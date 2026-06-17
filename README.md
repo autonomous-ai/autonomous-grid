@@ -5,24 +5,18 @@ already run into one private endpoint — and ships with two defaults so a bare 
 works out of the box.**
 
 You already run Ollama on your Mac, vLLM on your GPU box, LM Studio on your laptop, MLX on
-your MacBook. Grid points at all of them at once and turns them into a single
-OpenAI-compatible endpoint on your network. Your app talks to every machine and every
-engine through one address — and you migrated nothing, replaced nothing, and learned no
-new runtime. Text, images, and video, same endpoint.
-
-Grid is a LAN-only aggregating proxy. It sits on top of what you already have and unifies
-it; nothing leaves your network.
+your MacBook. Grid turns all of them into a single OpenAI-compatible endpoint on your
+network — you migrate nothing and learn no new runtime. Text, images, and video, same
+endpoint.
 
 - **It has no engine of its own.** Grid orchestrates real engines — the ones you already
   run (Ollama, vLLM, LM Studio, MLX) and two open-source defaults it sets up for you
-  (llama.cpp for text, ComfyUI for media). It never reimplements inference, and it never
-  competes with the tools it runs.
-- **One endpoint, every box.** Your app points at a single `OPENAI_BASE_URL`. Grid
-  routes each request to whichever machine serves that model.
-- **Private by default.** LAN-only, no auth, in-memory registry. Nothing phones home;
+  (llama.cpp for text, ComfyUI for media). Stop Grid and your engines are untouched; it
+  never reimplements inference or competes with the tools it runs.
+- **One endpoint, every box.** Your app points at a single `OPENAI_BASE_URL`. Grid routes
+  each request to whichever machine serves that model.
+- **Private by default.** LAN-only, no auth, in-memory registry — nothing phones home,
   nothing leaves your network.
-- **Text + images + video.** Chat/completions and ComfyUI-backed image generation,
-  image editing, and image-to-video all ride the same `/v1` endpoint.
 
 ## 60-second quickstart
 
@@ -60,20 +54,10 @@ grid provider start --network http://192.168.1.25:8090 \
   --model gemma2
 ```
 
-> **Two things to get right with `--endpoint-url`** — this is where setups trip up:
->
-> 1. **Reachable from the signaling-server machine.** Grid proxies requests from the
->    network process, so the URL must be reachable *from that machine*. Use the engine
->    machine's LAN IP, not `localhost` (localhost only works when the engine runs on the
->    same machine as `grid network create`). `--advertise-host` does not apply to
->    `--endpoint-url` — put the host in the URL.
-> 2. **The engine must listen on the LAN, not just loopback.** Ollama → set
->    `OLLAMA_HOST=0.0.0.0` and restart; LM Studio → enable "Serve on Local Network";
->    vLLM → start with `--host 0.0.0.0`.
->
-> Verify from the signaling-server machine: `curl http://192.168.1.10:11434/v1/models`.
-> The advertised `--model` is forwarded to the engine verbatim, so it must name a model
-> that engine actually serves.
+> **Two gotchas:** use each engine's **LAN IP, not `localhost`**, and make sure the engine
+> listens on the LAN (Ollama `OLLAMA_HOST=0.0.0.0`, LM Studio "Serve on Local Network",
+> vLLM `--host 0.0.0.0`). The advertised `--model` is forwarded verbatim, so name a model
+> that engine actually serves. Full LAN/IP notes in **[reference](docs/reference.md)**.
 
 **3. Point your app at the one endpoint:**
 
@@ -125,22 +109,6 @@ Three roles, one CLI:
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full request flow and
 **[docs/reference.md](docs/reference.md)** for the complete command reference.
-
-## How Grid relates to your engines
-
-Grid sits *above* your engines, not in place of them. Ollama, LM Studio, vLLM, MLX, and
-llama.cpp each run models and expose an OpenAI-compatible `/v1`. Grid does none of that —
-it keeps a live registry of those endpoints and forwards each request, unchanged, to the
-one that serves the requested model. That's the whole job.
-
-- **It depends on real engines.** Grid has no inference code of its own; it's only as good
-  as the engines it runs — the ones you point it at, or the two defaults it sets up for
-  you. Choosing the right engine per box (MLX or llama.cpp on a Mac, vLLM on a CUDA box,
-  whatever you prefer) stays your call — Grid just unifies the result.
-- **Nothing to migrate.** Your engines keep running exactly as they are. Stop Grid and
-  they're untouched.
-- **One address instead of N.** All Grid adds is a single endpoint and routing across
-  machines, so your app stops caring which box holds which model.
 
 ## Grid's two default engines
 
