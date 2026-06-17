@@ -1,7 +1,7 @@
 # Grid CLI
 
 ```
-grid                                  # overview: current grid, endpoint, live models, next steps
+grid                                  # overview: your grid, endpoint, live models, next steps
 grid --help   ·   grid <command> --help
 grid version
 ```
@@ -9,10 +9,8 @@ grid version
 ## Grid
 
 ```
-grid create [name]                    # create + start a grid (default: home)
-grid use <name>                       # set the current grid
-grid start [name]
-grid stop [name]
+grid up [name]                        # bring a grid online (creates it on first run; default: home)
+grid down [name]                      # take a grid offline (config persists; `up` brings it back)
 grid ls                               # list your grids
 grid info [grid] [--json]             # endpoint, key, live models
 grid info [grid] --env                # print OPENAI_* exports
@@ -57,7 +55,7 @@ grid engine pull <bundle>             # media bundle (comfyui)
 ## Conventions
 
 ```
-[grid] defaults to the current grid (set by `grid use`; `home` when unset)
+[grid] defaults to your only grid (or `home`); name it only when you have several
 aliases:  ls = list   ·   rm = remove
 output nouns: grid_url, openai_base_url, engines  (never provider/consumer/signaling)
 ```
