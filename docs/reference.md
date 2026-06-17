@@ -43,14 +43,25 @@ A provider registers an engine into a network and heartbeats it until you stop i
 ### Point at an engine you already run (recommended)
 
 Ollama, vLLM, LM Studio, and llama.cpp all expose an OpenAI-compatible `/v1` endpoint.
-`--endpoint-url` advertises that existing server without launching anything new.
-`--model` is repeatable, so one endpoint can advertise several model names:
+`--endpoint-url` advertises that existing server without launching anything new. Run the
+command on the engine's machine and use **that machine's LAN IP** (not `localhost`) so the
+signaling server can reach it. `--model` is repeatable, so one endpoint can advertise
+several model names:
 
 ```bash
-grid provider start --network home \
-  --endpoint-url http://localhost:11434/v1 \
+grid provider start --network http://192.168.1.25:8090 \
+  --endpoint-url http://192.168.1.10:11434/v1 \
   --model llama3 --model qwen2.5-coder
 ```
+
+> **`--endpoint-url` must be reachable from the signaling server**, which proxies requests
+> from its own process:
+> - Use the engine machine's LAN IP, not `localhost` (localhost only works if the engine
+>   runs on the signaling-server machine). `--advertise-host` does not apply here — put the
+>   host directly in the URL.
+> - The engine must listen on the LAN: Ollama `OLLAMA_HOST=0.0.0.0`; LM Studio "Serve on
+>   Local Network"; vLLM `--host 0.0.0.0`.
+> - Verify from the signaling server: `curl http://192.168.1.10:11434/v1/models`.
 
 The advertised model name is what consumers request, and it is forwarded verbatim to
 your engine — so advertise the names your engine already recognizes. Use
@@ -273,6 +284,30 @@ curl -N \
 ```
 
 ---
+
+## Troubleshooting connections
+
+All three of these come back from the signaling server's `/v1` endpoint:
+
+| Error | Likely cause |
+| --- | --- |
+| `No active LAN provider for model 'X'` (Grid; `code: provider_unavailable`) | No live provider advertises exactly `X`. Check `grid provider list`; the requested name must match an advertised `--model` exactly (case-sensitive). |
+| `Provider request failed: All connection attempts failed` (Grid; `code: provider_error`) | The signaling server can't open a connection to the provider's `endpoint_url`. The URL points at `localhost`/an unreachable host, the engine listens only on loopback, or a firewall blocks the port. |
+| `model 'X' not found`, `type: not_found_error`, no Grid `code` | The request *reached* an engine, but that engine doesn't serve `X`. Usually a `localhost` endpoint that resolved to the wrong machine, or an advertised name the engine doesn't recognize (Grid forwards `model` verbatim). |
+
+Make the engine listen on the LAN (not just loopback): Ollama → `OLLAMA_HOST=0.0.0.0`
+then restart; LM Studio → enable "Serve on Local Network"; vLLM → `--host 0.0.0.0`.
+
+Two checks that resolve most issues:
+
+```bash
+# From the SIGNALING-SERVER machine — proves reachability and lists the names the engine serves:
+curl http://<engine-ip>:<port>/v1/models
+
+# What each node advertises (and its endpoint_url). Note: this only proves the provider
+# registered + heartbeats — it does NOT verify reachability or model names.
+grid provider list --network http://192.168.1.25:8090
+```
 
 ## Quick command index
 

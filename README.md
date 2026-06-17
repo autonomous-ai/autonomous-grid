@@ -35,26 +35,41 @@ grid network create home --port 8090
 # -> signaling_url=http://192.168.1.25:8090
 ```
 
-**2. Point Grid at engines you already run.** One small command per engine; they all
-join the same network. Grid starts nothing — it advertises each endpoint and
-heartbeats it:
+**2. Point Grid at engines you already run.** Run each command **on the machine that
+engine runs on**, and put **that machine's LAN IP** in `--endpoint-url` (not `localhost`).
+Grid starts nothing — it advertises each endpoint and heartbeats it:
 
 ```bash
-# the Ollama already running on this Mac (one endpoint can serve several models)
-grid provider start --network home \
-  --endpoint-url http://localhost:11434/v1 \
+# the Ollama on your Mac (192.168.1.10) — one endpoint can serve several models
+grid provider start --network http://192.168.1.25:8090 \
+  --endpoint-url http://192.168.1.10:11434/v1 \
   --model llama3 --model qwen2.5-coder
 
-# the vLLM already running on your GPU box
+# the vLLM on your GPU box (192.168.1.20)
 grid provider start --network http://192.168.1.25:8090 \
-  --endpoint-url http://localhost:8000/v1 \
+  --endpoint-url http://192.168.1.20:8000/v1 \
   --model mistral-large
 
-# the LM Studio already running on your laptop
+# the LM Studio on your laptop (192.168.1.30)
 grid provider start --network http://192.168.1.25:8090 \
-  --endpoint-url http://localhost:1234/v1 \
+  --endpoint-url http://192.168.1.30:1234/v1 \
   --model gemma2
 ```
+
+> **Two things to get right with `--endpoint-url`** — this is where setups trip up:
+>
+> 1. **Reachable from the signaling-server machine.** Grid proxies requests from the
+>    network process, so the URL must be reachable *from that machine*. Use the engine
+>    machine's LAN IP, not `localhost` (localhost only works when the engine runs on the
+>    same machine as `grid network create`). `--advertise-host` does not apply to
+>    `--endpoint-url` — put the host in the URL.
+> 2. **The engine must listen on the LAN, not just loopback.** Ollama → set
+>    `OLLAMA_HOST=0.0.0.0` and restart; LM Studio → enable "Serve on Local Network";
+>    vLLM → start with `--host 0.0.0.0`.
+>
+> Verify from the signaling-server machine: `curl http://192.168.1.10:11434/v1/models`.
+> The advertised `--model` is forwarded to the engine verbatim, so it must name a model
+> that engine actually serves.
 
 **3. Point your app at the one endpoint:**
 
