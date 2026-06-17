@@ -1,18 +1,22 @@
 # Grid
 
-**Point Grid at the AI engines you already run, and they become one private endpoint.**
+**Grid is the orchestration layer for local AI. It unifies the inference engines you
+already run into one private endpoint — and ships with two defaults so a bare machine
+works out of the box.**
 
-You already run Ollama on your Mac, vLLM on your GPU box, LM Studio on your laptop.
-Point Grid at them — now they're one private endpoint. Your app talks to all your
-machines and all your engines at once, and you replaced nothing. Plus images and
-video, same endpoint.
+You already run Ollama on your Mac, vLLM on your GPU box, LM Studio on your laptop, MLX on
+your MacBook. Grid points at all of them at once and turns them into a single
+OpenAI-compatible endpoint on your network. Your app talks to every machine and every
+engine through one address — and you migrated nothing, replaced nothing, and learned no
+new runtime. Text, images, and video, same endpoint.
 
-Grid is a LAN-only, OpenAI-compatible aggregating proxy. It sits on top of everything
-you already have and unifies it — no migration, no new runtime to learn — and nothing
-leaves your network.
+Grid is a LAN-only aggregating proxy. It sits on top of what you already have and unifies
+it; nothing leaves your network.
 
-- **Replaced nothing.** Grid advertises your *existing* OpenAI-compatible servers
-  (Ollama, vLLM, LM Studio, llama.cpp, …). It doesn't replace or restart them.
+- **It has no engine of its own.** Grid orchestrates real engines — the ones you already
+  run (Ollama, vLLM, LM Studio, MLX) and two open-source defaults it sets up for you
+  (llama.cpp for text, ComfyUI for media). It never reimplements inference, and it never
+  competes with the tools it runs.
 - **One endpoint, every box.** Your app points at a single `OPENAI_BASE_URL`. Grid
   routes each request to whichever machine serves that model.
 - **Private by default.** LAN-only, no auth, in-memory registry. Nothing phones home;
@@ -122,10 +126,29 @@ Three roles, one CLI:
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full request flow and
 **[docs/reference.md](docs/reference.md)** for the complete command reference.
 
-## Grid can also host models for you
+## How Grid relates to your engines
 
-No engine running on a box yet? Grid can launch `llama.cpp` (text) and ComfyUI (media)
-for you, so a fresh machine becomes a provider with one command.
+Grid sits *above* your engines, not in place of them. Ollama, LM Studio, vLLM, MLX, and
+llama.cpp each run models and expose an OpenAI-compatible `/v1`. Grid does none of that —
+it keeps a live registry of those endpoints and forwards each request, unchanged, to the
+one that serves the requested model. That's the whole job.
+
+- **It depends on real engines.** Grid has no inference code of its own; it's only as good
+  as the engines it runs — the ones you point it at, or the two defaults it sets up for
+  you. Choosing the right engine per box (MLX or llama.cpp on a Mac, vLLM on a CUDA box,
+  whatever you prefer) stays your call — Grid just unifies the result.
+- **Nothing to migrate.** Your engines keep running exactly as they are. Stop Grid and
+  they're untouched.
+- **One address instead of N.** All Grid adds is a single endpoint and routing across
+  machines, so your app stops caring which box holds which model.
+
+## Grid's two default engines
+
+Don't have Ollama or LM Studio? You don't need them. Grid ships with two open-source
+engines it sets up for you — `llama.cpp` (text) and ComfyUI (media) — so a bare machine
+goes from zero to a working endpoint with one command. They install on first use, and Grid
+launches and supervises them like any other provider. Already running an engine you like?
+Point Grid at it instead (above).
 
 ```bash
 grid llama.cpp install                       # install/upgrade llama-server
