@@ -196,7 +196,6 @@ def build_parser() -> argparse.ArgumentParser:
     i2v.add_argument("--image", required=True, help="Input image path.")
     i2v.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
     i2v.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")
-    i2v.add_argument("--lora-type", default=None, help="Optional provider-supported LoRA preset.")
     i2v.set_defaults(handler=cmd_request_media_i2v)
 
     return parser
@@ -700,8 +699,6 @@ def cmd_request_media_i2v(args: argparse.Namespace) -> int:
         "aspect_ratio": args.aspect_ratio,
         "input_image": _load_media_file(args.image),
     }
-    if args.lora_type:
-        payload["lora_type"] = args.lora_type
     return _post_media_request(args, "media/video/i2v", payload)
 
 

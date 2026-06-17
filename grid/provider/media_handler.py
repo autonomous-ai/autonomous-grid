@@ -30,7 +30,6 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Optional
 
 import httpx
 
@@ -52,38 +51,6 @@ def _load_workflow(name: str) -> dict:
         with open(path, "r") as f:
             _workflow_cache[name] = json.load(f)
     return copy.deepcopy(_workflow_cache[name])
-
-
-LORA_MODELS = {
-    "massage-tits": {
-        "high_noise": "mql_massage_tits_wan22_i2v_v1_high_noise.safetensors",
-        "low_noise": "mql_massage_tits_wan22_i2v_v1_low_noise.safetensors",
-    },
-    "breast-play": {
-        "high_noise": "WAN-2.2-I2V-BreastPlay-HIGH-v2.safetensors",
-        "low_noise": "WAN-2.2-I2V-BreastPlay-LOW-v2.safetensors",
-    },
-    "face-down-ass-up": {
-        "high_noise": "WAN-2.2-I2V-FaceDownAssUp-HIGH-v1.safetensors",
-        "low_noise": "WAN-2.2-I2V-FaceDownAssUp-LOW-v1.safetensors",
-    },
-    "forward-bend": {
-        "high_noise": "BendForwardHigh-000032.safetensors",
-        "low_noise": "BendForwardLow-000032.safetensors",
-    },
-    "doggy-slider": {
-        "high_noise": "I2V_doggyslider_high.safetensors",
-        "low_noise": "I2V_doggyslider_low.safetensors",
-    },
-    "twerk": {
-        "high_noise": "slop_twerk_HighNoise_merged3_7_v2.safetensors",
-        "low_noise": "slop_twerk_LowNoise_merged3_7_v2.safetensors",
-    },
-    "hb": {
-        "high_noise": "WAN-2.2-I2V-HandjobBlowjobCombo-HIGH-v1.safetensors",
-        "low_noise": "WAN-2.2-I2V-HandjobBlowjobCombo-LOW-v1.safetensors",
-    },
-}
 
 
 class MediaHandler:
@@ -158,7 +125,6 @@ class MediaHandler:
         prompt_text = body.get("prompt", "")
         duration = body.get("duration", "5s")
         aspect_ratio = body.get("aspect_ratio", "2:3")
-        lora_type = body.get("lora_type")
         input_image = body.get("input_image", {})
         if not input_image:
             yield f'data: {json.dumps({"error": "No input image provided"})}'
@@ -173,7 +139,7 @@ class MediaHandler:
                 f.write(content)
             self._ensure_comfyui_running()
             workflow = self._build_i2v_workflow(
-                prompt_text, image_path, duration, aspect_ratio, lora_type
+                prompt_text, image_path, duration, aspect_ratio
             )
             yield from self._submit_and_track(workflow, "video/mp4", "output_video")
         finally:
@@ -437,20 +403,14 @@ class MediaHandler:
         return workflow
 
     def _build_i2v_workflow(self, prompt: str, image_path: str, duration: str,
-                             aspect_ratio: str, lora_type: Optional[str]) -> dict:
+                             aspect_ratio: str) -> dict:
         length_map = {"5s": 81, "8s": 129}
         ratio_map = {
             "2:3": {"width": 320, "height": 480},
             "3:2": {"width": 480, "height": 320},
             "1:1": {"width": 320, "height": 320},
         }
-        if lora_type and lora_type in LORA_MODELS:
-            workflow = _load_workflow("i2v_lora_workflow.json")
-            models = LORA_MODELS[lora_type]
-            workflow["prompt"]["118"]["inputs"]["lora_name"] = models["high_noise"]
-            workflow["prompt"]["120"]["inputs"]["lora_name"] = models["low_noise"]
-        else:
-            workflow = _load_workflow("i2v_workflow.json")
+        workflow = _load_workflow("i2v_workflow.json")
         workflow["prompt"]["93"]["inputs"]["text"] = prompt
         workflow["prompt"]["97"]["inputs"]["image"] = image_path
         workflow["prompt"]["108"]["inputs"]["filename_prefix"] = "output_video"
