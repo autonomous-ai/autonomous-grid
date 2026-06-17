@@ -37,7 +37,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full component map and request-fl
 walkthroughs. In short:
 
 - `grid/server.py` — the signaling server / OpenAI-compatible proxy
-- `grid/cli.py` — argument parsing + every `cmd_*` command handler
+- `grid/cli/` — the CLI, split by command group (`parser.py` builds the command tree;
+  per-group modules like `network.py` and `provider.py` hold the `cmd_*` handlers)
 - `grid/provider/`, `grid/models/`, `grid/engine/`, `grid/system/` — provider media,
   model management, engine lifecycle, and host/GPU info
 
@@ -53,9 +54,10 @@ platform-aware (Apple Silicon vs NVIDIA); add the entry and it shows up in
 `FileSpec(hf_repo, hf_path, subdir)` entries plus a `comfyui:*` capability name. Wire
 any new ComfyUI workflow JSON into `grid/provider/media_handler.py`.
 
-**Add a CLI command** — in `grid/cli.py`: add a subparser in `build_parser()`, write a
-`cmd_<name>(args) -> int` handler, and connect them with
-`parser.set_defaults(handler=cmd_<name>)`. Existing `cmd_*` functions are the template.
+**Add a CLI command** — add the subparser in `grid/cli/parser.py`'s `build_parser()`, write a
+`cmd_<name>(args) -> int` handler in the matching group module (e.g. `grid/cli/network.py`),
+and connect them with `set_defaults(handler=cmd_<name>)`. Re-export the handler from
+`grid/cli/__init__.py`. Existing `cmd_*` functions are the template.
 
 **Tune provider gating** — `grid/provider/media_gating.py` decides which media bundles a
 host advertises based on VRAM.

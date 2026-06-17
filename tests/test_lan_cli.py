@@ -393,7 +393,7 @@ def test_provider_start_launches_local_llama_server_by_default(monkeypatch, tmp_
     monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: calls.setdefault("waited", proc.port))
     monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped", proc.port))
-    monkeypatch.setattr(cli, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
@@ -429,7 +429,7 @@ def test_provider_start_advertise_as_routes_alias_and_sets_llama_alias(monkeypat
     monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: None)
     monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped", proc.port))
-    monkeypatch.setattr(cli, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
@@ -456,7 +456,7 @@ def test_provider_start_endpoint_url_skips_local_llama_server(monkeypatch, tmp_p
     calls = {}
 
     monkeypatch.setattr(launcher, "start_llm", lambda *args, **kwargs: pytest.fail("start_llm should not be called"))
-    monkeypatch.setattr(cli, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
@@ -489,7 +489,7 @@ def test_provider_start_enable_media_advertises_media_models(monkeypatch, tmp_pa
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: None)
     monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped_llama", proc.port))
     monkeypatch.setattr(
-        cli,
+        cli.provider,
         "_prepare_media_provider",
         lambda args: {
             "models": ["comfyui:image_generation", "comfyui:image_editing", "comfyui:i2v"],
@@ -498,7 +498,7 @@ def test_provider_start_enable_media_advertises_media_models(monkeypatch, tmp_pa
             "comfyui_started": False,
         },
     )
-    monkeypatch.setattr(cli, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
@@ -524,7 +524,7 @@ def test_provider_start_media_only_skips_local_llama_server(monkeypatch, tmp_pat
 
     monkeypatch.setattr(launcher, "start_llm", lambda *args, **kwargs: pytest.fail("start_llm should not be called"))
     monkeypatch.setattr(
-        cli,
+        cli.provider,
         "_prepare_media_provider",
         lambda args: {
             "models": ["comfyui:image_editing"],
@@ -533,7 +533,7 @@ def test_provider_start_media_only_skips_local_llama_server(monkeypatch, tmp_pat
             "comfyui_started": False,
         },
     )
-    monkeypatch.setattr(cli, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 

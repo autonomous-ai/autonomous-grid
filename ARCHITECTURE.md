@@ -21,7 +21,9 @@ nodes in memory, no database, no auth, LAN-only.
 
 ```
 grid/
-├── cli.py              Argument parsing + every `cmd_*` command handler; entry point `grid`/`agrid`.
+├── cli/                The CLI, split by command group. `parser.py` builds the command tree;
+│                       `network.py` / `provider.py` / `models.py` / `media.py` / `consumer.py` /
+│                       `request.py` hold each group's `cmd_*` handlers. Entry point `grid`/`agrid`.
 ├── server.py           The signaling server / OpenAI-compatible proxy (FastAPI `create_app`).
 ├── runtime.py          Network URL + provider endpoint URL resolution.
 ├── config.py           Saved networks under ~/.grid; `select_network`.
@@ -103,7 +105,7 @@ Media uses fixed model names (`comfyui:image_generation`, `comfyui:image_editing
 
 ## Provider lifecycle (`grid provider start`)
 
-`cli.py:cmd_provider_start`:
+`grid/cli/provider.py:cmd_provider_start`:
 
 1. Resolve the text endpoint — use `--endpoint-url` as-is, **or** launch a local
    `llama-server` (`engine/launcher.py`) for a single GGUF `--model`.
