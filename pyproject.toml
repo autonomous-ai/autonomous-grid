@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grid"
+version = "0.1.0"
+description = "LAN-only, unauthenticated Grid CLI for local provider/consumer networks."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "uvicorn>=0.34",
+    "websocket-client>=1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+grid = "grid.cli:main"
+agrid = "grid.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["grid*"]
+
+[tool.setuptools.package-data]
+"grid.engine" = ["*.txt"]
+"grid.provider" = ["workflows/*.json"]
