@@ -1,283 +1,142 @@
-## Install For Development
+# Grid
+
+**Point Grid at the AI engines you already run, and they become one private endpoint.**
+
+You already run Ollama on your Mac, vLLM on your GPU box, LM Studio on your laptop.
+Point Grid at them — now they're one private endpoint. Your app talks to all your
+machines and all your engines at once, and you replaced nothing. Plus images and
+video, same endpoint.
+
+Grid is a LAN-only, OpenAI-compatible aggregating proxy. It sits on top of everything
+you already have and unifies it — no migration, no new runtime to learn — and nothing
+leaves your network.
+
+- **Replaced nothing.** Grid advertises your *existing* OpenAI-compatible servers
+  (Ollama, vLLM, LM Studio, llama.cpp, …). It doesn't replace or restart them.
+- **One endpoint, every box.** Your app points at a single `OPENAI_BASE_URL`. Grid
+  routes each request to whichever machine serves that model.
+- **Private by default.** LAN-only, no auth, in-memory registry. Nothing phones home;
+  nothing leaves your network.
+- **Text + images + video.** Chat/completions and ComfyUI-backed image generation,
+  image editing, and image-to-video all ride the same `/v1` endpoint.
+
+## 60-second quickstart
+
+You need Python 3.11+ and [uv](https://docs.astral.sh/uv/). Install the CLI:
 
 ```bash
-uv run grid --version
+uv tool install -e . --force   # provides the `grid` command
 ```
 
-or install the editable CLI:
-
-```bash
-uv tool install -e . --force
-```
-
-## Create A LAN Network
-
-Run this on the device that will host the signaling server:
+**1. Create the endpoint** — run on any one machine; this is the address your apps use:
 
 ```bash
 grid network create home --port 8090
+# -> signaling_url=http://192.168.1.25:8090
 ```
 
-The command starts a local FastAPI signaling server bound to `0.0.0.0` and prints a LAN signaling URL such as:
-
-```text
-signaling_url=http://192.168.1.25:8090
-```
-
-Other devices can use that signaling URL directly wherever a command accepts `--network`.
-
-## Start A Provider
-
-Provider nodes need `llama-server` and at least one GGUF model under `~/.grid/models/`.
-
-Install or upgrade `llama-server`:
+**2. Point Grid at engines you already run.** One small command per engine; they all
+join the same network. Grid starts nothing — it advertises each endpoint and
+heartbeats it:
 
 ```bash
-grid llama.cpp install
-grid llama.cpp install --from-source
+# the Ollama already running on this Mac (one endpoint can serve several models)
+grid provider start --network home \
+  --endpoint-url http://localhost:11434/v1 \
+  --model llama3 --model qwen2.5-coder
+
+# the vLLM already running on your GPU box
+grid provider start --network http://192.168.1.25:8090 \
+  --endpoint-url http://localhost:8000/v1 \
+  --model mistral-large
+
+# the LM Studio already running on your laptop
+grid provider start --network http://192.168.1.25:8090 \
+  --endpoint-url http://localhost:1234/v1 \
+  --model gemma2
 ```
 
-The default behavior follows the referenced Grid CLI:
-
-- Apple Silicon macOS uses Homebrew's `llama.cpp` formula by default; `--from-source` builds a Metal backend locally.
-- Linux NVIDIA hosts use the pinned-tarball path when available; `--from-source` builds locally with CUDA.
-
-List local models and the platform-aware catalog:
-
-```bash
-grid models list
-grid models list --catalog
-```
-
-Pull the Apple Silicon catalog model:
-
-```bash
-grid models pull qwen36-35b-a3b-mtp
-```
-
-Pull the NVIDIA CUDA catalog model:
-
-```bash
-grid models pull qwen36-27b-mtp
-```
-
-Pull an arbitrary Hugging Face GGUF file:
-
-```bash
-grid models pull unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Qwen3.6-35B-A3B-UD-IQ3_S.gguf
-```
-
-Remove a local model:
-
-```bash
-grid models rm your-model.gguf --yes
-```
-
-## Optional Media Provider Setup
-
-```bash
-grid media install
-```
-
-Download one or more media bundles:
-
-```bash
-grid media pull image_generation
-grid media pull image_editing
-grid media pull i2v
-grid media status
-```
-
-You can manage ComfyUI directly when needed:
-
-```bash
-grid media start --detach
-grid media stop
-```
-
-Start a provider. By default this starts local `llama-server` on `0.0.0.0:8081`, waits for it to become ready, then advertises it on the LAN signaling server:
-
-```bash
-grid provider start \
-  --network home \
-  --model Qwen3.5-2B-UD-IQ2_M.gguf
-```
-
-Advertise a shorter routing name for a local GGUF model:
-
-```bash
-grid provider start \
-  --network home \
-  --model your-model.gguf \
-  --advertise-as your-model
-```
-
-From another LAN device, pass the signaling URL directly:
-
-```bash
-grid provider start \
-  --network http://192.168.1.25:8090 \
-  --model Qwen3.5-2B-UD-IQ2_M.gguf
-```
-
-Start the provider with media enabled:
-
-```bash
-grid provider start \
-  --network home \
-  --model Qwen3.5-2B-UD-IQ2_M.gguf \
-  --enable-media \
-  --media-bundle image_generation \
-  --media-bundle image_editing \
-  --media-bundle i2v
-```
-
-Start a media-only provider without a llama-server/text model:
-
-```bash
-grid provider start \
-  --network home \
-  --enable-media \
-  --media-bundle image_editing
-```
-
-If `--media-bundle` is omitted, `--enable-media` advertises every installed bundle that passes the host memory gate. The provider starts ComfyUI if needed, starts a provider-local media API, and advertises these LAN models:
-
-```text
-comfyui:image_generation
-comfyui:image_editing
-comfyui:i2v
-```
-
-If you already run an OpenAI-compatible provider yourself, pass `--endpoint-url` and the CLI will only advertise and heartbeat that existing endpoint:
-
-```bash
-grid provider start \
-  --network home \
-  --model qwen-local \
-  --endpoint-url http://192.168.1.50:8081/v1
-```
-
-## Use A Consumer
-
-Consumers can use the signaling server as an OpenAI-compatible base URL:
+**3. Point your app at the one endpoint:**
 
 ```bash
 grid consumer env --network home
+# export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
+# export OPENAI_API_KEY="local-lan"   # ignored by the server; only for SDK compatibility
 ```
 
-From another LAN device:
+Any OpenAI SDK now sees every model on every box:
 
 ```bash
-grid consumer env --network http://192.168.1.25:8090
+curl http://192.168.1.25:8090/v1/models          # llama3, qwen2.5-coder, mistral-large, gemma2, ...
+
+curl http://192.168.1.25:8090/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"mistral-large","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-This prints:
+The request for `mistral-large` is routed to your GPU box; `llama3` to your Mac. Same
+endpoint, same API key, nothing migrated.
+
+## How it works
+
+```
+                          your app (OpenAI SDK)
+                                   │  OPENAI_BASE_URL = http://host:8090/v1
+                                   ▼
+                  ┌──────────────────────────────────┐
+                  │   grid network                    │  in-memory registry of providers
+                  │   (signaling + OpenAI proxy)      │  routes /v1/* by the `model` field
+                  └────────┬──────────────┬───────────┘
+              routes "llama3"          routes "mistral-large"
+                           │              │
+                           ▼              ▼
+                  ┌────────────────┐  ┌────────────────┐
+                  │  your Mac      │  │  your GPU box  │
+                  │  Ollama :11434 │  │  vLLM :8000    │   ← existing engines, unchanged
+                  └────────────────┘  └────────────────┘
+```
+
+Three roles, one CLI:
+
+- **network** — the signaling server + OpenAI-compatible proxy. Holds a live registry
+  of providers and routes each `/v1` request to one that advertises the requested model.
+- **provider** — registers an engine into a network and heartbeats it. Either an
+  existing endpoint (`--endpoint-url`) or, optionally, a model Grid hosts for you (below).
+- **consumer** — anything that speaks the OpenAI API, pointed at the network's `/v1`.
+
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full request flow and
+**[docs/reference.md](docs/reference.md)** for the complete command reference.
+
+## Grid can also host models for you
+
+No engine running on a box yet? Grid can launch `llama.cpp` (text) and ComfyUI (media)
+for you, so a fresh machine becomes a provider with one command.
 
 ```bash
-export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
-export OPENAI_API_KEY="local-lan"
+grid llama.cpp install                       # install/upgrade llama-server
+grid models pull qwen36-35b-a3b-mtp          # platform-aware catalog, or any HF GGUF
+grid provider start --network home --model your-model.gguf
 ```
 
-The API key value is only for OpenAI SDK compatibility; the server ignores authorization headers.
-
-Smoke-test a request:
+Media (images + video) via ComfyUI:
 
 ```bash
-grid request chat --network home --model qwen-local --message "hello"
+grid media install
+grid media pull image_generation             # also: image_editing, i2v
+grid provider start --network home --enable-media --media-bundle image_generation
 ```
 
-Send media requests:
+Hosting, media, and the raw HTTP API are documented in **[docs/reference.md](docs/reference.md)**.
 
-```bash
-grid request media image-generate \
-  --network home \
-  --prompt "a compact walnut desk beside a sunlit window"
+## Contributing
 
-grid request media image-edit \
-  --network home \
-  --prompt "make the chair red" \
-  --image input.png
+Grid is built to be easy to pick up and contribute to — start with
+**[CONTRIBUTING.md](CONTRIBUTING.md)** and **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+Good first contributions: add a model to the catalog (`grid/models/catalog.py`) or a
+media bundle (`grid/models/media_bundles.py`).
 
-grid request media i2v \
-  --network home \
-  --prompt "slow cinematic push in" \
-  --image input.png
-```
+Local state lives under `~/.grid` (override with the `GRID_HOME` environment variable).
 
-## Direct Media HTTP API
+## License
 
-You can call the LAN signaling server directly without the CLI. First get the signaling URL:
-
-```bash
-grid network status home
-```
-
-Use the printed `signaling_url`, for example `http://192.168.1.25:8090`.
-
-Image generation:
-
-```bash
-curl -N \
-  -H "Content-Type: application/json" \
-  -X POST http://192.168.1.25:8090/v1/media/image/generate \
-  -d '{
-    "prompt": "a compact walnut desk beside a sunlit window",
-    "width": 720,
-    "height": 720,
-    "steps": 4
-  }'
-```
-
-Image editing:
-
-```bash
-IMAGE_BASE64="$(base64 -i input.png | tr -d '\n')"
-
-curl -N \
-  -H "Content-Type: application/json" \
-  -X POST http://192.168.1.25:8090/v1/media/image/edit \
-  -d "{
-    \"prompt\": \"make the chair red\",
-    \"steps\": 4,
-    \"input_images\": [
-      {
-        \"filename\": \"input.png\",
-        \"content_base64\": \"${IMAGE_BASE64}\"
-      }
-    ]
-  }"
-```
-
-Image-to-video:
-
-```bash
-IMAGE_BASE64="$(base64 -i input.png | tr -d '\n')"
-
-curl -N \
-  -H "Content-Type: application/json" \
-  -X POST http://192.168.1.25:8090/v1/media/video/i2v \
-  -d "{
-    \"prompt\": \"slow cinematic push in\",
-    \"duration\": \"5s\",
-    \"aspect_ratio\": \"2:3\",
-    \"input_image\": {
-      \"filename\": \"input.png\",
-      \"content_base64\": \"${IMAGE_BASE64}\"
-    }
-  }"
-```
-
-The response is an SSE stream. Progress events are followed by a result event whose `output_files` entries contain base64-encoded media.
-
-## Useful Commands
-
-```bash
-grid network list
-grid network status home
-grid provider list --network home
-grid media status
-grid network stop home
-```
-
-Local state is stored under `~/.grid` unless `GRID_HOME` is set.
+MIT — see [LICENSE](LICENSE).
