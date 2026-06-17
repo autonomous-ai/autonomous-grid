@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse

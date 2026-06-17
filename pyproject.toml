@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -29,3 +30,6 @@ include = ["grid*"]
 [tool.setuptools.package-data]
 "grid.engine" = ["*.txt"]
 "grid.provider" = ["workflows/*.json"]
+
+[tool.ruff]
+target-version = "py311"
