@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 690" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 705" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
   <defs>
     <radialGradient id="bgGrad" cx="0.5" cy="0.32" r="0.9">
       <stop offset="0" stop-color="#ffffff"/>
@@ -41,12 +41,12 @@
     </filter>
   </defs>
 
-  <rect width="1100" height="690" fill="url(#bgGrad)"/>
-  <rect width="1100" height="690" fill="url(#dots)"/>
+  <rect width="1100" height="705" fill="url(#bgGrad)"/>
+  <rect width="1100" height="705" fill="url(#dots)"/>
 
   <!-- section labels -->
-  <text x="180" y="50" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">APPS</text>
-  <text x="44" y="402" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">ENGINES — your machines, wired into the grid</text>
+  <text x="550" y="50" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">APPS</text>
+  <text x="550" y="694" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">ENGINES — your machines, wired into the grid</text>
 
   <!-- faint grid fabric between engines -->
   <g stroke="#9aa6b6" stroke-width="1.5" opacity="0.22" fill="none">
@@ -69,9 +69,9 @@
   </g>
   <!-- power lines: grid -> apps -->
   <g stroke-width="2.6" opacity="0.9" fill="none">
-    <path d="M280 203 C280 168, 280 168, 280 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
-    <path d="M550 203 C550 168, 550 168, 550 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
-    <path d="M820 203 C820 168, 820 168, 820 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
+    <path d="M280 205 C308 172, 308 172, 280 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
+    <path d="M550 205 C578 172, 578 172, 550 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
+    <path d="M820 205 C848 172, 848 172, 820 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
   </g>
 
   <!-- ===== MIDDLE: the grid ===== -->
