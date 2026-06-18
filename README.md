@@ -15,7 +15,7 @@ behind **one OpenAI-compatible endpoint** on your LAN.
 
 [**Quickstart**](#quickstart) · [How it works](#how-it-works) · [Grid vs. running an engine directly](#grid-vs-running-an-engine-directly) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
-<img src="docs/home-grid.svg" alt="Grid sits above your engines — apps call one endpoint, Grid routes each request to whichever machine serves the model" width="860">
+<img src="docs/home-grid.svg" alt="Your Home Grid sits above your engines — apps call one endpoint, Grid routes each request to whichever machine serves the model" width="860">
 
 </div>
 
@@ -33,61 +33,70 @@ services or Tailscale sits above your network. It is not another engine.
 
 ## Quickstart
 
-> Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Turn the machines you already own into one AI endpoint — in four steps.
+Most homes have idle compute scattered across a few boxes; Grid pools it.
+
+> Install the CLI on each machine: Python 3.11+ and [uv](https://docs.astral.sh/uv/), then
+> `uv tool install -e . --force`.
+
+**1 · Create your grid** — on any one machine:
 
 ```bash
-uv tool install -e . --force        # installs the `grid` command
+grid up
+# grid=home
+# grid_url=http://192.168.1.25:8090      ← the one address everything uses
 ```
+
+**2 · Add your Mac** — run this on the Mac; Grid finds the engine it's running (MLX, Ollama, or LM Studio) and joins it:
 
 ```bash
-grid up                             # 1. bring your grid online (one endpoint)
-grid join                           # 2. auto-detect & join the engines on this machine
-grid models                         # 3. every live model across every machine you've joined
-grid chat -m <model> "hello"        #    talk to any of them through the one endpoint
+grid join http://192.168.1.25:8090
+# joined  mac-studio · MLX · gemma4-31b
 ```
 
-Point **any OpenAI SDK** at it — no new client, no migration:
+**3 · Add your NVIDIA box** — run this on the GPU machine; Grid finds vLLM or llama.cpp:
 
 ```bash
-eval "$(grid info --env)"           # exports OPENAI_BASE_URL + OPENAI_API_KEY
+grid join http://192.168.1.25:8090
+# joined  gpu-4090 · vLLM · devstral-small-2
 ```
+
+Two different machines, two different frameworks — now one endpoint serves every model on both:
+
+```bash
+grid models
+# gemma4-31b        mac-studio   (MLX)
+# devstral-small-2  gpu-4090     (vLLM)
+```
+
+**4 · Point your apps at the grid** — OpenClaw, Hermes, or any OpenAI client:
+
+```bash
+eval "$(grid info --env)"        # exports OPENAI_BASE_URL + OPENAI_API_KEY
+```
+
+OpenClaw and Hermes read those two env vars, so they're now backed by your whole grid. Any OpenAI SDK works the same way:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI()                   # reads OPENAI_BASE_URL + OPENAI_API_KEY
+client = OpenAI()                            # reads OPENAI_BASE_URL + OPENAI_API_KEY
 client.chat.completions.create(
-    model="<model>",                # any model `grid models` lists
+    model="devstral-small-2",                # Grid routes this to the 4090 box automatically
     messages=[{"role": "user", "content": "hello"}],
 )
 ```
 
-**The aha:** every model on every machine you own, behind one base URL — and Grid never touched your engines.
+**The aha:** your Mac's MLX model and your GPU box's vLLM model now answer at one address, behind
+one API key — routed automatically. Add another machine with `grid join`, and every app instantly
+has more models and more capacity. Nothing migrated; your engines run exactly as before.
 
 <details>
-<summary><b>Join engines on other machines</b></summary>
+<summary><b>No engine on a machine yet? Grid can set one up</b></summary>
 
 <br>
 
-Run `grid join <grid-url>` on each machine. Auto-detect handles the common case; name a specific endpoint with `--at`:
-
-```bash
-# on a GPU box running vLLM
-grid join http://192.168.1.25:8090 --at http://localhost:8000/v1 -m devstral-small-2 --name gpu-4090
-```
-
-The engine must be reachable from the machine running the grid — bind it to the LAN
-(Ollama `OLLAMA_HOST=0.0.0.0`, LM Studio "Serve on Local Network", vLLM `--host 0.0.0.0`).
-More in [docs/reference.md](docs/reference.md).
-
-</details>
-
-<details>
-<summary><b>No engine yet? Grid can set one up for you</b></summary>
-
-<br>
-
-Grid doesn't ship a runtime, but it knows how to install and join two open-source engines so a
+Grid doesn't ship a runtime, but it knows how to install and join two open-source engines, so a
 bare machine can join a grid without Ollama, vLLM, or LM Studio:
 
 ```bash
@@ -108,8 +117,8 @@ grid image "a compact walnut desk beside a sunlit window"
 Grid sits **above** your engines (see the diagram). The machines you own are the inference engines,
 your grid is the one address everything talks through, and your apps draw from it.
 
-- **the grid** — one private endpoint that routes each request to a machine serving that model. Bring it up with `grid up`.
-- **engines** — the tools you already run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI), each joined with `grid join`. Grid advertises them and heartbeats them; it never restarts or replaces them.
+- **the grid** — one private endpoint that routes each request to a machine serving that model. Create it with `grid up`.
+- **engines** — the tools you already run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI). Run `grid join <grid-url>` on a machine and Grid advertises its engines and heartbeats them; it never restarts or replaces them.
 - **apps** — anything that speaks the OpenAI API, pointed at the URL `grid info` prints. Text on `/v1/chat`, images and video on `/v1/media`.
 
 Full request flow in **[ARCHITECTURE.md](ARCHITECTURE.md)**; the complete command surface in **[docs/cli.md](docs/cli.md)**.
