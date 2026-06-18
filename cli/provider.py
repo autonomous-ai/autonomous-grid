@@ -143,14 +143,58 @@ def _spawn_engine(
     record["pid"] = proc.pid
     _write_record(grid_id, engine_id, record)
 
+    status = _await_engine_start(runtime.grid_url(cfg), record["node_id"], proc)
+    if status == "died":
+        _record_path(grid_id, engine_id).unlink(missing_ok=True)
+        raise SystemExit(
+            f"Engine {engine_id} exited before it registered. See {log_path}:\n{_log_tail(log_path)}"
+        )
+
     print(f"Joined engine {engine_id} to {cfg['name']} (pid={proc.pid})")
     if endpoint_url:
         print(f"endpoint_url={endpoint_url}")
     if models:
         print(f"models={','.join(models)}")
     print(f"log={log_path}")
+    if status == "starting":
+        print("(still starting — run `grid models` shortly to confirm it is live)")
     print(f"Check `grid models {cfg['name']}`; stop with `grid leave {cfg['name']} --engine {engine_id}`.")
     return 0
+
+
+def _await_engine_start(grid_url: str, node_id: str, proc, grace: float = 3.0) -> str:
+    """Block briefly to tell whether a freshly-spawned engine actually came up.
+
+    Returns "registered" once the grid sees it, "died" if the process exited,
+    or "starting" if it is still alive but not yet registered (e.g. a `--serve`
+    engine still loading its model). Uses ``proc.poll()`` rather than a bare
+    pid signal so an exited-but-unreaped child (a zombie) is detected.
+    """
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return "died"
+        if _is_registered(grid_url, node_id):
+            return "registered"
+        time.sleep(0.2)
+    return "starting" if proc.poll() is None else "died"
+
+
+def _is_registered(grid_url: str, node_id: str) -> bool:
+    try:
+        resp = httpx.get(f"{grid_url}/nodes/discover", timeout=2)
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return False
+    return any(p.get("node_id") == node_id for p in resp.json().get("engines", []))
+
+
+def _log_tail(path, lines: int = 12) -> str:
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.strip().splitlines()[-lines:])
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 705" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 726" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
   <defs>
     <radialGradient id="bgGrad" cx="0.5" cy="0.32" r="0.9">
       <stop offset="0" stop-color="#ffffff"/>
@@ -41,14 +41,13 @@
     </filter>
   </defs>
 
-  <rect width="1100" height="705" fill="url(#bgGrad)"/>
-  <rect width="1100" height="705" fill="url(#dots)"/>
+  <rect width="1100" height="726" fill="url(#bgGrad)"/>
+  <rect width="1100" height="726" fill="url(#dots)"/>
 
-  <!-- section labels -->
-  <text x="550" y="50" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">APPS</text>
-  <text x="550" y="694" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">ENGINES — your machines, wired into the grid</text>
+  <!-- top label -->
+  <text x="550" y="50" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2.5" font-weight="700">APPS</text>
 
-  <!-- faint grid fabric between engines -->
+  <!-- faint grid fabric between machines -->
   <g stroke="#9aa6b6" stroke-width="1.5" opacity="0.22" fill="none">
     <line x1="150" y1="474" x2="390" y2="512"/>
     <line x1="390" y1="512" x2="340" y2="619"/>
@@ -58,7 +57,7 @@
     <line x1="650" y1="589" x2="890" y2="512"/>
   </g>
 
-  <!-- power lines: engines -> grid -->
+  <!-- power lines: machines -> grid -->
   <g stroke-width="2.6" opacity="0.9" fill="none">
     <path d="M150 430 C150 362, 200 362, 200 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
     <path d="M390 468 C390 381, 360 381, 360 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
@@ -78,9 +77,8 @@
   <ellipse cx="550" cy="250" rx="430" ry="70" fill="#10b981" opacity="0.20" filter="url(#glow)"/>
   <g filter="url(#sh)"><rect x="110" y="205" width="880" height="88" rx="20" fill="url(#gridGrad)"/></g>
   <rect x="118" y="211" width="864" height="30" rx="15" fill="#ffffff" opacity="0.10"/>
-  <text x="550" y="244" text-anchor="middle" fill="#ffffff" font-size="24" font-weight="800">Your Home Grid</text>
-  <text x="550" y="267" text-anchor="middle" fill="#eafff5" font-size="13.5">Local AI orchestration — one private endpoint for every engine you run</text>
-  <text x="550" y="285" text-anchor="middle" fill="#bbf7d0" font-size="11.5" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">home:8090/v1 · routes by model · /v1/chat + /v1/media</text>
+  <text x="550" y="247" text-anchor="middle" fill="#ffffff" font-size="25" font-weight="800">Your Home Grid</text>
+  <text x="550" y="275" text-anchor="middle" fill="#eafff5" font-size="15">Unifies and orchestrates all your compute resources</text>
 
   <!-- ===== TOP: apps ===== -->
   <g text-anchor="middle">
@@ -95,54 +93,58 @@
     <text x="820" y="101" fill="#ffffff" font-size="17" font-weight="700">Your Own App</text>
   </g>
 
-  <!-- ===== BOTTOM: engines (scattered) ===== -->
-  <g font-size="11">
-    <!-- E1 -->
+  <!-- ===== BOTTOM: inference engines (scattered) ===== -->
+  <g>
+    <!-- Main Desktop -->
     <g filter="url(#sh)"><rect x="60" y="430" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
     <rect x="66" y="435" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="78" y="456" fill="#ffffff" font-size="14.5" font-weight="700">Studio</text>
-    <text x="78" y="477"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">MLX</tspan></text>
-    <text x="78" y="493"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">Mac Studio</tspan></text>
-    <text x="78" y="509"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">512 GB</tspan></text>
+    <text x="78" y="456" fill="#ffffff" font-size="14.5" font-weight="700">Main Desktop</text>
+    <text x="78" y="477"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  MLX</tspan></text>
+    <text x="78" y="493"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  Mac Studio</tspan></text>
+    <text x="78" y="509"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  512 GB</tspan></text>
 
-    <!-- E2 -->
+    <!-- Home Server -->
     <g filter="url(#sh)"><rect x="300" y="468" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
     <rect x="306" y="473" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="318" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Desk mini</text>
-    <text x="318" y="515"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">Ollama</tspan></text>
-    <text x="318" y="531"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">Mac mini</tspan></text>
-    <text x="318" y="547"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">64 GB</tspan></text>
+    <text x="318" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Home Server</text>
+    <text x="318" y="515"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  Ollama</tspan></text>
+    <text x="318" y="531"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  Mac mini</tspan></text>
+    <text x="318" y="547"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  64 GB</tspan></text>
 
-    <!-- E3 -->
+    <!-- Basement Rig -->
     <g filter="url(#sh)"><rect x="250" y="575" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
     <rect x="256" y="580" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="268" y="601" fill="#ffffff" font-size="14.5" font-weight="700">Basement rig</text>
-    <text x="268" y="622"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">vLLM</tspan></text>
-    <text x="268" y="638"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">RTX 3090</tspan></text>
-    <text x="268" y="654"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">24 GB</tspan></text>
+    <text x="268" y="601" fill="#ffffff" font-size="14.5" font-weight="700">Basement Rig</text>
+    <text x="268" y="622"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  vLLM</tspan></text>
+    <text x="268" y="638"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  RTX 3090</tspan></text>
+    <text x="268" y="654"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  24 GB</tspan></text>
 
-    <!-- E4 -->
+    <!-- Laptop -->
     <g filter="url(#sh)"><rect x="520" y="413" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
     <rect x="526" y="418" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
     <text x="538" y="439" fill="#ffffff" font-size="14.5" font-weight="700">Laptop</text>
-    <text x="538" y="460"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">LM Studio</tspan></text>
-    <text x="538" y="476"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">MacBook Pro</tspan></text>
-    <text x="538" y="492"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">36 GB</tspan></text>
+    <text x="538" y="460"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  LM Studio</tspan></text>
+    <text x="538" y="476"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  MacBook Pro</tspan></text>
+    <text x="538" y="492"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  36 GB</tspan></text>
 
-    <!-- E5 -->
+    <!-- Gaming PC -->
     <g filter="url(#sh)"><rect x="560" y="545" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
     <rect x="566" y="550" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="578" y="571" fill="#ffffff" font-size="14.5" font-weight="700">Game PC</text>
-    <text x="578" y="592"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">llama.cpp</tspan></text>
-    <text x="578" y="608"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">RTX 4090</tspan></text>
-    <text x="578" y="624"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">24 GB</tspan></text>
+    <text x="578" y="571" fill="#ffffff" font-size="14.5" font-weight="700">Gaming PC</text>
+    <text x="578" y="592"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  llama.cpp</tspan></text>
+    <text x="578" y="608"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  RTX 4090</tspan></text>
+    <text x="578" y="624"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  24 GB</tspan></text>
 
-    <!-- E6 -->
+    <!-- Render Box -->
     <g filter="url(#sh)"><rect x="800" y="468" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
     <rect x="806" y="473" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="818" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Render box</text>
-    <text x="818" y="515"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">ComfyUI</tspan></text>
-    <text x="818" y="531"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">RTX 5090</tspan></text>
-    <text x="818" y="547"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">32 GB</tspan></text>
+    <text x="818" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Render Box</text>
+    <text x="818" y="515"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  ComfyUI</tspan></text>
+    <text x="818" y="531"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  RTX 5090</tspan></text>
+    <text x="818" y="547"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  32 GB</tspan></text>
   </g>
+
+  <!-- bottom label -->
+  <text x="550" y="700" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2.5" font-weight="700">INFERENCE ENGINES</text>
+  <text x="550" y="717" text-anchor="middle" fill="#9aa6b6" font-size="11.5">Your machines, wired into your home grid</text>
 </svg>

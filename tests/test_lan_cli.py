@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -569,6 +570,7 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
             self.pid = 4321
 
     monkeypatch.setattr(cli.provider.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
 
     args = cli.build_parser().parse_args([
         "join",
@@ -600,6 +602,7 @@ def test_join_no_flags_single_detected_engine_joins_it(monkeypatch, tmp_path):
         lambda host: [detect.DetectedEngine(label="ollama", endpoint_url="http://192.168.1.50:11434/v1", models=["llama3"])],
     )
     monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 1})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
 
     args = cli.build_parser().parse_args(["join", "home"])
     assert cli.cmd_join(args) == 0
@@ -637,11 +640,94 @@ def test_join_all_joins_every_detected_engine(monkeypatch, tmp_path):
         ],
     )
     monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 1})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
 
     args = cli.build_parser().parse_args(["join", "home", "--all"])
     assert cli.cmd_join(args) == 0
     records = cli.provider._read_records(config.select_grid("home")["grid_id"])
     assert set(records) == {"ollama", "vllm"}
+
+
+def test_join_cleans_up_record_when_engine_dies(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 999_999})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "died")
+
+    args = cli.build_parser().parse_args([
+        "join", "home", "--at", "http://192.168.1.10:11434/v1", "-m", "llama3", "--name", "bad",
+    ])
+    with pytest.raises(SystemExit):
+        cli.cmd_join(args)
+    # The stale record must not survive a failed start.
+    assert cli.provider._read_records(cfg["grid_id"]) == {}
+
+
+def test_await_engine_start_distinguishes_died_registered_starting(monkeypatch):
+    monkeypatch.setattr(cli.provider, "_is_registered", lambda url, node: node == "live")
+
+    class _Proc:
+        def __init__(self, code):
+            self._code = code
+
+        def poll(self):
+            return self._code
+
+    assert cli.provider._await_engine_start("http://x", "live", _Proc(None), grace=1.0) == "registered"
+    assert cli.provider._await_engine_start("http://x", "n", _Proc(1), grace=1.0) == "died"
+    assert cli.provider._await_engine_start("http://x", "n", _Proc(None), grace=0.3) == "starting"
+
+
+def test_detect_keeps_loopback_when_lan_not_bound(monkeypatch):
+    monkeypatch.setattr(detect.runtime, "detect_lan_ip", lambda: "10.0.0.5")
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, timeout=None):
+        # Engine answers on loopback only; the LAN IP is not bound.
+        if "10.0.0.5" in url:
+            raise httpx.ConnectError("refused")
+        if url.endswith("/api/tags"):
+            return FakeResp({"models": [{"name": "llama3"}]})
+        if url.endswith("/v1/models"):
+            return FakeResp({"data": [{"id": "llama3"}]})
+        raise httpx.ConnectError("refused")  # no comfyui
+
+    monkeypatch.setattr(detect.httpx, "get", fake_get)
+
+    engines = detect.detect_engines()
+    assert engines
+    assert all(e.endpoint_url.startswith("http://127.0.0.1:") for e in engines)
+
+
+def test_detect_prefers_lan_when_bound(monkeypatch):
+    monkeypatch.setattr(detect.runtime, "detect_lan_ip", lambda: "10.0.0.5")
+
+    class FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"id": "llama3"}], "models": [{"name": "llama3"}]}
+
+    def fake_get(url, timeout=None):
+        if "system_stats" in url:
+            raise httpx.ConnectError("no comfyui")
+        return FakeResp()  # reachable on both loopback and LAN
+
+    monkeypatch.setattr(detect.httpx, "get", fake_get)
+
+    engines = detect.detect_engines()
+    assert engines
+    assert all(e.endpoint_url.startswith("http://10.0.0.5:") for e in engines)
 
 
 def test_leave_all_removes_records(monkeypatch, tmp_path):
