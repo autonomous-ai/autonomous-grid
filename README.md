@@ -57,18 +57,53 @@ grid models
 # devstral-small-2  gpu-4090     (vLLM)
 ```
 
-**4 · Point your apps at the grid** — OpenClaw, Hermes, or any OpenAI client:
+**4 · Point your apps at the grid.** Grab the endpoint, then wire up any OpenAI client.
+Pick a model from `grid models` — Grid routes it to whichever machine serves it.
 
 ```bash
-eval "$(grid info --env)"        # exports OPENAI_BASE_URL + OPENAI_API_KEY
+grid info
+# grid_url         http://192.168.1.25:8090
+# openai_base_url  http://192.168.1.25:8090/v1
+# api key          local-grid     (any value works — auth is off on your LAN)
 ```
 
-OpenClaw and Hermes read those two env vars, so they're now backed by your whole grid. Any OpenAI SDK works the same way:
+**OpenClaw** — add Grid as a provider in `~/.openclaw/openclaw.json` ([docs](https://docs.openclaw.ai/concepts/model-providers)):
+
+```json
+{
+  "agents": { "defaults": { "model": { "primary": "grid/devstral-small-2" } } },
+  "models": {
+    "providers": {
+      "grid": {
+        "baseUrl": "http://192.168.1.25:8090/v1",
+        "apiKey": "local-grid",
+        "api": "openai-completions",
+        "models": [{ "id": "devstral-small-2", "name": "Devstral (via Grid)" }]
+      }
+    }
+  }
+}
+```
+
+**Hermes** — set the endpoint in `~/.hermes/config.yaml` ([docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)):
+
+```yaml
+model:
+  provider: custom
+  default: devstral-small-2
+  base_url: http://192.168.1.25:8090/v1
+```
+
+```bash
+echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env     # any value; Grid ignores it
+```
+
+**Your own app** — point any OpenAI SDK at the grid:
 
 ```python
 from openai import OpenAI
 
-client = OpenAI()                            # reads OPENAI_BASE_URL + OPENAI_API_KEY
+client = OpenAI(base_url="http://192.168.1.25:8090/v1", api_key="local-grid")
 client.chat.completions.create(
     model="devstral-small-2",                # Grid routes this to the 4090 box automatically
     messages=[{"role": "user", "content": "hello"}],
