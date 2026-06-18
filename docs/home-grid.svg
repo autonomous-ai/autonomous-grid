@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 705" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <radialGradient id="bgGrad" cx="0.5" cy="0.32" r="0.9">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eceff4"/>
+    </radialGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.4" fill="#d7dce4"/>
+    </pattern>
+    <linearGradient id="engineGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5fb0e6"/>
+      <stop offset="1" stop-color="#3a8cc8"/>
+    </linearGradient>
+    <linearGradient id="appGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8b8ff2"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="gridGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#0ea371"/>
+    </linearGradient>
+    <linearGradient id="lineEG" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#3f95d4"/>
+      <stop offset="1" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="lineGA" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <marker id="arrGreen" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#10b981"/>
+    </marker>
+    <marker id="arrIndigo" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#6366f1"/>
+    </marker>
+    <filter id="sh" x="-40%" y="-50%" width="180%" height="200%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#1e293b" flood-opacity="0.20"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+  </defs>
+
+  <rect width="1100" height="705" fill="url(#bgGrad)"/>
+  <rect width="1100" height="705" fill="url(#dots)"/>
+
+  <!-- section labels -->
+  <text x="550" y="50" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">APPS</text>
+  <text x="550" y="694" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2" font-weight="700">ENGINES — your machines, wired into the grid</text>
+
+  <!-- faint grid fabric between engines -->
+  <g stroke="#9aa6b6" stroke-width="1.5" opacity="0.22" fill="none">
+    <line x1="150" y1="474" x2="390" y2="512"/>
+    <line x1="390" y1="512" x2="340" y2="619"/>
+    <line x1="390" y1="512" x2="610" y2="457"/>
+    <line x1="610" y1="457" x2="650" y2="589"/>
+    <line x1="610" y1="457" x2="890" y2="512"/>
+    <line x1="650" y1="589" x2="890" y2="512"/>
+  </g>
+
+  <!-- power lines: engines -> grid -->
+  <g stroke-width="2.6" opacity="0.9" fill="none">
+    <path d="M150 430 C150 362, 200 362, 200 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
+    <path d="M390 468 C390 381, 360 381, 360 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
+    <path d="M340 575 C340 435, 300 435, 300 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
+    <path d="M610 413 C610 354, 560 354, 560 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
+    <path d="M650 545 C650 420, 640 420, 640 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
+    <path d="M890 468 C890 381, 820 381, 820 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
+  </g>
+  <!-- power lines: grid -> apps -->
+  <g stroke-width="2.6" opacity="0.9" fill="none">
+    <path d="M280 205 C308 172, 308 172, 280 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
+    <path d="M550 205 C578 172, 578 172, 550 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
+    <path d="M820 205 C848 172, 848 172, 820 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
+  </g>
+
+  <!-- ===== MIDDLE: the grid ===== -->
+  <ellipse cx="550" cy="250" rx="430" ry="70" fill="#10b981" opacity="0.20" filter="url(#glow)"/>
+  <g filter="url(#sh)"><rect x="110" y="205" width="880" height="88" rx="20" fill="url(#gridGrad)"/></g>
+  <rect x="118" y="211" width="864" height="30" rx="15" fill="#ffffff" opacity="0.10"/>
+  <text x="550" y="244" text-anchor="middle" fill="#ffffff" font-size="24" font-weight="800">Your Home Grid</text>
+  <text x="550" y="267" text-anchor="middle" fill="#eafff5" font-size="13.5">Local AI orchestration — one private endpoint for every engine you run</text>
+  <text x="550" y="285" text-anchor="middle" fill="#bbf7d0" font-size="11.5" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">home:8090/v1 · routes by model · /v1/chat + /v1/media</text>
+
+  <!-- ===== TOP: apps ===== -->
+  <g text-anchor="middle">
+    <g filter="url(#sh)"><rect x="180" y="66" width="200" height="58" rx="15" fill="url(#appGrad)"/></g>
+    <rect x="186" y="71" width="188" height="20" rx="10" fill="#ffffff" opacity="0.10"/>
+    <text x="280" y="101" fill="#ffffff" font-size="17" font-weight="700">OpenClaw</text>
+    <g filter="url(#sh)"><rect x="450" y="66" width="200" height="58" rx="15" fill="url(#appGrad)"/></g>
+    <rect x="456" y="71" width="188" height="20" rx="10" fill="#ffffff" opacity="0.10"/>
+    <text x="550" y="101" fill="#ffffff" font-size="17" font-weight="700">Hermes</text>
+    <g filter="url(#sh)"><rect x="720" y="66" width="200" height="58" rx="15" fill="url(#appGrad)"/></g>
+    <rect x="726" y="71" width="188" height="20" rx="10" fill="#ffffff" opacity="0.10"/>
+    <text x="820" y="101" fill="#ffffff" font-size="17" font-weight="700">Your Own App</text>
+  </g>
+
+  <!-- ===== BOTTOM: engines (scattered) ===== -->
+  <g font-size="11">
+    <!-- E1 -->
+    <g filter="url(#sh)"><rect x="60" y="430" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
+    <rect x="66" y="435" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
+    <text x="78" y="456" fill="#ffffff" font-size="14.5" font-weight="700">Studio</text>
+    <text x="78" y="477"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">MLX</tspan></text>
+    <text x="78" y="493"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">Mac Studio</tspan></text>
+    <text x="78" y="509"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">512 GB</tspan></text>
+
+    <!-- E2 -->
+    <g filter="url(#sh)"><rect x="300" y="468" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
+    <rect x="306" y="473" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
+    <text x="318" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Desk mini</text>
+    <text x="318" y="515"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">Ollama</tspan></text>
+    <text x="318" y="531"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">Mac mini</tspan></text>
+    <text x="318" y="547"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">64 GB</tspan></text>
+
+    <!-- E3 -->
+    <g filter="url(#sh)"><rect x="250" y="575" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
+    <rect x="256" y="580" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
+    <text x="268" y="601" fill="#ffffff" font-size="14.5" font-weight="700">Basement rig</text>
+    <text x="268" y="622"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">vLLM</tspan></text>
+    <text x="268" y="638"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">RTX 3090</tspan></text>
+    <text x="268" y="654"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">24 GB</tspan></text>
+
+    <!-- E4 -->
+    <g filter="url(#sh)"><rect x="520" y="413" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
+    <rect x="526" y="418" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
+    <text x="538" y="439" fill="#ffffff" font-size="14.5" font-weight="700">Laptop</text>
+    <text x="538" y="460"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">LM Studio</tspan></text>
+    <text x="538" y="476"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">MacBook Pro</tspan></text>
+    <text x="538" y="492"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">36 GB</tspan></text>
+
+    <!-- E5 -->
+    <g filter="url(#sh)"><rect x="560" y="545" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
+    <rect x="566" y="550" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
+    <text x="578" y="571" fill="#ffffff" font-size="14.5" font-weight="700">Game PC</text>
+    <text x="578" y="592"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">llama.cpp</tspan></text>
+    <text x="578" y="608"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">RTX 4090</tspan></text>
+    <text x="578" y="624"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">24 GB</tspan></text>
+
+    <!-- E6 -->
+    <g filter="url(#sh)"><rect x="800" y="468" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
+    <rect x="806" y="473" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
+    <text x="818" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Render box</text>
+    <text x="818" y="515"><tspan fill="#cfe6f6">framework </tspan><tspan fill="#ffffff" font-weight="600">ComfyUI</tspan></text>
+    <text x="818" y="531"><tspan fill="#cfe6f6">hardware </tspan><tspan fill="#ffffff" font-weight="600">RTX 5090</tspan></text>
+    <text x="818" y="547"><tspan fill="#cfe6f6">VRAM </tspan><tspan fill="#ffffff" font-weight="600">32 GB</tspan></text>
+  </g>
+</svg>
