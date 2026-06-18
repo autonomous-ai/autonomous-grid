@@ -39,6 +39,25 @@
     <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="26"/>
     </filter>
+    <symbol id="dev-monitor" viewBox="0 0 24 24">
+      <rect x="2.5" y="3" width="19" height="13" rx="1.6" fill="none" stroke="#eaf4fb" stroke-width="1.8"/>
+      <rect x="9.5" y="16" width="5" height="3" fill="#eaf4fb"/>
+      <rect x="6" y="20" width="12" height="2" rx="1" fill="#eaf4fb"/>
+    </symbol>
+    <symbol id="dev-laptop" viewBox="0 0 24 24">
+      <rect x="4" y="4" width="16" height="11" rx="1.4" fill="none" stroke="#eaf4fb" stroke-width="1.8"/>
+      <path d="M1.5 19.5 L22.5 19.5 L20 16.8 L4 16.8 Z" fill="#eaf4fb"/>
+    </symbol>
+    <symbol id="dev-mini" viewBox="0 0 24 24">
+      <rect x="2.5" y="8" width="19" height="9" rx="2" fill="none" stroke="#eaf4fb" stroke-width="1.8"/>
+      <circle cx="17.5" cy="12.5" r="1.1" fill="#eaf4fb"/>
+    </symbol>
+    <symbol id="dev-tower" viewBox="0 0 24 24">
+      <rect x="6" y="2.5" width="12" height="19" rx="1.6" fill="none" stroke="#eaf4fb" stroke-width="1.8"/>
+      <line x1="9" y1="6" x2="15" y2="6" stroke="#eaf4fb" stroke-width="1.5"/>
+      <line x1="9" y1="8.5" x2="15" y2="8.5" stroke="#eaf4fb" stroke-width="1.5"/>
+      <circle cx="12" cy="17.5" r="1.3" fill="#eaf4fb"/>
+    </symbol>
   </defs>
 
   <rect width="1100" height="726" fill="url(#bgGrad)"/>
@@ -78,7 +97,7 @@
   <g filter="url(#sh)"><rect x="110" y="205" width="880" height="88" rx="20" fill="url(#gridGrad)"/></g>
   <rect x="118" y="211" width="864" height="30" rx="15" fill="#ffffff" opacity="0.10"/>
   <text x="550" y="247" text-anchor="middle" fill="#ffffff" font-size="25" font-weight="800">Your Home Grid</text>
-  <text x="550" y="275" text-anchor="middle" fill="#eafff5" font-size="15">Unifies and orchestrates all your compute resources</text>
+  <text x="550" y="276" text-anchor="middle" fill="#f3fff9" font-size="18.5">Unifies and orchestrates all your compute resources</text>
 
   <!-- ===== TOP: apps ===== -->
   <g text-anchor="middle">
@@ -144,7 +163,17 @@
     <text x="818" y="547"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  32 GB</tspan></text>
   </g>
 
+  <!-- device icons (top-right of each card) -->
+  <g opacity="0.92">
+    <use href="#dev-monitor" x="210" y="438" width="24" height="24"/>
+    <use href="#dev-mini" x="450" y="476" width="24" height="24"/>
+    <use href="#dev-tower" x="400" y="583" width="24" height="24"/>
+    <use href="#dev-laptop" x="670" y="421" width="24" height="24"/>
+    <use href="#dev-tower" x="710" y="553" width="24" height="24"/>
+    <use href="#dev-tower" x="950" y="476" width="24" height="24"/>
+  </g>
+
   <!-- bottom label -->
-  <text x="550" y="700" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2.5" font-weight="700">INFERENCE ENGINES</text>
-  <text x="550" y="717" text-anchor="middle" fill="#9aa6b6" font-size="11.5">Your machines, wired into your home grid</text>
+  <text x="550" y="700" text-anchor="middle" fill="#5b6b85" font-size="13.5" letter-spacing="2.5" font-weight="700">INFERENCE ENGINES</text>
+  <text x="550" y="719" text-anchor="middle" fill="#5b6b85" font-size="14">Your machines, wired into your home grid</text>
 </svg>
