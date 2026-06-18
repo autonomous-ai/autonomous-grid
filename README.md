@@ -1,6 +1,6 @@
 <div align="center">
 
-# Grid
+# ⚡ Grid
 
 ### The orchestration layer for local AI.
 
@@ -43,7 +43,7 @@ grid join http://192.168.1.25:8090
 
 ```bash
 grid join http://192.168.1.25:8090
-# joined  gpu-4090 · vLLM · devstral-small-2
+# joined  gpu-4090 · vLLM · qwen3-coder
 ```
 
 Two machines, two frameworks — one endpoint now serves both:
@@ -51,7 +51,7 @@ Two machines, two frameworks — one endpoint now serves both:
 ```bash
 grid models
 # gemma4-31b        mac-studio   (MLX)
-# devstral-small-2  gpu-4090     (vLLM)
+# qwen3-coder  gpu-4090     (vLLM)
 ```
 
 **4 · Point your apps at the grid.** Grab the endpoint, then wire up any OpenAI client:
@@ -67,14 +67,14 @@ grid info
 
 ```json
 {
-  "agents": { "defaults": { "model": { "primary": "grid/devstral-small-2" } } },
+  "agents": { "defaults": { "model": { "primary": "grid/qwen3-coder" } } },
   "models": {
     "providers": {
       "grid": {
         "baseUrl": "http://192.168.1.25:8090/v1",
         "apiKey": "local-grid",
         "api": "openai-completions",
-        "models": [{ "id": "devstral-small-2", "name": "Devstral (via Grid)" }]
+        "models": [{ "id": "qwen3-coder", "name": "Qwen3 Coder (via Grid)" }]
       }
     }
   }
@@ -86,7 +86,7 @@ grid info
 ```yaml
 model:
   provider: custom
-  default: devstral-small-2
+  default: qwen3-coder
   base_url: http://192.168.1.25:8090/v1
 ```
 
@@ -101,7 +101,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://192.168.1.25:8090/v1", api_key="local-grid")
 client.chat.completions.create(
-    model="devstral-small-2",                # routed to the 4090 box automatically
+    model="qwen3-coder",                # routed to the 4090 box automatically
     messages=[{"role": "user", "content": "hello"}],
 )
 ```
