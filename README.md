@@ -4,17 +4,17 @@
 already run into one private endpoint — and ships with two defaults so a bare machine
 works out of the box.**
 
-You already run Ollama on your Mac, vLLM on your GPU box, LM Studio on your laptop, MLX on
-your MacBook. Grid turns all of them into a single OpenAI-compatible endpoint on your
-network — you migrate nothing and learn no new runtime. Text, images, and video, same
-endpoint.
+You already run Ollama on your Mac mini, MLX on a Mac Studio, vLLM on a GPU box,
+LM Studio on a laptop, and ComfyUI somewhere else. Grid turns all of them into one
+OpenAI-compatible endpoint on your LAN — you migrate nothing and learn no new engine.
+Text, images, and video, same endpoint.
 
 - **It has no engine of its own.** Grid orchestrates real engines — the ones you already
   run (Ollama, vLLM, LM Studio, MLX) and two open-source defaults it sets up for you
   (llama.cpp for text, ComfyUI for media). Stop Grid and your engines are untouched; it
   never reimplements inference or competes with the tools it runs.
-- **One endpoint, every box.** Your app points at a single `OPENAI_BASE_URL`. Grid routes
-  each request to whichever machine serves that model.
+- **One endpoint, every box.** Engines join a `grid_url`; apps call `grid_url/v1`.
+  Grid routes each request to whichever machine serves that model.
 - **Private by default.** LAN-only, no auth, in-memory registry — nothing phones home,
   nothing leaves your network.
 
@@ -26,37 +26,46 @@ You need Python 3.11+ and [uv](https://docs.astral.sh/uv/). Install the CLI:
 uv tool install -e . --force   # provides the `grid` command
 ```
 
-**1. Bring your grid up** — on any one machine; this is the address your apps will use:
+**1. Bring your grid up** — on any one machine; this is the address engines join:
 
 ```bash
-grid up home
+grid up
 # grid_url=http://192.168.1.25:8090
 ```
 
-**2. Join the engines you already run** — run on each machine. Grid auto-detects the local
-engine (Ollama, LM Studio, MLX…) and advertises that box's LAN address for you:
+**2. Join the engines you already run** — run on each machine. First inspect what Grid
+sees, then join it:
 
 ```bash
-# on the Mac mini running Ollama — auto-detected, nothing else to say
+# on a Mac Studio running MLX or LM Studio
+grid join http://192.168.1.25:8090 --dry-run
 grid join http://192.168.1.25:8090
 
-# on the GPU box running vLLM — name the models it serves
-grid join http://192.168.1.25:8090 --at http://localhost:8000/v1 -m mistral-large
+# on a GPU box running vLLM
+grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m devstral-small-2 --name gpu-4090
 ```
 
-> The engine just has to listen on the LAN, not only loopback (Ollama `OLLAMA_HOST=0.0.0.0`,
-> LM Studio "Serve on Local Network", vLLM `--host 0.0.0.0`). Full notes in **[reference](docs/reference.md)**.
+Use a grid URL explicitly when joining from another machine:
+
+```bash
+grid join http://192.168.1.25:8090 --at http://192.168.1.40:8000/v1 -m glm-4.5-air --name gpu-5090
+```
+
+> The engine has to be reachable from the machine running the grid. Use LAN addresses
+> when needed: Ollama `OLLAMA_HOST=0.0.0.0`, LM Studio "Serve on Local Network",
+> vLLM `--host 0.0.0.0`. Full notes in **[reference](docs/reference.md)**.
 
 **3. Point your apps at the grid:**
 
 ```bash
-grid info home                          # endpoint, key, and the live models
-eval "$(grid info home --env)"          # exports OPENAI_BASE_URL + OPENAI_API_KEY
-grid chat -m mistral-large "hello"      # quick check through the grid
+grid models                             # live models across every joined engine
+grid chat -m devstral-small-2 "hello"    # quick check through the grid
+eval "$(grid info --env)"               # exports OPENAI_BASE_URL + OPENAI_API_KEY
 ```
 
-Any OpenAI SDK now reaches every model on every machine — `mistral-large` routes to the
-GPU box, `llama3` to the Mac. Same endpoint, nothing migrated.
+Any OpenAI SDK now reaches every model on every machine — `gemma4-31b` can route to a
+Mac Studio, `devstral-small-2` to a 4090 box, `glm-4.5-air` to a 5090 box, and
+`comfyui:image_generation` to a media machine. Same endpoint, nothing migrated.
 
 ## How it works
 
@@ -69,13 +78,13 @@ Three things, one CLI:
 
 - **the grid** — one private endpoint that routes each request to a machine serving that
   model. Bring it up with `grid up`.
-- **engines** — the computers you already run (Ollama, vLLM, MLX, llama.cpp…), each joined
-  to the grid with `grid join`.
+- **engines** — the tools you already run (Ollama, vLLM, LM Studio, MLX, llama.cpp,
+  ComfyUI), each joined to the grid with `grid join`.
 - **apps** — anything that speaks the OpenAI API, pointed at the grid's endpoint
   (`grid info` prints it).
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full request flow and
-**[docs/reference.md](docs/reference.md)** for the complete command reference.
+**[docs/cli.md](docs/cli.md)** for the CLI contract.
 
 ## Grid's two default engines
 
@@ -89,6 +98,7 @@ Point Grid at it instead (above).
 grid engine install llama.cpp                # set up the built-in text engine
 grid pull qwen36-35b-a3b-mtp                 # see `grid catalog`, or any HF GGUF
 grid join --serve qwen36-35b-a3b-mtp
+grid chat -m qwen36-35b-a3b-mtp "hello"
 ```
 
 Media (images + video) via ComfyUI:
@@ -97,9 +107,10 @@ Media (images + video) via ComfyUI:
 grid engine install comfyui                  # set up the built-in media engine
 grid engine pull image_generation            # also: image_editing, i2v
 grid join --media --bundle image_generation
+grid image "a compact walnut desk beside a sunlit window"
 ```
 
-Hosting, media, and the raw HTTP API are documented in **[docs/reference.md](docs/reference.md)**.
+Engine setup, media, and the raw HTTP API are documented in **[docs/reference.md](docs/reference.md)**.
 
 ## Contributing
 
