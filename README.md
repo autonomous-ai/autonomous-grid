@@ -19,18 +19,6 @@ behind **one OpenAI-compatible endpoint** on your LAN.
 
 </div>
 
-## Grid is / Grid is not
-
-Grid is a **layer above** your inference engines — the same way an API gateway sits above your
-services or Tailscale sits above your network. It is not another engine.
-
-| ✅ Grid **is** | ❌ Grid is **not** |
-|---|---|
-| an orchestration layer that **routes** to the engines you already run | an inference engine or model runtime — **it runs no models of its own** |
-| **one OpenAI-compatible endpoint** for every engine on your LAN | a replacement for Ollama / vLLM / LM Studio / MLX / llama.cpp / ComfyUI — it sits **above** them |
-| a live registry that **auto-discovers** the models your machines serve | a cloud service — nothing leaves your network |
-| private by default (LAN-only, no auth) | a new API your apps must learn — it's just OpenAI |
-
 ## Quickstart
 
 Turn the machines you already own into one AI endpoint — in four steps.
@@ -114,8 +102,9 @@ grid image "a compact walnut desk beside a sunlit window"
 
 ## How it works
 
-Grid sits **above** your engines (see the diagram). The machines you own are the inference engines,
-your grid is the one address everything talks through, and your apps draw from it.
+Grid sits **above** your engines — the same way an API gateway sits above your services or
+Tailscale sits above your network (see the diagram). The machines you own are the inference
+engines, your grid is the one address everything talks through, and your apps draw from it.
 
 - **the grid** — one private endpoint that routes each request to a machine serving that model. Create it with `grid up`.
 - **engines** — the tools you already run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI). Run `grid join <grid-url>` on a machine and Grid advertises its engines and heartbeats them; it never restarts or replaces them.
