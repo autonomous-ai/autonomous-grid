@@ -133,7 +133,7 @@ talks through, and your apps draw from it.
 - **engines** — the tools you already run. `grid join <grid-url>` advertises a machine's engines and heartbeats them; Grid never restarts or replaces them.
 - **apps** — anything that speaks the OpenAI API. Text on `/v1/chat`, images and video on `/v1/media`.
 
-Full request flow in **[ARCHITECTURE.md](ARCHITECTURE.md)**; the complete command surface in **[docs/cli.md](docs/cli.md)**.
+Full request flow in **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**; the complete command surface in **[docs/cli.md](docs/cli.md)**.
 
 ## Contributing
 
@@ -147,8 +147,8 @@ uv run --extra dev pytest
 ```
 
 Good first PRs: add a model to the catalog (`models/catalog.py`) or a media bundle
-(`models/media_bundles.py`). Start with **[CONTRIBUTING.md](CONTRIBUTING.md)** and
-**[ARCHITECTURE.md](ARCHITECTURE.md)**.
+(`models/media_bundles.py`). Start with **[CONTRIBUTING.md](docs/CONTRIBUTING.md)** and
+**[ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 Local state lives under `~/.grid` (override with `GRID_HOME`).
 

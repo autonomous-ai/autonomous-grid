@@ -4,7 +4,7 @@ The deep reference — engine reachability, the full `grid join` flag set, the b
 engines, media bundles, the raw HTTP API, and troubleshooting. For the command contract
 and the common path, see **[docs/cli.md](cli.md)**; for the what/why and a quickstart, see
 the [README](../README.md); for how requests flow through the code, see
-[ARCHITECTURE.md](../ARCHITECTURE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 Local state is stored under `~/.grid` unless the `GRID_HOME` environment variable is set.
 

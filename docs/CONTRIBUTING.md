@@ -3,7 +3,7 @@
 Thanks for considering a contribution! Grid is a small, readable codebase by design —
 this guide gets you from clone to merged PR quickly. Skim
 [ARCHITECTURE.md](ARCHITECTURE.md) first; it's the map. The user-facing command contract
-is [docs/cli.md](docs/cli.md).
+is [cli.md](cli.md).
 
 ## Prerequisites
 

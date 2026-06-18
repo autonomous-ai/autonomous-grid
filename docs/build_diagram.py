@@ -4,10 +4,12 @@ Processes the OpenClaw + Hermes logos (transparent bg, trimmed, downscaled),
 inlines them as <image> into docs/home-grid.svg, and writes build/render.html
 for headless Chrome to screenshot.
 """
-import base64, io
+import base64, io, os
 from PIL import Image
 
-LOGOS = "docs/logos"
+HERE = os.path.dirname(os.path.abspath(__file__))   # docs/
+ROOT = os.path.dirname(HERE)
+LOGOS = os.path.join(HERE, "logos")
 
 
 def autocrop(im):
@@ -58,7 +60,7 @@ hermes, oc = proc_hermes(), proc_openclaw()
 hw, hh = hermes.size
 ow, oh = oc.size
 
-svg = open("docs/home-grid.svg").read()
+svg = open(os.path.join(HERE, "home-grid.svg")).read()
 svg = svg.replace('viewBox="0 0 1100 726"', 'viewBox="0 0 1100 726" width="1100" height="726"', 1)
 svg = svg.replace('<text x="280" y="101" fill="#ffffff" font-size="17" font-weight="700">OpenClaw</text>', '')
 svg = svg.replace('<text x="550" y="101" fill="#ffffff" font-size="17" font-weight="700">Hermes</text>', '')
@@ -66,5 +68,6 @@ svg = svg.replace('</svg>', img_tag(b64(oc), ow, oh, 280) + '\n' + img_tag(b64(h
 
 html = ('<!doctype html><html><head><meta charset="utf-8">'
         '<style>html,body{margin:0;padding:0}</style></head><body>' + svg + '</body></html>')
-open("build/render.html", "w").write(html)
+os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
+open(os.path.join(ROOT, "build", "render.html"), "w").write(html)
 print(f"built: openclaw {ow}x{oh}, hermes {hw}x{hh}")

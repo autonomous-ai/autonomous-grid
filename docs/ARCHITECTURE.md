@@ -5,7 +5,7 @@ OpenAI-compatible endpoint. This document explains the moving parts and traces a
 request through the code so you can find where to make a change.
 
 > **Vocabulary.** The product words are **grid**, **engine**, and **app** (see
-> [docs/cli.md](docs/cli.md)). The code uses the same words; the only older nouns that
+> [cli.md](cli.md)). The code uses the same words; the only older nouns that
 > survive are `node` (a registry entry) inside `server.py`, and the `provider/` package
 > name — both predate the rename and are called out below.
 
