@@ -44,7 +44,7 @@ def detect_engines(*, advertise_host: str | None = None, timeout: float = 0.75) 
             if _comfyui_reachable(port, timeout):
                 # Advertise media by this box's LAN host; the media bundle is
                 # selected at join time, so no model list here.
-                url = runtime.provider_endpoint_url(None, port, advertise_host).removesuffix("/v1")
+                url = runtime.engine_endpoint_url(None, port, advertise_host).removesuffix("/v1")
                 found.append(DetectedEngine(label=label, endpoint_url=url, models=[], media=True))
             continue
         models = _probe(port, kind, timeout)
@@ -52,7 +52,7 @@ def detect_engines(*, advertise_host: str | None = None, timeout: float = 0.75) 
             continue
         # Advertise the engine by this box's LAN IP, not localhost, so other
         # machines on the grid can reach it.
-        endpoint_url = runtime.provider_endpoint_url(None, port, advertise_host)
+        endpoint_url = runtime.engine_endpoint_url(None, port, advertise_host)
         found.append(DetectedEngine(label=label, endpoint_url=endpoint_url, models=models))
     return found
 

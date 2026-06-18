@@ -17,14 +17,14 @@ import config
 import paths
 
 
-NETWORK_TYPE = "lan-permissionless"
+GRID_TYPE = "lan-permissionless"
 DEFAULT_PORT = 8090
 DEFAULT_HOST = "0.0.0.0"
 
 
 def slug_name(name: str) -> str:
     clean = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-")
-    return clean or f"network-{uuid.uuid4().hex[:8]}"
+    return clean or f"grid-{uuid.uuid4().hex[:8]}"
 
 
 def utc_now() -> str:
@@ -54,19 +54,19 @@ def normalize_url(value: str) -> str:
     return url.rstrip("/")
 
 
-def init_network_config(
+def init_grid_config(
     *,
     name: str,
     port: int = DEFAULT_PORT,
     host: str = DEFAULT_HOST,
-    network_id: str | None = None,
+    grid_id: str | None = None,
     advertise_host: str | None = None,
 ) -> dict[str, Any]:
-    network_id = network_id or f"ag-{slug_name(name)}-{uuid.uuid4().hex[:8]}"
+    grid_id = grid_id or f"ag-{slug_name(name)}-{uuid.uuid4().hex[:8]}"
     data = {
-        "network_id": network_id,
+        "grid_id": grid_id,
         "name": name,
-        "network_type": NETWORK_TYPE,
+        "grid_type": GRID_TYPE,
         "managed_server": True,
         "host": host,
         "port": int(port),
@@ -75,11 +75,11 @@ def init_network_config(
         "created_at": utc_now(),
         "updated_at": utc_now(),
     }
-    config.save_network_config(network_id, data)
+    config.save_grid_config(grid_id, data)
     return data
 
 
-def start_server(cfg: dict[str, Any]) -> int:
+def start_grid(cfg: dict[str, Any]) -> int:
     if not cfg.get("managed_server", True):
         raise SystemExit(f"{cfg['name']} is a remote LAN signaling URL; there is no local server to start.")
 
@@ -95,23 +95,23 @@ def start_server(cfg: dict[str, Any]) -> int:
     if _tcp_port_in_use("127.0.0.1", port):
         raise SystemExit(f"Port {port} is already in use. Choose a different --port.")
 
-    log_path = paths.network_dir(cfg["network_id"]) / "server.log"
+    log_path = paths.grid_dir(cfg["grid_id"]) / "server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("ab")
     proc = subprocess.Popen(
-        _cli_subprocess_command() + ["__server", cfg["network_id"]],
+        _cli_subprocess_command() + ["__server", cfg["grid_id"]],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
     cfg["server_pid"] = proc.pid
     cfg["updated_at"] = utc_now()
-    config.save_network_config(cfg["network_id"], cfg)
+    config.save_grid_config(cfg["grid_id"], cfg)
     wait_for_health(cfg)
     return proc.pid
 
 
-def stop_server(cfg: dict[str, Any]) -> None:
+def stop_grid(cfg: dict[str, Any]) -> None:
     pid = int(cfg.get("server_pid") or 0)
     if not pid:
         return
@@ -124,12 +124,12 @@ def stop_server(cfg: dict[str, Any]) -> None:
         pass
     cfg["server_pid"] = 0
     cfg["updated_at"] = utc_now()
-    config.save_network_config(cfg["network_id"], cfg)
+    config.save_grid_config(cfg["grid_id"], cfg)
 
 
 def wait_for_health(cfg: dict[str, Any], timeout: int = 30) -> None:
     deadline = time.time() + timeout
-    url = f"http://127.0.0.1:{int(cfg['port'])}/server/info"
+    url = f"http://127.0.0.1:{int(cfg['port'])}/grid/info"
     while time.time() < deadline:
         try:
             resp = httpx.get(url, timeout=1)
@@ -138,15 +138,15 @@ def wait_for_health(cfg: dict[str, Any], timeout: int = 30) -> None:
         except Exception:
             pass
         time.sleep(0.25)
-    log = paths.network_dir(cfg["network_id"]) / "server.log"
+    log = paths.grid_dir(cfg["grid_id"]) / "server.log"
     raise SystemExit(f"LAN signaling server did not become healthy. See {log}")
 
 
-def network_url(cfg: dict[str, Any]) -> str:
+def grid_url(cfg: dict[str, Any]) -> str:
     return str(cfg["lan_signaling_url"]).rstrip("/")
 
 
-def provider_endpoint_url(endpoint_url: str | None, port: int, advertise_host: str | None = None) -> str:
+def engine_endpoint_url(endpoint_url: str | None, port: int, advertise_host: str | None = None) -> str:
     if endpoint_url:
         return normalize_url(endpoint_url)
     return f"{make_lan_url(port, advertise_host)}/v1"

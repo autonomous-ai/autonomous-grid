@@ -12,16 +12,16 @@ def home() -> Path:
     return grid_home()
 
 
-def networks_dir() -> Path:
-    return grid_home() / "networks"
+def grids_dir() -> Path:
+    return grid_home() / "grids"
 
 
-def network_dir(network_id: str) -> Path:
-    return networks_dir() / network_id
+def grid_dir(grid_id: str) -> Path:
+    return grids_dir() / grid_id
 
 
 def ensure_base() -> None:
-    networks_dir().mkdir(parents=True, exist_ok=True)
+    grids_dir().mkdir(parents=True, exist_ok=True)
 
 
 def bin_dir() -> Path:
@@ -44,8 +44,8 @@ def run_dir() -> Path:
     return grid_home() / "run"
 
 
-def engines_dir(network_id: str) -> Path:
-    return run_dir() / "engines" / network_id
+def engines_dir(grid_id: str) -> Path:
+    return run_dir() / "engines" / grid_id
 
 
 def llama_log(port: int) -> Path:
@@ -53,5 +53,5 @@ def llama_log(port: int) -> Path:
 
 
 def ensure_all() -> None:
-    for directory in (grid_home(), networks_dir(), bin_dir(), models_dir(), logs_dir(), run_dir()):
+    for directory in (grid_home(), grids_dir(), bin_dir(), models_dir(), logs_dir(), run_dir()):
         directory.mkdir(parents=True, exist_ok=True)

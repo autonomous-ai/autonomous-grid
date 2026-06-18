@@ -1,7 +1,7 @@
 """`grid join` / `grid leave` / `grid models`: the engine lifecycle.
 
 `grid join` registers an engine into a grid and keeps heartbeating it. It runs
-the heartbeat loop in a *detached* process (the internal ``__provider`` entry)
+the heartbeat loop in a *detached* process (the internal ``__engine`` entry)
 and records the engine under ``~/.grid/run/engines/<grid>/`` so a later
 `grid leave` can stop and unregister it. `grid models` lists the live models the
 grid can serve right now.
@@ -33,7 +33,7 @@ import runtime
 def cmd_join(args: argparse.Namespace) -> int:
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))
-    grid_id = cfg["network_id"]
+    grid_id = cfg["grid_id"]
 
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
@@ -101,7 +101,7 @@ def _spawn_engine(
     engine_id: str | None = None,
     media: bool = False,
 ) -> int:
-    grid_id = cfg["network_id"]
+    grid_id = cfg["grid_id"]
     engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
     if _record_path(grid_id, engine_id).exists() and _record_alive(grid_id, engine_id):
         raise SystemExit(f"Engine {engine_id!r} is already joined to {cfg['name']}. Use a different --name.")
@@ -109,7 +109,7 @@ def _spawn_engine(
     record = {
         "engine_id": engine_id,
         "node_id": f"node-{uuid.uuid4().hex[:12]}",
-        "network_id": grid_id,
+        "grid_id": grid_id,
         "pid": 0,
         "endpoint_url": endpoint_url,
         "models": models,
@@ -134,7 +134,7 @@ def _spawn_engine(
     log_path = paths.engines_dir(grid_id) / f"{engine_id}.log"
     log = log_path.open("ab")
     proc = subprocess.Popen(
-        runtime.cli_command() + ["__provider", grid_id, engine_id],
+        runtime.cli_command() + ["__engine", grid_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -159,7 +159,7 @@ def _spawn_engine(
 
 def cmd_leave(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
-    grid_id = cfg["network_id"]
+    grid_id = cfg["grid_id"]
     records = _read_records(grid_id)
 
     if args.all:
@@ -274,7 +274,7 @@ def cmd_engines(args: argparse.Namespace) -> int:
 
 
 def _discover(cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    grid_url = runtime.network_url(cfg)
+    grid_url = runtime.grid_url(cfg)
     try:
         resp = httpx.get(f"{grid_url}/nodes/discover", timeout=10)
         resp.raise_for_status()
@@ -282,7 +282,7 @@ def _discover(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         raise SystemExit(f"Could not reach grid {cfg['name']} at {grid_url}: {exc}") from exc
     except httpx.HTTPStatusError as exc:
         raise SystemExit(f"Discovery failed: {exc.response.status_code} {exc.response.text}") from exc
-    return resp.json().get("providers", [])
+    return resp.json().get("engines", [])
 
 
 def _engine_label(engine: dict[str, Any]) -> str:
@@ -290,15 +290,15 @@ def _engine_label(engine: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# detached provider loop (internal `__provider` entry)
+# detached provider loop (internal `__engine` entry)
 # ---------------------------------------------------------------------------
 
-def run_provider_from_record(grid_id: str, engine_id: str) -> int:
+def run_engine_from_record(grid_id: str, engine_id: str) -> int:
     record = _read_records(grid_id).get(engine_id)
     if not record:
         raise SystemExit(f"No engine record for {engine_id} on {grid_id}.")
     args = SimpleNamespace(
-        network=record["network_id"],
+        grid=record["grid_id"],
         node_id=record["node_id"],
         name=engine_id,
         models=list(record.get("models") or []),
@@ -323,12 +323,12 @@ def run_provider_from_record(grid_id: str, engine_id: str) -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_term)
-    return _run_provider(args)
+    return _run_engine(args)
 
 
-def _run_provider(args: SimpleNamespace) -> int:
-    cfg = config.select_network(args.network)
-    grid_url = runtime.network_url(cfg)
+def _run_engine(args: SimpleNamespace) -> int:
+    cfg = config.select_grid(args.grid)
+    grid_url = runtime.grid_url(cfg)
     node_id = args.node_id
     launched = None
     media_proc = None
@@ -342,9 +342,9 @@ def _run_provider(args: SimpleNamespace) -> int:
         text_advertised_models = _advertised_text_models(args.models, args.advertise_as)
         endpoint_url = None
         if args.endpoint_url:
-            endpoint_url = runtime.provider_endpoint_url(args.endpoint_url, args.endpoint_port, args.advertise_host)
+            endpoint_url = runtime.engine_endpoint_url(args.endpoint_url, args.endpoint_port, args.advertise_host)
         elif args.models:
-            endpoint_url = runtime.provider_endpoint_url(None, args.endpoint_port, args.advertise_host)
+            endpoint_url = runtime.engine_endpoint_url(None, args.endpoint_port, args.advertise_host)
             if len(args.models) != 1:
                 raise SystemExit("Built-in engine launch supports exactly one model. Use --at for custom engines.")
             from engine import launcher as launcher_mod
@@ -370,14 +370,14 @@ def _run_provider(args: SimpleNamespace) -> int:
 
         advertised_models = list(text_advertised_models)
         if args.enable_media:
-            prepared = _prepare_media_provider(args)
+            prepared = _prepare_media_engine(args)
             advertised_models.extend(prepared["models"])
             media_proc = prepared["proc"]
             media_url = prepared["media_url"]
             comfyui_started = bool(prepared["comfyui_started"])
 
         payload = {
-            "role": "provider",
+            "role": "engine",
             "models": advertised_models,
             "endpoint_url": endpoint_url,
             "media_url": media_url,
@@ -386,7 +386,7 @@ def _run_provider(args: SimpleNamespace) -> int:
             "capabilities": _media_capabilities(advertised_models) if args.enable_media else {},
             "load": {"active_tasks": 0},
         }
-        _register_provider(grid_url, node_id, payload)
+        _register_engine(grid_url, node_id, payload)
         registered = True
         print(f"Engine {node_id} advertised on {grid_url}")
         print(f"models={','.join(advertised_models)}")
@@ -478,7 +478,7 @@ def _advertised_text_models(models: list[str], aliases: list[str]) -> list[str]:
     return cleaned
 
 
-def _prepare_media_provider(args: SimpleNamespace) -> dict[str, Any]:
+def _prepare_media_engine(args: SimpleNamespace) -> dict[str, Any]:
     import media_runtime
     from engine import comfyui
     from models import media_bundles
@@ -530,7 +530,7 @@ def _prepare_media_provider(args: SimpleNamespace) -> dict[str, Any]:
 
     comfyui_url = f"http://localhost:{args.comfyui_port}/api"
     proc = media_runtime.start_media_server(port=args.media_port, comfyui_url=comfyui_url)
-    media_url = runtime.provider_endpoint_url(
+    media_url = runtime.engine_endpoint_url(
         None,
         args.media_port,
         args.advertise_host,
@@ -566,7 +566,7 @@ def _media_capabilities(models: list[str]) -> dict[str, Any]:
 # registration / state
 # ---------------------------------------------------------------------------
 
-def _register_provider(grid_url: str, node_id: str, payload: dict[str, Any]) -> None:
+def _register_engine(grid_url: str, node_id: str, payload: dict[str, Any]) -> None:
     try:
         resp = httpx.put(f"{grid_url}/nodes/{node_id}", json=payload, timeout=10)
     except httpx.RequestError as exc:
@@ -583,7 +583,7 @@ def _heartbeat(
 ) -> None:
     resp = httpx.post(f"{grid_url}/nodes/heartbeat", json={"node_id": node_id, "load": load}, timeout=10)
     if resp.status_code == 404:
-        _register_provider(grid_url, node_id, registration_payload)
+        _register_engine(grid_url, node_id, registration_payload)
         return
     if resp.status_code >= 400:
         raise SystemExit(f"Engine heartbeat failed ({resp.status_code}): {resp.text}")

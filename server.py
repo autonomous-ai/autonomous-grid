@@ -13,20 +13,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from runtime import NETWORK_TYPE
+from runtime import GRID_TYPE
 
 
 NODE_TTL_SECONDS = 60
-PROVIDER_TIMEOUT_SECONDS = 600
+ENGINE_TIMEOUT_SECONDS = 600
 
 
 class NodeCreateRequest(BaseModel):
-    role: Literal["provider", "consumer", "both"] = "consumer"
+    role: Literal["engine", "app", "both"] = "app"
     name: str | None = None
 
 
 class NodeUpdateRequest(BaseModel):
-    role: Literal["provider", "consumer", "both"] = "provider"
+    role: Literal["engine", "app", "both"] = "engine"
     models: list[str] = Field(default_factory=list)
     endpoint_url: str | None = None
     media_url: str | None = None
@@ -65,15 +65,15 @@ class Node:
         return data
 
 
-def create_app(*, network_id: str, network_name: str) -> FastAPI:
+def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
     app = FastAPI(
         title="Grid LAN Signaling Server",
-        description="Unauthenticated LAN-only provider discovery and OpenAI-compatible request proxy.",
+        description="Unauthenticated LAN-only engine discovery and OpenAI-compatible request proxy.",
         version="0.1.0",
     )
     app.state.nodes = {}
-    app.state.network_id = network_id
-    app.state.network_name = network_name
+    app.state.grid_id = grid_id
+    app.state.grid_name = grid_name
 
     app.add_middleware(
         CORSMiddleware,
@@ -85,11 +85,11 @@ def create_app(*, network_id: str, network_name: str) -> FastAPI:
 
     @app.get("/")
     async def root():
-        return _server_info(app)
+        return _grid_info(app)
 
-    @app.get("/server/info")
-    async def server_info():
-        return _server_info(app)
+    @app.get("/grid/info")
+    async def grid_info():
+        return _grid_info(app)
 
     @app.post("/nodes")
     async def create_node(req: NodeCreateRequest):
@@ -100,15 +100,15 @@ def create_app(*, network_id: str, network_name: str) -> FastAPI:
 
     @app.put("/nodes/{node_id}")
     async def update_node(node_id: str, req: NodeUpdateRequest):
-        if req.role in ("provider", "both") and not req.models:
-            raise HTTPException(status_code=400, detail="at least one model is required for providers")
-        if req.role in ("provider", "both"):
+        if req.role in ("engine", "both") and not req.models:
+            raise HTTPException(status_code=400, detail="at least one model is required for engines")
+        if req.role in ("engine", "both"):
             text_models = [model for model in req.models if not model.startswith("comfyui:")]
             media_models = [model for model in req.models if model.startswith("comfyui:")]
             if text_models and not req.endpoint_url:
-                raise HTTPException(status_code=400, detail="endpoint_url is required for text providers")
+                raise HTTPException(status_code=400, detail="endpoint_url is required for text engines")
             if media_models and not req.media_url:
-                raise HTTPException(status_code=400, detail="media_url is required for media providers")
+                raise HTTPException(status_code=400, detail="media_url is required for media engines")
         existing = _nodes(app).get(node_id)
         node = existing or Node(node_id=node_id, role=req.role)
         node.role = req.role
@@ -141,15 +141,15 @@ def create_app(*, network_id: str, network_name: str) -> FastAPI:
 
     @app.get("/nodes/discover")
     async def discover(model: str | None = None):
-        return {"providers": [_provider_dict(p) for p in _active_providers(app, model)]}
+        return {"engines": [_engine_dict(p) for p in _active_engines(app, model)]}
 
     @app.get("/v1/models")
     async def models():
         created = int(time.time())
         seen: set[str] = set()
         data = []
-        for provider in _active_providers(app):
-            for model in provider.models:
+        for engine in _active_engines(app):
+            for model in engine.models:
                 if model in seen:
                     continue
                 seen.add(model)
@@ -191,47 +191,47 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     if not isinstance(model, str) or not model:
         return _openai_error(400, "model is required", "invalid_request")
 
-    provider = _choose_provider(app, model)
-    if not provider:
-        return _openai_error(503, f"No active LAN provider for model {model!r}", "provider_unavailable")
+    engine = _choose_engine(app, model)
+    if not engine:
+        return _openai_error(503, f"No active LAN engine for model {model!r}", "engine_unavailable")
 
-    url = f"{provider.endpoint_url.rstrip('/')}/{endpoint_path}"
+    url = f"{engine.endpoint_url.rstrip('/')}/{endpoint_path}"
     headers = {"content-type": request.headers.get("content-type", "application/json")}
-    timeout = httpx.Timeout(PROVIDER_TIMEOUT_SECONDS, read=None if body.get("stream") else PROVIDER_TIMEOUT_SECONDS)
+    timeout = httpx.Timeout(ENGINE_TIMEOUT_SECONDS, read=None if body.get("stream") else ENGINE_TIMEOUT_SECONDS)
 
     if body.get("stream"):
         client = httpx.AsyncClient(timeout=timeout)
-        provider_request = client.build_request("POST", url, content=raw_body, headers=headers)
+        engine_request = client.build_request("POST", url, content=raw_body, headers=headers)
         try:
-            provider_response = await client.send(provider_request, stream=True)
+            engine_response = await client.send(engine_request, stream=True)
         except httpx.RequestError as exc:
             await client.aclose()
-            return _openai_error(502, f"Provider request failed: {exc}", "provider_error")
+            return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
 
         async def stream_response():
             try:
-                async for chunk in provider_response.aiter_raw():
+                async for chunk in engine_response.aiter_raw():
                     yield chunk
             finally:
-                await provider_response.aclose()
+                await engine_response.aclose()
                 await client.aclose()
 
         return StreamingResponse(
             stream_response(),
-            status_code=provider_response.status_code,
-            media_type=provider_response.headers.get("content-type", "text/event-stream"),
+            status_code=engine_response.status_code,
+            media_type=engine_response.headers.get("content-type", "text/event-stream"),
         )
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            provider_response = await client.post(url, content=raw_body, headers=headers)
+            engine_response = await client.post(url, content=raw_body, headers=headers)
     except httpx.RequestError as exc:
-        return _openai_error(502, f"Provider request failed: {exc}", "provider_error")
+        return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
 
     return Response(
-        content=provider_response.content,
-        status_code=provider_response.status_code,
-        media_type=provider_response.headers.get("content-type", "application/json"),
+        content=engine_response.content,
+        status_code=engine_response.status_code,
+        media_type=engine_response.headers.get("content-type", "application/json"),
     )
 
 
@@ -242,49 +242,49 @@ async def _proxy_media(
     request: Request,
 ) -> Response:
     raw_body = await request.body()
-    provider = _choose_provider(app, model)
-    if not provider:
-        return _openai_error(503, f"No active LAN media provider for {model!r}", "provider_unavailable")
-    if not provider.media_url:
-        return _openai_error(503, f"Provider {provider.node_id} did not advertise a media URL", "provider_unavailable")
+    engine = _choose_engine(app, model)
+    if not engine:
+        return _openai_error(503, f"No active LAN media engine for {model!r}", "engine_unavailable")
+    if not engine.media_url:
+        return _openai_error(503, f"Engine {engine.node_id} did not advertise a media URL", "engine_unavailable")
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(PROVIDER_TIMEOUT_SECONDS, read=None))
+    client = httpx.AsyncClient(timeout=httpx.Timeout(ENGINE_TIMEOUT_SECONDS, read=None))
     media_request = client.build_request(
         "POST",
-        f"{provider.media_url.rstrip('/')}/{endpoint_path}",
+        f"{engine.media_url.rstrip('/')}/{endpoint_path}",
         content=raw_body,
         headers={"content-type": request.headers.get("content-type", "application/json")},
     )
     try:
-        provider_response = await client.send(media_request, stream=True)
+        engine_response = await client.send(media_request, stream=True)
     except httpx.RequestError as exc:
         await client.aclose()
-        return _openai_error(502, f"Provider media request failed: {exc}", "provider_error")
+        return _openai_error(502, f"Engine media request failed: {exc}", "engine_error")
 
     async def stream_response():
         try:
-            async for chunk in provider_response.aiter_raw():
+            async for chunk in engine_response.aiter_raw():
                 yield chunk
         finally:
-            await provider_response.aclose()
+            await engine_response.aclose()
             await client.aclose()
 
     return StreamingResponse(
         stream_response(),
-        status_code=provider_response.status_code,
-        media_type=provider_response.headers.get("content-type", "text/event-stream"),
+        status_code=engine_response.status_code,
+        media_type=engine_response.headers.get("content-type", "text/event-stream"),
     )
 
 
-def _server_info(app: FastAPI) -> dict[str, Any]:
+def _grid_info(app: FastAPI) -> dict[str, Any]:
     return {
-        "network_id": app.state.network_id,
-        "name": app.state.network_name,
-        "network_type": NETWORK_TYPE,
+        "grid_id": app.state.grid_id,
+        "name": app.state.grid_name,
+        "grid_type": GRID_TYPE,
         "auth_required": False,
         "lan_only": True,
         "node_ttl_seconds": NODE_TTL_SECONDS,
-        "providers_online": len(_active_providers(app)),
+        "engines_online": len(_active_engines(app)),
     }
 
 
@@ -292,31 +292,31 @@ def _nodes(app: FastAPI) -> dict[str, Node]:
     return app.state.nodes
 
 
-def _active_providers(app: FastAPI, model: str | None = None) -> list[Node]:
+def _active_engines(app: FastAPI, model: str | None = None) -> list[Node]:
     now = time.time()
-    providers: list[Node] = []
+    engines: list[Node] = []
     stale_ids: list[str] = []
     for node_id, node in _nodes(app).items():
         if now - node.last_heartbeat > NODE_TTL_SECONDS:
             stale_ids.append(node_id)
             continue
-        if node.role not in ("provider", "both"):
+        if node.role not in ("engine", "both"):
             continue
         if model and model not in node.models:
             continue
-        providers.append(node)
+        engines.append(node)
     for node_id in stale_ids:
         _nodes(app).pop(node_id, None)
-    providers.sort(key=lambda item: (_load_score(item.load), item.last_heartbeat))
-    return providers
+    engines.sort(key=lambda item: (_load_score(item.load), item.last_heartbeat))
+    return engines
 
 
-def _choose_provider(app: FastAPI, model: str) -> Node | None:
-    providers = _active_providers(app, model)
-    return providers[0] if providers else None
+def _choose_engine(app: FastAPI, model: str) -> Node | None:
+    engines = _active_engines(app, model)
+    return engines[0] if engines else None
 
 
-def _provider_dict(node: Node) -> dict[str, Any]:
+def _engine_dict(node: Node) -> dict[str, Any]:
     data = node.public_dict()
     data.pop("last_heartbeat", None)
     return data

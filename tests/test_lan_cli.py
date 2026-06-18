@@ -20,9 +20,9 @@ from server import create_app
 from system import detect
 
 
-def _provider_args(**overrides) -> SimpleNamespace:
+def _engine_args(**overrides) -> SimpleNamespace:
     base = dict(
-        network="http://192.168.1.25:8090",
+        grid="http://192.168.1.25:8090",
         node_id="node-test",
         name="eng",
         models=[],
@@ -60,23 +60,23 @@ def test_cli_drops_auth_and_legacy_commands():
             parser.parse_args(argv)
 
 
-def test_init_network_config_is_lan_permissionless(monkeypatch, tmp_path):
+def test_init_grid_config_is_lan_permissionless(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "detect_lan_ip", lambda: "192.168.1.25")
 
-    cfg = runtime.init_network_config(name="home", port=48090)
+    cfg = runtime.init_grid_config(name="home", port=48090)
 
-    assert cfg["network_type"] == runtime.NETWORK_TYPE
+    assert cfg["grid_type"] == runtime.GRID_TYPE
     assert cfg["managed_server"] is True
     assert cfg["lan_signaling_url"] == "http://192.168.1.25:48090"
 
 
-def test_select_network_accepts_signaling_url(monkeypatch, tmp_path):
+def test_select_grid_accepts_signaling_url(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
-    cfg = config.select_network("http://192.168.1.25:8090/")
+    cfg = config.select_grid("http://192.168.1.25:8090/")
 
-    assert cfg["network_type"] == runtime.NETWORK_TYPE
+    assert cfg["grid_type"] == runtime.GRID_TYPE
     assert cfg["managed_server"] is False
     assert cfg["lan_signaling_url"] == "http://192.168.1.25:8090"
 
@@ -87,25 +87,25 @@ def test_select_grid_defaults_to_only_grid_then_home(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         config.select_grid(None)
 
-    runtime.init_network_config(name="solo", port=8090)
+    runtime.init_grid_config(name="solo", port=8090)
     assert config.select_grid(None)["name"] == "solo"
 
-    runtime.init_network_config(name="home", port=8091)
+    runtime.init_grid_config(name="home", port=8091)
     assert config.select_grid(None)["name"] == "home"
 
 
 def test_server_registers_and_discovers_provider_without_auth():
-    app = create_app(network_id="ag-test", network_name="test")
+    app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
 
-    info = client.get("/server/info")
+    info = client.get("/grid/info")
     assert info.status_code == 200
     assert info.json()["auth_required"] is False
 
     update = client.put(
         "/nodes/node-1",
         json={
-            "role": "provider",
+            "role": "engine",
             "models": ["qwen-local"],
             "endpoint_url": "http://192.168.1.50:8081/v1",
         },
@@ -114,29 +114,29 @@ def test_server_registers_and_discovers_provider_without_auth():
 
     discover = client.get("/nodes/discover", params={"model": "qwen-local"})
     assert discover.status_code == 200
-    providers = discover.json()["providers"]
+    providers = discover.json()["engines"]
     assert providers[0]["node_id"] == "node-1"
     assert providers[0]["endpoint_url"] == "http://192.168.1.50:8081/v1"
 
 
 def test_server_exposes_media_routes_without_auth():
-    app = create_app(network_id="ag-test", network_name="test")
+    app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
 
     resp = client.post("/v1/media/image/generate", json={"prompt": "desk"})
 
     assert resp.status_code == 503
-    assert resp.json()["error"]["code"] == "provider_unavailable"
+    assert resp.json()["error"]["code"] == "engine_unavailable"
 
 
 def test_server_accepts_media_only_provider_without_endpoint_url():
-    app = create_app(network_id="ag-test", network_name="test")
+    app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
 
     update = client.put(
         "/nodes/node-media",
         json={
-            "role": "provider",
+            "role": "engine",
             "models": ["comfyui:image_editing"],
             "media_url": "http://192.168.1.50:8190",
         },
@@ -144,35 +144,35 @@ def test_server_accepts_media_only_provider_without_endpoint_url():
 
     assert update.status_code == 200
     discover = client.get("/nodes/discover", params={"model": "comfyui:image_editing"})
-    providers = discover.json()["providers"]
+    providers = discover.json()["engines"]
     assert providers[0]["node_id"] == "node-media"
     assert providers[0]["endpoint_url"] is None
     assert providers[0]["media_url"] == "http://192.168.1.50:8190"
 
 
 def test_server_rejects_provider_missing_required_capability_url():
-    app = create_app(network_id="ag-test", network_name="test")
+    app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
 
     text = client.put(
         "/nodes/node-text",
         json={
-            "role": "provider",
+            "role": "engine",
             "models": ["qwen-local"],
         },
     )
     media = client.put(
         "/nodes/node-media",
         json={
-            "role": "provider",
+            "role": "engine",
             "models": ["comfyui:image_editing"],
         },
     )
 
     assert text.status_code == 400
-    assert text.json()["detail"] == "endpoint_url is required for text providers"
+    assert text.json()["detail"] == "endpoint_url is required for text engines"
     assert media.status_code == 400
-    assert media.json()["detail"] == "media_url is required for media providers"
+    assert media.json()["detail"] == "media_url is required for media engines"
 
 
 def test_info_env_prints_openai_compat_without_real_secret(monkeypatch, tmp_path, capsys):
@@ -421,7 +421,7 @@ def test_launcher_start_llm_adds_alias_flag(monkeypatch, tmp_path):
     ]
 
 
-def test_run_provider_launches_local_llama_server_by_default(monkeypatch, tmp_path):
+def test_run_engine_launches_local_llama_server_by_default(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
     monkeypatch.setattr(runtime, "detect_lan_ip", lambda: "192.168.1.50")
@@ -436,13 +436,13 @@ def test_run_provider_launches_local_llama_server_by_default(monkeypatch, tmp_pa
     monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: calls.setdefault("waited", proc.port))
     monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped", proc.port))
-    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _provider_args(models=["Qwen3.5-2B-UD-IQ2_M.gguf"])
+    args = _engine_args(models=["Qwen3.5-2B-UD-IQ2_M.gguf"])
 
-    assert cli.provider._run_provider(args) == 0
+    assert cli.provider._run_engine(args) == 0
     assert calls["model"] == "Qwen3.5-2B-UD-IQ2_M.gguf"
     assert calls["kwargs"]["port"] == 8081
     assert calls["waited"] == 8081
@@ -450,7 +450,7 @@ def test_run_provider_launches_local_llama_server_by_default(monkeypatch, tmp_pa
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
 
 
-def test_run_provider_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch, tmp_path):
+def test_run_engine_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
     monkeypatch.setattr(runtime, "detect_lan_ip", lambda: "192.168.1.50")
@@ -465,35 +465,35 @@ def test_run_provider_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch
     monkeypatch.setattr(launcher, "start_llm", fake_start_llm)
     monkeypatch.setattr(launcher, "wait_for_models", lambda proc: None)
     monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped", proc.port))
-    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _provider_args(models=["your-model.gguf"], advertise_as=["your-model"])
+    args = _engine_args(models=["your-model.gguf"], advertise_as=["your-model"])
 
-    assert cli.provider._run_provider(args) == 0
+    assert cli.provider._run_engine(args) == 0
     assert calls["model"] == "your-model.gguf"
     assert calls["kwargs"]["alias"] == "your-model"
     assert calls["payload"]["models"] == ["your-model"]
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
 
 
-def test_run_provider_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path):
+def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
 
     monkeypatch.setattr(launcher, "start_llm", lambda *args, **kwargs: pytest.fail("start_llm should not be called"))
-    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _provider_args(models=["custom-model"], endpoint_url="http://192.168.1.50:8081/v1")
+    args = _engine_args(models=["custom-model"], endpoint_url="http://192.168.1.50:8081/v1")
 
-    assert cli.provider._run_provider(args) == 0
+    assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
 
 
-def test_run_provider_enable_media_advertises_media_models(monkeypatch, tmp_path):
+def test_run_engine_enable_media_advertises_media_models(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
     monkeypatch.setattr(runtime, "detect_lan_ip", lambda: "192.168.1.50")
@@ -508,7 +508,7 @@ def test_run_provider_enable_media_advertises_media_models(monkeypatch, tmp_path
     monkeypatch.setattr(launcher, "stop", lambda proc: calls.setdefault("stopped_llama", proc.port))
     monkeypatch.setattr(
         cli.provider,
-        "_prepare_media_provider",
+        "_prepare_media_engine",
         lambda args: {
             "models": ["comfyui:image_generation", "comfyui:image_editing", "comfyui:i2v"],
             "proc": None,
@@ -516,26 +516,26 @@ def test_run_provider_enable_media_advertises_media_models(monkeypatch, tmp_path
             "comfyui_started": False,
         },
     )
-    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _provider_args(models=["Qwen3.5-2B-UD-IQ2_M.gguf"], enable_media=True)
+    args = _engine_args(models=["Qwen3.5-2B-UD-IQ2_M.gguf"], enable_media=True)
 
-    assert cli.provider._run_provider(args) == 0
+    assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["media_url"] == "http://192.168.1.50:8190"
     assert "comfyui:image_generation" in calls["payload"]["models"]
     assert calls["payload"]["capabilities"]["models"]["comfyui:i2v"]["endpoints"] == ["media"]
 
 
-def test_run_provider_media_only_skips_local_llama_server(monkeypatch, tmp_path):
+def test_run_engine_media_only_skips_local_llama_server(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     calls = {}
 
     monkeypatch.setattr(launcher, "start_llm", lambda *args, **kwargs: pytest.fail("start_llm should not be called"))
     monkeypatch.setattr(
         cli.provider,
-        "_prepare_media_provider",
+        "_prepare_media_engine",
         lambda args: {
             "models": ["comfyui:image_editing"],
             "proc": None,
@@ -543,13 +543,13 @@ def test_run_provider_media_only_skips_local_llama_server(monkeypatch, tmp_path)
             "comfyui_started": False,
         },
     )
-    monkeypatch.setattr(cli.provider, "_register_provider", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
     monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    args = _provider_args(enable_media=True, media_bundles=["image_editing"])
+    args = _engine_args(enable_media=True, media_bundles=["image_editing"])
 
-    assert cli.provider._run_provider(args) == 0
+    assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["models"] == ["comfyui:image_editing"]
     assert calls["payload"]["endpoint_url"] is None
     assert calls["payload"]["media_url"] == "http://192.168.1.50:8190"
@@ -559,7 +559,7 @@ def test_run_provider_media_only_skips_local_llama_server(monkeypatch, tmp_path)
 def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "detect_lan_ip", lambda: "192.168.1.50")
-    cfg = runtime.init_network_config(name="home", port=8090)
+    cfg = runtime.init_grid_config(name="home", port=8090)
     spawned = {}
 
     class FakePopen:
@@ -582,18 +582,18 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     ])
     assert cli.cmd_join(args) == 0
 
-    records = cli.provider._read_records(cfg["network_id"])
+    records = cli.provider._read_records(cfg["grid_id"])
     assert "mac" in records
     assert records["mac"]["endpoint_url"] == "http://192.168.1.10:11434/v1"
     assert records["mac"]["models"] == ["llama3"]
     assert records["mac"]["pid"] == 4321
-    assert spawned["cmd"][-3:] == ["__provider", cfg["network_id"], "mac"]
+    assert spawned["cmd"][-3:] == ["__engine", cfg["grid_id"], "mac"]
     assert spawned["kwargs"]["start_new_session"] is True
 
 
 def test_join_no_flags_single_detected_engine_joins_it(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(
         cli.provider,
         "_detect",
@@ -603,13 +603,13 @@ def test_join_no_flags_single_detected_engine_joins_it(monkeypatch, tmp_path):
 
     args = cli.build_parser().parse_args(["join", "home"])
     assert cli.cmd_join(args) == 0
-    records = cli.provider._read_records(config.select_grid("home")["network_id"])
+    records = cli.provider._read_records(config.select_grid("home")["grid_id"])
     assert records["ollama"]["endpoint_url"] == "http://192.168.1.50:11434/v1"
 
 
 def test_join_multiple_detected_non_interactive_requires_all(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(
         cli.provider,
         "_detect",
@@ -627,7 +627,7 @@ def test_join_multiple_detected_non_interactive_requires_all(monkeypatch, tmp_pa
 
 def test_join_all_joins_every_detected_engine(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(
         cli.provider,
         "_detect",
@@ -640,16 +640,16 @@ def test_join_all_joins_every_detected_engine(monkeypatch, tmp_path):
 
     args = cli.build_parser().parse_args(["join", "home", "--all"])
     assert cli.cmd_join(args) == 0
-    records = cli.provider._read_records(config.select_grid("home")["network_id"])
+    records = cli.provider._read_records(config.select_grid("home")["grid_id"])
     assert set(records) == {"ollama", "vllm"}
 
 
 def test_leave_all_removes_records(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    cfg = runtime.init_network_config(name="home", port=8090)
-    grid_id = cfg["network_id"]
-    cli.provider._write_record(grid_id, "mac", {"engine_id": "mac", "node_id": "n", "network_id": grid_id, "pid": 0})
-    cli.provider._write_record(grid_id, "gpu", {"engine_id": "gpu", "node_id": "n2", "network_id": grid_id, "pid": 0})
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "mac", {"engine_id": "mac", "node_id": "n", "grid_id": grid_id, "pid": 0})
+    cli.provider._write_record(grid_id, "gpu", {"engine_id": "gpu", "node_id": "n2", "grid_id": grid_id, "pid": 0})
 
     args = cli.build_parser().parse_args(["leave", "home", "--all"])
     assert cli.cmd_leave(args) == 0
@@ -678,7 +678,7 @@ _FAKE_ENGINES = [
 
 def test_models_default_is_deduped_names(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
 
     assert cli.cmd_models(cli.build_parser().parse_args(["models", "home"])) == 0
@@ -687,7 +687,7 @@ def test_models_default_is_deduped_names(monkeypatch, tmp_path, capsys):
 
 def test_models_verbose_table_and_json(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
 
     assert cli.cmd_models(cli.build_parser().parse_args(["models", "home", "--verbose"])) == 0
@@ -702,7 +702,7 @@ def test_models_verbose_table_and_json(monkeypatch, tmp_path, capsys):
 
 def test_engines_json_lists_joined_engines(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
 
     assert cli.cmd_engines(cli.build_parser().parse_args(["engines", "home", "--json"])) == 0
@@ -713,7 +713,7 @@ def test_engines_json_lists_joined_engines(monkeypatch, tmp_path, capsys):
 
 def test_info_json_uses_contract_keys(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    runtime.init_network_config(name="home", port=8090)
+    runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.grid, "_live_engines", lambda url: (_FAKE_ENGINES, True))
 
     assert cli.cmd_info(cli.build_parser().parse_args(["info", "home", "--json"])) == 0

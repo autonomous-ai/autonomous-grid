@@ -19,7 +19,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
     try:
         resp = httpx.post(
-            f"{runtime.network_url(cfg)}/v1/chat/completions",
+            f"{runtime.grid_url(cfg)}/v1/chat/completions",
             json={"model": args.model, "messages": [{"role": "user", "content": args.message}]},
             timeout=args.timeout,
         )
@@ -76,7 +76,7 @@ def cmd_video(args: argparse.Namespace) -> int:
 def _post_media_request(args: argparse.Namespace, endpoint_path: str, payload: dict[str, Any]) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
     timeout = httpx.Timeout(float(args.timeout), read=float(args.timeout))
-    url = f"{runtime.network_url(cfg)}/v1/{endpoint_path}"
+    url = f"{runtime.grid_url(cfg)}/v1/{endpoint_path}"
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else paths.grid_home() / "outputs"
     try:
         with httpx.stream("POST", url, json=payload, timeout=timeout) as resp:
