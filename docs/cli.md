@@ -8,7 +8,7 @@ Internal protocol words stay out of the user-facing CLI.
 
 ```
 grid      a named local AI endpoint, usually `home` or `work`
-grid_url  the URL engines join and apps call through `/v1`
+grid_url  the URL engines join; apps call it through `/v1`
 engine    something that runs models: Ollama, LM Studio, vLLM, MLX, llama.cpp, ComfyUI
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
@@ -45,7 +45,6 @@ Bare `grid` is not just help. It is the dashboard for a terminal:
 ```text
 Grid: home
 grid_url: http://192.168.1.25:8090
-openai_base_url: http://192.168.1.25:8090/v1
 engines: 3 live
 models: llama3, qwen2.5-coder, mistral-large
 
@@ -82,7 +81,6 @@ grid info [grid] --env                # print OPENAI_* exports
 ```text
 grid=home
 grid_url=http://192.168.1.25:8090
-openai_base_url=http://192.168.1.25:8090/v1
 ```
 
 No separate `create`, `start`, or `use` in the main surface. They make first use feel
@@ -210,12 +208,15 @@ Human output uses these names exactly:
 ```
 grid
 grid_url
-openai_base_url
 engines
 models
 ```
 
-Environment output:
+`grid_url` is the primary URL. `OPENAI_BASE_URL` is derived as `${grid_url}/v1` and is
+shown only where OpenAI-compatible app integration needs copy-pasteable environment
+variables.
+
+Environment output from `grid info --env`:
 
 ```bash
 export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
@@ -228,7 +229,6 @@ JSON output should use snake_case keys and include enough detail for scripts:
 {
   "grid": "home",
   "grid_url": "http://192.168.1.25:8090",
-  "openai_base_url": "http://192.168.1.25:8090/v1",
   "engines": [],
   "models": []
 }
