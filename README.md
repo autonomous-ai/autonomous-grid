@@ -63,7 +63,7 @@ GPU box, `llama3` to the Mac. Same endpoint, nothing migrated.
 Like an electric grid: the machines you own are the generators, your grid is the shared
 supply on one address, and your apps are the homes that draw from it.
 
-![Your Home Grid — your machines feed one private endpoint; your apps draw from it](docs/grid.svg)
+![Your Home Grid — your machines feed one private endpoint; your apps draw from it](docs/grid-diagram.svg)
 
 Three things, one CLI:
 
