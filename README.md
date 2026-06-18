@@ -123,7 +123,7 @@ grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp   # your grid_url 
 grid engine install comfyui             # media engine (images + video)
 grid engine pull image_generation       # also: image_editing, i2v
 grid join http://192.168.1.25:8090 --media --bundle image_generation
-grid image "a compact walnut desk beside a sunlit window"
+grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090
 ```
 
 ## How it works
