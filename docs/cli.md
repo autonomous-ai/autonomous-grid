@@ -25,7 +25,6 @@ and code.
 - `up` is idempotent: create if missing, start if stopped, print the same contract every time.
 - Default output is human-readable. Every state-reading command supports `--json`.
 - Use examples before exhaustive flags in help text.
-- `--dry-run` never changes state.
 - `--name` names an engine; `[grid]` names a grid.
 - `--at <url>` always means an existing engine endpoint.
 - `--serve <model>` always means Grid starts its default text engine, then joins it.
@@ -90,7 +89,6 @@ like infrastructure management. `up` is the user-level operation.
 
 ```
 grid join [grid]                                      # auto-detect local engines
-grid join [grid] --dry-run                            # show detected engines; register nothing
 grid join [grid] --all                                # join every detected engine
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
@@ -112,7 +110,7 @@ When detection finds more than one engine, print the plan and ask for confirmati
 interactive terminals. In non-interactive mode, require `--all`, `--engine <kind>`, or
 explicit `--at`.
 
-Example dry run:
+Example detection output:
 
 ```text
 Detected engines on this machine:
@@ -243,7 +241,6 @@ JSON output should use snake_case keys and include enough detail for scripts:
 
 ```bash
 grid up
-grid join --dry-run
 grid join
 grid models
 grid chat -m qwen36-27b-mtp "hello"

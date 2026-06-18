@@ -33,12 +33,10 @@ grid up
 # grid_url=http://192.168.1.25:8090
 ```
 
-**2. Join the engines you already run** — run on each machine. First inspect what Grid
-sees, then join it:
+**2. Join the engines you already run** — run on each machine:
 
 ```bash
 # on a Mac Studio running MLX or LM Studio
-grid join http://192.168.1.25:8090 --dry-run
 grid join http://192.168.1.25:8090
 
 # on a GPU box running vLLM
