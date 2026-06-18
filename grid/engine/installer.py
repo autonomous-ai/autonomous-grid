@@ -57,7 +57,7 @@ def install_pinned(tarball: TarballPin) -> Path:
         raise SystemExit(
             f"Pinned tarball {tarball.label!r} has placeholder URL/sha. Fill in real values "
             "in grid/engine/installer.py before running "
-            "`grid llama.cpp install`, or pass --from-source."
+            "`grid engine install llama.cpp`, or pass --from-source."
         )
     paths.ensure_all()
     with tempfile.TemporaryDirectory(prefix="grid-engine-") as tmpdir:

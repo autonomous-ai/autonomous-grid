@@ -1,4 +1,4 @@
-"""`grid request` commands: smoke-test chat and media requests through a network."""
+"""`grid chat` / `grid image` / `grid edit` / `grid video`: requests through a grid."""
 from __future__ import annotations
 
 import argparse
@@ -13,8 +13,8 @@ import httpx
 from .. import config, paths, runtime
 
 
-def cmd_request_chat(args: argparse.Namespace) -> int:
-    cfg = config.select_network(args.network)
+def cmd_chat(args: argparse.Namespace) -> int:
+    cfg = config.select_grid(getattr(args, "grid", None))
     try:
         resp = httpx.post(
             f"{runtime.network_url(cfg)}/v1/chat/completions",
@@ -27,7 +27,7 @@ def cmd_request_chat(args: argparse.Namespace) -> int:
     return 0 if resp.status_code < 400 else 1
 
 
-def cmd_request_media_image_generate(args: argparse.Namespace) -> int:
+def cmd_image(args: argparse.Namespace) -> int:
     return _post_media_request(
         args,
         "media/image/generate",
@@ -40,9 +40,9 @@ def cmd_request_media_image_generate(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_request_media_image_edit(args: argparse.Namespace) -> int:
+def cmd_edit(args: argparse.Namespace) -> int:
     if len(args.input_images) > 3:
-        raise SystemExit("Image editing supports at most three --image values.")
+        raise SystemExit("Image editing supports at most three -i/--image values.")
     return _post_media_request(
         args,
         "media/image/edit",
@@ -54,7 +54,7 @@ def cmd_request_media_image_edit(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_request_media_i2v(args: argparse.Namespace) -> int:
+def cmd_video(args: argparse.Namespace) -> int:
     payload = {
         "prompt": args.prompt,
         "duration": args.duration,
@@ -65,7 +65,7 @@ def cmd_request_media_i2v(args: argparse.Namespace) -> int:
 
 
 def _post_media_request(args: argparse.Namespace, endpoint_path: str, payload: dict[str, Any]) -> int:
-    cfg = config.select_network(args.network)
+    cfg = config.select_grid(getattr(args, "grid", None))
     timeout = httpx.Timeout(float(args.timeout), read=float(args.timeout))
     url = f"{runtime.network_url(cfg)}/v1/{endpoint_path}"
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else paths.grid_home() / "outputs"

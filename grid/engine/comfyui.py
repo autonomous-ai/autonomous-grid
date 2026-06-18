@@ -337,7 +337,7 @@ def start(port: int = COMFYUI_PORT_DEFAULT) -> ComfyProcess:
     global _active
     if not comfyui_python().exists():
         raise SystemExit(
-            f"ComfyUI not installed at {comfyui_dir()}. Run `grid media install` first."
+            f"ComfyUI not installed at {comfyui_dir()}. Run `grid engine install comfyui` first."
         )
     if _is_port_in_use(port):
         raise SystemExit(f"Port {port} already in use; cannot start ComfyUI.")

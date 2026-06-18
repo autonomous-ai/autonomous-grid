@@ -55,6 +55,14 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--comfyui-url", required=True)
         args = parser.parse_args(argv[1:])
         return cmd_internal_media_server(args.port, args.comfyui_url)
+    if argv[0] == "__provider":
+        from .provider import run_provider_from_record
+
+        parser = argparse.ArgumentParser(prog="grid __provider")
+        parser.add_argument("grid_id")
+        parser.add_argument("engine_id")
+        args = parser.parse_args(argv[1:])
+        return run_provider_from_record(args.grid_id, args.engine_id)
     return None
 
 

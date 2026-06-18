@@ -132,7 +132,7 @@ def pull_bundle(name: str, *, on_progress=None) -> list[Path]:
         raise SystemExit(f"Unknown media bundle: {name!r}. Known: {sorted(BUNDLES)}")
     if not comfyui_engine.comfyui_dir().exists():
         raise SystemExit(
-            "ComfyUI is not installed. Run `grid media install` first so the "
+            "ComfyUI is not installed. Run `grid engine install comfyui` first so the "
             "models/ subdirectories exist."
         )
     paths.ensure_all()

@@ -55,6 +55,27 @@ def iter_network_configs() -> list[dict[str, Any]]:
     return configs
 
 
+def select_grid(name_or_id: str | None) -> dict[str, Any]:
+    """Resolve the grid to act on.
+
+    Honors the CLI convention: when a name is given, look it up; when omitted,
+    default to the only grid, else the one named ``home``, else ask the caller
+    to name one.
+    """
+    if name_or_id:
+        return select_network(name_or_id)
+    grids = iter_network_configs()
+    if not grids:
+        raise SystemExit("No grids yet. Run `grid up` to bring one online.")
+    if len(grids) == 1:
+        return grids[0]
+    for cfg in grids:
+        if cfg.get("name") == "home":
+            return cfg
+    names = ", ".join(sorted(cfg.get("name", cfg["network_id"]) for cfg in grids))
+    raise SystemExit(f"Several grids exist ({names}); name one, e.g. `grid info <grid>`.")
+
+
 def select_network(name_or_id: str) -> dict[str, Any]:
     if _looks_like_signaling_url(name_or_id):
         url = _normalize_signaling_url(name_or_id)
@@ -74,8 +95,8 @@ def select_network(name_or_id: str) -> dict[str, Any]:
     ]
     if not matches:
         raise SystemExit(
-            f"Network not found: {name_or_id!r}. Run `grid network create` "
-            "on this device or pass a signaling URL as --network."
+            f"Grid not found: {name_or_id!r}. Run `grid up {name_or_id}` "
+            "on this device or pass a grid URL."
         )
     return matches[-1]
 

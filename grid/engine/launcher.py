@@ -84,7 +84,7 @@ def llama_server_path() -> str:
     on_path = shutil.which("llama-server")
     if on_path:
         return on_path
-    raise SystemExit("llama-server not found. Run `grid llama.cpp install` first.")
+    raise SystemExit("llama-server not found. Run `grid engine install llama.cpp` first.")
 
 
 def is_port_in_use(port: int) -> bool:
@@ -242,7 +242,7 @@ def assert_supported_build() -> None:
     if build is not None and build > 1 and build < MIN_LLAMA_SERVER_BUILD:
         raise SystemExit(
             f"llama-server build {build} is too old; need >= {MIN_LLAMA_SERVER_BUILD}. "
-            "Run `grid llama.cpp install`."
+            "Run `grid engine install llama.cpp`."
         )
 
 

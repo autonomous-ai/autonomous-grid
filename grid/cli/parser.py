@@ -1,7 +1,7 @@
 """Builds the full `grid` argument parser.
 
 The command tree lives here; each command's handler lives in the per-group
-module this imports from.
+module this imports from. The surface mirrors docs/cli.md.
 """
 from __future__ import annotations
 
@@ -13,222 +13,219 @@ from ._constants import (
     VALID_I2V_DURATIONS,
     VALID_MEDIA_BUNDLES,
 )
-from .consumer import cmd_consumer_env
-from .llama_cpp import cmd_llama_cpp_install
-from .media import (
-    cmd_media_install,
-    cmd_media_pull,
-    cmd_media_start,
-    cmd_media_status,
-    cmd_media_stop,
+from .engine import (
+    cmd_engine_install,
+    cmd_engine_pull,
+    cmd_engine_start,
+    cmd_engine_status,
+    cmd_engine_stop,
 )
-from .models import cmd_models_list, cmd_models_pull, cmd_models_rm
-from .network import (
-    cmd_network_create,
-    cmd_network_list,
-    cmd_network_start,
-    cmd_network_status,
-    cmd_network_stop,
+from .grid import (
+    cmd_down,
+    cmd_info,
+    cmd_ls,
+    cmd_overview,
+    cmd_up,
+    cmd_version,
 )
-from .provider import cmd_provider_list, cmd_provider_start
-from .request import (
-    cmd_request_chat,
-    cmd_request_media_image_edit,
-    cmd_request_media_image_generate,
-    cmd_request_media_i2v,
-)
+from .models import cmd_catalog, cmd_pull, cmd_rm
+from .provider import cmd_join, cmd_leave, cmd_models
+from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
-        description="LAN-only, unauthenticated Grid CLI.",
+        description="Grid: one private OpenAI endpoint for the engines you already run.",
     )
     parser.add_argument("--version", action="version", version=f"grid {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="<command>", required=True)
+    parser.set_defaults(handler=cmd_overview)
+    sub = parser.add_subparsers(dest="command", metavar="<command>", required=False)
 
-    network = sub.add_parser("network", help="Create and manage LAN networks")
-    net_sub = network.add_subparsers(dest="subcommand", required=True)
+    version = sub.add_parser("version", help="Print the grid version")
+    version.set_defaults(handler=cmd_version)
 
-    create = net_sub.add_parser("create", help="Create and start a LAN signaling server")
-    create.add_argument("name")
-    create.add_argument("--port", type=int, default=runtime.DEFAULT_PORT)
-    create.add_argument("--host", default=runtime.DEFAULT_HOST)
-    create.add_argument("--advertise-host", default=None)
-    create.add_argument("--network-id", default=None)
-    create.set_defaults(handler=cmd_network_create)
+    _add_grid_lifecycle(sub)
+    _add_engines(sub)
+    _add_models(sub)
+    _add_use(sub)
+    _add_engine_setup(sub)
 
-    start = net_sub.add_parser("start", help="Start a local managed signaling server")
-    start.add_argument("network")
-    start.set_defaults(handler=cmd_network_start)
+    return parser
 
-    stop = net_sub.add_parser("stop", help="Stop a local managed signaling server")
-    stop.add_argument("network")
-    stop.set_defaults(handler=cmd_network_stop)
 
-    status = net_sub.add_parser("status", help="Show network status")
-    status.add_argument("network")
-    status.set_defaults(handler=cmd_network_status)
+def _add_grid_lifecycle(sub) -> None:
+    up = sub.add_parser("up", help="Bring a grid online (creates it on first run; default: home)")
+    up.add_argument("name", nargs="?", default=None)
+    up.add_argument("--port", type=int, default=runtime.DEFAULT_PORT)
+    up.add_argument("--host", default=runtime.DEFAULT_HOST)
+    up.add_argument("--advertise-host", default=None)
+    up.set_defaults(handler=cmd_up)
 
-    list_cmd = net_sub.add_parser("list", help="List saved networks")
-    list_cmd.set_defaults(handler=cmd_network_list)
+    down = sub.add_parser("down", help="Take a grid offline (config persists)")
+    down.add_argument("name", nargs="?", default=None)
+    down.set_defaults(handler=cmd_down)
 
-    provider = sub.add_parser("provider", help="Provider lifecycle")
-    provider_sub = provider.add_subparsers(dest="subcommand", required=True)
+    ls = sub.add_parser("ls", help="List your grids")
+    ls.set_defaults(handler=cmd_ls)
 
-    provider_start = provider_sub.add_parser(
-        "start",
-        help="Advertise an OpenAI-compatible provider endpoint and keep heartbeating",
-    )
-    provider_start.add_argument("--network", required=True)
-    provider_start.add_argument("--model", action="append", dest="models", default=[])
-    provider_start.add_argument(
-        "--advertise-as",
+    info = sub.add_parser("info", help="Endpoint, key, and live models for a grid")
+    info.add_argument("grid", nargs="?", default=None)
+    info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    info.add_argument("--env", action="store_true", help="Print OPENAI_* shell exports.")
+    info.set_defaults(handler=cmd_info)
+
+
+def _add_engines(sub) -> None:
+    join = sub.add_parser("join", help="Join an engine to a grid")
+    join.add_argument("grid", nargs="?", default=None)
+    join.add_argument("--at", default=None, help="URL of an existing OpenAI-compatible engine.")
+    join.add_argument("-m", "--model", action="append", dest="models", default=[])
+    join.add_argument("--serve", default=None, help="Start the built-in engine for this model, then join.")
+    join.add_argument("--media", action="store_true", help="Join this box as a media (ComfyUI) engine.")
+    join.add_argument(
+        "--bundle",
         action="append",
-        dest="advertise_as",
-        default=[],
-        help="Model name advertised to the signaling server. Repeat once per --model.",
-    )
-    provider_start.add_argument("--endpoint-url", default=None)
-    provider_start.add_argument("--endpoint-port", type=int, default=8081)
-    provider_start.add_argument("--llama-port", dest="endpoint_port", type=int, default=argparse.SUPPRESS)
-    provider_start.add_argument("--advertise-host", default=None)
-    provider_start.add_argument("--node-id", default=None)
-    provider_start.add_argument("--name", default=None)
-    provider_start.add_argument("--heartbeat-interval", type=float, default=15.0)
-    provider_start.add_argument("--ctx-size", type=int, default=None)
-    provider_start.add_argument("--n-predict", type=int, default=None)
-    provider_start.add_argument("--parallel", type=int, default=None)
-    provider_start.add_argument("--flash-attn", default=None)
-    provider_start.add_argument("--temp", type=float, default=None)
-    provider_start.add_argument("--reasoning-budget", type=int, default=None)
-    provider_start.add_argument("--enable-media", action="store_true")
-    provider_start.add_argument(
-        "--media-bundle",
-        action="append",
-        dest="media_bundles",
+        dest="bundles",
         choices=VALID_MEDIA_BUNDLES,
         default=[],
         help="Media bundle to advertise; repeat for multiple bundles.",
     )
-    provider_start.add_argument("--comfyui-port", type=int, default=8188)
-    provider_start.add_argument("--media-port", type=int, default=8190)
-    provider_start.set_defaults(handler=cmd_provider_start)
-
-    provider_list = provider_sub.add_parser("list", help="List active providers on a network")
-    provider_list.add_argument("--network", required=True)
-    provider_list.add_argument("--model", default=None)
-    provider_list.set_defaults(handler=cmd_provider_list)
-
-    llama_cpp = sub.add_parser("llama.cpp", help="Manage the local llama.cpp engine")
-    llama_cpp_sub = llama_cpp.add_subparsers(dest="subcommand", required=True)
-    llama_cpp_install = llama_cpp_sub.add_parser("install", help="Install or upgrade llama-server")
-    llama_cpp_install.add_argument(
-        "--from-source",
-        action="store_true",
-        help=(
-            "On Apple Silicon, build llama.cpp with Metal from source instead of using Homebrew; "
-            "on Linux NVIDIA, build from source instead of using a pinned tarball."
-        ),
+    join.add_argument("--name", default=None, help="Engine id (for `grid leave --engine <id>`).")
+    join.add_argument("--dry-run", action="store_true", help="Show detected engines; register nothing.")
+    join.add_argument(
+        "--advertise-as",
+        action="append",
+        dest="advertise_as",
+        default=[],
+        help="Model name advertised to the grid. Repeat once per -m/--model.",
     )
-    llama_cpp_install.add_argument(
-        "--target-sm",
-        default=None,
-        help="Linux NVIDIA only: override the detected compute capability, for example sm_86.",
-    )
-    llama_cpp_install.set_defaults(handler=cmd_llama_cpp_install)
+    join.add_argument("--endpoint-port", type=int, default=8081)
+    join.add_argument("--advertise-host", default=None)
+    join.add_argument("--heartbeat-interval", type=float, default=15.0)
+    join.add_argument("--ctx-size", type=int, default=None)
+    join.add_argument("--n-predict", type=int, default=None)
+    join.add_argument("--parallel", type=int, default=None)
+    join.add_argument("--flash-attn", default=None)
+    join.add_argument("--temp", type=float, default=None)
+    join.add_argument("--reasoning-budget", type=int, default=None)
+    join.add_argument("--comfyui-port", type=int, default=8188)
+    join.add_argument("--media-port", type=int, default=8190)
+    join.set_defaults(handler=cmd_join)
 
-    models = sub.add_parser("models", help="Manage local GGUF model files")
-    models_sub = models.add_subparsers(dest="subcommand", required=True)
-    models_list = models_sub.add_parser("list", help="List local models")
-    models_list.add_argument("--catalog", action="store_true", help="Also print the curated model catalog.")
-    models_list.set_defaults(handler=cmd_models_list)
-    models_pull = models_sub.add_parser("pull", help="Download a GGUF model from Hugging Face")
-    models_pull.add_argument(
-        "spec",
-        help="Either '<hf-repo>:<filename>' or a catalog label from `grid models list --catalog`.",
-    )
-    models_pull.set_defaults(handler=cmd_models_pull)
-    models_rm = models_sub.add_parser("rm", help="Delete a local model file")
-    models_rm.add_argument("name", help="Filename under ~/.grid/models/")
-    models_rm.add_argument("--yes", action="store_true", help="Skip confirmation.")
-    models_rm.set_defaults(handler=cmd_models_rm)
+    leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")
+    leave.add_argument("grid", nargs="?", default=None)
+    leave.add_argument("--engine", default=None, help="Engine id to leave.")
+    leave.add_argument("--all", action="store_true", help="Leave every engine on this grid.")
+    leave.set_defaults(handler=cmd_leave)
 
-    media = sub.add_parser("media", help="Manage the local ComfyUI media runtime")
-    media_sub = media.add_subparsers(dest="subcommand", required=True)
-    media_install = media_sub.add_parser("install", help="Install ComfyUI and media runtime dependencies")
-    media_install.set_defaults(handler=cmd_media_install)
-    media_pull = media_sub.add_parser("pull", help="Download a media model bundle")
-    media_pull.add_argument("bundle", choices=VALID_MEDIA_BUNDLES)
-    media_pull.set_defaults(handler=cmd_media_pull)
-    media_status = media_sub.add_parser("status", help="Show ComfyUI install and runtime status")
-    media_status.add_argument("--port", type=int, default=8188)
-    media_status.set_defaults(handler=cmd_media_status)
-    media_start = media_sub.add_parser("start", help="Start ComfyUI")
-    media_start.add_argument("--port", type=int, default=8188)
-    media_start.add_argument(
-        "--detach",
-        action="store_true",
-        help="Return after ComfyUI is ready instead of blocking on its lifetime.",
-    )
-    media_start.set_defaults(handler=cmd_media_start)
-    media_stop = media_sub.add_parser("stop", help="Stop ComfyUI")
-    media_stop.set_defaults(handler=cmd_media_stop)
+    models = sub.add_parser("models", help="Live models the grid can run now")
+    models.add_argument("grid", nargs="?", default=None)
+    models.add_argument("--verbose", action="store_true", help="Show the engine serving each model.")
+    models.set_defaults(handler=cmd_models)
 
-    consumer = sub.add_parser("consumer", help="Consumer helpers")
-    consumer_sub = consumer.add_subparsers(dest="subcommand", required=True)
-    env = consumer_sub.add_parser("env", help="Print OpenAI-compatible environment variables")
-    env.add_argument("--network", required=True)
-    env.set_defaults(handler=cmd_consumer_env)
 
-    request = sub.add_parser("request", help="Smoke-test requests through the LAN server")
-    req_sub = request.add_subparsers(dest="subcommand", required=True)
-    chat = req_sub.add_parser("chat", help="Send one chat completion request")
-    chat.add_argument("--network", required=True)
-    chat.add_argument("--model", required=True)
-    chat.add_argument("--message", required=True)
+def _add_models(sub) -> None:
+    catalog = sub.add_parser("catalog", help="Models Grid can pull")
+    catalog.set_defaults(handler=cmd_catalog)
+
+    pull = sub.add_parser("pull", help="Download a model (catalog label or '<hf-repo>:<file>')")
+    pull.add_argument("model")
+    pull.set_defaults(handler=cmd_pull)
+
+    rm = sub.add_parser("rm", help="Delete a local model file")
+    rm.add_argument("model", help="Filename under ~/.grid/models/")
+    rm.add_argument("--yes", action="store_true", help="Skip confirmation.")
+    rm.set_defaults(handler=cmd_rm)
+
+
+def _add_use(sub) -> None:
+    chat = sub.add_parser("chat", help="Send one chat message")
+    chat.add_argument("-m", "--model", required=True)
+    chat.add_argument("message")
+    chat.add_argument("--grid", default=None)
     chat.add_argument("--timeout", type=float, default=600.0)
-    chat.set_defaults(handler=cmd_request_chat)
+    chat.set_defaults(handler=cmd_chat)
 
-    media_req = req_sub.add_parser("media", help="Send media requests through a LAN network")
-    media_req_sub = media_req.add_subparsers(dest="media_command", required=True)
-    image_gen = media_req_sub.add_parser("image-generate", help="Generate an image")
-    _add_media_request_common_args(image_gen)
-    image_gen.add_argument("--prompt", required=True)
-    image_gen.add_argument("--width", type=int, default=720)
-    image_gen.add_argument("--height", type=int, default=720)
-    image_gen.add_argument("--steps", type=int, default=4)
-    image_gen.set_defaults(handler=cmd_request_media_image_generate)
-    image_edit = media_req_sub.add_parser("image-edit", help="Edit one to three images")
-    _add_media_request_common_args(image_edit)
-    image_edit.add_argument("--prompt", required=True)
-    image_edit.add_argument(
+    image = sub.add_parser("image", help="Generate an image")
+    _add_media_common(image)
+    image.add_argument("prompt")
+    image.add_argument("--width", type=int, default=720)
+    image.add_argument("--height", type=int, default=720)
+    image.add_argument("--steps", type=int, default=4)
+    image.set_defaults(handler=cmd_image)
+
+    edit = sub.add_parser("edit", help="Edit one to three images")
+    _add_media_common(edit)
+    edit.add_argument("prompt")
+    edit.add_argument(
+        "-i",
         "--image",
         action="append",
         dest="input_images",
         required=True,
         help="Input image path. Repeat up to three times.",
     )
-    image_edit.add_argument("--steps", type=int, default=4)
-    image_edit.set_defaults(handler=cmd_request_media_image_edit)
-    i2v = media_req_sub.add_parser("i2v", help="Generate a short video from an image")
-    _add_media_request_common_args(i2v)
-    i2v.add_argument("--prompt", required=True)
-    i2v.add_argument("--image", required=True, help="Input image path.")
-    i2v.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
-    i2v.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")
-    i2v.set_defaults(handler=cmd_request_media_i2v)
+    edit.add_argument("--steps", type=int, default=4)
+    edit.set_defaults(handler=cmd_edit)
 
-    return parser
+    video = sub.add_parser("video", help="Generate a short video from an image")
+    _add_media_common(video)
+    video.add_argument("prompt")
+    video.add_argument("-i", "--image", required=True, help="Input image path.")
+    video.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
+    video.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")
+    video.set_defaults(handler=cmd_video)
 
 
-def _add_media_request_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--network", required=True)
+def _add_engine_setup(sub) -> None:
+    engine = sub.add_parser("engine", help="Set up the built-in engines")
+    engine_sub = engine.add_subparsers(dest="subcommand", required=True)
+
+    install = engine_sub.add_parser("install", help="Install an engine: llama.cpp (text) or comfyui (media)")
+    install.add_argument("name", choices=("llama.cpp", "comfyui"))
+    install.add_argument(
+        "--from-source",
+        action="store_true",
+        help=(
+            "llama.cpp only: on Apple Silicon build with Metal from source instead of Homebrew; "
+            "on Linux NVIDIA build from source instead of a pinned tarball."
+        ),
+    )
+    install.add_argument(
+        "--target-sm",
+        default=None,
+        help="llama.cpp on Linux NVIDIA: override the detected compute capability, e.g. sm_86.",
+    )
+    install.set_defaults(handler=cmd_engine_install)
+
+    pull = engine_sub.add_parser("pull", help="Download a media model bundle (comfyui)")
+    pull.add_argument("bundle", choices=VALID_MEDIA_BUNDLES)
+    pull.set_defaults(handler=cmd_engine_pull)
+
+    status = engine_sub.add_parser("status", help="Show the built-in media engine (ComfyUI) status")
+    status.add_argument("--port", type=int, default=8188)
+    status.set_defaults(handler=cmd_engine_status)
+
+    start = engine_sub.add_parser("start", help="Start the built-in media engine (ComfyUI)")
+    start.add_argument("--port", type=int, default=8188)
+    start.add_argument(
+        "--detach",
+        action="store_true",
+        help="Return after ComfyUI is ready instead of blocking on its lifetime.",
+    )
+    start.set_defaults(handler=cmd_engine_start)
+
+    stop = engine_sub.add_parser("stop", help="Stop the built-in media engine (ComfyUI)")
+    stop.set_defaults(handler=cmd_engine_stop)
+
+
+def _add_media_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--grid", default=None)
     parser.add_argument("--timeout", type=int, default=1800, help="Seconds to wait for the streamed result.")
     parser.add_argument(
+        "-o",
         "--output-dir",
         default=None,
         help="Directory for returned media files. Defaults to ~/.grid/outputs.",
     )
-
-

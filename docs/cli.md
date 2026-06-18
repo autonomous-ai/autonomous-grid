@@ -50,6 +50,9 @@ grid video "<prompt>" -i <img> [-o <dir>]
 ```
 grid engine install <name>            # llama.cpp (text) · comfyui (media)
 grid engine pull <bundle>             # media bundle (comfyui)
+grid engine status [--port <p>]       # built-in media engine (comfyui) status
+grid engine start [--port <p>] [--detach]
+grid engine stop
 ```
 
 ## Conventions

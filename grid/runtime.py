@@ -165,6 +165,11 @@ def _tcp_port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def cli_command() -> list[str]:
+    """The argv prefix that re-invokes this CLI (for detached subprocesses)."""
+    return _cli_subprocess_command()
+
+
 def _cli_subprocess_command() -> list[str]:
     argv0 = sys.argv[0] if sys.argv else ""
     candidates: list[Path] = []
