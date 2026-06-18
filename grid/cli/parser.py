@@ -29,7 +29,7 @@ from .grid import (
     cmd_version,
 )
 from .models import cmd_catalog, cmd_pull, cmd_rm
-from .provider import cmd_join, cmd_leave, cmd_models
+from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 
@@ -67,7 +67,12 @@ def _add_grid_lifecycle(sub) -> None:
     down.set_defaults(handler=cmd_down)
 
     ls = sub.add_parser("ls", help="List your grids")
+    ls.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     ls.set_defaults(handler=cmd_ls)
+
+    list_alias = sub.add_parser("list", help="Alias for `grid ls`")
+    list_alias.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    list_alias.set_defaults(handler=cmd_ls)
 
     info = sub.add_parser("info", help="Endpoint, key, and live models for a grid")
     info.add_argument("grid", nargs="?", default=None)
@@ -92,7 +97,8 @@ def _add_engines(sub) -> None:
         help="Media bundle to advertise; repeat for multiple bundles.",
     )
     join.add_argument("--name", default=None, help="Engine id (for `grid leave --engine <id>`).")
-    join.add_argument("--dry-run", action="store_true", help="Show detected engines; register nothing.")
+    join.add_argument("--all", action="store_true", help="Join every detected engine.")
+    join.add_argument("--engine", default=None, help="Join only the detected engine of this kind.")
     join.add_argument(
         "--advertise-as",
         action="append",
@@ -122,21 +128,29 @@ def _add_engines(sub) -> None:
     models = sub.add_parser("models", help="Live models the grid can run now")
     models.add_argument("grid", nargs="?", default=None)
     models.add_argument("--verbose", action="store_true", help="Show the engine serving each model.")
+    models.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     models.set_defaults(handler=cmd_models)
+
+    engines = sub.add_parser("engines", help="Live engines joined to a grid")
+    engines.add_argument("grid", nargs="?", default=None)
+    engines.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    engines.set_defaults(handler=cmd_engines)
 
 
 def _add_models(sub) -> None:
     catalog = sub.add_parser("catalog", help="Models Grid can pull")
+    catalog.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     catalog.set_defaults(handler=cmd_catalog)
 
     pull = sub.add_parser("pull", help="Download a model (catalog label or '<hf-repo>:<file>')")
     pull.add_argument("model")
     pull.set_defaults(handler=cmd_pull)
 
-    rm = sub.add_parser("rm", help="Delete a local model file")
-    rm.add_argument("model", help="Filename under ~/.grid/models/")
-    rm.add_argument("--yes", action="store_true", help="Skip confirmation.")
-    rm.set_defaults(handler=cmd_rm)
+    for verb, help_text in (("rm", "Delete a local model file"), ("remove", "Alias for `grid rm`")):
+        rm = sub.add_parser(verb, help=help_text)
+        rm.add_argument("model", help="Filename under ~/.grid/models/")
+        rm.add_argument("--yes", action="store_true", help="Skip confirmation.")
+        rm.set_defaults(handler=cmd_rm)
 
 
 def _add_use(sub) -> None:
@@ -144,6 +158,7 @@ def _add_use(sub) -> None:
     chat.add_argument("-m", "--model", required=True)
     chat.add_argument("message")
     chat.add_argument("--grid", default=None)
+    chat.add_argument("--json", action="store_true", help="Print the full JSON response.")
     chat.add_argument("--timeout", type=float, default=600.0)
     chat.set_defaults(handler=cmd_chat)
 

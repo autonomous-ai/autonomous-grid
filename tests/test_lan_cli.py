@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -179,7 +180,7 @@ def test_info_env_prints_openai_compat_without_real_secret(monkeypatch, tmp_path
 
     out = capsys.readouterr().out
     assert 'OPENAI_BASE_URL="http://192.168.1.25:8090/v1"' in out
-    assert 'OPENAI_API_KEY="local-lan"' in out
+    assert 'OPENAI_API_KEY="local-grid"' in out
 
 
 def test_cli_accepts_engine_and_model_commands():
@@ -587,20 +588,57 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
     assert spawned["kwargs"]["start_new_session"] is True
 
 
-def test_join_dry_run_lists_detected_without_registering(monkeypatch, tmp_path, capsys):
+def test_join_no_flags_single_detected_engine_joins_it(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
     monkeypatch.setattr(
         cli.provider,
         "_detect",
         lambda host: [detect.DetectedEngine(label="ollama", endpoint_url="http://192.168.1.50:11434/v1", models=["llama3"])],
     )
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 1})())
 
-    args = cli.build_parser().parse_args(["join", "--dry-run"])
+    args = cli.build_parser().parse_args(["join", "home"])
     assert cli.cmd_join(args) == 0
+    records = cli.provider._read_records(config.select_grid("home")["network_id"])
+    assert records["ollama"]["endpoint_url"] == "http://192.168.1.50:11434/v1"
 
-    out = capsys.readouterr().out
-    assert "ollama" in out
-    assert "llama3" in out
+
+def test_join_multiple_detected_non_interactive_requires_all(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda host: [
+            detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
+            detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
+        ],
+    )
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
+
+    args = cli.build_parser().parse_args(["join", "home"])
+    with pytest.raises(SystemExit):
+        cli.cmd_join(args)
+
+
+def test_join_all_joins_every_detected_engine(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda host: [
+            detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
+            detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
+        ],
+    )
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 1})())
+
+    args = cli.build_parser().parse_args(["join", "home", "--all"])
+    assert cli.cmd_join(args) == 0
+    records = cli.provider._read_records(config.select_grid("home")["network_id"])
+    assert set(records) == {"ollama", "vllm"}
 
 
 def test_leave_all_removes_records(monkeypatch, tmp_path):
@@ -613,3 +651,70 @@ def test_leave_all_removes_records(monkeypatch, tmp_path):
     args = cli.build_parser().parse_args(["leave", "home", "--all"])
     assert cli.cmd_leave(args) == 0
     assert cli.provider._read_records(grid_id) == {}
+
+
+def test_cli_accepts_engines_and_json_and_aliases():
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["engines"]).handler is cli.cmd_engines
+    assert parser.parse_args(["engines", "home", "--json"]).json is True
+    assert parser.parse_args(["models", "--json"]).json is True
+    assert parser.parse_args(["catalog", "--json"]).json is True
+    assert parser.parse_args(["ls", "--json"]).json is True
+    assert parser.parse_args(["chat", "-m", "x", "hi", "--json"]).json is True
+    # aliases route to the same handlers as ls / rm
+    assert parser.parse_args(["list"]).handler is cli.cmd_ls
+    assert parser.parse_args(["remove", "m.gguf"]).handler is cli.cmd_rm
+
+
+_FAKE_ENGINES = [
+    {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
+    {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
+]
+
+
+def test_models_default_is_deduped_names(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
+    monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
+
+    assert cli.cmd_models(cli.build_parser().parse_args(["models", "home"])) == 0
+    assert capsys.readouterr().out.splitlines() == ["gemma4-31b", "devstral"]
+
+
+def test_models_verbose_table_and_json(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
+    monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
+
+    assert cli.cmd_models(cli.build_parser().parse_args(["models", "home", "--verbose"])) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].split() == ["MODEL", "ENGINE", "WHERE"]
+    assert "gemma4-31b" in out and "mac" in out and "http://192.168.1.20:8000/v1" in out
+
+    assert cli.cmd_models(cli.build_parser().parse_args(["models", "home", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {"model": "devstral", "engine": "gpu", "where": "http://192.168.1.20:8000/v1"} in payload
+
+
+def test_engines_json_lists_joined_engines(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
+    monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
+
+    assert cli.cmd_engines(cli.build_parser().parse_args(["engines", "home", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [e["engine"] for e in payload] == ["mac", "gpu"]
+    assert payload[1]["models"] == ["devstral", "gemma4-31b"]
+
+
+def test_info_json_uses_contract_keys(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_network_config(name="home", port=8090)
+    monkeypatch.setattr(cli.grid, "_live_engines", lambda url: (_FAKE_ENGINES, True))
+
+    assert cli.cmd_info(cli.build_parser().parse_args(["info", "home", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == {"grid", "grid_url", "engines", "models"}
+    assert payload["grid"] == "home"
+    assert payload["models"] == ["gemma4-31b", "devstral"]

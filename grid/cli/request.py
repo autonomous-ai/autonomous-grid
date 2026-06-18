@@ -23,8 +23,15 @@ def cmd_chat(args: argparse.Namespace) -> int:
         )
     except httpx.RequestError as exc:
         raise SystemExit(f"Request failed: {exc}") from exc
-    print(resp.text)
-    return 0 if resp.status_code < 400 else 1
+    if getattr(args, "json", False) or resp.status_code >= 400:
+        print(resp.text)
+        return 0 if resp.status_code < 400 else 1
+    # Default: print just the assistant message; fall back to raw on any surprise.
+    try:
+        print(resp.json()["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, ValueError):
+        print(resp.text)
+    return 0
 
 
 def cmd_image(args: argparse.Namespace) -> int:

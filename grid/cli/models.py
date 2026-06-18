@@ -2,10 +2,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
     from ..models import catalog, store
+
+    if getattr(args, "json", False):
+        print(json.dumps([
+            {
+                "label": entry.label,
+                "hf_repo": entry.hf_repo,
+                "file": entry.quantized_file,
+                "min_vram_gb": entry.min_vram_gb,
+                "kind": entry.kind,
+                "target": entry.target,
+            }
+            for entry in catalog.recommended_entries()
+        ], indent=2))
+        return 0
 
     stored = store.list_all()
     if stored:

@@ -23,11 +23,9 @@ def cmd_up(args: argparse.Namespace) -> int:
         host=args.host,
         advertise_host=args.advertise_host,
     )
-    pid = runtime.start_server(cfg)
-    print(f"Grid {cfg['name']} is up.")
+    runtime.start_server(cfg)
+    print(f"grid={cfg['name']}")
     print(f"grid_url={runtime.network_url(cfg)}")
-    print(f"openai_base_url={runtime.network_url(cfg)}/v1")
-    print(f"server_pid={pid}")
     return 0
 
 
@@ -43,6 +41,16 @@ def cmd_down(args: argparse.Namespace) -> int:
 
 def cmd_ls(args: argparse.Namespace) -> int:
     grids = config.iter_network_configs()
+    if getattr(args, "json", False):
+        print(json.dumps([
+            {
+                "grid": cfg["name"],
+                "grid_url": runtime.network_url(cfg),
+                "local": bool(cfg.get("managed_server", True)),
+            }
+            for cfg in grids
+        ], indent=2))
+        return 0
     if not grids:
         print("(no grids — run `grid up` to bring one online)")
         return 0
@@ -55,35 +63,30 @@ def cmd_ls(args: argparse.Namespace) -> int:
 def cmd_info(args: argparse.Namespace) -> int:
     cfg = config.select_grid(args.grid)
     grid_url = runtime.network_url(cfg)
-    base_url = f"{grid_url}/v1"
 
     if args.env:
-        print(f'export OPENAI_BASE_URL="{base_url}"')
-        print('export OPENAI_API_KEY="local-lan"')
+        print(f'export OPENAI_BASE_URL="{grid_url}/v1"')
+        print('export OPENAI_API_KEY="local-grid"')
         return 0
 
     engines, reachable = _live_engines(grid_url)
+    models = _unique_models(engines)
 
     if args.json:
         print(json.dumps({
-            "name": cfg["name"],
+            "grid": cfg["name"],
             "grid_url": grid_url,
-            "openai_base_url": base_url,
-            "openai_api_key": "local-lan",
-            "reachable": reachable,
-            "engines": engines,
-        }, indent=2, sort_keys=True))
+            "engines": [_engine_entry(engine) for engine in engines],
+            "models": models,
+        }, indent=2))
         return 0
 
-    print(f"name={cfg['name']}")
+    print(f"grid={cfg['name']}")
     print(f"grid_url={grid_url}")
-    print(f"openai_base_url={base_url}")
-    print('openai_api_key=local-lan')
     if not reachable:
         print("status=unreachable")
         return 0
     print(f"engines={len(engines)}")
-    models = _unique_models(engines)
     print(f"models={','.join(models) if models else '(none)'}")
     return 0
 
@@ -95,29 +98,28 @@ def cmd_info(args: argparse.Namespace) -> int:
 def cmd_overview(args: argparse.Namespace) -> int:
     grids = config.iter_network_configs()
     if not grids:
-        print("No grids yet.")
-        print("Bring one online:  grid up")
-        print("Then join an engine:  grid join --serve <model>   (or)  grid join --at <url> -m <model>")
+        print("No grid yet.\n")
+        print("Start one:\n  grid up\n")
+        print("Then join an engine:\n  grid join")
         return 0
-
-    print("Grids:")
-    for cfg in grids:
-        where = "local" if cfg.get("managed_server", True) else "remote"
-        print(f"  {cfg['name']:<16} {where:<6} {runtime.network_url(cfg)}")
 
     default = config.select_grid(None) if _has_default(grids) else grids[0]
     grid_url = runtime.network_url(default)
     engines, reachable = _live_engines(grid_url)
-    print()
-    print(f"Endpoint ({default['name']}):")
-    print(f"  openai_base_url={grid_url}/v1")
+    models = _unique_models(engines)
+
+    print(f"Grid: {default['name']}")
+    print(f"grid_url: {grid_url}")
     if not reachable:
-        print("  status=unreachable — start it with `grid up`")
+        print("status: unreachable — start it with `grid up`")
     else:
-        models = _unique_models(engines)
-        print(f"  live models: {', '.join(models) if models else '(none — `grid join` an engine)'}")
-    print()
-    print("Next: grid join · grid models · grid info --env")
+        print(f"engines: {len(engines)} live")
+        print(f"models: {', '.join(models) if models else '(none)'}")
+    print("\nNext:")
+    print("  grid join")
+    if models:
+        print(f'  grid chat -m {models[0]} "hello"')
+    print("  grid info --env")
     return 0
 
 
@@ -143,6 +145,14 @@ def _live_engines(grid_url: str) -> tuple[list[dict[str, Any]], bool]:
     except httpx.HTTPError:
         return [], False
     return resp.json().get("providers", []), True
+
+
+def _engine_entry(engine: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "engine": engine.get("name") or engine.get("node_id", "?"),
+        "where": engine.get("endpoint_url") or engine.get("media_url") or "",
+        "models": engine.get("models") or [],
+    }
 
 
 def _unique_models(engines: list[dict[str, Any]]) -> list[str]:

@@ -9,6 +9,7 @@ grid can serve right now.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -29,10 +30,6 @@ from .. import config, paths, runtime
 
 def cmd_join(args: argparse.Namespace) -> int:
     advertise_host = getattr(args, "advertise_host", None)
-
-    if getattr(args, "dry_run", False):
-        return _print_detected(advertise_host)
-
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["network_id"]
 
@@ -42,30 +39,55 @@ def cmd_join(args: argparse.Namespace) -> int:
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return _spawn_engine(cfg, args, endpoint_url=args.at, models=list(args.models))
+        return _spawn_engine(cfg, args, endpoint_url=args.at, models=list(args.models), media=args.media)
 
     if args.serve:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[args.serve])
+        return _spawn_engine(cfg, args, endpoint_url=None, models=[args.serve], media=args.media)
 
     if args.media and not args.models:
-        return _spawn_engine(cfg, args, endpoint_url=None, models=[])
+        return _spawn_engine(cfg, args, endpoint_url=None, models=[], media=True)
 
     if args.models:
         raise SystemExit("-m/--model names models for an engine; pair it with --at <url>, or use --serve <model>.")
 
-    # No engine flags: join whatever is already running on this box.
+    # No engine spec: detect what is already running on this box.
     detected = _detect(advertise_host)
     if not detected:
         raise SystemExit(
             "No running engine detected on this box. Point at one with "
             "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
         )
+    if args.engine:
+        detected = [engine for engine in detected if engine.label == args.engine]
+        if not detected:
+            raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
+    elif len(detected) > 1 and not args.all:
+        _print_plan(detected)
+        if _interactive():
+            if not _confirm("Join all detected engines?"):
+                print("Nothing joined.")
+                return 0
+        else:
+            raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
+
     used: set[str] = set()
+    rc = 0
     for engine in detected:
         engine_id = _unique_engine_id(grid_id, engine.label, used)
         used.add(engine_id)
-        _spawn_engine(cfg, args, endpoint_url=engine.endpoint_url, models=engine.models, engine_id=engine_id)
-    return 0
+        try:
+            _spawn_engine(
+                cfg,
+                args,
+                endpoint_url=None if engine.media else engine.endpoint_url,
+                models=engine.models,
+                engine_id=engine_id,
+                media=engine.media,
+            )
+        except SystemExit as exc:
+            print(f"Skipped {engine.label}: {exc}", file=sys.stderr)
+            rc = 1
+    return rc
 
 
 def _spawn_engine(
@@ -75,6 +97,7 @@ def _spawn_engine(
     endpoint_url: str | None,
     models: list[str],
     engine_id: str | None = None,
+    media: bool = False,
 ) -> int:
     grid_id = cfg["network_id"]
     engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
@@ -89,7 +112,7 @@ def _spawn_engine(
         "endpoint_url": endpoint_url,
         "models": models,
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
-        "media": bool(getattr(args, "media", False)),
+        "media": bool(media),
         "media_bundles": list(getattr(args, "bundles", []) or []),
         "endpoint_port": getattr(args, "endpoint_port", 8081),
         "advertise_host": getattr(args, "advertise_host", None),
@@ -180,6 +203,75 @@ def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
 
 def cmd_models(args: argparse.Namespace) -> int:
     cfg = config.select_grid(getattr(args, "grid", None))
+    engines = _discover(cfg)
+    rows = [
+        (model, _engine_label(engine), engine.get("endpoint_url") or engine.get("media_url") or "")
+        for engine in engines
+        for model in engine.get("models") or []
+    ]
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            [{"model": model, "engine": label, "where": where} for model, label, where in rows],
+            indent=2,
+        ))
+        return 0
+
+    if not rows:
+        print("(no live models — `grid join` an engine first)")
+        return 0
+
+    if args.verbose:
+        width = max(len("MODEL"), *(len(model) for model, _, _ in rows))
+        ewidth = max(len("ENGINE"), *(len(label) for _, label, _ in rows))
+        print(f"{'MODEL':<{width}}  {'ENGINE':<{ewidth}}  WHERE")
+        for model, label, where in rows:
+            print(f"{model:<{width}}  {label:<{ewidth}}  {where}")
+        return 0
+
+    seen: list[str] = []
+    for model, _, _ in rows:
+        if model not in seen:
+            seen.append(model)
+    for model in seen:
+        print(model)
+    return 0
+
+
+def cmd_engines(args: argparse.Namespace) -> int:
+    cfg = config.select_grid(getattr(args, "grid", None))
+    engines = _discover(cfg)
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            [
+                {
+                    "engine": _engine_label(engine),
+                    "where": engine.get("endpoint_url") or engine.get("media_url") or "",
+                    "models": engine.get("models") or [],
+                }
+                for engine in engines
+            ],
+            indent=2,
+        ))
+        return 0
+
+    if not engines:
+        print("(no engines — `grid join` one first)")
+        return 0
+
+    labels = [_engine_label(engine) for engine in engines]
+    ewidth = max(len("ENGINE"), *(len(label) for label in labels))
+    print(f"{'ENGINE':<{ewidth}}  WHERE")
+    for engine, label in zip(engines, labels):
+        where = engine.get("endpoint_url") or engine.get("media_url") or ""
+        models = ",".join(engine.get("models") or []) or "(none)"
+        print(f"{label:<{ewidth}}  {where}")
+        print(f"{'':<{ewidth}}  models: {models}")
+    return 0
+
+
+def _discover(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     grid_url = runtime.network_url(cfg)
     try:
         resp = httpx.get(f"{grid_url}/nodes/discover", timeout=10)
@@ -187,28 +279,12 @@ def cmd_models(args: argparse.Namespace) -> int:
     except httpx.RequestError as exc:
         raise SystemExit(f"Could not reach grid {cfg['name']} at {grid_url}: {exc}") from exc
     except httpx.HTTPStatusError as exc:
-        raise SystemExit(f"Model discovery failed: {exc.response.status_code} {exc.response.text}") from exc
+        raise SystemExit(f"Discovery failed: {exc.response.status_code} {exc.response.text}") from exc
+    return resp.json().get("providers", [])
 
-    engines = resp.json().get("providers", [])
-    if not engines:
-        print("(no live models — `grid join` an engine first)")
-        return 0
 
-    if args.verbose:
-        for engine in engines:
-            label = engine.get("name") or engine.get("node_id", "?")
-            models = ",".join(engine.get("models") or []) or "(none)"
-            print(f"{label}\t{models}\t{engine.get('endpoint_url', '')}")
-        return 0
-
-    seen: list[str] = []
-    for engine in engines:
-        for model in engine.get("models") or []:
-            if model not in seen:
-                seen.append(model)
-    for model in seen:
-        print(model)
-    return 0
+def _engine_label(engine: dict[str, Any]) -> str:
+    return engine.get("name") or engine.get("node_id", "?")
 
 
 # ---------------------------------------------------------------------------
@@ -357,15 +433,20 @@ def _detect(advertise_host: str | None) -> list[Any]:
     return detect.detect_engines(advertise_host=advertise_host)
 
 
-def _print_detected(advertise_host: str | None) -> int:
-    detected = _detect(advertise_host)
-    if not detected:
-        print("(no running engine detected on this box)")
-        return 0
+def _print_plan(detected: list[Any]) -> None:
+    print("Detected engines on this machine:\n")
     for engine in detected:
-        models = ",".join(engine.models) or "(no models listed)"
-        print(f"{engine.label}\t{engine.endpoint_url}\t{models}")
-    return 0
+        models = ",".join(engine.models) or ("comfyui" if engine.media else "(no models listed)")
+        print(f"  {engine.label:<12} {engine.endpoint_url:<34} {models}")
+    print("\nJoin them:\n  grid join --all\n  grid join --engine <kind>")
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _confirm(prompt: str) -> bool:
+    return input(f"{prompt} [y/N] ").strip().lower() == "y"
 
 
 def _unique_engine_id(grid_id: str, base: str, used: set[str]) -> str:

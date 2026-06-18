@@ -29,7 +29,7 @@ from .grid import (
 )
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
-from .provider import cmd_join, cmd_leave, cmd_models
+from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 __all__ = [
@@ -46,6 +46,7 @@ __all__ = [
     "cmd_join",
     "cmd_leave",
     "cmd_models",
+    "cmd_engines",
     "cmd_catalog",
     "cmd_pull",
     "cmd_rm",
