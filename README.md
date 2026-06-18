@@ -32,26 +32,29 @@ grid up
 # grid_url=http://192.168.1.25:8090      ← the one address everything uses
 ```
 
-**2 · Add your Mac** — run on the Mac; Grid auto-detects MLX, Ollama, or LM Studio:
+**2 · Add your Mac** — point Grid at the MLX it's running, and name the box:
 
 ```bash
-grid join http://192.168.1.25:8090
-# joined  mac-studio · MLX · gemma4-31b
+grid join http://192.168.1.25:8090 --at http://192.168.1.10:8080/v1 -m gemma4-31b --name mac-studio
+# Joined engine mac-studio to http://192.168.1.25:8090
+# models=gemma4-31b
 ```
 
-**3 · Add your NVIDIA box** — run on the GPU box; Grid auto-detects vLLM or llama.cpp:
+**3 · Add your NVIDIA box** — same, pointing at the vLLM it's running:
 
 ```bash
-grid join http://192.168.1.25:8090
-# joined  gpu-4090 · vLLM · qwen3-coder
+grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
+# Joined engine gpu-4090 to http://192.168.1.25:8090
+# models=qwen3-coder
 ```
 
 Two machines, two frameworks — one endpoint now serves both:
 
 ```bash
-grid models
-# gemma4-31b     mac-studio   (MLX)
-# qwen3-coder    gpu-4090     (vLLM)
+grid models --verbose
+# MODEL        ENGINE      WHERE
+# gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
+# qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
 ```
 
 **4 · Point your apps at the grid.** Grab the endpoint, then wire up any OpenAI client:
@@ -115,11 +118,11 @@ Grid installs and joins a built-in engine for you — `llama.cpp` for text, Comf
 ```bash
 grid engine install llama.cpp           # text engine
 grid pull qwen36-35b-a3b-mtp            # see `grid catalog`, or any HF GGUF
-grid join --serve qwen36-35b-a3b-mtp
+grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp   # your grid_url from step 1
 
 grid engine install comfyui             # media engine (images + video)
 grid engine pull image_generation       # also: image_editing, i2v
-grid join --media --bundle image_generation
+grid join http://192.168.1.25:8090 --media --bundle image_generation
 grid image "a compact walnut desk beside a sunlit window"
 ```
 
