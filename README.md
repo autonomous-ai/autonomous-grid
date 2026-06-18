@@ -13,7 +13,7 @@ behind **one OpenAI-compatible endpoint** on your LAN.
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-[**Quickstart**](#quickstart) · [How it works](#how-it-works) · [Grid vs. running an engine directly](#grid-vs-running-an-engine-directly) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 <img src="docs/home-grid.svg" alt="Your Home Grid sits above your engines — apps call one endpoint, Grid routes each request to whichever machine serves the model" width="860">
 
@@ -111,19 +111,6 @@ engines, your grid is the one address everything talks through, and your apps dr
 - **apps** — anything that speaks the OpenAI API, pointed at the URL `grid info` prints. Text on `/v1/chat`, images and video on `/v1/media`.
 
 Full request flow in **[ARCHITECTURE.md](ARCHITECTURE.md)**; the complete command surface in **[docs/cli.md](docs/cli.md)**.
-
-## Grid vs. running an engine directly
-
-Grid isn't competing with Ollama or vLLM — it's the layer that makes all of them answer at one address.
-
-|  | **Grid** | A single engine (e.g. Ollama) | A cloud aggregator (e.g. OpenRouter) |
-|---|:---:|:---:|:---:|
-| Runs inference itself | **No — routes to yours** | Yes | Yes (in the cloud) |
-| Unifies the engines you already run | **Yes** | No | No |
-| Pools models across many machines | **Yes** | No | — |
-| One OpenAI-compatible endpoint | Yes | Yes (one engine) | Yes |
-| Stays on your LAN / fully private | **Yes** | Yes | No |
-| Uses hardware you already own | **Yes** | Yes (one box) | No |
 
 ## Contributing
 
