@@ -70,7 +70,7 @@ Mac Studio, `devstral-small-2` to a 4090 box, `glm-4.5-air` to a 5090 box, and
 Like an electric grid: the machines you own are the generators, your grid is the shared
 supply on one address, and your apps are the homes that draw from it.
 
-![Your Home Grid — your machines feed one private endpoint; your apps draw from it](docs/grid-diagram.svg)
+![Your Home Grid — your machines feed one private endpoint; your apps draw from it](docs/home-grid.svg)
 
 Three things, one CLI:
 
