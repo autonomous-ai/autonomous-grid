@@ -1,101 +1,101 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 660" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="arrIndigo" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#6366f1"/>
+    <marker id="arrBlue" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#3f95d4"/>
+    </marker>
+    <marker id="arrGreen" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#10b981"/>
     </marker>
     <filter id="sh" x="-30%" y="-50%" width="160%" height="200%">
       <feDropShadow dx="0" dy="2" stdDeviation="3.5" flood-color="#0f172a" flood-opacity="0.18"/>
     </filter>
-    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="16"/>
-    </filter>
   </defs>
 
-  <rect width="1200" height="600" fill="#f3f4f6"/>
-
-  <!-- title -->
-  <text x="600" y="46" text-anchor="middle" fill="#1f2937" font-size="34" font-weight="700" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">Your Home Grid</text>
-  <text x="600" y="76" text-anchor="middle" fill="#6b7280" font-size="14.5">your machines wired into one grid — your apps draw from it</text>
+  <rect width="1100" height="660" fill="#f3f4f6"/>
 
   <!-- section labels -->
-  <text x="40" y="150" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">ENGINES</text>
-  <text x="820" y="150" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">APPS</text>
+  <text x="190" y="56" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">APPS</text>
+  <text x="170" y="356" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">ENGINES — wired into one grid</text>
 
-  <!-- ===== grid lattice (the power grid) ===== -->
+  <!-- flow: grid -> apps (up) -->
+  <g stroke="#10b981" stroke-width="2.5" opacity="0.85" fill="none">
+    <line x1="290" y1="208" x2="290" y2="133" marker-end="url(#arrGreen)"/>
+    <line x1="550" y1="208" x2="550" y2="133" marker-end="url(#arrGreen)"/>
+    <line x1="810" y1="208" x2="810" y2="133" marker-end="url(#arrGreen)"/>
+  </g>
+  <!-- flow: engines -> grid (up) -->
+  <g stroke="#3f95d4" stroke-width="2.5" opacity="0.85" fill="none">
+    <line x1="280" y1="372" x2="280" y2="303" marker-end="url(#arrBlue)"/>
+    <line x1="550" y1="372" x2="550" y2="303" marker-end="url(#arrBlue)"/>
+    <line x1="820" y1="372" x2="820" y2="303" marker-end="url(#arrBlue)"/>
+  </g>
+
+  <!-- ===== TOP: apps ===== -->
+  <g text-anchor="middle">
+    <g filter="url(#sh)"><rect x="190" y="70" width="200" height="60" rx="13" fill="#6366f1"/></g>
+    <text x="290" y="106" fill="#ffffff" font-size="16" font-weight="700">OpenClaw</text>
+    <g filter="url(#sh)"><rect x="450" y="70" width="200" height="60" rx="13" fill="#6366f1"/></g>
+    <text x="550" y="106" fill="#ffffff" font-size="16" font-weight="700">Hermes</text>
+    <g filter="url(#sh)"><rect x="710" y="70" width="200" height="60" rx="13" fill="#6366f1"/></g>
+    <text x="810" y="106" fill="#ffffff" font-size="16" font-weight="700">Your Own App</text>
+  </g>
+
+  <!-- ===== MIDDLE: the grid ===== -->
+  <g filter="url(#sh)"><rect x="120" y="210" width="860" height="92" rx="18" fill="#10b981"/></g>
+  <text x="550" y="248" text-anchor="middle" fill="#ffffff" font-size="23" font-weight="700">Your Home Grid</text>
+  <text x="550" y="272" text-anchor="middle" fill="#d1fae5" font-size="13.5">Local AI orchestration — one private endpoint for every engine you run</text>
+  <text x="550" y="291" text-anchor="middle" fill="#a7f3d0" font-size="11.5" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">home:8090/v1 · routes by model · /v1/chat + /v1/media</text>
+
+  <!-- ===== BOTTOM: engines forming a grid ===== -->
   <g stroke="#5b6b85" stroke-width="2.2" opacity="0.55">
-    <line x1="138" y1="216" x2="380" y2="216"/>
-    <line x1="380" y1="216" x2="622" y2="216"/>
-    <line x1="138" y1="366" x2="380" y2="366"/>
-    <line x1="380" y1="366" x2="622" y2="366"/>
-    <line x1="138" y1="216" x2="138" y2="366"/>
-    <line x1="380" y1="216" x2="380" y2="366"/>
-    <line x1="622" y1="216" x2="622" y2="366"/>
+    <line x1="280" y1="420" x2="550" y2="420"/>
+    <line x1="550" y1="420" x2="820" y2="420"/>
+    <line x1="280" y1="560" x2="550" y2="560"/>
+    <line x1="550" y1="560" x2="820" y2="560"/>
+    <line x1="280" y1="420" x2="280" y2="560"/>
+    <line x1="550" y1="420" x2="550" y2="560"/>
+    <line x1="820" y1="420" x2="820" y2="560"/>
   </g>
   <g fill="#5b6b85" opacity="0.7">
-    <circle cx="138" cy="216" r="4"/><circle cx="380" cy="216" r="4"/><circle cx="622" cy="216" r="4"/>
-    <circle cx="138" cy="366" r="4"/><circle cx="380" cy="366" r="4"/><circle cx="622" cy="366" r="4"/>
+    <circle cx="280" cy="420" r="4"/><circle cx="550" cy="420" r="4"/><circle cx="820" cy="420" r="4"/>
+    <circle cx="280" cy="560" r="4"/><circle cx="550" cy="560" r="4"/><circle cx="820" cy="560" r="4"/>
   </g>
 
-  <!-- grid core -> apps -->
-  <g stroke="#6366f1" stroke-width="2.5" opacity="0.85" fill="none">
-    <line x1="720" y1="366" x2="818" y2="196" marker-end="url(#arrIndigo)"/>
-    <line x1="720" y1="366" x2="818" y2="356" marker-end="url(#arrIndigo)"/>
-    <line x1="720" y1="366" x2="818" y2="516" marker-end="url(#arrIndigo)"/>
-  </g>
-
-  <!-- ===== engine cards (matrix) ===== -->
   <g font-size="11.5">
-    <g filter="url(#sh)"><rect x="40" y="168" width="196" height="96" rx="13" fill="#3f95d4"/></g>
-    <text x="56" y="194" fill="#ffffff" font-size="15" font-weight="700">Studio</text>
-    <text x="56" y="216"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">MLX</tspan></text>
-    <text x="56" y="236"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">Mac Studio</tspan></text>
-    <text x="56" y="256"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">512 GB</tspan></text>
+    <g filter="url(#sh)"><rect x="170" y="372" width="220" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="188" y="398" fill="#ffffff" font-size="15" font-weight="700">Studio</text>
+    <text x="188" y="420"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">MLX</tspan></text>
+    <text x="188" y="440"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">Mac Studio</tspan></text>
+    <text x="188" y="460"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">512 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="282" y="168" width="196" height="96" rx="13" fill="#3f95d4"/></g>
-    <text x="298" y="194" fill="#ffffff" font-size="15" font-weight="700">Desk mini</text>
-    <text x="298" y="216"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">Ollama</tspan></text>
-    <text x="298" y="236"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">Mac mini</tspan></text>
-    <text x="298" y="256"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">64 GB</tspan></text>
+    <g filter="url(#sh)"><rect x="440" y="372" width="220" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="458" y="398" fill="#ffffff" font-size="15" font-weight="700">Desk mini</text>
+    <text x="458" y="420"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">Ollama</tspan></text>
+    <text x="458" y="440"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">Mac mini</tspan></text>
+    <text x="458" y="460"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">64 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="524" y="168" width="196" height="96" rx="13" fill="#3f95d4"/></g>
-    <text x="540" y="194" fill="#ffffff" font-size="15" font-weight="700">Basement rig</text>
-    <text x="540" y="216"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">vLLM</tspan></text>
-    <text x="540" y="236"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 3090</tspan></text>
-    <text x="540" y="256"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">24 GB</tspan></text>
+    <g filter="url(#sh)"><rect x="710" y="372" width="220" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="728" y="398" fill="#ffffff" font-size="15" font-weight="700">Laptop</text>
+    <text x="728" y="420"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">LM Studio</tspan></text>
+    <text x="728" y="440"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">MacBook Pro</tspan></text>
+    <text x="728" y="460"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">36 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="40" y="318" width="196" height="96" rx="13" fill="#3f95d4"/></g>
-    <text x="56" y="344" fill="#ffffff" font-size="15" font-weight="700">Game PC</text>
-    <text x="56" y="366"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">llama.cpp</tspan></text>
-    <text x="56" y="386"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 4090</tspan></text>
-    <text x="56" y="406"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">24 GB</tspan></text>
+    <g filter="url(#sh)"><rect x="170" y="512" width="220" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="188" y="538" fill="#ffffff" font-size="15" font-weight="700">Basement rig</text>
+    <text x="188" y="560"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">vLLM</tspan></text>
+    <text x="188" y="580"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 3090</tspan></text>
+    <text x="188" y="600"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">24 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="282" y="318" width="196" height="96" rx="13" fill="#3f95d4"/></g>
-    <text x="298" y="344" fill="#ffffff" font-size="15" font-weight="700">Render box</text>
-    <text x="298" y="366"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">ComfyUI</tspan></text>
-    <text x="298" y="386"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 5090</tspan></text>
-    <text x="298" y="406"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">32 GB</tspan></text>
-  </g>
+    <g filter="url(#sh)"><rect x="440" y="512" width="220" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="458" y="538" fill="#ffffff" font-size="15" font-weight="700">Game PC</text>
+    <text x="458" y="560"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">llama.cpp</tspan></text>
+    <text x="458" y="580"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 4090</tspan></text>
+    <text x="458" y="600"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">24 GB</tspan></text>
 
-  <!-- grid core node (sits in the matrix) -->
-  <ellipse cx="622" cy="366" rx="110" ry="66" fill="#10b981" opacity="0.18" filter="url(#glow)"/>
-  <g filter="url(#sh)"><rect x="524" y="318" width="196" height="96" rx="13" fill="#10b981" stroke="#34d399" stroke-width="1.5"/></g>
-  <polygon points="608,336 599,350 607,350 602,364 616,347 608,347" fill="#bbf7d0"/>
-  <text x="640" y="352" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="700">THE GRID</text>
-  <text x="622" y="378" text-anchor="middle" fill="#d1fae5" font-size="11.5" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">home:8090/v1</text>
-  <text x="622" y="398" text-anchor="middle" fill="#a7f3d0" font-size="11">routes by model</text>
-
-  <!-- app nodes -->
-  <g>
-    <g filter="url(#sh)"><rect x="820" y="164" width="180" height="64" rx="13" fill="#6366f1"/></g>
-    <text x="910" y="191" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">OpenClaw</text>
-    <text x="910" y="211" text-anchor="middle" fill="#e0e7ff" font-size="11.5">agent runtime</text>
-
-    <g filter="url(#sh)"><rect x="820" y="324" width="180" height="64" rx="13" fill="#6366f1"/></g>
-    <text x="910" y="351" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">Hermes</text>
-    <text x="910" y="371" text-anchor="middle" fill="#e0e7ff" font-size="11.5">OpenAI client</text>
-
-    <g filter="url(#sh)"><rect x="820" y="484" width="180" height="64" rx="13" fill="#6366f1"/></g>
-    <text x="910" y="511" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">your own app</text>
-    <text x="910" y="531" text-anchor="middle" fill="#e0e7ff" font-size="11.5">any OpenAI SDK</text>
+    <g filter="url(#sh)"><rect x="710" y="512" width="220" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="728" y="538" fill="#ffffff" font-size="15" font-weight="700">Render box</text>
+    <text x="728" y="560"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">ComfyUI</tspan></text>
+    <text x="728" y="580"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 5090</tspan></text>
+    <text x="728" y="600"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">32 GB</tspan></text>
   </g>
 </svg>
