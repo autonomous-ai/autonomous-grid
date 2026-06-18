@@ -14,7 +14,7 @@ behind **one OpenAI-compatible endpoint** on your LAN.
 
 [**Quickstart**](#quickstart) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
-<img src="docs/home-grid.svg" alt="Your Home Grid sits above your engines — apps call one endpoint, Grid routes each request to whichever machine serves the model" width="860">
+<img src="docs/home-grid.png" alt="Your Home Grid sits above your engines — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever machine serves the model" width="860">
 
 </div>
 
