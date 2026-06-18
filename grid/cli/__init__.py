@@ -1,8 +1,8 @@
 """Grid command-line interface.
 
-The CLI is split by command group (network, provider, models, media, …). This
-package re-exports the public surface — ``main``, ``build_parser`` and every
-``cmd_*`` handler — so ``grid.cli.<name>`` keeps resolving as before.
+The CLI is split by command group. This package re-exports the public surface —
+``main``, ``build_parser`` and every ``cmd_*`` handler — so ``grid.cli.<name>``
+resolves from one place.
 """
 from __future__ import annotations
 
@@ -12,56 +12,51 @@ import time  # noqa: F401
 import httpx  # noqa: F401
 
 from ._main import cmd_internal_media_server, cmd_internal_server, main
+from .engine import (
+    cmd_engine_install,
+    cmd_engine_pull,
+    cmd_engine_start,
+    cmd_engine_status,
+    cmd_engine_stop,
+)
+from .grid import (
+    cmd_down,
+    cmd_info,
+    cmd_ls,
+    cmd_overview,
+    cmd_up,
+    cmd_version,
+)
+from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
-from .consumer import cmd_consumer_env
-from .llama_cpp import cmd_llama_cpp_install
-from .media import (
-    cmd_media_install,
-    cmd_media_pull,
-    cmd_media_start,
-    cmd_media_status,
-    cmd_media_stop,
-)
-from .models import cmd_models_list, cmd_models_pull, cmd_models_rm
-from .network import (
-    cmd_network_create,
-    cmd_network_list,
-    cmd_network_start,
-    cmd_network_status,
-    cmd_network_stop,
-)
-from .provider import cmd_provider_list, cmd_provider_start
-from .request import (
-    cmd_request_chat,
-    cmd_request_media_image_edit,
-    cmd_request_media_image_generate,
-    cmd_request_media_i2v,
-)
+from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
+from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 __all__ = [
     "main",
     "build_parser",
     "cmd_internal_server",
     "cmd_internal_media_server",
-    "cmd_network_create",
-    "cmd_network_start",
-    "cmd_network_stop",
-    "cmd_network_status",
-    "cmd_network_list",
-    "cmd_provider_start",
-    "cmd_provider_list",
-    "cmd_llama_cpp_install",
-    "cmd_models_list",
-    "cmd_models_pull",
-    "cmd_models_rm",
-    "cmd_media_install",
-    "cmd_media_pull",
-    "cmd_media_status",
-    "cmd_media_start",
-    "cmd_media_stop",
-    "cmd_consumer_env",
-    "cmd_request_chat",
-    "cmd_request_media_image_generate",
-    "cmd_request_media_image_edit",
-    "cmd_request_media_i2v",
+    "cmd_overview",
+    "cmd_version",
+    "cmd_up",
+    "cmd_down",
+    "cmd_ls",
+    "cmd_info",
+    "cmd_join",
+    "cmd_leave",
+    "cmd_models",
+    "cmd_engines",
+    "cmd_catalog",
+    "cmd_pull",
+    "cmd_rm",
+    "cmd_chat",
+    "cmd_image",
+    "cmd_edit",
+    "cmd_video",
+    "cmd_engine_install",
+    "cmd_engine_pull",
+    "cmd_engine_status",
+    "cmd_engine_start",
+    "cmd_engine_stop",
 ]

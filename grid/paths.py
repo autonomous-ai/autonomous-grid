@@ -44,8 +44,8 @@ def run_dir() -> Path:
     return grid_home() / "run"
 
 
-def pid_file() -> Path:
-    return run_dir() / "provider.pid"
+def engines_dir(network_id: str) -> Path:
+    return run_dir() / "engines" / network_id
 
 
 def llama_log(port: int) -> Path:
