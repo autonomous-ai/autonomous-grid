@@ -46,11 +46,11 @@ Bare `grid` is not just help. It is the dashboard for a terminal:
 Grid: home
 grid_url: http://192.168.1.25:8090
 engines: 3 live
-models: llama3, qwen2.5-coder, mistral-large
+models: qwen36-27b-mtp, gemma4-31b, devstral-small-2
 
 Next:
   grid join
-  grid chat -m llama3 "hello"
+  grid chat -m qwen36-27b-mtp "hello"
   grid info --env
 ```
 
@@ -117,12 +117,12 @@ Example dry run:
 ```text
 Detected engines on this machine:
 
-  mac-ollama     Ollama     http://192.168.1.10:11434/v1     llama3, qwen2.5-coder
-  lmstudio       LM Studio  http://192.168.1.10:1234/v1      gemma2
+  mac-studio     MLX        http://192.168.1.10:8080/v1      gemma4-31b
+  gpu-4090       vLLM       http://192.168.1.20:8000/v1      devstral-small-2
 
 Join them:
   grid join --all
-  grid join --engine ollama
+  grid join --engine gpu-4090
 ```
 
 Engine IDs are local names shown by `grid engines`, `grid info`, and
@@ -142,19 +142,24 @@ grid rm <model> [--yes]                 # remove a pulled model
 Default:
 
 ```text
-llama3
-qwen2.5-coder
-mistral-large
+qwen36-27b-mtp
+gemma4-31b
+glm-4.5-air
+devstral-small-2
 comfyui:image_generation
 ```
+
+Examples should intentionally mix model families. Grid is an orchestration layer, not a
+launcher for one model vendor.
 
 Verbose:
 
 ```text
 MODEL                     ENGINE       WHERE
-llama3                    mac-ollama   http://192.168.1.10:11434/v1
-qwen2.5-coder             mac-ollama   http://192.168.1.10:11434/v1
-mistral-large             gpu-vllm     http://192.168.1.20:8000/v1
+gemma4-31b                mac-studio   http://192.168.1.10:8080/v1
+qwen36-27b-mtp            gpu-3090     http://192.168.1.20:8000/v1
+devstral-small-2          gpu-4090     http://192.168.1.30:8000/v1
+glm-4.5-air               gpu-5090     http://192.168.1.40:8000/v1
 comfyui:image_generation  media-mac    http://192.168.1.30:8190
 ```
 
@@ -172,7 +177,7 @@ to an engine. Their errors should name the missing model, the selected grid, and
 diagnostic command:
 
 ```text
-No live model named `llama3` on grid `home`.
+No live model named `qwen36-27b-mtp` on grid `home`.
 
 See live models:
   grid models
@@ -241,7 +246,7 @@ grid up
 grid join --dry-run
 grid join
 grid models
-grid chat -m llama3 "hello"
+grid chat -m qwen36-27b-mtp "hello"
 eval "$(grid info --env)"
 ```
 
