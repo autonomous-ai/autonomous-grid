@@ -36,30 +36,30 @@ monkeypatching subprocess launches).
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full component map and request-flow
 walkthroughs. In short:
 
-- `grid/server.py` — the signaling server / OpenAI-compatible proxy
-- `grid/cli/` — the CLI, split by command group (`parser.py` builds the command tree;
+- `server.py` — the signaling server / OpenAI-compatible proxy
+- `cli/` — the CLI, split by command group (`parser.py` builds the command tree;
   per-group modules like `network.py` and `provider.py` hold the `cmd_*` handlers)
-- `grid/provider/`, `grid/models/`, `grid/engine/`, `grid/system/` — provider media,
+- `provider/`, `models/`, `engine/`, `system/` — provider media,
   model management, engine lifecycle, and host/GPU info
 
 ## Common contributions
 
 These are well-bounded and make great first PRs:
 
-**Add a model to the catalog** — edit `grid/models/catalog.py`. The catalog is
+**Add a model to the catalog** — edit `models/catalog.py`. The catalog is
 platform-aware (Apple Silicon vs NVIDIA); add the entry and it shows up in
 `grid models list --catalog` and `grid models pull <name>`.
 
-**Add a media bundle** — edit `grid/models/media_bundles.py`. A bundle is a tuple of
+**Add a media bundle** — edit `models/media_bundles.py`. A bundle is a tuple of
 `FileSpec(hf_repo, hf_path, subdir)` entries plus a `comfyui:*` capability name. Wire
-any new ComfyUI workflow JSON into `grid/provider/media_handler.py`.
+any new ComfyUI workflow JSON into `provider/media_handler.py`.
 
-**Add a CLI command** — add the subparser in `grid/cli/parser.py`'s `build_parser()`, write a
-`cmd_<name>(args) -> int` handler in the matching group module (e.g. `grid/cli/network.py`),
+**Add a CLI command** — add the subparser in `cli/parser.py`'s `build_parser()`, write a
+`cmd_<name>(args) -> int` handler in the matching group module (e.g. `cli/network.py`),
 and connect them with `set_defaults(handler=cmd_<name>)`. Re-export the handler from
-`grid/cli/__init__.py`. Existing `cmd_*` functions are the template.
+`cli/__init__.py`. Existing `cmd_*` functions are the template.
 
-**Tune provider gating** — `grid/provider/media_gating.py` decides which media bundles a
+**Tune provider gating** — `provider/media_gating.py` decides which media bundles a
 host advertises based on VRAM.
 
 ## Code style
@@ -67,7 +67,7 @@ host advertises based on VRAM.
 - Match the surrounding code: type hints, `from __future__ import annotations`, module
   docstrings explaining *why*.
 - Prefer small, focused functions; keep the CLI handlers thin and push logic into the
-  relevant `grid/` module.
+  relevant top-level module or package.
 - Keep the LAN-only, unauthenticated assumptions intact (see ARCHITECTURE.md). Don't add
   network calls that leave the LAN or features that require auth.
 - Vendored files (annotated in their docstrings) should keep edits bracketed and minimal.

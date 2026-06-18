@@ -10,7 +10,9 @@ from typing import Any
 
 import httpx
 
-from .. import config, paths, runtime
+import config
+import paths
+import runtime
 
 
 def cmd_chat(args: argparse.Namespace) -> int:

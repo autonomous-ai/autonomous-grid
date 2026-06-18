@@ -20,7 +20,7 @@ nodes in memory, no database, no auth, LAN-only.
 ## Component map
 
 ```
-grid/
+.   (repo root)
 ├── cli/                The CLI, split by command group. `parser.py` builds the command tree;
 │                       `network.py` / `provider.py` / `models.py` / `media.py` / `consumer.py` /
 │                       `request.py` hold each group's `cmd_*` handlers. Entry point `grid`/`agrid`.
@@ -105,7 +105,7 @@ Media uses fixed model names (`comfyui:image_generation`, `comfyui:image_editing
 
 ## Provider lifecycle (`grid provider start`)
 
-`grid/cli/provider.py:cmd_provider_start`:
+`cli/provider.py:cmd_provider_start`:
 
 1. Resolve the text endpoint — use `--endpoint-url` as-is, **or** launch a local
    `llama-server` (`engine/launcher.py`) for a single GGUF `--model`.

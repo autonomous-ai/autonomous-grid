@@ -21,7 +21,9 @@ from typing import Any
 
 import httpx
 
-from .. import config, paths, runtime
+import config
+import paths
+import runtime
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +347,7 @@ def _run_provider(args: SimpleNamespace) -> int:
             endpoint_url = runtime.provider_endpoint_url(None, args.endpoint_port, args.advertise_host)
             if len(args.models) != 1:
                 raise SystemExit("Built-in engine launch supports exactly one model. Use --at for custom engines.")
-            from ..engine import launcher as launcher_mod
+            from engine import launcher as launcher_mod
 
             launcher = launcher_mod
             if launcher.is_port_in_use(args.endpoint_port):
@@ -412,12 +414,12 @@ def _run_provider(args: SimpleNamespace) -> int:
             launcher.stop(launched)
             print(f"Stopped llama-server on :{args.endpoint_port}")
         if media_proc is not None:
-            from .. import media_runtime
+            import media_runtime
 
             media_runtime.stop_media_server(media_proc)
             print(f"Stopped engine media server on :{args.media_port}")
         if comfyui_started:
-            from ..engine import comfyui
+            from engine import comfyui
 
             comfyui.stop()
             print(f"Stopped ComfyUI on :{args.comfyui_port}")
@@ -428,7 +430,7 @@ def _run_provider(args: SimpleNamespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _detect(advertise_host: str | None) -> list[Any]:
-    from ..system import detect
+    from system import detect
 
     return detect.detect_engines(advertise_host=advertise_host)
 
@@ -477,12 +479,12 @@ def _advertised_text_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _prepare_media_provider(args: SimpleNamespace) -> dict[str, Any]:
-    from .. import media_runtime
-    from ..engine import comfyui
-    from ..models import media_bundles
-    from ..provider import media_gating
-    from ..system import gpu as gpu_probe
-    from ..system import host as host_probe
+    import media_runtime
+    from engine import comfyui
+    from models import media_bundles
+    from provider import media_gating
+    from system import gpu as gpu_probe
+    from system import host as host_probe
 
     if not comfyui.comfyui_dir().exists():
         raise SystemExit(

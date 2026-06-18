@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .runtime import NETWORK_TYPE
+from runtime import NETWORK_TYPE
 
 
 NODE_TTL_SECONDS = 60

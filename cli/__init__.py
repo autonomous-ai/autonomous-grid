@@ -1,12 +1,12 @@
 """Grid command-line interface.
 
 The CLI is split by command group. This package re-exports the public surface —
-``main``, ``build_parser`` and every ``cmd_*`` handler — so ``grid.cli.<name>``
+``main``, ``build_parser`` and every ``cmd_*`` handler — so ``cli.<name>``
 resolves from one place.
 """
 from __future__ import annotations
 
-# Imported so tests can monkeypatch ``grid.cli.httpx`` / ``grid.cli.time`` and
+# Imported so tests can monkeypatch ``cli.httpx`` / ``cli.time`` and
 # have the patch apply to the per-group modules (they share the singletons).
 import time  # noqa: F401
 import httpx  # noqa: F401

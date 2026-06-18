@@ -14,8 +14,8 @@ from pathlib import Path
 
 import httpx
 
-from .. import paths
-from ..system import gpu
+import paths
+from system import gpu
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ def install_pinned(tarball: TarballPin) -> Path:
     if tarball.sha256 == "PLACEHOLDER" or "PLACEHOLDER" in tarball.url:
         raise SystemExit(
             f"Pinned tarball {tarball.label!r} has placeholder URL/sha. Fill in real values "
-            "in grid/engine/installer.py before running "
+            "in engine/installer.py before running "
             "`grid engine install llama.cpp`, or pass --from-source."
         )
     paths.ensure_all()

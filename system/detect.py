@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .. import runtime
+import runtime
 
 
 @dataclass(frozen=True)

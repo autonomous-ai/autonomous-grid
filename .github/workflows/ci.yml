@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Ruff
-        run: uv run --extra dev ruff check grid/ tests/
+        run: uv run --extra dev ruff check .
 
   test:
     runs-on: ubuntu-latest

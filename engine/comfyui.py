@@ -27,8 +27,8 @@ from typing import Iterator, Optional
 
 import httpx
 
-from .. import paths
-from ..system import gpu as gpu_probe
+import paths
+from system import gpu as gpu_probe
 
 
 logger = logging.getLogger(__name__)

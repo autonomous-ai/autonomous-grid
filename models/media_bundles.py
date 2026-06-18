@@ -15,8 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import paths
-from ..engine import comfyui as comfyui_engine
+import paths
+from engine import comfyui as comfyui_engine
 from . import download
 
 

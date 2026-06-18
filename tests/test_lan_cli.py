@@ -9,12 +9,15 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from grid import cli, config, paths, runtime
-from grid.engine import comfyui, installer, launcher
-from grid.models import catalog, media_bundles
-from grid.provider import media_server
-from grid.server import create_app
-from grid.system import detect
+import cli
+import config
+import paths
+import runtime
+from engine import comfyui, installer, launcher
+from models import catalog, media_bundles
+from provider import media_server
+from server import create_app
+from system import detect
 
 
 def _provider_args(**overrides) -> SimpleNamespace:

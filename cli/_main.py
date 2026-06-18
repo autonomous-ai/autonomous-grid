@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .. import config, runtime
+import config
+import runtime
 from .parser import build_parser
 
 
@@ -14,7 +15,7 @@ def cmd_internal_server(network_id: str) -> int:
     cfg = config.load_network_config(network_id)
     if not cfg:
         raise SystemExit(f"Network config not found: {network_id}")
-    from ..server import create_app
+    from server import create_app
 
     app = create_app(network_id=cfg["network_id"], network_name=cfg["name"])
     uvicorn.run(app, host=cfg.get("host") or runtime.DEFAULT_HOST, port=int(cfg["port"]))
@@ -24,7 +25,7 @@ def cmd_internal_server(network_id: str) -> int:
 def cmd_internal_media_server(port: int, comfyui_url: str) -> int:
     import uvicorn
 
-    from ..provider.media_server import create_app
+    from provider.media_server import create_app
 
     app = create_app(comfyui_url=comfyui_url)
     uvicorn.run(app, host="0.0.0.0", port=int(port))

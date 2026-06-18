@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from .. import paths
+import paths
 
 
 MIN_LLAMA_SERVER_BUILD = 9240

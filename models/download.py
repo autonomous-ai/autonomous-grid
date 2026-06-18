@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from .. import paths
+import paths
 
 
 HF_BASE = "https://huggingface.co"

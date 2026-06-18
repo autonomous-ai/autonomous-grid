@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import paths
+import paths
 
 
 CONFIG_FILE = "config.json"

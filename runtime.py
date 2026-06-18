@@ -13,7 +13,8 @@ from typing import Any
 
 import httpx
 
-from . import config, paths
+import config
+import paths
 
 
 NETWORK_TYPE = "lan-permissionless"
@@ -181,4 +182,4 @@ def _cli_subprocess_command() -> list[str]:
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return [str(candidate.resolve())]
-    return [sys.executable, "-m", "grid.cli"]
+    return [sys.executable, "-m", "cli"]

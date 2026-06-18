@@ -33,7 +33,7 @@ import uuid
 
 import httpx
 
-from .. import paths
+import paths
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ class MediaHandler:
             pass
         # Lazy import: engine.comfyui depends on filesystem layout that
         # only matters when media is actually enabled.
-        from ..engine import comfyui as comfyui_engine
+        from engine import comfyui as comfyui_engine
         comfyui_engine.ensure_running(comfyui_url=self.comfyui_url)
 
     def _submit_workflow(self, workflow: dict) -> str:

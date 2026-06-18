@@ -7,7 +7,9 @@ from typing import Any
 
 import httpx
 
-from .. import __version__, config, runtime
+import config
+import runtime
+from _version import __version__
 
 
 def cmd_version(args: argparse.Namespace) -> int:

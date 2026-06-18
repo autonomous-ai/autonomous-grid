@@ -6,7 +6,7 @@ import json
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
-    from ..models import catalog, store
+    from models import catalog, store
 
     if getattr(args, "json", False):
         print(json.dumps([
@@ -37,7 +37,7 @@ def cmd_catalog(args: argparse.Namespace) -> int:
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    from ..models import catalog, download
+    from models import catalog, download
 
     entry = catalog.find(args.model)
     if entry:
@@ -52,7 +52,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_rm(args: argparse.Namespace) -> int:
-    from ..models import store
+    from models import store
 
     model = store.find(args.model)
     if not model:

@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import argparse
 
-from .. import __version__, runtime
+import runtime
+from _version import __version__
 from ._constants import (
     VALID_I2V_ASPECT_RATIOS,
     VALID_I2V_DURATIONS,

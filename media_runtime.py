@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from . import paths
+import paths
 
 
 def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
@@ -90,5 +90,5 @@ def _cli_subprocess_command() -> list[str]:
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return [str(candidate.resolve())]
-    return [sys.executable, "-m", "grid.cli"]
+    return [sys.executable, "-m", "cli"]
 

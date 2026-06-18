@@ -114,8 +114,8 @@ Engine setup, media, and the raw HTTP API are documented in **[docs/reference.md
 
 Grid is built to be easy to pick up and contribute to — start with
 **[CONTRIBUTING.md](CONTRIBUTING.md)** and **[ARCHITECTURE.md](ARCHITECTURE.md)**.
-Good first contributions: add a model to the catalog (`grid/models/catalog.py`) or a
-media bundle (`grid/models/media_bundles.py`).
+Good first contributions: add a model to the catalog (`models/catalog.py`) or a
+media bundle (`models/media_bundles.py`).
 
 Local state lives under `~/.grid` (override with the `GRID_HOME` environment variable).
 
