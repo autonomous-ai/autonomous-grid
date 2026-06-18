@@ -50,8 +50,8 @@ Two machines, two frameworks — one endpoint now serves both:
 
 ```bash
 grid models
-# gemma4-31b        mac-studio   (MLX)
-# qwen3-coder  gpu-4090     (vLLM)
+# gemma4-31b     mac-studio   (MLX)
+# qwen3-coder    gpu-4090     (vLLM)
 ```
 
 **4 · Point your apps at the grid.** Grab the endpoint, then wire up any OpenAI client:
