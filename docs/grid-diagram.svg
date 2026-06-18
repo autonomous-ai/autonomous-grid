@@ -1,8 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="arrBlue" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#3f95d4"/>
-    </marker>
     <marker id="arrIndigo" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L8,3 L0,6 Z" fill="#6366f1"/>
     </marker>
@@ -10,93 +7,95 @@
       <feDropShadow dx="0" dy="2" stdDeviation="3.5" flood-color="#0f172a" flood-opacity="0.18"/>
     </filter>
     <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="22"/>
+      <feGaussianBlur stdDeviation="16"/>
     </filter>
   </defs>
 
-  <rect width="1200" height="680" fill="#f3f4f6"/>
+  <rect width="1200" height="600" fill="#f3f4f6"/>
 
   <!-- title -->
-  <text x="600" y="50" text-anchor="middle" fill="#1f2937" font-size="34" font-weight="700" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">Your Home Grid</text>
-  <text x="600" y="80" text-anchor="middle" fill="#6b7280" font-size="14.5">your machines are nodes on one grid — they generate, your apps draw</text>
+  <text x="600" y="46" text-anchor="middle" fill="#1f2937" font-size="34" font-weight="700" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">Your Home Grid</text>
+  <text x="600" y="76" text-anchor="middle" fill="#6b7280" font-size="14.5">your machines wired into one grid — your apps draw from it</text>
 
   <!-- section labels -->
-  <text x="24" y="108" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">ENGINE NODES</text>
-  <text x="1176" y="150" text-anchor="end" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">APPS</text>
+  <text x="40" y="150" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">ENGINES</text>
+  <text x="820" y="150" fill="#7c8aa5" font-size="12" letter-spacing="1.5" font-weight="700">APPS</text>
 
-  <!-- faint grid fabric between nodes -->
-  <g stroke="#94a3b8" stroke-width="1.4" opacity="0.32" fill="none">
-    <line x1="160" y1="140" x2="340" y2="175"/>
-    <line x1="160" y1="140" x2="105" y2="300"/>
-    <line x1="105" y1="300" x2="175" y2="460"/>
-    <line x1="175" y1="460" x2="340" y2="540"/>
-    <line x1="340" y1="175" x2="105" y2="300"/>
+  <!-- ===== grid lattice (the power grid) ===== -->
+  <g stroke="#5b6b85" stroke-width="2.2" opacity="0.55">
+    <line x1="138" y1="216" x2="380" y2="216"/>
+    <line x1="380" y1="216" x2="622" y2="216"/>
+    <line x1="138" y1="366" x2="380" y2="366"/>
+    <line x1="380" y1="366" x2="622" y2="366"/>
+    <line x1="138" y1="216" x2="138" y2="366"/>
+    <line x1="380" y1="216" x2="380" y2="366"/>
+    <line x1="622" y1="216" x2="622" y2="366"/>
+  </g>
+  <g fill="#5b6b85" opacity="0.7">
+    <circle cx="138" cy="216" r="4"/><circle cx="380" cy="216" r="4"/><circle cx="622" cy="216" r="4"/>
+    <circle cx="138" cy="366" r="4"/><circle cx="380" cy="366" r="4"/><circle cx="622" cy="366" r="4"/>
   </g>
 
-  <!-- power lines: nodes -> grid core -->
-  <g stroke="#3f95d4" stroke-width="2.5" opacity="0.85" fill="none">
-    <line x1="160" y1="140" x2="510" y2="314" marker-end="url(#arrBlue)"/>
-    <line x1="340" y1="175" x2="590" y2="268" marker-end="url(#arrBlue)"/>
-    <line x1="105" y1="300" x2="510" y2="360" marker-end="url(#arrBlue)"/>
-    <line x1="175" y1="460" x2="510" y2="406" marker-end="url(#arrBlue)"/>
-    <line x1="340" y1="540" x2="590" y2="452" marker-end="url(#arrBlue)"/>
-  </g>
-  <!-- power lines: grid core -> apps -->
+  <!-- grid core -> apps -->
   <g stroke="#6366f1" stroke-width="2.5" opacity="0.85" fill="none">
-    <line x1="670" y1="314" x2="1010" y2="210" marker-end="url(#arrIndigo)"/>
-    <line x1="670" y1="360" x2="1060" y2="360" marker-end="url(#arrIndigo)"/>
-    <line x1="670" y1="406" x2="1010" y2="510" marker-end="url(#arrIndigo)"/>
+    <line x1="720" y1="366" x2="818" y2="196" marker-end="url(#arrIndigo)"/>
+    <line x1="720" y1="366" x2="818" y2="356" marker-end="url(#arrIndigo)"/>
+    <line x1="720" y1="366" x2="818" y2="516" marker-end="url(#arrIndigo)"/>
   </g>
 
-  <!-- grid core -->
-  <ellipse cx="590" cy="360" rx="120" ry="120" fill="#10b981" opacity="0.16" filter="url(#glow)"/>
-  <polygon points="590,452 510,406 510,314 590,268 670,314 670,406" fill="#10b981" stroke="#34d399" stroke-width="1.5" filter="url(#sh)"/>
-  <polygon points="595,292 580,316 591,316 585,338 603,310 593,310" fill="#bbf7d0"/>
-  <text x="590" y="356" text-anchor="middle" fill="#bbf7d0" font-size="11" letter-spacing="2.5" font-weight="700">THE GRID</text>
-  <rect x="528" y="364" width="124" height="22" rx="11" fill="#052e2a"/>
-  <text x="590" y="379" text-anchor="middle" fill="#5eead4" font-size="11" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">home:8090/v1</text>
-  <text x="590" y="403" text-anchor="middle" fill="#ecfdf5" font-size="11">routes by model · /v1/chat + /v1/media</text>
+  <!-- ===== engine cards (matrix) ===== -->
+  <g font-size="11.5">
+    <g filter="url(#sh)"><rect x="40" y="168" width="196" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="56" y="194" fill="#ffffff" font-size="15" font-weight="700">Studio</text>
+    <text x="56" y="216"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">MLX</tspan></text>
+    <text x="56" y="236"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">Mac Studio</tspan></text>
+    <text x="56" y="256"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">512 GB</tspan></text>
 
-  <!-- engine nodes: hardware (top) + engine (bottom) -->
-  <g>
-    <g filter="url(#sh)"><rect x="76" y="112" width="168" height="56" rx="12" fill="#3f95d4"/></g>
-    <line x1="90" y1="140" x2="230" y2="140" stroke="#ffffff" stroke-opacity="0.22"/>
-    <text x="160" y="133" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">Mac Studio</text>
-    <text x="160" y="158" text-anchor="middle" fill="#dbeafe" font-size="11.5">MLX</text>
+    <g filter="url(#sh)"><rect x="282" y="168" width="196" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="298" y="194" fill="#ffffff" font-size="15" font-weight="700">Desk mini</text>
+    <text x="298" y="216"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">Ollama</tspan></text>
+    <text x="298" y="236"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">Mac mini</tspan></text>
+    <text x="298" y="256"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">64 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="256" y="147" width="168" height="56" rx="12" fill="#3f95d4"/></g>
-    <line x1="270" y1="175" x2="410" y2="175" stroke="#ffffff" stroke-opacity="0.22"/>
-    <text x="340" y="168" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">Mac mini</text>
-    <text x="340" y="193" text-anchor="middle" fill="#dbeafe" font-size="11.5">Ollama</text>
+    <g filter="url(#sh)"><rect x="524" y="168" width="196" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="540" y="194" fill="#ffffff" font-size="15" font-weight="700">Basement rig</text>
+    <text x="540" y="216"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">vLLM</tspan></text>
+    <text x="540" y="236"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 3090</tspan></text>
+    <text x="540" y="256"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">24 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="21" y="272" width="168" height="56" rx="12" fill="#3f95d4"/></g>
-    <line x1="35" y1="300" x2="175" y2="300" stroke="#ffffff" stroke-opacity="0.22"/>
-    <text x="105" y="293" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">RTX 3090</text>
-    <text x="105" y="318" text-anchor="middle" fill="#dbeafe" font-size="11.5">vLLM</text>
+    <g filter="url(#sh)"><rect x="40" y="318" width="196" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="56" y="344" fill="#ffffff" font-size="15" font-weight="700">Game PC</text>
+    <text x="56" y="366"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">llama.cpp</tspan></text>
+    <text x="56" y="386"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 4090</tspan></text>
+    <text x="56" y="406"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">24 GB</tspan></text>
 
-    <g filter="url(#sh)"><rect x="91" y="432" width="168" height="56" rx="12" fill="#3f95d4"/></g>
-    <line x1="105" y1="460" x2="245" y2="460" stroke="#ffffff" stroke-opacity="0.22"/>
-    <text x="175" y="453" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">RTX 4090</text>
-    <text x="175" y="478" text-anchor="middle" fill="#dbeafe" font-size="11.5">llama.cpp</text>
-
-    <g filter="url(#sh)"><rect x="256" y="512" width="168" height="56" rx="12" fill="#3f95d4"/></g>
-    <line x1="270" y1="540" x2="410" y2="540" stroke="#ffffff" stroke-opacity="0.22"/>
-    <text x="340" y="533" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">RTX 5090</text>
-    <text x="340" y="558" text-anchor="middle" fill="#dbeafe" font-size="11.5">ComfyUI · image · video</text>
+    <g filter="url(#sh)"><rect x="282" y="318" width="196" height="96" rx="13" fill="#3f95d4"/></g>
+    <text x="298" y="344" fill="#ffffff" font-size="15" font-weight="700">Render box</text>
+    <text x="298" y="366"><tspan fill="#a9cde8">framework: </tspan><tspan fill="#ffffff">ComfyUI</tspan></text>
+    <text x="298" y="386"><tspan fill="#a9cde8">hardware: </tspan><tspan fill="#ffffff">RTX 5090</tspan></text>
+    <text x="298" y="406"><tspan fill="#a9cde8">VRAM: </tspan><tspan fill="#ffffff">32 GB</tspan></text>
   </g>
+
+  <!-- grid core node (sits in the matrix) -->
+  <ellipse cx="622" cy="366" rx="110" ry="66" fill="#10b981" opacity="0.18" filter="url(#glow)"/>
+  <g filter="url(#sh)"><rect x="524" y="318" width="196" height="96" rx="13" fill="#10b981" stroke="#34d399" stroke-width="1.5"/></g>
+  <polygon points="608,336 599,350 607,350 602,364 616,347 608,347" fill="#bbf7d0"/>
+  <text x="640" y="352" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="700">THE GRID</text>
+  <text x="622" y="378" text-anchor="middle" fill="#d1fae5" font-size="11.5" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">home:8090/v1</text>
+  <text x="622" y="398" text-anchor="middle" fill="#a7f3d0" font-size="11">routes by model</text>
 
   <!-- app nodes -->
   <g>
-    <g filter="url(#sh)"><rect x="926" y="182" width="168" height="56" rx="12" fill="#6366f1"/></g>
-    <text x="1010" y="205" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">OpenClaw</text>
-    <text x="1010" y="225" text-anchor="middle" fill="#e0e7ff" font-size="11.5">agent runtime</text>
+    <g filter="url(#sh)"><rect x="820" y="164" width="180" height="64" rx="13" fill="#6366f1"/></g>
+    <text x="910" y="191" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">OpenClaw</text>
+    <text x="910" y="211" text-anchor="middle" fill="#e0e7ff" font-size="11.5">agent runtime</text>
 
-    <g filter="url(#sh)"><rect x="976" y="332" width="168" height="56" rx="12" fill="#6366f1"/></g>
-    <text x="1060" y="355" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">Hermes</text>
-    <text x="1060" y="375" text-anchor="middle" fill="#e0e7ff" font-size="11.5">OpenAI client</text>
+    <g filter="url(#sh)"><rect x="820" y="324" width="180" height="64" rx="13" fill="#6366f1"/></g>
+    <text x="910" y="351" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">Hermes</text>
+    <text x="910" y="371" text-anchor="middle" fill="#e0e7ff" font-size="11.5">OpenAI client</text>
 
-    <g filter="url(#sh)"><rect x="926" y="482" width="168" height="56" rx="12" fill="#6366f1"/></g>
-    <text x="1010" y="505" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">your own app</text>
-    <text x="1010" y="525" text-anchor="middle" fill="#e0e7ff" font-size="11.5">any OpenAI SDK</text>
+    <g filter="url(#sh)"><rect x="820" y="484" width="180" height="64" rx="13" fill="#6366f1"/></g>
+    <text x="910" y="511" text-anchor="middle" fill="#ffffff" font-size="14.5" font-weight="700">your own app</text>
+    <text x="910" y="531" text-anchor="middle" fill="#e0e7ff" font-size="11.5">any OpenAI SDK</text>
   </g>
 </svg>
