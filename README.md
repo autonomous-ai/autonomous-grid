@@ -5,66 +5,162 @@
 ### The orchestration layer for local AI.
 
 Grid unifies the inference engines you already run — **Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI** —
-behind **one OpenAI-compatible endpoint** on your LAN.
+behind **one OpenAI-compatible endpoint**. Run it as an unauthenticated proxy on your **LAN**, or sign in
+and reach your engines over the internet through autonomous's hosted **relay** — same commands, two modes.
 
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-[**Quickstart**](#quickstart) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [Two modes](#two-modes) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 <img src="docs/home-grid.png" alt="Your Home Grid sits above your engines — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever machine serves the model" width="860">
 
 </div>
 
+## Two modes
+
+Grid runs in one of two **modes**, and the same verbs (`up`, `join`, `chat`, `info`) work in both:
+
+| | **`lan`** _(default)_ | **`cloud`** |
+|---|---|---|
+| What it is | Unauthenticated, LAN-only proxy | Signed-in thin client to autonomous's hosted relay |
+| Reach | Same network only | Over the internet |
+| Sign-in | None | `grid login` (your account) |
+| API key | `local-grid` placeholder — auth is off | Your per-grid access token |
+| How requests flow | Grid forwards straight to your engines | Engines poll the relay for work; apps consume through it |
+
+The chosen mode is persisted to **`~/.grid/state.json`**, and each mode remembers its own active grid there.
+Switch any time with `grid mode lan|cloud`, or override a single command with `--lan` / `--cloud`. A machine
+with no state file behaves exactly as a `lan`-only install.
+
 ## Quickstart
 
-Turn the machines you already own into one AI endpoint — in four steps.
+**Install** — on each machine (macOS / Linux):
 
-> Install on each machine: Python 3.11+ and [uv](https://docs.astral.sh/uv/), then `uv tool install -e . --force`.
+```bash
+curl -fsSL https://grid.autonomous.ai/install.sh | bash
+```
 
-**1 · Create your grid** — on any one machine:
+You get `grid` (and the `agrid` alias) on your PATH — a self-contained binary on Linux, or a
+[uv](https://docs.astral.sh/uv/)-managed install on macOS. Pin a release with `GRID_VERSION=0.1.0`.
+Contributors can instead clone and `uv tool install -e . --force`.
 
+Every step below gives the **☁️ Cloud** command and the **🏠 LAN** command.
+
+### 1 · Choose your mode
+
+`grid mode` writes your choice to `~/.grid/state.json` and keeps it until you switch again — so the rest of
+your commands target the same mode without repeating yourself.
+
+**☁️ Cloud**
+```bash
+grid mode cloud
+# cloud
+# Cloud mode: `grid login` to sign in, then `grid up` to bring a cloud grid online …
+```
+
+**🏠 LAN** — the default; a fresh install is already here.
+```bash
+grid mode lan
+# lan
+```
+
+### 2 · Sign in
+
+**☁️ Cloud** — sign in once with the device-code flow (opens a browser; `--no-browser` prints the code for headless boxes):
+```bash
+grid login
+# To sign in, open this URL and approve with Google:
+#   https://grid.autonomous.ai/login?user_code=ABCD-1234
+#   Code: ABCD-1234
+# Signed in as you@example.com. 2 grid(s) available: research, team.
+# Run `grid use <name>` to pick one.
+```
+
+**🏠 LAN** — _nothing to do._ The LAN proxy is unauthenticated, so there is no sign-in — skip to step 3.
+
+### 3 · Bring a grid online
+
+**☁️ Cloud** — create (or start) a hosted grid, then make it your active one. Creating needs an explicit name:
+```bash
+grid up research --type permissioned-public   # --type is optional (this is the default)
+grid use research
+# grid=research
+# grid_url=https://grid.autonomous.ai/…        ← apps reach the grid here, with your token
+```
+`grid ls` lists the grids your sign-in can reach; `--type permissioned-providers` restricts who may serve to it.
+
+**🏠 LAN** — bring up the default `home` grid on this machine:
 ```bash
 grid up
 # grid=home
-# grid_url=http://192.168.1.25:8090      ← the one address everything uses
+# grid_url=http://192.168.1.25:8090            ← the one address engines + apps use
 ```
 
-**2 · Add your Mac** — point Grid at the MLX it's running, and name the box:
+### 4 · Add an engine
 
+Point Grid at an inference server you already run (here, a vLLM box serving `qwen3-coder`), and name the box.
+
+**☁️ Cloud** — serve your local engine to the cloud grid. The engine polls the relay outbound, so `--at` is its address **on this machine** (`localhost`) — no inbound port or public IP needed:
 ```bash
-grid join http://192.168.1.25:8090 --at http://192.168.1.10:8080/v1 -m gemma4-31b --name mac-studio
-# Joined engine mac-studio to http://192.168.1.25:8090
-# models=gemma4-31b
-```
-
-**3 · Add your NVIDIA box** — same, pointing at the vLLM it's running:
-
-```bash
-grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
-# Joined engine gpu-4090 to http://192.168.1.25:8090
+grid join research --at http://localhost:8000/v1 -m qwen3-coder --name gpu-4090
+# Joining engine gpu-4090 to research (pid=12345) — serving via the relay.
 # models=qwen3-coder
 ```
 
-Two machines, two frameworks — one endpoint now serves both:
-
+**🏠 LAN** — join it to the `grid_url` from step 3. Here `--at` is the engine's **LAN address** — the grid forwards requests to it, so it must be reachable on your network:
 ```bash
-grid models --verbose
-# MODEL        ENGINE      WHERE
-# gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
-# qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
+grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
+# Joined engine gpu-4090 to http://192.168.1.25:8090 (pid=12345)
+# models=qwen3-coder
 ```
 
-**4 · Point your apps at the grid.** Grab the endpoint, then wire up any OpenAI client:
+Add as many boxes as you like — repeat `grid join` for each MLX, vLLM, or Ollama you run.
 
+### 5 · Use a model
+
+The same `grid chat` works in both modes — a quick smoke test, and a handy daily command:
+
+**☁️ Cloud** — routed through the relay with your access token:
 ```bash
-grid info
-# grid_url         http://192.168.1.25:8090
-# openai_base_url  http://192.168.1.25:8090/v1
-# api key          local-grid     (any value works — auth is off on your LAN)
+grid chat -m qwen3-coder "write a haiku about local GPUs"
 ```
+
+**🏠 LAN** — routed straight through the local proxy:
+```bash
+grid chat -m qwen3-coder "write a haiku about local GPUs"
+```
+
+> **🏠 LAN tip:** see every model across every joined box with `grid models --verbose`:
+> ```text
+> MODEL        ENGINE      WHERE
+> qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
+> gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
+> ```
+> Two machines, two frameworks — one endpoint serves both. _(A CLI listing for cloud grids is on the way; for now your cloud grid's models show on its web page.)_
+
+### 6 · Point your apps at the grid
+
+`grid info --env` prints copy-pasteable `OPENAI_*` exports for whichever mode you're in:
+
+**☁️ Cloud** — the relay base URL and your real per-grid token (the grid must be up):
+```bash
+grid info --env
+# export OPENAI_BASE_URL="https://grid.autonomous.ai/relay/v1"
+# export OPENAI_API_KEY="<your access token>"
+```
+
+**🏠 LAN** — the local endpoint and a placeholder key (auth is off on your LAN):
+```bash
+grid info --env
+# export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
+# export OPENAI_API_KEY="local-grid"
+```
+
+Wire those two values — `OPENAI_BASE_URL` and `OPENAI_API_KEY` — into any OpenAI-compatible client.
+The examples below use the LAN values; cloud users paste their relay URL and token instead.
 
 **OpenClaw** — add Grid as a provider in `~/.openclaw/openclaw.json` ([docs](https://docs.openclaw.ai/concepts/model-providers)):
 
@@ -94,10 +190,10 @@ model:
 ```
 
 ```bash
-echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env     # any value; Grid ignores it
+echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env     # cloud: use your access token
 ```
 
-**Your own app** — point any OpenAI SDK at the grid:
+**Your own app** — point any OpenAI SDK at the values from `grid info --env`:
 
 ```python
 from openai import OpenAI
@@ -109,18 +205,26 @@ client.chat.completions.create(
 )
 ```
 
-**That's it — your home grid is live.** Every model on every machine answers at one endpoint. Add another box anytime with `grid join`.
+**That's it.** Every model on every machine answers at one endpoint — on your LAN, or over the internet. Add another box anytime with `grid join`.
 
 ### No engine on a box yet?
 
-Grid installs and joins a built-in engine for you — `llama.cpp` for text, ComfyUI for media:
+Grid installs and joins a built-in engine for you — `llama.cpp` for text, ComfyUI for media. `grid engine install`
+and `grid pull` work the same in both modes; only the grid you join differs (a cloud grid **name**, or a LAN
+**`grid_url`**).
 
 ```bash
-grid engine install llama.cpp           # text engine
+grid engine install llama.cpp           # text engine (both modes)
 grid pull qwen36-35b-a3b-mtp            # see `grid catalog`, or any HF GGUF
-grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp   # your grid_url from step 1
 
-grid engine install comfyui             # media engine (images + video)
+grid join research --serve qwen36-35b-a3b-mtp                    # ☁️ cloud: your grid name
+grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp   # 🏠 lan: your grid_url
+```
+
+Media serving (ComfyUI images + video) is **LAN-only** today:
+
+```bash
+grid engine install comfyui             # media engine
 grid engine pull image_generation       # also: image_editing, i2v
 grid join http://192.168.1.25:8090 --media --bundle image_generation
 grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090
@@ -132,11 +236,16 @@ Grid sits **above** your engines — like an API gateway above your services, or
 your network. Your machines are the inference engines, your grid is the one address everything
 talks through, and your apps draw from it.
 
-- **the grid** — one private endpoint that routes each request to a machine serving that model. Create it with `grid up`.
-- **engines** — the tools you already run. `grid join <grid-url>` advertises a machine's engines and heartbeats them; Grid never restarts or replaces them.
+- **the grid** — one endpoint that routes each request to a machine serving that model. On your **LAN** it's a
+  local proxy you create with `grid up`; in **cloud** it's a hosted grid on autonomous's relay you bring up the
+  same way after `grid login`.
+- **engines** — the tools you already run. `grid join` advertises a machine's engines and heartbeats them; Grid
+  never restarts or replaces them. On LAN they register directly with the grid; in cloud they poll the relay
+  outbound for work, so they serve from behind a NAT with no inbound port.
 - **apps** — anything that speaks the OpenAI API. Text on `/v1/chat`, images and video on `/v1/media`.
 
-Full request flow in **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**; the complete command surface in **[docs/cli.md](docs/cli.md)**.
+Full request flow in **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**; the complete command surface — including
+membership (`grid members`) and cloud grid types — in **[docs/cli.md](docs/cli.md)**.
 
 ## Contributing
 
@@ -149,8 +258,8 @@ uv sync --extra dev
 uv run --extra dev pytest
 ```
 
-Good first PRs: add a model to the catalog (`models/catalog.py`) or a media bundle
-(`models/media_bundles.py`). Start with **[CONTRIBUTING.md](docs/CONTRIBUTING.md)** and
+Good first PRs: add a model to the catalog (`shared/models/catalog.py`) or a media bundle
+(`shared/models/media_bundles.py`). Start with **[CONTRIBUTING.md](docs/CONTRIBUTING.md)** and
 **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 Local state lives under `~/.grid` (override with `GRID_HOME`).

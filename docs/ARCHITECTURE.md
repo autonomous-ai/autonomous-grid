@@ -1,84 +1,109 @@
 # Architecture
 
-Grid turns the AI engines already running on your LAN into a single
-OpenAI-compatible endpoint. This document explains the moving parts and traces a
-request through the code so you can find where to make a change.
+Grid turns the AI engines you already run into a single OpenAI-compatible endpoint. It works
+in two **modes** that share a vocabulary and an engine/model/media layer but route requests
+differently:
 
-> **Vocabulary.** The product words are **grid**, **engine**, and **app** (see
-> [cli.md](cli.md)). The code uses the same words; the only older nouns that
-> survive are `node` (a registry entry) inside `server.py`, and the `provider/` package
-> name — both predate the rename and are called out below.
+- **`lan`** (default) — an in-memory proxy on your local network. Engines push their endpoint
+  to a grid; the grid **forwards** each request straight to the matching engine.
+- **`cloud`** — a signed-in thin client to autonomous's hosted relay. Engines **poll** the
+  relay for work over the internet; apps consume through the relay with a per-grid token.
 
-## The three roles
+This document explains the moving parts and traces a request through the code in each mode so
+you can find where to make a change.
 
-Everything is one CLI (`grid`); a machine plays one or more roles:
+> **Vocabulary.** The product words are **grid** / **cloud grid**, **engine**, and **app**
+> (see [cli.md](cli.md)). The code uses the same words;
+> the only older noun that survives near the surface is `node` (a registry entry / relay
+> `node_id`). Internal API ids — the `managed-networks` control-plane path, `signaling_url` for
+> the relay base — are code-level, never product terms.
+
+## The two modes and three roles
+
+Everything is one CLI (`grid`); a machine plays one or more roles. The roles are the same in
+both modes — only the wire between **grid** and **engine** changes:
 
 | Role | Brought up by | What it is |
 | --- | --- | --- |
-| **grid** | `grid up` | The grid server: an OpenAI-compatible proxy plus an in-memory registry of engines. Routes every `/v1` request to an engine. |
-| **engine** | `grid join` | Something that runs models (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI). Registers into a grid and heartbeats it. |
-| **app** | any OpenAI SDK | Points at the grid's `/v1` base URL (`grid info --env`). |
+| **grid** | `grid up` | The endpoint apps point at. In `lan`, the grid server: an OpenAI-compatible proxy + in-memory registry running on your box. In `cloud`, a **cloud grid** hosted on autonomous's relay. |
+| **engine** | `grid join` | Something that runs models (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI). In `lan` it registers into the grid and is forwarded requests; in `cloud` it polls the relay for work. |
+| **app** | any OpenAI SDK | Points at the grid's `/v1` base URL (`grid info --env`). In `cloud` the base is the relay and the key is a per-grid access token. |
 
-A grid is the only long-lived shared state, and it is deliberately tiny: a dict of
-nodes in memory, no database, no auth, LAN-only.
+In **`lan`** the grid is the only long-lived shared state and it is deliberately tiny: a dict
+of nodes in memory, no database, no auth, on the LAN only. In **`cloud`** the long-lived state
+(grids, membership, queued work) lives on autonomous's hosted relay; this repo is only the thin
+client — the engine that serves a grid and the app that consumes it, plus local sign-in
+credentials.
 
 ## Component map
 
+The code is four top-level packages with the mode boundary enforced by folders: `cli/` (the
+command surface), `shared/` (used by both modes), `lan/` (LAN mode), and `cloud/` (cloud mode).
+`lan/` and `cloud/` import `shared/`, never each other.
+
 ```
 .   (repo root)
-├── cli/                The CLI, split by command group. `parser.py` builds the tree
-│                       (mirrors docs/cli.md); `_main.py` is the entry point + internal
-│                       subcommand dispatch. Handlers live in:
-│   ├── grid.py           `grid up` / `down` / `ls` / `info` / `version` / overview
-│   ├── provider.py       `grid join` / `leave` / `engines` / `models` — the engine
-│   │                     lifecycle (file name predates the rename)
-│   ├── engine.py         `grid engine install|pull|status|start|stop` (built-in engines)
-│   ├── models.py         `grid catalog` / `pull` / `rm`
-│   └── request.py        `grid chat` / `image` / `edit` / `video`
-├── server.py           The grid server / OpenAI-compatible proxy (FastAPI `create_app`).
-├── runtime.py          grid_url + engine endpoint URL resolution; grid server lifecycle.
-├── config.py           Saved grids under ~/.grid/grids/; `select_grid`.
-├── paths.py            ~/.grid filesystem layout.
-├── media_runtime.py    Starts/stops the engine-local media server subprocess.
-├── provider/           The engine-side media server (package name predates the rename).
-│   ├── media_server.py   FastAPI app exposing /media/* (create_app).
-│   ├── media_handler.py  Drives ComfyUI: submit workflow, track progress, collect outputs.
-│   ├── media_gating.py   Decides which media bundles a host can advertise (by VRAM).
-│   └── workflows/*.json  ComfyUI prompt graphs (image gen / edit / i2v).
-├── models/
-│   ├── catalog.py        Platform-aware model catalog (`grid catalog`).
-│   ├── store.py          Local GGUF model files under ~/.grid/models.
-│   ├── download.py       Hugging Face downloads.
-│   └── media_bundles.py  ComfyUI model bundles + advertised capability names.
-├── engine/
-│   ├── installer.py      Install/upgrade llama.cpp.
-│   ├── launcher.py       Start/stop a local llama-server.
-│   └── comfyui.py        ComfyUI install + lifecycle.
-└── system/
-    ├── detect.py         Detect engines already running on this box (`grid join`).
-    ├── host.py           Host metrics.
-    └── gpu.py            NVIDIA GPU discovery via nvidia-smi.
+├── cli/                The command surface, split by group. `parser.py` builds the tree
+│   │                   (mirrors docs/cli.md); `_main.py` is the entry point + internal
+│   │                   subcommand dispatch; `dispatch.py` resolves the mode and routes.
+│   ├── parser.py         Argparse tree for every command + flag.
+│   ├── _main.py          Entry point; `_maybe_internal` dispatches the hidden `__*` children.
+│   ├── dispatch.py       Mode resolution + routing (AGNOSTIC / GATED / CLOUD_HANDLERS / CLOUD_ONLY).
+│   ├── mode.py           `grid mode` / `grid use` (mode + active-grid selection).
+│   ├── grid.py           `grid up` / `down` / `ls` / `info` / `version` / overview (LAN).
+│   ├── provider.py       `grid join` / `leave` / `engines` / `models` — LAN engine lifecycle
+│   │                     (file name predates the rename).
+│   ├── request.py        `grid chat` / `image` / `edit` / `video` (LAN).
+│   ├── engine.py         `grid engine install|pull|status|start|stop` (built-in engines).
+│   ├── models.py         `grid catalog` / `pull` / `rm`.
+│   ├── auth.py           `grid login` / `logout` (cloud sign-in).
+│   ├── cloud_grid.py     Cloud `up` / `down` / `ls` / `info` + `members`.
+│   ├── cloud_provider.py Cloud `join` / `leave` (serve a cloud grid).
+│   ├── cloud_request.py  Cloud `chat` / `image` / `edit` / `video` (consume via relay).
+│   └── media_io.py       Shared media SSE/file IO used by LAN + cloud request handlers.
+├── shared/             Used by both modes.
+│   ├── state.py          Persisted mode pointer + per-mode active grid (~/.grid/state.json).
+│   ├── paths.py          ~/.grid filesystem layout.
+│   ├── run_records.py    Detached-engine run record + `grid leave` teardown (LAN + cloud).
+│   ├── jsonio.py         Atomic JSON read/write helpers.
+│   ├── engine/           Install/launch llama.cpp + ComfyUI lifecycle.
+│   ├── models/           Catalog, local GGUF store, downloads, media bundles.
+│   ├── media/            ComfyUI-driving media handler + workflow JSON (vendored).
+│   └── system/           Detect running engines, host metrics, GPU discovery.
+├── lan/                LAN mode.
+│   ├── server.py         The grid server / OpenAI-compatible proxy (FastAPI `create_app`).
+│   ├── runtime.py        grid_url + endpoint resolution; grid server lifecycle.
+│   ├── config.py         Saved grids under ~/.grid/grids/; `select_grid`.
+│   ├── media_server.py   The engine-side media API (FastAPI, exposes /media/*).
+│   └── media_runtime.py  Starts/stops the engine-local media server subprocess.
+└── cloud/              Cloud mode (thin client).
+    ├── control_plane.py  Auth / device-code login / tokens / managed-networks HTTP.
+    ├── credentials.py    The 0o600 token store (~/.grid/credentials.toml).
+    ├── relay.py          Relay HTTP wire: provider poll/heartbeat + consumer client/headers.
+    ├── serve.py          The detached poll → forward → submit serve loop.
+    └── probe.py          Capability probe + benchmark for what the relay needs to register.
 ```
 
-## The registry
+## LAN mode
 
-The grid server holds `app.state.nodes`, a `{node_id: Node}` dict (`server.py`). A `Node`
-records its `role` (`"engine"` / `"app"` / `"both"`), advertised `models`, an
-`endpoint_url` (text) and/or `media_url` (media), plus `load` and `last_heartbeat`. Key
-constants:
+### The registry
 
-- `NODE_TTL_SECONDS = 60` — an engine that hasn't heartbeat in 60s is dropped lazily
-  the next time the registry is read.
+The grid server holds `app.state.nodes`, a `{node_id: Node}` dict (`lan/server.py`). A `Node`
+records its `role` (`"engine"` / `"app"` / `"both"`), advertised `models`, an `endpoint_url`
+(text) and/or `media_url` (media), plus `load` and `last_heartbeat`. Key constants:
+
+- `NODE_TTL_SECONDS = 60` — an engine that hasn't heartbeat in 60s is dropped lazily the next
+  time the registry is read.
 - `ENGINE_TIMEOUT_SECONDS = 600` — how long the proxy waits on an upstream engine.
 
 Engine selection is **load-aware**: `_active_engines(model)` filters to fresh engines
 advertising the model and sorts by `active_tasks` (then heartbeat recency);
 `_choose_engine(model)` takes the least-loaded one.
 
-## Request flow — text (`/v1/chat/completions`)
+### Request flow — text (`/v1/chat/completions`)
 
 ```
-app ──POST /v1/chat/completions {"model":"llama3",...}──▶ grid server (server.py)
+app ──POST /v1/chat/completions {"model":"llama3",...}──▶ grid server (lan/server.py)
                                                              │
                                   _proxy_openai: read body["model"]
                                   _choose_engine("llama3")  ── least-loaded match
@@ -90,63 +115,116 @@ app ──POST /v1/chat/completions {"model":"llama3",...}──▶ grid server 
                      stream response ◀──────────────────────┘
 ```
 
-1. `server.py:_proxy_openai` parses the JSON body and reads `model`.
+1. `lan/server.py:_proxy_openai` parses the JSON body and reads `model`.
 2. `_choose_engine` picks an active engine advertising that model.
-3. The **raw request body is forwarded unchanged** to `{endpoint_url}/chat/completions`
-   — so the advertised model name must be one the upstream engine recognizes. If
-   `stream: true`, the response is proxied chunk-by-chunk (SSE passthrough); otherwise
-   it's returned whole.
-4. The upstream is whatever the engine registered: one you already run, or a
-   `llama-server` Grid launched for you (`grid join --serve`).
+3. The **raw request body is forwarded unchanged** to `{endpoint_url}/chat/completions` — so
+   the advertised model name must be one the upstream engine recognizes. If `stream: true`, the
+   response is proxied chunk-by-chunk (SSE passthrough); otherwise it's returned whole.
+4. The upstream is whatever the engine registered: one you already run, or a `llama-server`
+   Grid launched for you (`grid join --serve`).
 
-`/v1/completions` follows the identical path; `/v1/models` returns the de-duplicated
-union of every active engine's models. `/nodes/discover` returns the live engines as
-`{"engines": [...]}`, which `grid engines` / `grid models` render.
+`/v1/completions` follows the identical path; `/v1/models` returns the de-duplicated union of
+every active engine's models. `/nodes/discover` returns the live engines as `{"engines": [...]}`,
+which `grid engines` / `grid models` render.
 
-## Request flow — media (`/v1/media/*`)
+### Request flow — media (`/v1/media/*`)
 
 Media uses fixed model names (`comfyui:image_generation`, `comfyui:image_editing`,
 `comfyui:i2v`) instead of a body `model` field.
 
-1. `server.py:_proxy_media` maps the route to its `comfyui:*` model and
-   `_choose_engine` finds an engine advertising it.
-2. The body is forwarded to `{engine.media_url}/media/...` and the SSE stream
-   (progress events, then a result event with base64 `output_files`) is proxied back.
-3. On the engine, `provider/media_server.py` hands the request to
-   `provider/media_handler.py`, which loads a workflow from `provider/workflows/`,
-   submits it to ComfyUI, tracks progress over WebSocket (HTTP polling fallback), and
-   collects the output files.
+1. `lan/server.py:_proxy_media` maps the route to its `comfyui:*` model and `_choose_engine`
+   finds an engine advertising it.
+2. The body is forwarded to `{engine.media_url}/media/...` and the SSE stream (progress events,
+   then a result event with base64 `output_files`) is proxied back.
+3. On the engine, `lan/media_server.py` hands the request to `shared/media/media_handler.py`,
+   which loads a workflow from `shared/media/workflows/`, submits it to ComfyUI, tracks progress
+   over WebSocket (HTTP polling fallback), and collects the output files.
 
-## Engine lifecycle (`grid join`)
+### Engine lifecycle (`grid join`)
 
 `cli/provider.py:cmd_join`:
 
-1. Resolve what to join — an existing endpoint (`--at <url>` + `-m <model>`), the
-   built-in engine (`--serve <model>`), media (`--media`), or auto-detect with
-   `system/detect.py`.
-2. Write an engine record under `~/.grid/run/engines/<grid>/` (`paths.engines_dir`) and
-   spawn a **detached** `__engine <grid_id> <engine_id>` subprocess for the heartbeat loop.
-3. That subprocess (`run_engine_from_record` → `_run_engine`): optionally launch a local
-   `llama-server` (`engine/launcher.py`) and/or the media server (`media_runtime.py`),
-   then `PUT /nodes/{id}` with the advertised models, `endpoint_url`, and `media_url`, and
-   heartbeat every `--heartbeat-interval` seconds (role `"engine"`).
-4. `grid leave` SIGTERMs the detached process, which unregisters (`DELETE /nodes/{id}`)
-   and stops anything it started.
+1. Resolve what to join — an existing endpoint (`--at <url>` + `-m <model>`), the built-in
+   engine (`--serve <model>`), media (`--media`), or auto-detect with `shared/system/detect.py`.
+2. Write an engine record under `~/.grid/run/engines/<grid>/` (`shared/run_records.py`) and spawn
+   a **detached** `__engine <grid_id> <engine_id>` subprocess for the heartbeat loop.
+3. That subprocess (`cli/provider.py:run_engine_from_record` → `_run_engine`): optionally launch
+   a local `llama-server` (`shared/engine/launcher.py`) and/or the media server
+   (`lan/media_runtime.py`), then `PUT /nodes/{id}` with the advertised models, `endpoint_url`,
+   and `media_url`, and heartbeat every `--heartbeat-interval` seconds (role `"engine"`).
+4. `grid leave` SIGTERMs the detached process, which unregisters (`DELETE /nodes/{id}`) and stops
+   anything it started.
+
+## Cloud mode
+
+A cloud grid is hosted on autonomous's relay; this repo only runs the engine that serves it and
+the app that consumes it. Both authenticate every relay call with the grid's per-grid **access
+token** (Bearer). The relay base URL (`signaling_url` internally) is **resolved live** from the
+grid's status each time — it is never persisted at sign-in (ADR 0003 / ADR 0005).
+
+### Request flow — consume (`grid chat` / `image` / `edit` / `video`)
+
+```
+app (grid chat) ──POST /relay/v1/chat/completions (Bearer token)──▶ hosted relay
+                                                                       │ enqueue job
+engine ──GET /relay/v1/poll (long-poll)──▶ claims job ◀────────────────┘
+   │ forward body to local engine, read its reply
+   └──POST /relay/v1/response/{txn}──▶ relay ──result──▶ app (grid chat)
+```
+
+1. `cli/cloud_request.py:_resolve` gates in order — signed in → a grid resolves → it has an
+   access token → it is up — and reads the relay base from the grid's live `…/status`.
+2. The handler POSTs to `{relay}/relay/v1/chat/completions` (media → `/relay/v1/media/*`,
+   consumed as an SSE stream) with the Bearer token and the optional cloud-only routing headers
+   (`--target-provider` → `X-Target-Provider`, `--allow-self-provider` → `X-Allow-Self-Provider`).
+3. The relay queues the job for a serving engine and returns the engine's result to the app
+   (whole for chat, streamed SSE for media). A 401 is a clean "run `grid login`" — the one-shot
+   consume path does not refresh the token. See [ADR 0005](adr/0005-cloud-consume.md).
+
+### Engine lifecycle (`grid join` in cloud)
+
+`cli/cloud_provider.py:cmd_cloud_join` writes the same kind of engine record (shared
+`shared/run_records.py`) and spawns a detached `__cloud-engine <network_id> <engine_id>` instead
+of `__engine`. That subprocess (`cloud/serve.py:run_cloud_engine_from_record`):
+
+1. Brings the engine(s) up through the **same shared layer** as LAN, and probes capabilities
+   (`cloud/probe.py`) into the envelope the relay requires.
+2. Registers with the relay (`PUT /nodes/{node_id}` via `cloud/relay.py`), then loops
+   **poll → forward → submit**: long-poll `GET /relay/v1/poll`, forward each claimed job to the
+   local engine, and post the result back (`POST /relay/v1/response/{txn}`, or `/error/{txn}`).
+3. A heartbeat thread keeps the node live (`POST /nodes/heartbeat`); a 401 on any call refreshes
+   the per-grid token (`control_plane.refresh_network_token`) and retries.
+4. `grid join --all` serves several local engines under **one** identity: it registers the union
+   of their models and routes each polled job to the engine serving the requested `body["model"]`
+   (first-detected wins on a duplicate). See [ADR 0007](adr/0007-cloud-multi-engine-routing.md).
+5. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
+   drains queued work, and stops anything it launched. See
+   [ADR 0004](adr/0004-cloud-provider-serve.md).
 
 ## Internal subcommands
 
-`grid up` and `grid join` spawn detached children via hidden CLI subcommands:
-`__server <grid_id>` (the grid server), `__engine <grid_id> <engine_id>` (an engine's
-heartbeat loop), and `__media-server` (the engine-side media API). These are process
-plumbing, not part of the user-facing surface.
+`grid up` and `grid join` spawn detached children via hidden CLI subcommands (dispatched in
+`cli/_main.py:_maybe_internal`) — process plumbing, not part of the user-facing surface:
+
+- `__server <grid_id>` — the LAN grid server (`lan/server.py`).
+- `__engine <grid_id> <engine_id>` — a LAN engine's heartbeat loop (`cli/provider.py`).
+- `__cloud-engine <network_id> <engine_id>` — a cloud engine's serve loop (`cloud/serve.py`).
+- `__media-server` — the engine-side media API (`lan/media_server.py`).
+
+`grid leave` SIGTERMs the engine child (`__engine` in LAN, `__cloud-engine` in cloud); the engine
+record and teardown are shared (`shared/run_records.py`).
 
 ## Design constraints worth knowing
 
-- **LAN-only, unauthenticated.** The server ignores auth headers and binds the LAN; the
-  `OPENAI_API_KEY` apps set is only for SDK compatibility. Don't add features that assume
-  an authenticated, internet-facing deployment.
-- **Stateless registry.** Node state is in memory and TTL-expired; restarting a grid
+- **LAN mode is LAN-only and unauthenticated.** The grid server ignores auth headers and binds
+  the LAN; the `OPENAI_API_KEY` apps set is only for SDK compatibility. Don't add features that
+  assume an authenticated, internet-facing deployment *to LAN mode*.
+- **LAN registry is stateless.** Node state is in memory and TTL-expired; restarting a grid
   forgets its engines (they re-register on their next heartbeat cycle).
-- **Vendored media stack.** Parts of `provider/` and `engine/` are vendored from an
-  upstream desktop app and annotated as such in their docstrings; keep vendored edits
-  bracketed and minimal so they're easy to re-sync.
+- **Cloud mode is a thin client.** It authenticates (per-grid access tokens, refreshed on 401)
+  and makes off-LAN calls to the relay, but the hosted backend — the relay service, its Postgres,
+  billing — and heavy server dependencies stay out of this repo (DECISIONS D1, D14). Cloud admin
+  here is allowlist-only (`grid members`); richer management lives on the website (D13).
+- **Vendored media stack.** Parts of `shared/media/` and `shared/engine/` are vendored from an
+  upstream desktop app and annotated as such in their docstrings; keep vendored edits bracketed
+  and minimal so they're easy to re-sync.

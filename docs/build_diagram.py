@@ -4,7 +4,10 @@ Processes the OpenClaw + Hermes logos (transparent bg, trimmed, downscaled),
 inlines them as <image> into docs/home-grid.svg, and writes build/render.html
 for headless Chrome to screenshot.
 """
-import base64, io, os
+import base64
+import io
+import os
+
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))   # docs/

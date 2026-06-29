@@ -5,4 +5,14 @@ __pycache__/
 *.egg-info/
 .coverage
 build/
+.DS_Store
 
+.agents/
+.claude/
+skills-lock.json
+.venv-macos-build/
+.venv-build/
+dist/
+.codegraph/
+.scratch/
+docs/agents/

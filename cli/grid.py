@@ -7,9 +7,10 @@ from typing import Any
 
 import httpx
 
-import config
-import runtime
-from _version import __version__
+from lan import config
+from lan import runtime
+from shared import state
+from shared._version import __version__
 
 
 def cmd_version(args: argparse.Namespace) -> int:
@@ -98,8 +99,36 @@ def cmd_info(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_overview(args: argparse.Namespace) -> int:
+    # Mode is stamped by dispatch; fall back to the persisted mode for direct calls.
+    mode = getattr(args, "mode", None) or state.get_mode()
+    as_json = getattr(args, "json", False)
+    if mode == "cloud":
+        return _overview_cloud(as_json)
+    return _overview_lan(as_json)
+
+
+def _overview_cloud(as_json: bool) -> int:
+    active = state.get_active("cloud")
+    if as_json:
+        print(json.dumps({"mode": "cloud", "grid": active}, indent=2))
+        return 0
+    print("mode: cloud")
+    print(f"active grid: {active}" if active else "active grid: (none)")
+    print("\nSign in with `grid login`, then manage your cloud grids with `grid up`/`ls`/`info`, "
+          "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
+    return 0
+
+
+def _overview_lan(as_json: bool) -> int:
     grids = config.iter_grid_configs()
     if not grids:
+        if as_json:
+            print(json.dumps(
+                {"mode": "lan", "grid": None, "grid_url": None, "engines": [], "models": []},
+                indent=2,
+            ))
+            return 0
+        print("mode: lan\n")
         print("No grid yet.\n")
         print("Start one:\n  grid up\n")
         print("Then join an engine:\n  grid join")
@@ -110,6 +139,17 @@ def cmd_overview(args: argparse.Namespace) -> int:
     engines, reachable = _live_engines(grid_url)
     models = _unique_models(engines)
 
+    if as_json:
+        print(json.dumps({
+            "mode": "lan",
+            "grid": default["name"],
+            "grid_url": grid_url,
+            "engines": [_engine_entry(engine) for engine in engines],
+            "models": models,
+        }, indent=2))
+        return 0
+
+    print("mode: lan")
     print(f"Grid: {default['name']}")
     print(f"grid_url: {grid_url}")
     if not reachable:
@@ -137,6 +177,9 @@ def _grid_by_name(name: str) -> dict[str, Any] | None:
 
 
 def _has_default(grids: list[dict[str, Any]]) -> bool:
+    active = state.get_active("lan")
+    if active and any(cfg.get("grid_id") == active or cfg.get("name") == active for cfg in grids):
+        return True
     return len(grids) == 1 or any(cfg.get("name") == "home" for cfg in grids)
 
 
@@ -144,9 +187,12 @@ def _live_engines(grid_url: str) -> tuple[list[dict[str, Any]], bool]:
     try:
         resp = httpx.get(f"{grid_url}/nodes/discover", timeout=3)
         resp.raise_for_status()
-    except httpx.HTTPError:
+        body = resp.json()
+    except (httpx.HTTPError, ValueError):
         return [], False
-    return resp.json().get("engines", []), True
+    if not isinstance(body, dict):
+        return [], False
+    return body.get("engines", []), True
 
 
 def _engine_entry(engine: dict[str, Any]) -> dict[str, Any]:

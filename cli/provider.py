@@ -21,16 +21,36 @@ from typing import Any
 
 import httpx
 
-import config
-import paths
-import runtime
+from lan import config
+from shared import paths, run_records
+from lan import runtime
 
 
 # ---------------------------------------------------------------------------
 # grid join
 # ---------------------------------------------------------------------------
 
+# Cloud-only `grid join` flags (DECISIONS D6/D8): rejected in LAN mode, where the concept
+# doesn't exist. (attr on args, surface flag) — kept here next to the LAN handler that guards them.
+_CLOUD_ONLY_JOIN_FLAGS = (
+    ("engine_label", "--engine-label"),
+    ("pricing_input", "--pricing-input"),
+    ("pricing_output", "--pricing-output"),
+    ("max_concurrency", "--max-concurrency"),
+)
+
+
+def _reject_cloud_only_flags(args: argparse.Namespace) -> None:
+    used = [flag for attr, flag in _CLOUD_ONLY_JOIN_FLAGS if getattr(args, attr, None) is not None]
+    if used:
+        raise SystemExit(
+            f"{', '.join(used)} only applies in cloud mode. "
+            "Switch with `grid mode cloud` (or pass --cloud)."
+        )
+
+
 def cmd_join(args: argparse.Namespace) -> int:
+    _reject_cloud_only_flags(args)
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]
@@ -228,19 +248,7 @@ def cmd_leave(args: argparse.Namespace) -> int:
 
 
 def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
-    pid = int(record.get("pid") or 0)
-    if pid and _pid_alive(pid):
-        # SIGTERM the detached provider so it unregisters and stops its engines.
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        deadline = time.time() + 8
-        while time.time() < deadline and _pid_alive(pid):
-            time.sleep(0.2)
-        if _pid_alive(pid):
-            _kill_group(pid)
-    _record_path(grid_id, engine_id).unlink(missing_ok=True)
+    run_records.stop_engine(grid_id, engine_id, record)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +399,7 @@ def _run_engine(args: SimpleNamespace) -> int:
             endpoint_url = runtime.engine_endpoint_url(None, args.endpoint_port, args.advertise_host)
             if len(args.models) != 1:
                 raise SystemExit("Built-in engine launch supports exactly one model. Use --at for custom engines.")
-            from engine import launcher as launcher_mod
+            from shared.engine import launcher as launcher_mod
 
             launcher = launcher_mod
             if launcher.is_port_in_use(args.endpoint_port):
@@ -452,18 +460,18 @@ def _run_engine(args: SimpleNamespace) -> int:
         if registered:
             try:
                 httpx.delete(f"{grid_url}/nodes/{node_id}", timeout=5)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"Unregister failed (ignoring): {exc}", file=sys.stderr)
         if launched is not None and launcher is not None:
             launcher.stop(launched)
             print(f"Stopped llama-server on :{args.endpoint_port}")
         if media_proc is not None:
-            import media_runtime
+            from lan import media_runtime
 
             media_runtime.stop_media_server(media_proc)
             print(f"Stopped engine media server on :{args.media_port}")
         if comfyui_started:
-            from engine import comfyui
+            from shared.engine import comfyui
 
             comfyui.stop()
             print(f"Stopped ComfyUI on :{args.comfyui_port}")
@@ -474,7 +482,7 @@ def _run_engine(args: SimpleNamespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _detect(advertise_host: str | None) -> list[Any]:
-    from system import detect
+    from shared.system import detect
 
     return detect.detect_engines(advertise_host=advertise_host)
 
@@ -523,12 +531,12 @@ def _advertised_text_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _prepare_media_engine(args: SimpleNamespace) -> dict[str, Any]:
-    import media_runtime
-    from engine import comfyui
-    from models import media_bundles
-    from provider import media_gating
-    from system import gpu as gpu_probe
-    from system import host as host_probe
+    from lan import media_runtime
+    from shared.engine import comfyui
+    from shared.models import media_bundles
+    from shared.media import media_gating
+    from shared.system import gpu as gpu_probe
+    from shared.system import host as host_probe
 
     if not comfyui.comfyui_dir().exists():
         raise SystemExit(
@@ -633,46 +641,28 @@ def _heartbeat(
         raise SystemExit(f"Engine heartbeat failed ({resp.status_code}): {resp.text}")
 
 
+# Engine-record I/O + teardown live in `shared.run_records` (shared by both modes, DECISIONS
+# D17). These thin wrappers keep the existing `cli.provider._*` call/monkeypatch surface.
 def _record_path(grid_id: str, engine_id: str):
-    return paths.engines_dir(grid_id) / f"{engine_id}.json"
+    return run_records.record_path(grid_id, engine_id)
 
 
 def _write_record(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
-    config.atomic_write_json(_record_path(grid_id, engine_id), record)
+    run_records.write_record(grid_id, engine_id, record)
 
 
 def _read_records(grid_id: str) -> dict[str, dict[str, Any]]:
-    root = paths.engines_dir(grid_id)
-    if not root.exists():
-        return {}
-    records: dict[str, dict[str, Any]] = {}
-    for path in sorted(root.glob("*.json")):
-        data = config.load_json(path)
-        if data.get("engine_id"):
-            records[data["engine_id"]] = data
-    return records
+    return run_records.read_records(grid_id)
 
 
 def _record_alive(grid_id: str, engine_id: str) -> bool:
-    record = _read_records(grid_id).get(engine_id)
-    return bool(record and _pid_alive(int(record.get("pid") or 0)))
+    record = run_records.read_records(grid_id).get(engine_id)
+    return bool(record and run_records.pid_alive(int(record.get("pid") or 0)))
 
 
 def _pid_alive(pid: int) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    return run_records.pid_alive(pid)
 
 
 def _kill_group(pid: int) -> None:
-    try:
-        if hasattr(os, "killpg"):
-            os.killpg(pid, signal.SIGKILL)
-        else:
-            os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    run_records.kill_group(pid)

@@ -12,11 +12,13 @@ grid_url  the URL engines join; apps call it through `/v1`
 engine    something that runs models: Ollama, LM Studio, vLLM, MLX, llama.cpp, ComfyUI
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
+mode      which world the CLI targets: `lan` (default) or `cloud`
 ```
 
-Do not use `provider`, `consumer`, or `signaling` in CLI output or first-run docs.
-Avoid `network` as a product noun. Those are implementation terms for architecture docs
-and code.
+Do not use `provider`, `consumer`, or `signaling` in CLI output or first-run docs — with one
+exception: `consumer` / `provider` / `both` are the sanctioned **role** values on the cloud-only
+`grid members` command (a member's permission label, not the engine/app it names). Avoid `network`
+as a product noun. Those are implementation terms for architecture docs and code.
 
 ## Design Rules
 
@@ -33,15 +35,17 @@ and code.
 ## Top Level
 
 ```
-grid                                  # overview: default grid, endpoint, engines, models, next steps
+grid                                  # overview: mode, active grid, endpoint, engines, models, next steps
 grid --help                           # concise help with common examples first
 grid <command> --help
 grid version
+grid [--lan | --cloud] <command>      # override the active mode for one command
 ```
 
 Bare `grid` is not just help. It is the dashboard for a terminal:
 
 ```text
+mode: lan
 Grid: home
 grid_url: http://192.168.1.25:8090
 engines: 3 live
@@ -56,6 +60,8 @@ Next:
 If no grid exists yet, bare `grid` should show the shortest successful path:
 
 ```text
+mode: lan
+
 No grid yet.
 
 Start one:
@@ -65,14 +71,79 @@ Then join an engine:
   grid join
 ```
 
+In `cloud` mode bare `grid` shows the mode and your active cloud grid, then the next steps:
+
+```text
+mode: cloud
+active grid: research
+
+Manage your cloud grids with `grid up` / `ls` / `info`, serve models with `grid join`,
+and use them with `grid chat -m <model> "…"`.
+```
+
+(Signed in but no grid selected yet, it prints `active grid: (none)` — run `grid ls` then
+`grid use <name>`.)
+
+## Modes
+
+Grid runs in one of two modes. **`lan`** (the default) is everything documented here: an
+unauthenticated in-memory grid on your local network. **`cloud`** is a signed-in thin client to
+autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **cloud
+grids** with the same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
+(`chat`/`image`/`edit`/`video`), and manage who may join or use them (`grid members`).
+
+```
+grid mode                             # print the current mode
+grid mode lan | cloud                 # switch and persist the mode
+grid use [name] [--json]              # show or set the active grid for the current mode
+grid use --none                       # clear the active grid for the current mode
+grid [--lan | --cloud] <command>      # override the mode for a single command
+```
+
+The mode is persisted in `~/.grid/state.json` (default `lan`); each mode remembers its own
+active grid. Which mode a command runs in is resolved as `--lan`/`--cloud` (one command) > the
+persisted mode > `lan`. `grid use <name>` sets the persistent default grid, so `grid chat` /
+`grid info` / `grid models` target it without naming it — an explicit `[grid]` positional still
+wins, and a stale selection (its grid was removed) is ignored.
+
+In `cloud` mode the grid lifecycle (`up`/`down`/`ls`/`info`), sign-in (`login`/`logout`), serving
+(`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`), and membership admin (`grid members`)
+all work. `grid members` is cloud-only — in `lan` mode it exits with guidance to switch. The shared
+local commands (`catalog`, `pull`, `rm`, `engine …`) work in either mode. A machine with no state
+file behaves exactly as a `lan`-only install.
+
+Notes:
+- `--json` goes after the subcommand (`grid info --json`); bare `grid --json` prints the
+  overview as JSON, including a `mode` key.
+- `--lan`/`--cloud` may appear anywhere on the line, but are not listed in per-command `--help`.
+
+## Sign in
+
+```
+grid login [--no-browser] [--json]    # sign in to cloud mode (device-code flow)
+grid logout [--json]                  # clear stored cloud credentials
+grid sync [--json]                    # refresh your cloud grids without signing in again
+```
+
+**Cloud-only.** `grid login` signs you in to autonomous's hosted relay with a device-code
+flow — it opens a browser, or with `--no-browser` prints the URL and code to enter on another
+device (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
+**not** pick an active grid: run `grid ls` to see the cloud grids you can reach, then
+`grid use <name>` (or name one per command). `grid logout` clears the stored credentials.
+`grid sync` re-fetches your grids and tokens using your saved sign-in (no browser), so a grid
+created on the website or one you were just added to appears after `grid sync` — it never changes
+your active grid, and an expired session tells you to run `grid login`. In `lan` mode these
+commands exit with guidance to switch — sign-in is a cloud concept. See
+[ADR 0002](./adr/0002-cloud-sign-in.md).
+
 ## Grid Lifecycle
 
 ```
-grid up [name]                        # create/start a grid; default: home
-grid down [name]                      # stop a local grid; config persists
+grid up [name] [--type <t>]           # create/start a grid (--type sets a cloud grid's type on create)
+grid down [name]                      # stop a grid; the grid/config persists
 grid ls [--json]                      # list saved grids
 grid info [grid] [--json]             # endpoint, key, engines, live models
-grid info [grid] --env                # print OPENAI_* exports
+grid info [grid] --env                # print OPENAI_* exports (lan key, or cloud relay URL + token)
 ```
 
 `grid up` output is stable and scriptable:
@@ -82,8 +153,17 @@ grid=home
 grid_url=http://192.168.1.25:8090
 ```
 
-No separate `create`, `start`, or `use` in the main surface. They make first use feel
-like infrastructure management. `up` is the user-level operation.
+No separate `create` or `start` in the main surface — `up` is the single lifecycle verb, so
+first use feels like one operation rather than infrastructure management. (`grid use` only sets
+which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
+
+In `cloud` mode these same verbs act on hosted **cloud grids**: `grid up <name>` create-or-starts
+one — `--type` is `permissioned-public` (default) or `permissioned-providers`, set on create, and
+creating needs an explicit name (no auto-`home`). `grid down` stops it (the grid persists),
+`grid ls` lists the grids your sign-in fetched (local — no network call), and `grid info` shows a
+grid's `status` and `grid_url`. `grid info --env` prints the grid's relay base URL plus your access
+token so any OpenAI SDK can call it (the relay address is read live from the grid, so it must be up).
+See [ADR 0003](./adr/0003-cloud-grid-lifecycle.md).
 
 ## Engines
 
@@ -126,6 +206,31 @@ Join them:
 Engine IDs are local names shown by `grid engines`, `grid info`, and
 `grid models --verbose`; they are accepted by `grid leave --engine <id>`.
 
+### `grid join` in cloud mode
+
+In cloud mode the same verb serves your models on a cloud grid: it brings the engine up the same
+way, then runs a detached loop that registers the engine's capabilities with the hosted relay,
+long-polls it for work, forwards each claimed job to the local engine, and heartbeats — `grid
+leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`). `grid
+join --all` serves several detected engines under **one** identity: it advertises the union of their
+models and routes each job to the engine that serves the requested model (first-detected wins when
+two engines share a model name).
+
+The `grid join` flag set is the union of both modes, gated by mode:
+
+- **Both modes:** `--at` / `--serve` / `-m,--model` / `--engine <kind>` / `--name` / `--all`,
+  `--advertise-as`, `--endpoint-port` (alias `--llama-port`), `--comfyui-port`, and the llama
+  tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`).
+- **LAN-only:** `--advertise-host`, `--media-port` (a cloud engine polls outbound — no inbound
+  endpoint to advertise).
+- **Cloud-only:** `--engine-label` (the engine kind shown on the grid page), `--pricing-input` /
+  `--pricing-output` (price per 1K tokens), `--max-concurrency`.
+
+A flag used in the wrong mode fails with a clear message. (`--media` serving in cloud is a later
+slice; `--advertise-as` is single-engine only and is rejected with `--all`.) See
+[ADR 0004](./adr/0004-cloud-provider-serve.md) and
+[ADR 0007](./adr/0007-cloud-multi-engine-routing.md).
+
 ## Models
 
 ```
@@ -164,15 +269,17 @@ comfyui:image_generation  media-mac    http://192.168.1.30:8190
 ## Use
 
 ```
-grid chat -m <model> "<message>" [--json]
-grid image "<prompt>" [-o <dir>]
-grid edit "<prompt>" -i <img>... [-o <dir>]
-grid video "<prompt>" -i <img> [-o <dir>]
+grid chat -m <model> "<message>" [--json] [--target-provider <id>] [--allow-self-provider]
+grid image "<prompt>" [-o <dir>] [--target-provider <id>] [--allow-self-provider]
+grid edit "<prompt>" -i <img>... [-o <dir>] [--target-provider <id>] [--allow-self-provider]
+grid video "<prompt>" -i <img> [-o <dir>] [--target-provider <id>] [--allow-self-provider]
 ```
 
-These are smoke tests and useful daily commands. They go through the grid, not directly
-to an engine. Their errors should name the missing model, the selected grid, and the next
-diagnostic command:
+These are smoke tests and useful daily commands. The same verbs work in both modes: in `lan`
+they go through the local grid proxy, in `cloud` through the grid's relay with your access token.
+`--target-provider` (pin the request to a specific engine) and `--allow-self-provider` (let your
+own engine serve it) are **cloud-only** — using them in `lan` mode is a clear error. Their errors
+should name the missing model, the selected grid, and the next diagnostic command:
 
 ```text
 No live model named `qwen36-27b-mtp` on grid `home`.
@@ -183,6 +290,21 @@ See live models:
 Check engines:
   grid engines
 ```
+
+## Members
+
+```
+grid members add [grid] <email> [--role consumer|provider|both] [--json]   # default role: consumer
+grid members remove [grid] <email> [--json]
+grid members list [grid] [--json]
+```
+
+**Cloud-only.** Manage who may use or serve a cloud grid you own. `[grid]` follows the usual
+selection rules (the active grid when omitted); `add`/`remove` take a member `email`, and `--role`
+is `consumer` (use models), `provider` (serve models), or `both`. `grid members list` prints each
+member's email and roles (`--json` for the raw list). These authenticate with your account sign-in
+(not a per-grid token) and don't need the grid to be running. In `lan` mode the command exits with
+guidance to switch — membership is a cloud concept. See [ADR 0006](./adr/0006-cloud-membership.md).
 
 ## Engine Setup
 
@@ -219,11 +341,19 @@ models
 shown only where OpenAI-compatible app integration needs copy-pasteable environment
 variables.
 
-Environment output from `grid info --env`:
+Environment output from `grid info --env` (lan — the key is a placeholder, the grid is unauthenticated):
 
 ```bash
 export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
 export OPENAI_API_KEY="local-grid"
+```
+
+In `cloud` mode the base is the grid's relay and the key is your real per-grid access token — the one
+command that prints a token (like `gh auth token`):
+
+```bash
+export OPENAI_BASE_URL="https://relay.example/relay/v1"
+export OPENAI_API_KEY="<your access token>"
 ```
 
 JSON output should use snake_case keys and include enough detail for scripts:

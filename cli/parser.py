@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import argparse
 
-import runtime
-from _version import __version__
+from lan import runtime
+from shared._version import __version__
 from ._constants import (
     VALID_I2V_ASPECT_RATIOS,
     VALID_I2V_DURATIONS,
     VALID_MEDIA_BUNDLES,
 )
+from .auth import cmd_login, cmd_logout, cmd_sync
+from .cloud_grid import cmd_cloud_members
 from .engine import (
     cmd_engine_install,
     cmd_engine_pull,
@@ -29,6 +31,7 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
@@ -37,9 +40,17 @@ from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="grid",
-        description="Grid: one private OpenAI endpoint for the engines you already run.",
+        description=(
+            "Grid: one private OpenAI endpoint for the engines you already run. "
+            "Use --lan/--cloud before any command to override the active mode for that one run."
+        ),
     )
     parser.add_argument("--version", action="version", version=f"grid {__version__}")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With no command, print the overview as JSON. (For subcommands, pass --json after the command.)",
+    )
     parser.set_defaults(handler=cmd_overview)
     sub = parser.add_subparsers(dest="command", metavar="<command>", required=False)
 
@@ -50,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_engines(sub)
     _add_models(sub)
     _add_use(sub)
+    _add_state(sub)
+    _add_auth(sub)
+    _add_members(sub)
     _add_engine_setup(sub)
 
     return parser
@@ -61,6 +75,14 @@ def _add_grid_lifecycle(sub) -> None:
     up.add_argument("--port", type=int, default=runtime.DEFAULT_PORT)
     up.add_argument("--host", default=runtime.DEFAULT_HOST)
     up.add_argument("--advertise-host", default=None)
+    # Cloud-only (LAN cmd_up ignores it): the network type set when `grid up` creates a cloud grid.
+    # default=None lets the cloud handler tell an explicit value on a *start* from this create default.
+    up.add_argument(
+        "--type",
+        choices=("permissioned-public", "permissioned-providers"),
+        default=None,
+        help="Cloud grid network type, set on create (default permissioned-public).",
+    )
     up.set_defaults(handler=cmd_up)
 
     down = sub.add_parser("down", help="Take a grid offline (config persists)")
@@ -107,8 +129,7 @@ def _add_engines(sub) -> None:
         default=[],
         help="Model name advertised to the grid. Repeat once per -m/--model.",
     )
-    join.add_argument("--endpoint-port", type=int, default=8081)
-    join.add_argument("--advertise-host", default=None)
+    join.add_argument("--endpoint-port", "--llama-port", type=int, default=8081)
     join.add_argument("--heartbeat-interval", type=float, default=15.0)
     join.add_argument("--ctx-size", type=int, default=None)
     join.add_argument("--n-predict", type=int, default=None)
@@ -117,7 +138,19 @@ def _add_engines(sub) -> None:
     join.add_argument("--temp", type=float, default=None)
     join.add_argument("--reasoning-budget", type=int, default=None)
     join.add_argument("--comfyui-port", type=int, default=8188)
+    # LAN-only: cloud has no inbound endpoint, so there is nothing to advertise (rejected in cloud).
+    join.add_argument("--advertise-host", default=None)
     join.add_argument("--media-port", type=int, default=8190)
+    # Cloud-only: billing + pull-based capacity + grid-page display (rejected in LAN). default=None
+    # so a wrong-mode use is detectable.
+    join.add_argument("--engine-label", default=None,
+                      help="Cloud-only: label for this engine's kind on the grid page.")
+    join.add_argument("--pricing-input", type=float, default=None,
+                      help="Cloud-only: price charged per 1K input tokens.")
+    join.add_argument("--pricing-output", type=float, default=None,
+                      help="Cloud-only: price charged per 1K output tokens.")
+    join.add_argument("--max-concurrency", type=int, default=None,
+                      help="Cloud-only: how many requests this engine serves at once.")
     join.set_defaults(handler=cmd_join)
 
     leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")
@@ -161,6 +194,7 @@ def _add_use(sub) -> None:
     chat.add_argument("--grid", default=None)
     chat.add_argument("--json", action="store_true", help="Print the full JSON response.")
     chat.add_argument("--timeout", type=float, default=600.0)
+    _add_cloud_use_flags(chat)
     chat.set_defaults(handler=cmd_chat)
 
     image = sub.add_parser("image", help="Generate an image")
@@ -169,6 +203,7 @@ def _add_use(sub) -> None:
     image.add_argument("--width", type=int, default=720)
     image.add_argument("--height", type=int, default=720)
     image.add_argument("--steps", type=int, default=4)
+    _add_cloud_use_flags(image)
     image.set_defaults(handler=cmd_image)
 
     edit = sub.add_parser("edit", help="Edit one to three images")
@@ -183,6 +218,7 @@ def _add_use(sub) -> None:
         help="Input image path. Repeat up to three times.",
     )
     edit.add_argument("--steps", type=int, default=4)
+    _add_cloud_use_flags(edit)
     edit.set_defaults(handler=cmd_edit)
 
     video = sub.add_parser("video", help="Generate a short video from an image")
@@ -191,7 +227,83 @@ def _add_use(sub) -> None:
     video.add_argument("-i", "--image", required=True, help="Input image path.")
     video.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
     video.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")
+    _add_cloud_use_flags(video)
     video.set_defaults(handler=cmd_video)
+
+
+def _add_state(sub) -> None:
+    mode = sub.add_parser("mode", help="Show or switch the active mode (lan/cloud)")
+    mode.add_argument(
+        "target",
+        nargs="?",
+        choices=("lan", "cloud"),
+        default=None,
+        help="Switch to this mode and persist it; omit to print the current mode.",
+    )
+    mode.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    mode.set_defaults(handler=cmd_mode)
+
+    use = sub.add_parser("use", help="Set the active grid for the current mode")
+    use.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="Grid to make active; omit to print the current active grid.",
+    )
+    use.add_argument("--none", action="store_true", help="Clear the active grid for the current mode.")
+    use.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    use.set_defaults(handler=cmd_use)
+
+
+def _add_auth(sub) -> None:
+    login = sub.add_parser("login", help="Sign in to cloud mode")
+    login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the sign-in URL and code instead of opening a browser (for headless machines).",
+    )
+    login.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    login.set_defaults(handler=cmd_login)
+
+    logout = sub.add_parser("logout", help="Sign out of cloud mode")
+    logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    logout.set_defaults(handler=cmd_logout)
+
+    sync = sub.add_parser("sync", help="Refresh your cloud grids without signing in again")
+    sync.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    sync.set_defaults(handler=cmd_sync)
+
+
+def _add_members(sub) -> None:
+    """Cloud-only membership admin (DECISIONS D13): `grid members add|remove [grid] <email>` and
+    `grid members list [grid]`. Gated in LAN mode by dispatch (`members` is in `CLOUD_ONLY`). On
+    add/remove the `[grid]` positional is declared first so argparse binds a lone positional to the
+    required `email`; omitting it falls back to the active grid."""
+    members = sub.add_parser("members", help="Manage who may use or serve a cloud grid")
+    members_sub = members.add_subparsers(dest="subcommand", required=True)
+
+    add = members_sub.add_parser("add", help="Add a member to a grid")
+    add.add_argument("grid", nargs="?", default=None)
+    add.add_argument("email")
+    add.add_argument(
+        "--role",
+        choices=("consumer", "provider", "both"),
+        default="consumer",
+        help="Member role (default: consumer).",
+    )
+    add.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    add.set_defaults(handler=cmd_cloud_members)
+
+    remove = members_sub.add_parser("remove", help="Remove a member from a grid")
+    remove.add_argument("grid", nargs="?", default=None)
+    remove.add_argument("email")
+    remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    remove.set_defaults(handler=cmd_cloud_members)
+
+    listing = members_sub.add_parser("list", help="List a grid's members and roles")
+    listing.add_argument("grid", nargs="?", default=None)
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    listing.set_defaults(handler=cmd_cloud_members)
 
 
 def _add_engine_setup(sub) -> None:
@@ -244,4 +356,21 @@ def _add_media_common(parser: argparse.ArgumentParser) -> None:
         "--output-dir",
         default=None,
         help="Directory for returned media files. Defaults to ~/.grid/outputs.",
+    )
+
+
+def _add_cloud_use_flags(parser: argparse.ArgumentParser) -> None:
+    """Cloud-only request-routing flags shared by chat/image/edit/video (DECISIONS D16). Declared on
+    the unified parser; the LAN handlers reject them (cli/request.py) since the concept is cloud-only.
+    ``--target-provider`` defaults to ``None`` and ``--allow-self-provider`` to ``False`` so a wrong-mode
+    use is detectable."""
+    parser.add_argument(
+        "--target-provider",
+        default=None,
+        help="Cloud only: pin this request to a specific engine by id.",
+    )
+    parser.add_argument(
+        "--allow-self-provider",
+        action="store_true",
+        help="Cloud only: let your own engine serve this request.",
     )

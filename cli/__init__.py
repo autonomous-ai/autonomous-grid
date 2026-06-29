@@ -12,6 +12,20 @@ import time  # noqa: F401
 import httpx  # noqa: F401
 
 from ._main import cmd_internal_media_server, cmd_internal_server, main
+from .auth import cmd_login, cmd_logout, cmd_sync
+from .cloud_grid import (
+    cmd_cloud_down,
+    cmd_cloud_info,
+    cmd_cloud_ls,
+    cmd_cloud_members,
+    cmd_cloud_up,
+)
+from .cloud_request import (
+    cmd_cloud_chat,
+    cmd_cloud_edit,
+    cmd_cloud_image,
+    cmd_cloud_video,
+)
 from .engine import (
     cmd_engine_install,
     cmd_engine_pull,
@@ -27,6 +41,7 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
@@ -50,6 +65,20 @@ __all__ = [
     "cmd_catalog",
     "cmd_pull",
     "cmd_rm",
+    "cmd_mode",
+    "cmd_use",
+    "cmd_login",
+    "cmd_logout",
+    "cmd_sync",
+    "cmd_cloud_up",
+    "cmd_cloud_down",
+    "cmd_cloud_ls",
+    "cmd_cloud_info",
+    "cmd_cloud_members",
+    "cmd_cloud_chat",
+    "cmd_cloud_image",
+    "cmd_cloud_edit",
+    "cmd_cloud_video",
     "cmd_chat",
     "cmd_image",
     "cmd_edit",

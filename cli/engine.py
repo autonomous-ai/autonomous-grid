@@ -10,7 +10,7 @@ def cmd_engine_install(args: argparse.Namespace) -> int:
     if args.name == "llama.cpp":
         return _install_llama_cpp(args)
     if args.name == "comfyui":
-        from engine import comfyui
+        from shared.engine import comfyui
 
         comfyui.install()
         print("Done. Run `grid engine pull <bundle>` to download media model files.")
@@ -19,7 +19,7 @@ def cmd_engine_install(args: argparse.Namespace) -> int:
 
 
 def cmd_engine_pull(args: argparse.Namespace) -> int:
-    from models import download, media_bundles
+    from shared.models import download, media_bundles
 
     paths_written = media_bundles.pull_bundle(args.bundle, on_progress=download.stderr_progress)
     print(f"Downloaded {len(paths_written)} file(s) into the ComfyUI models tree.")
@@ -27,8 +27,8 @@ def cmd_engine_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_engine_status(args: argparse.Namespace) -> int:
-    from engine import comfyui
-    from models import media_bundles
+    from shared.engine import comfyui
+    from shared.models import media_bundles
 
     installed = comfyui.comfyui_dir().exists()
     print(f"Installed       : {'yes' if installed else 'no'} ({comfyui.comfyui_dir()})")
@@ -44,7 +44,7 @@ def cmd_engine_status(args: argparse.Namespace) -> int:
 
 
 def cmd_engine_start(args: argparse.Namespace) -> int:
-    from engine import comfyui
+    from shared.engine import comfyui
 
     cp = comfyui.start(args.port)
     print(f"Spawned ComfyUI pid={cp.proc.pid}, log={cp.log}")
@@ -60,13 +60,13 @@ def cmd_engine_start(args: argparse.Namespace) -> int:
 
 
 def cmd_engine_stop(args: argparse.Namespace) -> int:
-    from engine import comfyui
+    from shared.engine import comfyui
 
     return comfyui.stop_running()
 
 
 def _install_llama_cpp(args: argparse.Namespace) -> int:
-    from engine import installer
+    from shared.engine import installer
 
     if installer.is_apple_silicon():
         if args.target_sm:
@@ -79,7 +79,7 @@ def _install_llama_cpp(args: argparse.Namespace) -> int:
         print(f"Installed Homebrew llama-server -> {path}")
         return 0
 
-    from system import gpu
+    from shared.system import gpu
 
     gpus = gpu.enumerate_gpus()
     if not gpus and not args.target_sm:

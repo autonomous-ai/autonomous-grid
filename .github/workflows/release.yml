@@ -1,0 +1,77 @@
+name: Release
+
+# Cut a release by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
+# Bump shared/_version.py AND pyproject.toml to the same X.Y.Z first (the tag must be vX.Y.Z).
+# Ships the assets install.sh downloads: standalone `grid` binaries for LINUX (x86_64 +
+# arm64, one runner each — Nuitka can't cross-compile) and the universal wheel (which the
+# macOS path installs via uv — a distributable macOS binary needs Apple notarization, not
+# done here). Everything is published with SHA256SUMS to the GitHub Release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}   # allow manual runs for dry-tests (no release is created)
+
+permissions:
+  contents: write   # create the release + upload assets
+
+jobs:
+  binaries:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    os: linux, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, os: linux, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install patchelf (Linux standalone needs it)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+      - name: Build standalone binary
+        run: |
+          chmod +x packaging/build_binary.sh
+          GRID_BUILD_PYTHON="$(command -v python3.12)" packaging/build_binary.sh
+          mv dist/grid "grid-${{ matrix.os }}-${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grid-${{ matrix.os }}-${{ matrix.arch }}
+          path: grid-${{ matrix.os }}-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build universal wheel
+        run: uv build --wheel
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Assemble assets + checksums
+        run: |
+          cp dist/grid-*-py3-none-any.whl artifacts/
+          cd artifacts
+          chmod +x grid-linux-* 2>/dev/null || true
+          sha256sum grid-* > SHA256SUMS
+          echo "::group::SHA256SUMS"; cat SHA256SUMS; echo "::endgroup::"
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/grid-linux-x86_64
+            artifacts/grid-linux-arm64
+            artifacts/grid-*-py3-none-any.whl
+            artifacts/SHA256SUMS
+          generate_release_notes: true
