@@ -22,7 +22,7 @@ from shared import paths
 from shared import state
 from lan import runtime
 from shared.engine import comfyui, installer, launcher
-from shared.models import catalog, media_bundles
+from shared.models import catalog, download, media_bundles
 from lan import media_server
 from lan.server import create_app
 from shared.system import detect
@@ -336,6 +336,59 @@ def test_catalog_contains_reference_readme_qwen36_models():
     assert nvidia.hf_repo == "unsloth/Qwen3.6-27B-MTP-GGUF"
     assert nvidia.quantized_file == "Qwen3.6-27B-UD-Q5_K_XL.gguf"
     assert nvidia.target == catalog.TARGET_NVIDIA
+
+
+def test_download_surfaces_non_2xx_as_clean_systemexit(monkeypatch, tmp_path):
+    # A non-2xx HF response must yield "Download failed (<status>): <body>",
+    # not an httpx.ResponseNotRead traceback from reading .text on an unread stream.
+    class _FakeStreamResponse:
+        status_code = 404
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b"Entry not found"
+
+        @property
+        def text(self):  # an unread streaming response raises, exactly like real httpx
+            raise httpx.ResponseNotRead()
+
+    monkeypatch.setattr(download.httpx, "stream", lambda *a, **k: _FakeStreamResponse())
+
+    with pytest.raises(SystemExit) as exc:
+        download.download("nope/missing-GGUF", "missing.gguf", out=tmp_path / "missing.gguf")
+
+    # A clean SystemExit (status + body) means no ResponseNotRead leaked through.
+    assert "404" in str(exc.value)
+    assert "Entry not found" in str(exc.value)
+
+
+def test_download_non_2xx_with_unreadable_body_still_exits_cleanly(monkeypatch, tmp_path):
+    # If reading the error body fails (e.g. connection dropped mid-body), still
+    # surface a clean SystemExit with the status — never a raw httpx traceback.
+    class _BrokenStreamResponse:
+        status_code = 404
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            raise httpx.ReadError("connection dropped")
+
+    monkeypatch.setattr(download.httpx, "stream", lambda *a, **k: _BrokenStreamResponse())
+
+    with pytest.raises(SystemExit) as exc:
+        download.download("nope/missing-GGUF", "missing.gguf", out=tmp_path / "missing.gguf")
+
+    assert "404" in str(exc.value)
+    assert "could not read response body" in str(exc.value)
 
 
 def test_rm_yes_deletes_local_model(monkeypatch, tmp_path, capsys):

@@ -53,7 +53,11 @@ def download(repo: str, quantized_file: str, *, out: Path | None = None, on_prog
     mode = "ab" if have > 0 else "wb"
     with httpx.stream("GET", url, headers=headers, timeout=httpx.Timeout(30, read=None), follow_redirects=True) as resp:
         if resp.status_code not in (200, 206):
-            raise SystemExit(f"Download failed ({resp.status_code}): {resp.text[:300]}")
+            try:
+                body = resp.read().decode(errors="replace")[:300]
+            except httpx.HTTPError:
+                body = "(could not read response body)"
+            raise SystemExit(f"Download failed ({resp.status_code}): {body}")
         total = have + int(resp.headers.get("Content-Length") or 0)
         with part.open(mode) as fh:
             for chunk in resp.iter_bytes(CHUNK):
