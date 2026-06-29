@@ -13,18 +13,18 @@ import httpx  # noqa: F401
 
 from ._main import cmd_internal_media_server, cmd_internal_server, main
 from .auth import cmd_login, cmd_logout, cmd_sync
-from .cloud_grid import (
-    cmd_cloud_down,
-    cmd_cloud_info,
-    cmd_cloud_ls,
-    cmd_cloud_members,
-    cmd_cloud_up,
+from .internet_grid import (
+    cmd_internet_down,
+    cmd_internet_info,
+    cmd_internet_ls,
+    cmd_internet_members,
+    cmd_internet_up,
 )
-from .cloud_request import (
-    cmd_cloud_chat,
-    cmd_cloud_edit,
-    cmd_cloud_image,
-    cmd_cloud_video,
+from .internet_request import (
+    cmd_internet_chat,
+    cmd_internet_edit,
+    cmd_internet_image,
+    cmd_internet_video,
 )
 from .engine import (
     cmd_engine_install,
@@ -70,15 +70,15 @@ __all__ = [
     "cmd_login",
     "cmd_logout",
     "cmd_sync",
-    "cmd_cloud_up",
-    "cmd_cloud_down",
-    "cmd_cloud_ls",
-    "cmd_cloud_info",
-    "cmd_cloud_members",
-    "cmd_cloud_chat",
-    "cmd_cloud_image",
-    "cmd_cloud_edit",
-    "cmd_cloud_video",
+    "cmd_internet_up",
+    "cmd_internet_down",
+    "cmd_internet_ls",
+    "cmd_internet_info",
+    "cmd_internet_members",
+    "cmd_internet_chat",
+    "cmd_internet_image",
+    "cmd_internet_edit",
+    "cmd_internet_video",
     "cmd_chat",
     "cmd_image",
     "cmd_edit",

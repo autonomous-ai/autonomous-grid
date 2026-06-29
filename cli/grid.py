@@ -102,19 +102,19 @@ def cmd_overview(args: argparse.Namespace) -> int:
     # Mode is stamped by dispatch; fall back to the persisted mode for direct calls.
     mode = getattr(args, "mode", None) or state.get_mode()
     as_json = getattr(args, "json", False)
-    if mode == "cloud":
-        return _overview_cloud(as_json)
+    if mode == "internet":
+        return _overview_internet(as_json)
     return _overview_lan(as_json)
 
 
-def _overview_cloud(as_json: bool) -> int:
-    active = state.get_active("cloud")
+def _overview_internet(as_json: bool) -> int:
+    active = state.get_active("internet")
     if as_json:
-        print(json.dumps({"mode": "cloud", "grid": active}, indent=2))
+        print(json.dumps({"mode": "internet", "grid": active}, indent=2))
         return 0
-    print("mode: cloud")
+    print("mode: internet")
     print(f"active grid: {active}" if active else "active grid: (none)")
-    print("\nSign in with `grid login`, then manage your cloud grids with `grid up`/`ls`/`info`, "
+    print("\nSign in with `grid login`, then manage your internet grids with `grid up`/`ls`/`info`, "
           "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
     return 0
 

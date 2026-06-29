@@ -66,14 +66,14 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("engine_id")
         args = parser.parse_args(argv[1:])
         return run_engine_from_record(args.grid_id, args.engine_id)
-    if argv[0] == "__cloud-engine":
-        from cloud.serve import run_cloud_engine_from_record
+    if argv[0] == "__internet-engine":
+        from internet.serve import run_internet_engine_from_record
 
-        parser = argparse.ArgumentParser(prog="grid __cloud-engine")
+        parser = argparse.ArgumentParser(prog="grid __internet-engine")
         parser.add_argument("grid_id")
         parser.add_argument("engine_id")
         args = parser.parse_args(argv[1:])
-        return run_cloud_engine_from_record(args.grid_id, args.engine_id)
+        return run_internet_engine_from_record(args.grid_id, args.engine_id)
     return None
 
 

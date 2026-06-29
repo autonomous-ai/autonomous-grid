@@ -1,9 +1,9 @@
-"""`grid login` / `grid logout` / `grid sync` — cloud-mode sign-in and credential refresh.
+"""`grid login` / `grid logout` / `grid sync` — internet-mode sign-in and credential refresh.
 
-Cloud-only: dispatch gates these to cloud mode, so the handlers assume cloud. `cmd_login`
+Internet-only: dispatch gates these to internet mode, so the handlers assume internet. `cmd_login`
 mirrors grid-src's browser device flow (start → poll → fetch tokens → persist); `cmd_logout`
 clears the local credential store; `cmd_sync` reuses the saved session to re-fetch the grid list
-+ tokens with no browser (ADR 0002 §11), never touching the active pointer. Cloud deps import
++ tokens with no browser (ADR 0002 §11), never touching the active pointer. Internet deps import
 lazily inside the handlers (repo convention). Tokens are never printed or logged — not on the human
 path, not in ``--json``. Login does not pick an active grid; selection is always an explicit
 ``grid use <name>``.
@@ -31,7 +31,7 @@ _SESSION_EXPIRED_RE = re.compile(r"[A-Z]+ \S+ failed \((?:401|403)\):")
 
 
 def cmd_login(args: argparse.Namespace) -> int:
-    from cloud import control_plane, credentials
+    from internet import control_plane, credentials
 
     as_json = getattr(args, "json", False)
     api_url = credentials.api_url()
@@ -62,13 +62,13 @@ def cmd_login(args: argparse.Namespace) -> int:
         "user": user,
         "networks": networks,
     })
-    # Deliberately no `state.set_active("cloud", …)` here — login never auto-selects a grid.
+    # Deliberately no `state.set_active("internet", …)` here — login never auto-selects a grid.
     return _report_login(user.get("email", ""), networks, as_json=as_json)
 
 
 def _await_approval(started: dict[str, Any], api_url: str) -> dict[str, Any]:
     """Poll until the user approves in the browser, or the device code expires."""
-    from cloud import control_plane
+    from internet import control_plane
 
     device_code = started.get("device_code")
     if not device_code:
@@ -92,7 +92,7 @@ def _await_approval(started: dict[str, Any], api_url: str) -> dict[str, Any]:
 def _device_login_url(started: dict[str, Any]) -> str:
     """The page where the user signs in with Google. Built from the configured website URL;
     falls back to the server's value when ``GRID_WEBSITE_URL`` is set empty (grid-src parity)."""
-    from cloud import credentials
+    from internet import credentials
 
     website = credentials.default_website_url()
     if website:
@@ -144,11 +144,11 @@ def _report_login(email: str, networks: list[dict[str, Any]], *, as_json: bool) 
 
 
 def cmd_logout(args: argparse.Namespace) -> int:
-    from cloud import credentials
+    from internet import credentials
     from shared import state
 
     existed = credentials.clear_credentials()
-    state.set_active("cloud", None)  # a cleared session has no active grid
+    state.set_active("internet", None)  # a cleared session has no active grid
     if getattr(args, "json", False):
         print(json.dumps({"signed_out": existed}))
         return 0
@@ -164,17 +164,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
     created on the website (or one you were just added to) appears without signing in again. Never
     writes ``state.json`` — the active pointer is left untouched (a vanished active grid becomes a
     tolerated stale value), mirroring login's "never auto-select". The overwrite is last-writer-wins
-    against a concurrent detached ``__cloud-engine`` doing ``update_network_tokens`` — the same
+    against a concurrent detached ``__internet-engine`` doing ``update_network_tokens`` — the same
     atomic-write model the rest of the credential store uses, so no new locking is needed.
     """
-    from cloud import control_plane, credentials
+    from internet import control_plane, credentials
 
     as_json = getattr(args, "json", False)
     # One credentials snapshot for both the auth gate and the merge below. Reading the session token
     # and `data` from the same load closes a TOCTOU window: with two reads, a concurrent `grid logout`
     # in between would let the save recreate a partial file (networks but no session) — the same
     # concurrent-logout hazard credentials.update_network_tokens already guards. Same "not signed in"
-    # wording as credentials.require_session (the gate every other cloud command uses).
+    # wording as credentials.require_session (the gate every other internet command uses).
     data = credentials.load_credentials()
     session_token = data.get("session_token")
     if not session_token:

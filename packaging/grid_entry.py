@@ -3,7 +3,7 @@
 Nuitka compiles a *script file* into the binary, so this mirrors ``cli/__main__.py``
 (``python -m cli``): it calls ``cli.main`` and exits with its return code, so the frozen
 ``grid`` binary dispatches exactly like the installed console script — including the hidden
-internal subcommands (``__server`` / ``__engine`` / ``__cloud-engine``) the CLI re-execs
+internal subcommands (``__server`` / ``__engine`` / ``__internet-engine``) the CLI re-execs
 itself with. Kept tiny and import-light on purpose.
 """
 from cli import main
