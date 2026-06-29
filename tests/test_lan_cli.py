@@ -1494,7 +1494,7 @@ def test_default_website_url_empty_env_falls_back_to_server(monkeypatch):
     from cloud import credentials
 
     monkeypatch.delenv("GRID_WEBSITE_URL", raising=False)
-    assert credentials.default_website_url() == "https://staging.autonomousdev.xyz"
+    assert credentials.default_website_url() == "https://autonomous.ai"
     monkeypatch.setenv("GRID_WEBSITE_URL", "")  # opt out of the constructed URL
     assert credentials.default_website_url() == ""
 

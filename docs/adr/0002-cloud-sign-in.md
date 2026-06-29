@@ -67,7 +67,7 @@ Hard invariant: LAN mode stays LAN-only, unauthenticated, stateless — unchange
 
 8. **Config: keep grid-src's env vars + defaults, evaluated at call time.** Only two values are
    env-read — `GRID_CONTROL_PLANE_URL` (default `https://api-grid.autonomous.ai`) and
-   `GRID_WEBSITE_URL` (default `https://staging.autonomousdev.xyz`); `GRID_LOGIN_PATH` is a
+   `GRID_WEBSITE_URL` (default `https://autonomous.ai`); `GRID_LOGIN_PATH` is a
    hardcoded constant. The sign-in URL is built from `GRID_WEBSITE_URL`; setting it empty falls
    back to the server's `verification_uri_complete`. Reading env in functions (not at import) keeps
    it monkeypatchable per test.

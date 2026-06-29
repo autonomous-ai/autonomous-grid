@@ -39,7 +39,7 @@ def default_website_url() -> str:
     An explicit empty ``GRID_WEBSITE_URL`` returns ``""`` on purpose: the caller then falls
     back to the server-provided ``verification_uri_complete`` instead of constructing a URL.
     """
-    return os.environ.get("GRID_WEBSITE_URL", "https://staging.autonomousdev.xyz").rstrip("/")
+    return os.environ.get("GRID_WEBSITE_URL", "https://autonomous.ai").rstrip("/")
 
 
 def load_toml(path: Path) -> dict[str, Any]:
