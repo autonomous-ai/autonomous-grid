@@ -1,7 +1,8 @@
 name: Release
 
-# Cut a release by pushing a tag:  git tag v0.1.0 && git push origin v0.1.0
-# Bump shared/_version.py AND pyproject.toml to the same X.Y.Z first (the tag must be vX.Y.Z).
+# Cut a release by pushing a tag:  git tag vX.Y.Z && git push public vX.Y.Z
+# Bump pyproject.toml to X.Y.Z first and make the tag match (vX.Y.Z). shared/_version.py reads
+# the version back from package metadata, so pyproject.toml is the only place to bump.
 # Ships the assets install.sh downloads: standalone `grid` binaries for LINUX (x86_64 +
 # arm64, one runner each — Nuitka can't cross-compile) and the universal wheel (which the
 # macOS path installs via uv — a distributable macOS binary needs Apple notarization, not
