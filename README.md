@@ -4,12 +4,6 @@
 
 ### Orchestrate the computers you already own to run AI inference.
 
-Grid pools the computers you already have — your Mac, your NVIDIA desktop, the workstation in the corner —
-behind **one OpenAI-compatible endpoint**, and routes each request to whichever computer is running the right
-model. The inference servers you already run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI) stay where they
-are. Run it as an unauthenticated proxy on your **local network**, or sign in and reach your computers
-**remotely** through autonomous's hosted **relay** — same commands, two modes.
-
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
@@ -20,6 +14,12 @@ are. Run it as an unauthenticated proxy on your **local network**, or sign in an
 <img src="docs/home-grid.png" alt="Your Home Grid sits above your computers — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever computer serves the model" width="860">
 
 </div>
+
+Grid pools the computers you already have — your Mac, your NVIDIA desktop, the workstation in the corner — behind **one OpenAI-compatible endpoint**, and routes each request to whichever one is running the right model.
+
+The inference servers you run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI) stay where they are — Grid just ties them together.
+
+Run it on your **local** network, or sign in to reach your computers **remotely** through autonomous's hosted **relay**. Same commands, two modes.
 
 ## Two modes
 
