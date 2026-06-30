@@ -19,7 +19,7 @@ Grid pools the computers you already have — your Mac, your NVIDIA desktop, the
 
 The inference servers you run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI) stay where they are — Grid just ties them together.
 
-Run it on your **local** network, or sign in to reach your computers **remotely** through autonomous's hosted **relay**. Same commands, two modes.
+Run it on your **local** network, or sign in to reach your computers **remotely** through **Autonomous Relay**, our hosted connection. Same commands, two modes.
 
 ## Two modes
 
@@ -27,7 +27,7 @@ Grid runs in one of two **modes**, and the same verbs (`up`, `join`, `chat`, `in
 
 | | **`local`** _(default)_ | **`remote`** |
 |---|---|---|
-| What it is | Unauthenticated, local-only proxy | Signed-in thin client to autonomous's hosted relay |
+| What it is | Unauthenticated, local-only proxy | Signed-in thin client to Autonomous Relay (our hosted connection) |
 | Reach | Same network only | From anywhere |
 | Sign-in | None | `grid login` (your account) |
 | API key | `local-grid` placeholder — auth is off | Your per-grid access token |
@@ -239,7 +239,7 @@ your network. Each computer runs one or more inference servers (an **engine** �
 ComfyUI); your grid is the one address everything talks through, and your apps draw from it.
 
 - **the grid** — one endpoint that routes each request to a computer serving that model. On your **local** it's a
-  local proxy you create with `grid up`; in **remote** it's a hosted grid on autonomous's relay you bring up the
+  local proxy you create with `grid up`; in **remote** it's a hosted grid on Autonomous Relay you bring up the
   same way after `grid login`.
 - **engines** — the tools you already run. `grid join` advertises a computer's engines and heartbeats them; Grid
   never restarts or replaces them. On local they register directly with the grid; in remote they poll the relay
