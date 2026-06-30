@@ -1,4 +1,4 @@
-"""The cloud provider serve loop — what the detached ``__cloud-engine`` subprocess runs.
+"""The internet provider serve loop — what the detached ``__internet-engine`` subprocess runs.
 
 It mirrors the LAN engine loop (`cli/provider.py:_run_engine`) but, instead of being forwarded
 inbound requests by a grid proxy, it **polls** the hosted relay for work: bring the engine up
@@ -20,7 +20,7 @@ import sys
 import threading
 from typing import Any
 
-from cloud import control_plane, credentials, probe, relay
+from internet import control_plane, credentials, probe, relay
 from shared import run_records
 
 
@@ -37,12 +37,12 @@ _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
 # Detached entry
 # ---------------------------------------------------------------------------
 
-def run_cloud_engine_from_record(grid_id: str, engine_id: str) -> int:
-    """Detached ``__cloud-engine`` entry: serve one engine to the grid's relay until SIGTERM."""
+def run_internet_engine_from_record(grid_id: str, engine_id: str) -> int:
+    """Detached ``__internet-engine`` entry: serve one engine to the grid's relay until SIGTERM."""
     record = run_records.read_record(grid_id, engine_id)
     if not record:
         raise SystemExit(f"No engine record for {engine_id} on {grid_id}.")
-    network_id = record["grid_id"]  # the run record's grid_id IS the cloud network_id
+    network_id = record["grid_id"]  # the run record's grid_id IS the internet network_id
     signaling_url = (record.get("signaling_url") or "").rstrip("/")
     if not signaling_url:
         raise SystemExit("This grid has no relay address; run `grid up` then re-join.")
@@ -95,7 +95,7 @@ def run_cloud_engine_from_record(grid_id: str, engine_id: str) -> int:
     except KeyboardInterrupt:
         print("\nEngine unregistered.")
     except (Exception, SystemExit) as exc:  # detached top level: report, tear down, exit non-zero
-        print(f"Cloud engine stopped: {exc}", file=sys.stderr)
+        print(f"Internet engine stopped: {exc}", file=sys.stderr)
         rc = 1
     finally:
         if state is not None:
@@ -225,7 +225,7 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
 def _build_routing(
     engine_results: list[tuple[str, list[str], dict[str, Any]]],
 ) -> tuple[dict[str, str], list[str], dict[str, Any], list[str]]:
-    """Merge several local engines into one cloud identity's routing state (DECISIONS D9).
+    """Merge several local engines into one internet identity's routing state (DECISIONS D9).
 
     ``engine_results`` is ``[(llm_url, models, caps_envelope), ...]`` in detect order. Returns
     ``(routes, union_models, merged_caps, warnings)``:
@@ -491,8 +491,8 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     is_stream = bool(job.get("is_stream", False))
     read_timeout = float(job.get("inference_timeout_seconds") or _DEFAULT_INFERENCE_TIMEOUT)
 
-    if endpoint.startswith("media/"):  # cloud media serving is a later slice
-        _try_submit_error(state, txn, "media serving isn't available in cloud yet")
+    if endpoint.startswith("media/"):  # internet media serving is a later slice
+        _try_submit_error(state, txn, "media serving isn't available in internet mode yet")
         return
     if endpoint not in _ALLOWED_ENDPOINTS:  # don't forward an unknown path to the local engine
         _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")

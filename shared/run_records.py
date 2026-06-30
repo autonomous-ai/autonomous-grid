@@ -4,12 +4,12 @@ detached subprocess, shared by both modes.
 `grid join` writes one record per engine under
 ``~/.grid/run/engines/<grid_id>/<engine_id>.json`` (`shared.paths.engines_dir`) and spawns a
 detached child; `grid leave` reads it back to SIGTERM that child and remove the file. The record
-holds only **non-secret routing** — never a token (cloud tokens live in ``credentials.toml``,
+holds only **non-secret routing** — never a token (internet tokens live in ``credentials.toml``,
 ``0o600``).
 
-Extracted from ``cli/provider.py`` so the cloud serve loop (`cloud/serve.py`) and the cloud
-join/leave handlers (`cli/cloud_provider.py`) reuse the exact same record format and teardown
-without a ``cloud → cli`` back-dependency (DECISIONS D17). Writes go through ``shared.jsonio`` —
+Extracted from ``cli/provider.py`` so the internet serve loop (`internet/serve.py`) and the internet
+join/leave handlers (`cli/internet_provider.py`) reuse the exact same record format and teardown
+without an ``internet → cli`` back-dependency (DECISIONS D17). Writes go through ``shared.jsonio`` —
 the same atomic, ``0o600`` writer ``lan/config`` re-exports — so LAN behaviour is byte-identical.
 """
 from __future__ import annotations

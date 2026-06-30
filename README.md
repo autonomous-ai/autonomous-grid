@@ -23,7 +23,7 @@ and reach your engines over the internet through autonomous's hosted **relay** �
 
 Grid runs in one of two **modes**, and the same verbs (`up`, `join`, `chat`, `info`) work in both:
 
-| | **`lan`** _(default)_ | **`cloud`** |
+| | **`lan`** _(default)_ | **`internet`** |
 |---|---|---|
 | What it is | Unauthenticated, LAN-only proxy | Signed-in thin client to autonomous's hosted relay |
 | Reach | Same network only | Over the internet |
@@ -32,7 +32,7 @@ Grid runs in one of two **modes**, and the same verbs (`up`, `join`, `chat`, `in
 | How requests flow | Engines poll the relay for work; apps consume through it | |
 
 The chosen mode is persisted to **`~/.grid/state.json`**, and each mode remembers its own active grid there.
-Switch any time with `grid mode lan|cloud`, or override a single command with `--lan` / `--cloud`. A machine
+Switch any time with `grid mode lan|internet`, or override a single command with `--lan` / `--internet`. A machine
 with no state file behaves exactly as a `lan`-only install.
 
 ## Quickstart
@@ -56,7 +56,7 @@ your commands target the same mode without repeating yourself.
 
 **🌐 Internet**
 ```bash
-grid mode cloud
+grid mode internet
 # internet
 # Internet mode: `grid login` to sign in, then `grid up` to bring an internet grid online …
 ```

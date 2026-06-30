@@ -1,16 +1,16 @@
-# ADR 0007 — Cloud multi-engine routing (`grid join --all`, one identity, model→engine)
+# ADR 0007 — Internet multi-engine routing (`grid join --all`, one identity, model→engine)
 
 Status: accepted (2026-06-28)
 
 ## Context
 
-ADR 0004 stood up the cloud provider serve loop for **one** engine and §7 deliberately deferred
+ADR 0004 stood up the internet provider serve loop for **one** engine and §7 deliberately deferred
 multi-engine: `--all` was rejected and auto-detecting >1 engine errored. This slice flips that guard
-so one cloud identity can serve several local engines at once (DECISIONS **D9**; PRD User Story 27).
+so one internet identity can serve several local engines at once (DECISIONS **D9**; PRD User Story 27).
 `grid join --all` (or a confirmed bare auto-detect of several) brings up every detected engine,
 registers the **union** of their models under one `node_id`, and the serve loop keeps a
 `model → llm_url` table, forwarding each claimed job to the local engine that serves its requested
-model. Builds directly on ADR 0004 (the `__cloud-engine` loop, relay contract, refresh-on-401) and
+model. Builds directly on ADR 0004 (the `__internet-engine` loop, relay contract, refresh-on-401) and
 DECISIONS D17 (shared engine bring-up + a mode-specific serve loop). Parent: issue
 `…/issues/08-multi-engine-routing.md`.
 
@@ -20,8 +20,8 @@ routing is **net-new** here, not a port; the reference still informs the loop sh
 submit, heartbeat cadence) but the routing decisions below were taken fresh and confirmed with the
 maintainer this session.
 
-Hard invariant: LAN stays LAN-only / unauthenticated / stateless; single-engine cloud serve and the
-whole existing suite stay green; cloud reaches the relay only through `cloud/`; tokens are never
+Hard invariant: LAN stays LAN-only / unauthenticated / stateless; single-engine internet serve and the
+whole existing suite stay green; internet reaches the relay only through `internet/`; tokens are never
 printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is an internal id, and
 `provider` / `consumer` / `signaling` / `network` / bare `node` stay off it.
 
@@ -29,7 +29,7 @@ printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is
 
 1. **One `grid join` = one identity; `--all` is the union mechanism; repeated joins stay separate.**
    Each `grid join` writes one run record (carrying an `engines: [...]` list) + one `node_id` + one
-   detached `__cloud-engine` process. `--all` (or an interactive "join all" confirm) gathers every
+   detached `__internet-engine` process. `--all` (or an interactive "join all" confirm) gathers every
    detected engine into that single record; a repeated `grid join` on the same box is a *separate*
    identity (status quo), not a merge — merging into a live detached process would need new IPC and
    buys nothing the acceptance criteria ask for. `grid leave` (sole / `--engine <id>` / `--all`) is
@@ -37,7 +37,7 @@ printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is
    launched — "stops all engines started under that identity". (The issue's "or repeated joins on one
    machine" prose is reconciled to this in the issue file.)
 
-2. **Routing is client-side on `body["model"]`; first-detected wins.** `cloud/serve._build_routing`
+2. **Routing is client-side on `body["model"]`; first-detected wins.** `internet/serve._build_routing`
    folds `[(llm_url, models, caps), …]` (detect order) into `routes: {model→llm_url}`, the union model
    list, and a merged caps envelope. The **first** engine to advertise a model wins the route; a later
    duplicate (e.g. Ollama and LM Studio both serving `llama3`) is dropped with a warning line, never an
@@ -63,8 +63,8 @@ printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is
    unchanged. `--advertise-as` is rejected together with `--all`: the table is keyed on the
    **advertised** name and the body is forwarded unchanged, so advertised must equal the engine's real
    model name — single-engine `--serve` gets away with aliasing only because it sets `alias=` on
-   launch, which detected external engines have no hook for. Cloud media engines are still rejected (a
-   lone one) or skipped with a note (under `--all`); cloud media serving remains a later slice.
+   launch, which detected external engines have no hook for. Internet media engines are still rejected (a
+   lone one) or skipped with a note (under `--all`); internet media serving remains a later slice.
 
 5. **The record shape is additive and back-compatible.** `_build_record` adds `engines: [{endpoint_url,
    models, engine_label}, …]` and keeps the top-level `endpoint_url` (the sole engine's, or `None` for
@@ -75,7 +75,7 @@ printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is
 
 ## Consequences
 
-- Single-engine cloud serve is unchanged: `_ServeState` still constructs from `llm_url` + `models`
+- Single-engine internet serve is unchanged: `_ServeState` still constructs from `llm_url` + `models`
   (routes derived), and a job without a usable `model` still forwards to the sole engine. The whole
   existing suite stays green; new tests cover the routing helper, model routing in `handle_job`,
   multi-engine `--all` records, and the bring-up wiring against a mocked relay/probe.
@@ -83,5 +83,5 @@ printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is
   least-loaded is intentionally out of scope (no precedent in the port source, no acceptance criterion).
 - The grid page shows a multi-engine identity by its gathered kinds (e.g. `ollama+vllm`) when no
   `--engine-label` is given.
-- LAN is untouched. The routing + bring-up live entirely in `cloud/serve.py` + `cli/cloud_provider.py`;
+- LAN is untouched. The routing + bring-up live entirely in `internet/serve.py` + `cli/internet_provider.py`;
   `relay.py` and the shared record layer did not change.

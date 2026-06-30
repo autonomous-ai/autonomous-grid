@@ -30,9 +30,9 @@ from lan import runtime
 # grid join
 # ---------------------------------------------------------------------------
 
-# Cloud-only `grid join` flags (DECISIONS D6/D8): rejected in LAN mode, where the concept
+# Internet-only `grid join` flags (DECISIONS D6/D8): rejected in LAN mode, where the concept
 # doesn't exist. (attr on args, surface flag) — kept here next to the LAN handler that guards them.
-_CLOUD_ONLY_JOIN_FLAGS = (
+_INTERNET_ONLY_JOIN_FLAGS = (
     ("engine_label", "--engine-label"),
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
@@ -40,17 +40,17 @@ _CLOUD_ONLY_JOIN_FLAGS = (
 )
 
 
-def _reject_cloud_only_flags(args: argparse.Namespace) -> None:
-    used = [flag for attr, flag in _CLOUD_ONLY_JOIN_FLAGS if getattr(args, attr, None) is not None]
+def _reject_internet_only_flags(args: argparse.Namespace) -> None:
+    used = [flag for attr, flag in _INTERNET_ONLY_JOIN_FLAGS if getattr(args, attr, None) is not None]
     if used:
         raise SystemExit(
-            f"{', '.join(used)} only applies in cloud mode. "
-            "Switch with `grid mode cloud` (or pass --cloud)."
+            f"{', '.join(used)} only applies in internet mode. "
+            "Switch with `grid mode internet` (or pass --internet)."
         )
 
 
 def cmd_join(args: argparse.Namespace) -> int:
-    _reject_cloud_only_flags(args)
+    _reject_internet_only_flags(args)
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]

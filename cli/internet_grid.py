@@ -1,13 +1,13 @@
-"""Cloud-mode grid lifecycle: `grid up` / `down` / `ls` / `info` against the hosted
+"""Internet-mode grid lifecycle: `grid up` / `down` / `ls` / `info` against the hosted
 managed-networks API.
 
-Cloud-only — `cli.dispatch` routes these here in cloud mode, so the handlers assume cloud and
+Internet-only — `cli.dispatch` routes these here in internet mode, so the handlers assume internet and
 gate on sign-in via `credentials.require_session()`. Lifecycle is an *account-level* operation:
 it authenticates with the session token, not a per-grid token (the per-grid token and
-`info --env` are the cloud use-path, a later slice). `ls` reads the locally stored grids
+`info --env` are the internet use-path, a later slice). `ls` reads the locally stored grids
 (`credentials.toml`), never the network. Tokens are never printed. See ADR 0003.
 
-Import rule: only stdlib + `shared.state` at module top; `cloud.*` is imported lazily inside
+Import rule: only stdlib + `shared.state` at module top; `internet.*` is imported lazily inside
 each handler (mirrors `cli/auth.py`) because `cli.dispatch` imports this module while the `cli`
 package is still initialising — a top-level `from cli import …` here would be a partial-init cycle.
 """
@@ -33,7 +33,7 @@ _NETWORK_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def _networks() -> list[dict[str, Any]]:
-    from cloud import credentials
+    from internet import credentials
 
     return list(credentials.load_credentials().get("networks") or [])
 
@@ -48,12 +48,12 @@ def _by_name(name: str) -> dict[str, Any] | None:
 
 def _resolve_default() -> dict[str, Any] | None:
     """The grid to act on when none is named: the active selection, else the sole grid, else
-    ``None``. No ``home`` fallback — cloud never auto-creates one. Mirrors the default branch of
+    ``None``. No ``home`` fallback — internet never auto-creates one. Mirrors the default branch of
     ``lan/config.select_grid``; a stale active (its grid was removed) falls through to the sole grid.
     The single home of the active>sole precedence, shared by ``up`` (no name) and ``_select``.
     """
     nets = _networks()
-    active = state.get_active("cloud")
+    active = state.get_active("internet")
     if active:
         for net in nets:
             if net.get("network_id") == active or net.get("name") == active:
@@ -100,7 +100,7 @@ def _grid_url(live: dict[str, Any], rec: dict[str, Any]) -> str:
 def _try_status(session: str, network_id: str) -> dict[str, Any]:
     """Live managed-network status, or ``{}`` when the caller may not read it (a non-creator member
     gets 403 from the creator-only endpoint). For display paths that should degrade, never fail."""
-    from cloud import control_plane
+    from internet import control_plane
 
     try:
         return control_plane.get_managed_network_status(session, network_id)
@@ -120,7 +120,7 @@ def resolve_relay_base(
     grid then fails later at the relay). Raises a clean ``SystemExit`` when no URL is available
     anywhere, or when the creator-visible status says the grid is stopped.
     """
-    from cloud import control_plane
+    from internet import control_plane
 
     bundle_url = rec.get("lan_signaling_url") or rec.get("signaling_url")
     try:
@@ -157,8 +157,8 @@ def _print_up(name: str, url: str) -> int:
     return 0
 
 
-def cmd_cloud_up(args: argparse.Namespace) -> int:
-    from cloud import control_plane, credentials
+def cmd_internet_up(args: argparse.Namespace) -> int:
+    from internet import control_plane, credentials
 
     session = credentials.require_session()
     name = args.name
@@ -188,14 +188,14 @@ def cmd_cloud_up(args: argparse.Namespace) -> int:
         # The grid exists server-side now; tell the user rather than leaving a bare traceback and a
         # next `grid up <name>` that would create a duplicate.
         raise SystemExit(
-            f"Grid {name!r} was created in the cloud but couldn't be saved locally ({exc}). "
+            f"Grid {name!r} was created in internet mode but couldn't be saved locally ({exc}). "
             "Run `grid login` to re-sync your grids before retrying."
         ) from None
     return _print_up(resp.get("name") or name, _grid_url(resp, record))
 
 
-def cmd_cloud_down(args: argparse.Namespace) -> int:
-    from cloud import control_plane, credentials
+def cmd_internet_down(args: argparse.Namespace) -> int:
+    from internet import control_plane, credentials
 
     session = credentials.require_session()
     rec = _select(args.name)
@@ -206,12 +206,12 @@ def cmd_cloud_down(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_cloud_ls(args: argparse.Namespace) -> int:
-    from cloud import credentials
+def cmd_internet_ls(args: argparse.Namespace) -> int:
+    from internet import credentials
 
     credentials.require_session()
     nets = _networks()  # local only — `grid login` already fetched these; no network call
-    active = state.get_active("cloud")
+    active = state.get_active("internet")
     if args.json:
         print(json.dumps([{"grid": n.get("name"), "type": n.get("network_type")} for n in nets], indent=2))
         return 0
@@ -225,8 +225,8 @@ def cmd_cloud_ls(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_cloud_info(args: argparse.Namespace) -> int:
-    from cloud import credentials
+def cmd_internet_info(args: argparse.Namespace) -> int:
+    from internet import credentials
 
     session = credentials.require_session()
     if args.env:
@@ -267,14 +267,14 @@ def cmd_cloud_info(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_cloud_members(args: argparse.Namespace) -> int:
-    """`grid members add|remove|list [grid] <email>` — manage who may use or serve a cloud grid.
+def cmd_internet_members(args: argparse.Namespace) -> int:
+    """`grid members add|remove|list [grid] <email>` — manage who may use or serve an internet grid.
 
     Account-level (session token, like lifecycle): it resolves the grid locally and never needs it
     running, so there is no status/relay call. Human output is built from the inputs we already hold
     and ``.get()`` on each member — the control-plane reply shape is never indexed into; ``--json``
     echoes the raw reply. No token is printed."""
-    from cloud import control_plane, credentials
+    from internet import control_plane, credentials
 
     session = credentials.require_session()
     network_id = _network_id(_select(args.grid))

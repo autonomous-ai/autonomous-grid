@@ -68,6 +68,27 @@ def test_cli_drops_auth_and_legacy_commands():
             parser.parse_args(argv)
 
 
+def test_internet_mode_rename_is_a_hard_cutover():
+    """The old ``cloud`` spelling is gone; ``internet`` is the over-the-network mode.
+
+    Pins the cloud→internet rename as a hard cutover: no alias, no back-compat for
+    the removed name, at both the ``grid mode`` and one-shot ``--flag`` layers.
+    """
+    assert "cloud" not in state.VALID_MODES
+    assert "internet" in state.VALID_MODES
+
+    parser = cli.build_parser()
+    # ``grid mode cloud`` is rejected (removed choice); ``grid mode internet`` is accepted.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["mode", "cloud"])
+    assert parser.parse_args(["mode", "internet"]).target == "internet"
+
+    # The one-shot override: ``--internet`` is recognised and stripped; ``--cloud`` is not.
+    assert dispatch.resolve_override(["--internet", "engines"]) == ("internet", ["engines"])
+    override, cleaned = dispatch.resolve_override(["--cloud", "engines"])
+    assert override is None and "--cloud" in cleaned
+
+
 def test_init_grid_config_is_lan_permissionless(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "detect_lan_ip", lambda: "192.168.1.25")
@@ -739,7 +760,7 @@ def test_join_cleans_up_record_when_engine_dies(monkeypatch, tmp_path, capsys):
     assert cli.provider._read_records(cfg["grid_id"]) == {}
 
 
-def test_join_parser_accepts_unified_cloud_flags(monkeypatch, tmp_path):
+def test_join_parser_accepts_unified_internet_flags(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     args = cli.build_parser().parse_args([
         "join", "--serve", "m", "--engine-label", "rig", "--pricing-input", "0.5",
@@ -751,13 +772,13 @@ def test_join_parser_accepts_unified_cloud_flags(monkeypatch, tmp_path):
     assert args.endpoint_port == 9001  # --llama-port is an alias for --endpoint-port
 
 
-def test_join_lan_rejects_cloud_only_flags(monkeypatch, tmp_path):
+def test_join_lan_rejects_internet_only_flags(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     runtime.init_grid_config(name="home", port=8090)
     args = cli.build_parser().parse_args(["join", "home", "--serve", "m", "--max-concurrency", "4"])
     with pytest.raises(SystemExit) as exc:
-        cli.cmd_join(args)  # LAN handler rejects a cloud-only flag before doing any work
-    assert "--max-concurrency" in str(exc.value) and "cloud" in str(exc.value).lower()
+        cli.cmd_join(args)  # LAN handler rejects an internet-only flag before doing any work
+    assert "--max-concurrency" in str(exc.value) and "internet" in str(exc.value).lower()
 
 
 def test_await_engine_start_distinguishes_died_registered_starting(monkeypatch):
@@ -934,7 +955,7 @@ def test_state_defaults_to_lan_with_no_active_when_absent(monkeypatch, tmp_path)
 
     assert state.get_mode() == "lan"
     assert state.get_active("lan") is None
-    assert state.get_active("cloud") is None
+    assert state.get_active("internet") is None
     assert not state.state_path().exists()
 
 
@@ -942,28 +963,28 @@ def test_state_set_mode_persists_and_preserves_active(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
     state.set_active("lan", "home")
-    state.set_mode("cloud")
+    state.set_mode("internet")
 
-    assert state.get_mode() == "cloud"
+    assert state.get_mode() == "internet"
     assert state.get_active("lan") == "home"  # switching mode keeps each mode's active
     payload = json.loads(state.state_path().read_text())
     assert payload["version"] == 1
-    assert payload["mode"] == "cloud"
+    assert payload["mode"] == "internet"
 
 
 def test_state_active_is_per_mode_and_preserves_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
-    state.set_mode("cloud")
+    state.set_mode("internet")
     state.set_active("lan", "home")
-    state.set_active("cloud", "team")
+    state.set_active("internet", "team")
 
     assert state.get_active("lan") == "home"
-    assert state.get_active("cloud") == "team"
-    assert state.get_mode() == "cloud"  # setting active never changes the mode
+    assert state.get_active("internet") == "team"
+    assert state.get_mode() == "internet"  # setting active never changes the mode
 
-    state.set_active("cloud", None)  # clear
-    assert state.get_active("cloud") is None
+    state.set_active("internet", None)  # clear
+    assert state.get_active("internet") is None
     assert state.get_active("lan") == "home"
 
 
@@ -971,7 +992,7 @@ def test_resolve_mode_override_beats_persisted(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     state.set_mode("lan")
 
-    assert state.resolve_mode("cloud") == "cloud"  # override wins
+    assert state.resolve_mode("internet") == "internet"  # override wins
     assert state.resolve_mode(None) == "lan"       # falls back to persisted
 
 
@@ -990,8 +1011,8 @@ def test_state_recovers_from_malformed_file(monkeypatch, tmp_path):
     state.state_path().write_text("{ this is not json")
 
     assert state.get_mode() == "lan"  # lenient: corrupt file => defaults
-    state.set_mode("cloud")           # self-heals on next write
-    assert state.get_mode() == "cloud"
+    state.set_mode("internet")           # self-heals on next write
+    assert state.get_mode() == "internet"
 
 
 # ---------------------------------------------------------------------------
@@ -1004,16 +1025,16 @@ def test_grid_mode_reads_and_persists(monkeypatch, tmp_path, capsys):
     assert cli.cmd_mode(cli.build_parser().parse_args(["mode"])) == 0
     assert capsys.readouterr().out.strip() == "lan"
 
-    assert cli.cmd_mode(cli.build_parser().parse_args(["mode", "cloud"])) == 0
+    assert cli.cmd_mode(cli.build_parser().parse_args(["mode", "internet"])) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "cloud"
-    assert "grid login" in out  # switching to cloud points at sign-in + grid management
-    assert "grid chat" in out  # consume has shipped — the switch points at using a cloud grid
+    assert out.splitlines()[0] == "internet"
+    assert "grid login" in out  # switching to internet mode points at sign-in + grid management
+    assert "grid chat" in out  # consume has shipped — the switch points at using an internet grid
     assert "later release" not in out  # no stale "chatting comes later" line
-    assert state.get_mode() == "cloud"
+    assert state.get_mode() == "internet"
 
     assert cli.cmd_mode(cli.build_parser().parse_args(["mode", "--json"])) == 0
-    assert json.loads(capsys.readouterr().out) == {"mode": "cloud"}
+    assert json.loads(capsys.readouterr().out) == {"mode": "internet"}
 
 
 def test_grid_use_sets_reads_and_clears_active_lan(monkeypatch, tmp_path, capsys):
@@ -1050,29 +1071,29 @@ def test_grid_use_rejects_unknown_grid_in_lan(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_resolve_override_strips_flag_in_any_position():
-    assert dispatch.resolve_override(["--cloud", "up"]) == ("cloud", ["up"])
-    assert dispatch.resolve_override(["up", "--cloud"]) == ("cloud", ["up"])
+    assert dispatch.resolve_override(["--internet", "up"]) == ("internet", ["up"])
+    assert dispatch.resolve_override(["up", "--internet"]) == ("internet", ["up"])
     assert dispatch.resolve_override(["models", "--lan", "home"]) == ("lan", ["models", "home"])
     assert dispatch.resolve_override(["up"]) == (None, ["up"])
     with pytest.raises(SystemExit):
-        dispatch.resolve_override(["--lan", "--cloud", "up"])
+        dispatch.resolve_override(["--lan", "--internet", "up"])
 
 
-def test_dispatch_stubs_unimplemented_cloud_commands(monkeypatch, tmp_path):
+def test_dispatch_stubs_unimplemented_internet_commands(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")
+    state.set_mode("internet")
 
-    # Gated commands without a real cloud handler yet still hit the "not available" stub.
+    # Gated commands without a real internet handler yet still hit the "not available" stub.
     # (up/down/ls/info and join/leave now have handlers — covered by their own tests below.)
     for command in ("models", "engines"):
         with pytest.raises(SystemExit) as exc:
             cli.main([command])
-        assert "cloud mode yet" in str(exc.value).lower()
+        assert "internet mode yet" in str(exc.value).lower()
 
 
-def test_cloud_lifecycle_requires_session_when_signed_out(monkeypatch, tmp_path):
+def test_internet_lifecycle_requires_session_when_signed_out(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")  # cloud mode, but not signed in
+    state.set_mode("internet")  # internet mode, but not signed in
 
     # The lifecycle verbs are no longer stubbed: they reach the auth gate, not the old stub.
     for argv in (["up", "team"], ["down", "team"], ["info", "team"]):
@@ -1081,29 +1102,29 @@ def test_cloud_lifecycle_requires_session_when_signed_out(monkeypatch, tmp_path)
         assert "login" in str(exc.value).lower()
 
 
-def test_cloud_up_create_rejects_missing_network_id(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path)
+def test_internet_up_create_rejects_missing_network_id(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path)
     # 200 OK but no network_id (API regression): a clean error, not false success + a later KeyError.
     _mock_lifecycle(monkeypatch, create={"name": "team", "network_type": "permissioned-public"})
     with pytest.raises(SystemExit) as exc:
         cli.main(["up", "team"])
     assert "no usable id" in str(exc.value).lower()
 
-    from cloud import credentials
+    from internet import credentials
     assert credentials.load_credentials()["networks"] == []  # nothing persisted
 
 
-def test_cloud_down_rejects_unsafe_network_id(monkeypatch, tmp_path):
+def test_internet_down_rejects_unsafe_network_id(monkeypatch, tmp_path):
     # A stored id that could re-target the request path is refused before any control-plane call.
-    _seed_cloud(monkeypatch, tmp_path, networks=[{"network_id": "n1/../admin", "name": "team"}])
+    _seed_internet(monkeypatch, tmp_path, networks=[{"network_id": "n1/../admin", "name": "team"}])
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
     with pytest.raises(SystemExit):
         cli.main(["down", "team"])
     assert "stop" not in calls  # rejected before reaching the network
 
 
-def test_cloud_down_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_down_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}, {"network_id": "n2", "name": "lab"}],
                 active="lab")
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
@@ -1112,8 +1133,8 @@ def test_cloud_down_bare_stops_active_grid(monkeypatch, tmp_path, capsys):
     assert "lab" in capsys.readouterr().out
 
 
-def test_cloud_info_bare_uses_sole_grid(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_info_bare_uses_sole_grid(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://r"})
     assert cli.main(["info"]) == 0  # no name → the sole grid
@@ -1122,81 +1143,81 @@ def test_cloud_info_bare_uses_sole_grid(monkeypatch, tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Cloud `grid join` / `grid leave` (cli/cloud_provider.py + dispatch + __cloud-engine)
+# Internet `grid join` / `grid leave` (cli/internet_provider.py + dispatch + __internet-engine)
 # ---------------------------------------------------------------------------
 
-def _seed_running_cloud_grid(monkeypatch, tmp_path, *, access_token="AT"):
-    """A signed-in cloud user with one *running* grid (status mocked) for the join tests."""
+def _seed_running_internet_grid(monkeypatch, tmp_path, *, access_token="AT"):
+    """A signed-in internet mode user with one *running* grid (status mocked) for the join tests."""
     net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}
     if access_token is not None:
         net["access_token"], net["refresh_token"] = access_token, "RT"
-    _seed_cloud(monkeypatch, tmp_path, networks=[net], active="team")
+    _seed_internet(monkeypatch, tmp_path, networks=[net], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
 
 
-def _mock_cloud_spawn(monkeypatch, *, pid=4242):
-    """Capture the detached __cloud-engine spawn and skip the real liveness wait."""
+def _mock_internet_spawn(monkeypatch, *, pid=4242):
+    """Capture the detached __internet-engine spawn and skip the real liveness wait."""
     spawned = {}
 
     def fake_popen(cmd, **kw):
         spawned["cmd"] = cmd
         return type("P", (), {"pid": pid})()
 
-    monkeypatch.setattr(cli.cloud_provider.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli.cloud_provider, "_await_cloud_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.internet_provider.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli.internet_provider, "_await_internet_engine_start", lambda *a, **k: "starting")
     return spawned
 
 
-def test_cloud_join_serve_writes_record_and_spawns_cloud_engine(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    spawned = _mock_cloud_spawn(monkeypatch)
+def test_internet_join_serve_writes_record_and_spawns_internet_engine(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    spawned = _mock_internet_spawn(monkeypatch)
 
     assert cli.main(["join", "--serve", "m"]) == 0
 
-    records = cli.provider._read_records("n1")  # cloud records live under engines_dir(network_id)
+    records = cli.provider._read_records("n1")  # internet records live under engines_dir(network_id)
     assert len(records) == 1
     (engine_id, record), = records.items()
     assert record["signaling_url"] == "https://relay.example"
     assert record["models"] == ["m"] and record["endpoint_url"] is None and record["grid_id"] == "n1"
     assert "access_token" not in record  # the token stays in credentials.toml, never the run record
-    assert spawned["cmd"][-3:] == ["__cloud-engine", "n1", engine_id]
+    assert spawned["cmd"][-3:] == ["__internet-engine", "n1", engine_id]
 
 
-def test_cloud_join_at_serves_external_engine(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_at_serves_external_engine(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
 
     assert cli.main(["join", "--at", "http://192.168.1.9:11434/v1", "-m", "llama3", "--name", "ext"]) == 0
     record = cli.provider._read_records("n1")["ext"]
     assert record["endpoint_url"] == "http://192.168.1.9:11434/v1" and record["models"] == ["llama3"]
 
 
-def test_cloud_join_member_falls_back_to_bundle_url_when_status_forbidden(monkeypatch, tmp_path):
+def test_internet_join_member_falls_back_to_bundle_url_when_status_forbidden(monkeypatch, tmp_path):
     """A provider MEMBER (not the grid creator) gets 403 from the creator-only status endpoint; join
     must fall back to the lan_signaling_url the login bundle carries instead of failing."""
-    from cloud import control_plane
+    from internet import control_plane
 
     net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
            "access_token": "AT", "refresh_token": "RT", "lan_signaling_url": "https://grid.example/n1"}
-    _seed_cloud(monkeypatch, tmp_path, networks=[net], active="team")
+    _seed_internet(monkeypatch, tmp_path, networks=[net], active="team")
 
     def _forbidden(session_token, network_id, api_url=None):
         raise SystemExit("GET .../status failed (403): Only the network creator can manage it")
 
     monkeypatch.setattr(control_plane, "get_managed_network_status", _forbidden)
-    _mock_cloud_spawn(monkeypatch)
+    _mock_internet_spawn(monkeypatch)
 
     assert cli.main(["join", "--serve", "m"]) == 0
     record = next(iter(cli.provider._read_records("n1").values()))
     assert record["signaling_url"] == "https://grid.example/n1"  # from the bundle, not the denied status
 
 
-def test_cloud_join_member_without_stored_url_surfaces_status_error(monkeypatch, tmp_path):
+def test_internet_join_member_without_stored_url_surfaces_status_error(monkeypatch, tmp_path):
     """Status denied AND no relay URL in the bundle → surface the original error, never silently pass."""
-    from cloud import control_plane
+    from internet import control_plane
 
     net = {"network_id": "n1", "name": "team", "access_token": "AT", "refresh_token": "RT"}  # no lan_signaling_url
-    _seed_cloud(monkeypatch, tmp_path, networks=[net], active="team")
+    _seed_internet(monkeypatch, tmp_path, networks=[net], active="team")
 
     def _forbidden(session_token, network_id, api_url=None):
         raise SystemExit("GET .../status failed (403): Only the network creator can manage it")
@@ -1207,9 +1228,9 @@ def test_cloud_join_member_without_stored_url_surfaces_status_error(monkeypatch,
     assert "creator" in str(exc.value).lower()
 
 
-def test_cloud_join_autodetects_single_engine(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_autodetects_single_engine(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
     monkeypatch.setattr(cli.provider, "_detect", lambda host: [
         detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
     ])
@@ -1219,9 +1240,9 @@ def test_cloud_join_autodetects_single_engine(monkeypatch, tmp_path):
     assert record["endpoint_url"] == "http://h:11434/v1" and record["models"] == ["llama3"]
 
 
-def test_cloud_join_all_serves_every_detected(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    spawned = _mock_cloud_spawn(monkeypatch)
+def test_internet_join_all_serves_every_detected(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    spawned = _mock_internet_spawn(monkeypatch)
     monkeypatch.setattr(cli.provider, "_detect", lambda host: [
         detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
         detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
@@ -1235,12 +1256,12 @@ def test_cloud_join_all_serves_every_detected(monkeypatch, tmp_path):
     assert [e["endpoint_url"] for e in record["engines"]] == ["http://h:11434/v1", "http://h:8000/v1"]
     assert record["models"] == ["llama3", "mistral"]  # union, in detect order
     assert record["endpoint_url"] is None  # no single endpoint when several engines
-    assert spawned["cmd"][-3:] == ["__cloud-engine", "n1", engine_id]
+    assert spawned["cmd"][-3:] == ["__internet-engine", "n1", engine_id]
 
 
-def test_cloud_join_all_warns_on_shadowed_model(monkeypatch, tmp_path, capsys):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_all_warns_on_shadowed_model(monkeypatch, tmp_path, capsys):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
     monkeypatch.setattr(cli.provider, "_detect", lambda host: [
         detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
         detect.DetectedEngine(label="lm-studio", endpoint_url="http://h:1234/v1", models=["llama3"]),
@@ -1251,9 +1272,9 @@ def test_cloud_join_all_warns_on_shadowed_model(monkeypatch, tmp_path, capsys):
     assert "llama3" in err and "more than one engine" in err  # operator sees the shadowing at join time
 
 
-def test_cloud_join_all_rejects_advertise_as(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_all_rejects_advertise_as(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
     monkeypatch.setattr(cli.provider, "_detect", lambda host: [
         detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
         detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
@@ -1263,25 +1284,25 @@ def test_cloud_join_all_rejects_advertise_as(monkeypatch, tmp_path):
     assert "advertise-as" in str(exc.value).lower()
 
 
-def test_cloud_join_rejects_media(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_rejects_media(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--media"])
     assert "media" in str(exc.value).lower()
 
 
-def test_cloud_join_rejects_advertise_host(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_rejects_advertise_host(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--serve", "m", "--advertise-host", "1.2.3.4"])
     assert "advertise-host" in str(exc.value).lower()
 
 
-def test_cloud_join_rejects_multiple_detected(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    _mock_cloud_spawn(monkeypatch)
+def test_internet_join_rejects_multiple_detected(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    _mock_internet_spawn(monkeypatch)
     monkeypatch.setattr(cli.provider, "_detect", lambda host: [
         detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
         detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
@@ -1291,46 +1312,46 @@ def test_cloud_join_rejects_multiple_detected(monkeypatch, tmp_path):
     assert "multiple engines" in str(exc.value).lower()  # bare join still needs --all/--engine to disambiguate
 
 
-def test_cloud_join_requires_sign_in(monkeypatch, tmp_path):
+def test_internet_join_requires_sign_in(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")  # cloud mode, not signed in
+    state.set_mode("internet")  # internet mode, not signed in
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--serve", "m"])
     assert "login" in str(exc.value).lower()
 
 
-def test_cloud_join_requires_access_token(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}], active="team")  # no token
+def test_internet_join_requires_access_token(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}], active="team")  # no token
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--serve", "m"])
     assert "login" in str(exc.value).lower()
 
 
-def test_cloud_join_requires_grid_up(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_join_requires_grid_up(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT", "refresh_token": "RT"}],
                 active="team")
     _mock_lifecycle(monkeypatch, status={"state": "stopped"})  # down → no relay address
-    monkeypatch.setattr(cli.cloud_provider.subprocess, "Popen",
+    monkeypatch.setattr(cli.internet_provider.subprocess, "Popen",
                         lambda *a, **k: pytest.fail("must not spawn when the grid is down"))
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--serve", "m"])
     assert "grid up" in str(exc.value).lower()
 
 
-def test_cloud_join_died_cleans_up_record(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli.cloud_provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 999_999})())
-    monkeypatch.setattr(cli.cloud_provider, "_await_cloud_engine_start", lambda *a, **k: "died")
+def test_internet_join_died_cleans_up_record(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.internet_provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 999_999})())
+    monkeypatch.setattr(cli.internet_provider, "_await_internet_engine_start", lambda *a, **k: "died")
     with pytest.raises(SystemExit):
         cli.main(["join", "--serve", "m", "--name", "bad"])
     assert cli.provider._read_records("n1") == {}  # stale record removed on a failed start
 
 
-def test_cloud_leave_stops_and_removes_record(monkeypatch, tmp_path, capsys):
+def test_internet_leave_stops_and_removes_record(monkeypatch, tmp_path, capsys):
     from shared import run_records
 
-    _seed_cloud(monkeypatch, tmp_path,
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
     run_records.write_record("n1", "rig", {"engine_id": "rig", "node_id": "node-x", "grid_id": "n1", "pid": 0})
 
@@ -1339,20 +1360,20 @@ def test_cloud_leave_stops_and_removes_record(monkeypatch, tmp_path, capsys):
     assert "Left engine rig" in capsys.readouterr().out
 
 
-def test_dispatch_runs_agnostic_command_in_cloud(monkeypatch, tmp_path, capsys):
+def test_dispatch_runs_agnostic_command_in_internet(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")
+    state.set_mode("internet")
 
-    assert cli.main(["catalog", "--json"]) == 0  # agnostic: runs even in cloud
+    assert cli.main(["catalog", "--json"]) == 0  # agnostic: runs even in internet mode
     assert json.loads(capsys.readouterr().out)  # produced the catalog payload
 
 
-def test_override_sets_cloud_active_without_persisting_mode(monkeypatch, tmp_path, capsys):
+def test_override_sets_internet_active_without_persisting_mode(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # persisted mode stays lan
 
-    assert cli.main(["--cloud", "use", "team"]) == 0  # G1: --cloud reaches cmd_use
+    assert cli.main(["--internet", "use", "team"]) == 0  # G1: --internet reaches cmd_use
     capsys.readouterr()
-    assert state.get_active("cloud") == "team"
+    assert state.get_active("internet") == "team"
     assert state.get_active("lan") is None
     assert state.get_mode() == "lan"  # the one-shot override did not persist
 
@@ -1360,20 +1381,20 @@ def test_override_sets_cloud_active_without_persisting_mode(monkeypatch, tmp_pat
 def test_mode_query_ignores_override(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
-    assert cli.main(["--cloud", "mode"]) == 0
+    assert cli.main(["--internet", "mode"]) == 0
     assert capsys.readouterr().out.strip() == "lan"  # prints persisted mode, not the override
 
 
 def test_both_mode_flags_is_error(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     with pytest.raises(SystemExit):
-        cli.main(["--lan", "--cloud", "mode"])
+        cli.main(["--lan", "--internet", "mode"])
 
 
 def test_every_command_is_classified_for_dispatch():
     parser = cli.build_parser()
     sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
-    classified = set(dispatch.AGNOSTIC) | set(dispatch.CLOUD_HANDLERS) | set(dispatch.CLOUD_ONLY)
+    classified = set(dispatch.AGNOSTIC) | set(dispatch.INTERNET_HANDLERS) | set(dispatch.INTERNET_ONLY)
     unclassified = set(sub.choices) - classified
     assert not unclassified, f"unclassified commands: {unclassified}"
 
@@ -1421,19 +1442,19 @@ def test_overview_json_lan_contract(monkeypatch, tmp_path, capsys):
     assert payload["models"] == ["gemma4-31b", "devstral"]
 
 
-def test_overview_cloud_is_stub_without_network(monkeypatch, tmp_path, capsys):
+def test_overview_internet_is_stub_without_network(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")
+    state.set_mode("internet")
 
     def _boom(url):
-        raise AssertionError("overview must not hit the network in cloud mode")
+        raise AssertionError("overview must not hit the network in internet mode")
 
     monkeypatch.setattr(cli.grid, "_live_engines", _boom)
 
     assert cli.main([]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "mode: cloud"
-    assert "grid login" in out  # accurate cloud guidance, still no network call
+    assert out.splitlines()[0] == "mode: internet"
+    assert "grid login" in out  # accurate internet guidance, still no network call
     assert "grid chat" in out  # consume has shipped — overview points at it
     assert "later release" not in out  # the stale "chatting comes later" line is gone
 
@@ -1477,11 +1498,11 @@ def test_live_engines_tolerates_non_dict_response(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Cloud credential store (cloud/credentials.py)
+# Internet credential store (internet/credentials.py)
 # ---------------------------------------------------------------------------
 
 def test_device_id_generates_once_and_survives_logout(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     first = credentials.device_id()
@@ -1495,7 +1516,7 @@ def test_device_id_generates_once_and_survives_logout(monkeypatch, tmp_path):
 
 
 def test_credentials_roundtrip_is_0600(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     bundle = {"session_token": "tok", "api_url": "https://api.example", "networks": []}
@@ -1507,7 +1528,7 @@ def test_credentials_roundtrip_is_0600(monkeypatch, tmp_path):
 
 
 def test_clear_credentials_reports_existence(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     assert credentials.clear_credentials() is False  # nothing to clear
@@ -1517,7 +1538,7 @@ def test_clear_credentials_reports_existence(monkeypatch, tmp_path):
 
 
 def test_require_session_gates_when_signed_out(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     with pytest.raises(SystemExit) as exc:
@@ -1529,7 +1550,7 @@ def test_require_session_gates_when_signed_out(monkeypatch, tmp_path):
 
 
 def test_api_url_resolution_precedence(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     monkeypatch.delenv("GRID_CONTROL_PLANE_URL", raising=False)
@@ -1544,7 +1565,7 @@ def test_api_url_resolution_precedence(monkeypatch, tmp_path):
 
 
 def test_default_website_url_empty_env_falls_back_to_server(monkeypatch):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.delenv("GRID_WEBSITE_URL", raising=False)
     assert credentials.default_website_url() == "https://autonomous.ai"
@@ -1553,7 +1574,7 @@ def test_default_website_url_empty_env_falls_back_to_server(monkeypatch):
 
 
 def test_update_network_tokens_replaces_in_place_and_preserves_rest(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({
@@ -1576,7 +1597,7 @@ def test_update_network_tokens_replaces_in_place_and_preserves_rest(monkeypatch,
 
 
 def test_update_network_tokens_keeps_refresh_when_not_rotated(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"networks": [{"network_id": "n1", "access_token": "AT1", "refresh_token": "RT1"}]})
@@ -1589,12 +1610,12 @@ def test_update_network_tokens_keeps_refresh_when_not_rotated(monkeypatch, tmp_p
 
 
 # ---------------------------------------------------------------------------
-# Cloud control-plane client (cloud/control_plane.py)
+# Internet control-plane client (internet/control_plane.py)
 # ---------------------------------------------------------------------------
 
 def _mock_control_plane(monkeypatch, handler):
-    """Serve the cloud client's HTTP via httpx.MockTransport — real request-building, no network."""
-    from cloud import control_plane
+    """Serve the internet client's HTTP via httpx.MockTransport — real request-building, no network."""
+    from internet import control_plane
 
     real_client = httpx.Client
     monkeypatch.setattr(
@@ -1605,7 +1626,7 @@ def _mock_control_plane(monkeypatch, handler):
 
 
 def test_control_plane_start_device_login(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1620,7 +1641,7 @@ def test_control_plane_start_device_login(monkeypatch, tmp_path):
 
 
 def test_control_plane_poll_sends_device_code(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1636,7 +1657,7 @@ def test_control_plane_poll_sends_device_code(monkeypatch, tmp_path):
 
 
 def test_control_plane_fetch_tokens_attaches_bearer_and_query(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1654,7 +1675,7 @@ def test_control_plane_fetch_tokens_attaches_bearer_and_query(monkeypatch, tmp_p
 
 
 def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json={"networks": None}))
@@ -1662,7 +1683,7 @@ def test_control_plane_fetch_tokens_defaults_missing_networks_to_empty(monkeypat
 
 
 def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(401, text="denied"))
@@ -1672,7 +1693,7 @@ def test_control_plane_raises_on_error_status(monkeypatch, tmp_path):
 
 
 def test_control_plane_refresh_network_token_posts_refresh_unauthenticated(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1692,7 +1713,7 @@ def test_control_plane_refresh_network_token_posts_refresh_unauthenticated(monke
 
 
 def test_control_plane_refresh_network_token_raises_on_error(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(401, text="bad refresh"))
@@ -1702,7 +1723,7 @@ def test_control_plane_refresh_network_token_raises_on_error(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# Cloud relay client (cloud/relay.py)
+# Internet relay client (internet/relay.py)
 # ---------------------------------------------------------------------------
 
 def _mock_relay(monkeypatch, handler, _real=httpx.Client):
@@ -1711,7 +1732,7 @@ def _mock_relay(monkeypatch, handler, _real=httpx.Client):
     ``_real`` is bound to the genuine ``httpx.Client`` once at import, so a test can call this more
     than once (re-mocking per status) without the second patch wrapping the first.
     """
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setattr(
         relay.httpx,
@@ -1721,7 +1742,7 @@ def _mock_relay(monkeypatch, handler, _real=httpx.Client):
 
 
 def test_relay_register_node_puts_envelope_with_bearer(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1746,7 +1767,7 @@ def test_relay_register_node_puts_envelope_with_bearer(monkeypatch, tmp_path):
 
 
 def test_relay_register_node_raises_typed_errors(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_relay(monkeypatch, lambda r: httpx.Response(401, text="nope"))
@@ -1758,7 +1779,7 @@ def test_relay_register_node_raises_typed_errors(monkeypatch, tmp_path):
 
 
 def test_relay_poll_maps_status_to_job_none_or_signal(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     job = {"transaction_id": "t1", "endpoint_path": "chat/completions", "body": {"model": "m"}, "is_stream": False}
@@ -1785,7 +1806,7 @@ def test_relay_poll_maps_status_to_job_none_or_signal(monkeypatch, tmp_path):
 
 
 def test_relay_heartbeat_body_has_no_node_id(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1808,7 +1829,7 @@ def test_relay_heartbeat_body_has_no_node_id(monkeypatch, tmp_path):
 
 
 def test_relay_submit_response_non_stream_and_stream(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1835,7 +1856,7 @@ def test_relay_submit_response_non_stream_and_stream(monkeypatch, tmp_path):
 
 
 def test_relay_submit_error_posts_message(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1851,7 +1872,7 @@ def test_relay_submit_error_posts_message(monkeypatch, tmp_path):
 
 
 def test_relay_unregister_flips_role_to_consumer_best_effort(monkeypatch, tmp_path):
-    from cloud import relay
+    from internet import relay
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -1872,12 +1893,12 @@ def test_relay_unregister_flips_role_to_consumer_best_effort(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# Cloud capability probe + benchmark (cloud/probe.py)
+# Internet capability probe + benchmark (internet/probe.py)
 # ---------------------------------------------------------------------------
 
 def _mock_engine(monkeypatch, handler, _real=httpx.Client):
-    """Serve a probed local engine's HTTP via httpx.MockTransport (patches cloud.probe's client)."""
-    from cloud import probe
+    """Serve a probed local engine's HTTP via httpx.MockTransport (patches internet.probe's client)."""
+    from internet import probe
 
     monkeypatch.setattr(
         probe.httpx,
@@ -1907,7 +1928,7 @@ def _capable_engine_handler(request):
 
 
 def test_probe_capabilities_builds_envelope_from_live_probe(monkeypatch, tmp_path):
-    from cloud import probe
+    from internet import probe
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_engine(monkeypatch, _capable_engine_handler)
@@ -1926,7 +1947,7 @@ def test_probe_capabilities_builds_envelope_from_live_probe(monkeypatch, tmp_pat
 
 
 def test_probe_capabilities_degrades_to_text_only_on_probe_failure(monkeypatch, tmp_path):
-    from cloud import probe
+    from internet import probe
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_engine(monkeypatch, lambda r: httpx.Response(500))  # engine refuses every probe
@@ -1942,7 +1963,7 @@ def test_probe_capabilities_degrades_to_text_only_on_probe_failure(monkeypatch, 
 
 
 def test_probe_benchmark_tok_s_prefers_predicted_per_second(monkeypatch, tmp_path):
-    from cloud import probe
+    from internet import probe
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_engine(monkeypatch, lambda r: httpx.Response(
@@ -1951,7 +1972,7 @@ def test_probe_benchmark_tok_s_prefers_predicted_per_second(monkeypatch, tmp_pat
 
 
 def test_probe_benchmark_tok_s_is_none_on_engine_error(monkeypatch, tmp_path):
-    from cloud import probe
+    from internet import probe
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_engine(monkeypatch, lambda r: httpx.Response(500))
@@ -1959,7 +1980,7 @@ def test_probe_benchmark_tok_s_is_none_on_engine_error(monkeypatch, tmp_path):
 
 
 def test_probe_tok_s_from_response_extracts_or_none():
-    from cloud import probe
+    from internet import probe
 
     assert probe.tok_s_from_response({"timings": {"predicted_per_second": 12.0}}) == 12.0
     assert probe.tok_s_from_response({"timings": {}}) is None
@@ -1967,7 +1988,7 @@ def test_probe_tok_s_from_response_extracts_or_none():
 
 
 # ---------------------------------------------------------------------------
-# Cloud serve loop (cloud/serve.py)
+# Internet serve loop (internet/serve.py)
 # ---------------------------------------------------------------------------
 
 def _mock_serve_engine(monkeypatch, handler, _real=httpx.Client):
@@ -1979,7 +2000,7 @@ def _mock_serve_engine(monkeypatch, handler, _real=httpx.Client):
 
 
 def _serve_state(monkeypatch, tmp_path, **overrides):
-    from cloud import serve
+    from internet import serve
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     kwargs = dict(
@@ -1998,7 +2019,7 @@ def test_serve_node_id_comes_from_access_token_jwt():
     import base64
     import json as _json
 
-    from cloud import serve
+    from internet import serve
 
     def _jwt(claims):
         body = base64.urlsafe_b64encode(_json.dumps(claims).encode()).decode().rstrip("=")
@@ -2010,7 +2031,7 @@ def test_serve_node_id_comes_from_access_token_jwt():
 
 
 def test_serve_register_sends_cached_payload(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path,
                          capabilities={"schema_version": 1, "models": {"m": {}}}, max_concurrency=3)
@@ -2024,7 +2045,7 @@ def test_serve_register_sends_cached_payload(monkeypatch, tmp_path):
 
 
 def test_serve_handle_job_non_stream_forwards_then_submits(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     captured = {}
@@ -2044,7 +2065,7 @@ def test_serve_handle_job_non_stream_forwards_then_submits(monkeypatch, tmp_path
 
 
 def test_serve_handle_job_stream_passes_sse_through(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     captured = {}
@@ -2060,7 +2081,7 @@ def test_serve_handle_job_stream_passes_sse_through(monkeypatch, tmp_path):
 
 
 def test_serve_handle_job_engine_error_submits_error(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     captured = {}
@@ -2073,7 +2094,7 @@ def test_serve_handle_job_engine_error_submits_error(monkeypatch, tmp_path):
 
 
 def test_serve_handle_job_rejects_media(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     captured = {}
@@ -2084,7 +2105,7 @@ def test_serve_handle_job_rejects_media(monkeypatch, tmp_path):
 
 
 def test_serve_poll_once_returns_none_when_no_work(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     monkeypatch.setattr(relay, "poll", lambda url, tok: None)
@@ -2092,7 +2113,7 @@ def test_serve_poll_once_returns_none_when_no_work(monkeypatch, tmp_path):
 
 
 def test_serve_poll_once_refreshes_then_retries_on_401(monkeypatch, tmp_path):
-    from cloud import control_plane, credentials, relay, serve
+    from internet import control_plane, credentials, relay, serve
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"networks": [{"network_id": "n1", "access_token": "AT", "refresh_token": "RT"}]})
@@ -2116,7 +2137,7 @@ def test_serve_poll_once_refreshes_then_retries_on_401(monkeypatch, tmp_path):
 
 
 def test_serve_poll_once_raises_when_refresh_unavailable(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path, refresh_token=None)  # nothing to refresh with
 
@@ -2129,7 +2150,7 @@ def test_serve_poll_once_raises_when_refresh_unavailable(monkeypatch, tmp_path):
 
 
 def test_serve_heartbeat_once_ok_reports_inflight_load(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     seen = {}
@@ -2139,7 +2160,7 @@ def test_serve_heartbeat_once_ok_reports_inflight_load(monkeypatch, tmp_path):
 
 
 def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     monkeypatch.setattr(relay, "heartbeat", lambda url, tok, *, load: "missing")
@@ -2150,7 +2171,7 @@ def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
 
 
 def test_serve_state_refresh_adopts_already_rotated_token(monkeypatch, tmp_path):
-    from cloud import control_plane, credentials
+    from internet import control_plane, credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"networks": [{"network_id": "n1", "access_token": "AT2", "refresh_token": "RT2"}]})
@@ -2165,7 +2186,7 @@ def test_serve_state_refresh_adopts_already_rotated_token(monkeypatch, tmp_path)
 
 
 def test_serve_handle_job_rejects_unknown_endpoint(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     captured = {}
@@ -2176,7 +2197,7 @@ def test_serve_handle_job_rejects_unknown_endpoint(monkeypatch, tmp_path):
 
 
 def test_serve_handle_job_drops_malformed_job_without_crashing(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
     called = []
@@ -2186,7 +2207,7 @@ def test_serve_handle_job_drops_malformed_job_without_crashing(monkeypatch, tmp_
 
 
 def test_serve_handle_job_survives_failed_error_report(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
 
@@ -2200,7 +2221,7 @@ def test_serve_handle_job_survives_failed_error_report(monkeypatch, tmp_path):
 
 
 def test_serve_handle_job_routes_to_engine_for_requested_model(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     # Two engines under one identity; the job for m2 must reach the engine that serves m2.
     state = _serve_state(
@@ -2224,7 +2245,7 @@ def test_serve_handle_job_routes_to_engine_for_requested_model(monkeypatch, tmp_
 
 
 def test_serve_handle_job_unknown_model_submits_error(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(
         monkeypatch, tmp_path, models=["m1", "m2"],
@@ -2244,7 +2265,7 @@ def test_serve_handle_job_unknown_model_submits_error(monkeypatch, tmp_path):
 
 
 def test_serve_handle_job_single_engine_forwards_unknown_model(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     # One engine serving two models is still ONE engine (one distinct URL): an unknown model still
     # forwards to it, preserving the pre-multi-engine "forward the body unchanged" contract.
@@ -2265,7 +2286,7 @@ def test_serve_handle_job_single_engine_forwards_unknown_model(monkeypatch, tmp_
 
 
 def test_serve_heartbeat_loop_stops_when_auth_exhausted(monkeypatch, tmp_path):
-    from cloud import relay, serve
+    from internet import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path, refresh_token=None)  # nothing to refresh with
 
@@ -2278,11 +2299,11 @@ def test_serve_heartbeat_loop_stops_when_auth_exhausted(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Multi-engine routing under one cloud identity (cloud/serve.py:_build_routing, DECISIONS D9)
+# Multi-engine routing under one internet identity (internet/serve.py:_build_routing, DECISIONS D9)
 # ---------------------------------------------------------------------------
 
 def test_build_routing_single_engine_maps_each_model(monkeypatch, tmp_path):
-    from cloud import serve
+    from internet import serve
 
     routes, union, caps, warns = serve._build_routing([
         ("http://127.0.0.1:8081/v1", ["m1", "m2"], {"schema_version": 1, "models": {"m1": {"x": 1}}}),
@@ -2294,7 +2315,7 @@ def test_build_routing_single_engine_maps_each_model(monkeypatch, tmp_path):
 
 
 def test_build_routing_disjoint_engines_union_and_merge(monkeypatch, tmp_path):
-    from cloud import serve
+    from internet import serve
 
     routes, union, caps, warns = serve._build_routing([
         ("http://127.0.0.1:8081/v1", ["a"], {"schema_version": 1, "models": {"a": {"f": "A"}}}),
@@ -2307,7 +2328,7 @@ def test_build_routing_disjoint_engines_union_and_merge(monkeypatch, tmp_path):
 
 
 def test_build_routing_duplicate_model_first_wins_with_warning(monkeypatch, tmp_path):
-    from cloud import serve
+    from internet import serve
 
     routes, union, caps, warns = serve._build_routing([
         ("http://127.0.0.1:8081/v1", ["dup"], {"schema_version": 1, "models": {"dup": {"f": "first"}}}),
@@ -2320,7 +2341,7 @@ def test_build_routing_duplicate_model_first_wins_with_warning(monkeypatch, tmp_
 
 
 def test_build_routing_tolerates_failed_probe_empty_caps(monkeypatch, tmp_path):
-    from cloud import serve
+    from internet import serve
 
     # A failed probe degrades to {} upstream — the merge must still route, not KeyError.
     routes, union, caps, warns = serve._build_routing([
@@ -2332,7 +2353,7 @@ def test_build_routing_tolerates_failed_probe_empty_caps(monkeypatch, tmp_path):
 
 
 def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
-    from cloud import probe, serve
+    from internet import probe, serve
 
     record = {
         "engines": [
@@ -2355,7 +2376,7 @@ def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
 
 
 def test_bring_up_engines_falls_back_to_flat_record(monkeypatch, tmp_path):
-    from cloud import probe, serve
+    from internet import probe, serve
 
     # A record written before multi-engine has no `engines` list — synthesise one spec from flat fields.
     record = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "advertise_as": []}
@@ -2368,7 +2389,7 @@ def test_bring_up_engines_falls_back_to_flat_record(monkeypatch, tmp_path):
 
 
 def test_bring_up_engines_rejects_multi_without_endpoints(monkeypatch, tmp_path):
-    from cloud import serve
+    from internet import serve
 
     record = {"engines": [
         {"endpoint_url": "http://h:11434/v1", "models": ["a"], "engine_label": "ollama"},
@@ -2386,7 +2407,7 @@ def test_bring_up_engines_rejects_multi_without_endpoints(monkeypatch, tmp_path)
 def _device_flow(monkeypatch, *, poll_statuses, networks, started=None):
     """Wire control_plane + webbrowser + sleep for a cmd_login run; return a calls record."""
     from cli import auth
-    from cloud import control_plane
+    from internet import control_plane
 
     calls = {"browser": 0, "fetch_device_id": None, "fetch_session": None,
              "browser_url": None, "sleeps": []}
@@ -2425,10 +2446,10 @@ def test_parser_accepts_login_and_logout():
     assert parser.parse_args(["logout"]).handler is cli.cmd_logout
 
 
-def test_login_logout_classified_cloud_only():
-    assert {"login", "logout"} <= set(dispatch.CLOUD_ONLY)
-    assert not (set(dispatch.AGNOSTIC) & set(dispatch.CLOUD_ONLY))
-    assert not (set(dispatch.CLOUD_HANDLERS) & set(dispatch.CLOUD_ONLY))
+def test_login_logout_classified_internet_only():
+    assert {"login", "logout"} <= set(dispatch.INTERNET_ONLY)
+    assert not (set(dispatch.AGNOSTIC) & set(dispatch.INTERNET_ONLY))
+    assert not (set(dispatch.INTERNET_HANDLERS) & set(dispatch.INTERNET_ONLY))
 
 
 def test_login_logout_gated_in_lan_mode(monkeypatch, tmp_path):
@@ -2436,15 +2457,15 @@ def test_login_logout_gated_in_lan_mode(monkeypatch, tmp_path):
     for command in ("login", "logout"):
         with pytest.raises(SystemExit) as exc:
             cli.main([command])
-        assert "cloud" in str(exc.value).lower()
+        assert "internet" in str(exc.value).lower()
     assert not paths.credentials_file().exists()  # gated before any work happens
 
 
 def test_login_happy_path_persists_tokens_and_sets_no_active(monkeypatch, tmp_path, capsys):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")
+    state.set_mode("internet")
     calls = _device_flow(
         monkeypatch,
         poll_statuses=[{"status": "pending"}, _APPROVED],
@@ -2452,7 +2473,7 @@ def test_login_happy_path_persists_tokens_and_sets_no_active(monkeypatch, tmp_pa
                    "access_token": "AT-secret", "refresh_token": "RT-secret"}],
     )
 
-    assert cli.main(["login"]) == 0  # routes through dispatch in cloud mode
+    assert cli.main(["login"]) == 0  # routes through dispatch in internet mode
     out = capsys.readouterr().out
 
     assert calls["browser"] == 1  # browser opened by default
@@ -2461,7 +2482,7 @@ def test_login_happy_path_persists_tokens_and_sets_no_active(monkeypatch, tmp_pa
     assert saved["user"]["email"] == "a@b.com"
     assert [n["name"] for n in saved["networks"]] == ["team"]
     assert stat.S_IMODE(paths.credentials_file().stat().st_mode) == 0o600
-    assert state.get_active("cloud") is None  # Q1: login never auto-selects
+    assert state.get_active("internet") is None  # Q1: login never auto-selects
     assert "Signed in as a@b.com" in out and "team" in out and "grid use" in out
     for secret in ("SESS-secret", "AT-secret", "RT-secret"):
         assert secret not in out
@@ -2480,7 +2501,7 @@ def test_login_no_browser_prints_url_and_code(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.parametrize("status", ["denied", "expired", "consumed"])
 def test_login_aborts_on_terminal_poll_status(monkeypatch, tmp_path, status):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _device_flow(monkeypatch, poll_statuses=[{"status": status}], networks=[])
@@ -2525,11 +2546,11 @@ def test_login_multi_grid_lists_all_and_sets_no_active(monkeypatch, tmp_path, ca
     assert cli.cmd_login(cli.build_parser().parse_args(["login", "--no-browser"])) == 0
     out = capsys.readouterr().out
     assert "alpha" in out and "beta" in out and "grid use" in out
-    assert state.get_active("cloud") is None
+    assert state.get_active("internet") is None
 
 
 def test_relogin_reuses_device_id_and_overwrites_tokens(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "OLD", "networks": []})
@@ -2567,23 +2588,23 @@ def test_login_json_emits_names_only_and_no_tokens(monkeypatch, tmp_path, capsys
 
 
 def test_logout_clears_credentials_and_active(monkeypatch, tmp_path, capsys):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "S"})
-    state.set_active("cloud", "team")
+    state.set_active("internet", "team")
 
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
     assert "Signed out." in capsys.readouterr().out
     assert not paths.credentials_file().exists()
-    assert state.get_active("cloud") is None
+    assert state.get_active("internet") is None
 
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0  # idempotent
     assert "not signed in" in capsys.readouterr().out.lower()
 
 
 def test_logout_json(monkeypatch, tmp_path, capsys):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "S"})
@@ -2596,7 +2617,7 @@ def test_logout_json(monkeypatch, tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_save_credentials_locks_home_dir_to_0700(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "S"})
@@ -2604,7 +2625,7 @@ def test_save_credentials_locks_home_dir_to_0700(monkeypatch, tmp_path):
 
 
 def test_load_credentials_reports_corrupt_file(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     paths.credentials_file().parent.mkdir(parents=True, exist_ok=True)
@@ -2615,7 +2636,7 @@ def test_load_credentials_reports_corrupt_file(monkeypatch, tmp_path):
 
 
 def test_control_plane_wraps_transport_error_as_systemexit(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
 
@@ -2629,7 +2650,7 @@ def test_control_plane_wraps_transport_error_as_systemexit(monkeypatch, tmp_path
 
 
 def test_login_aborts_when_approved_without_session_token(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _device_flow(monkeypatch, poll_statuses=[{"status": "approved", "user": {"email": "a@b.com"}}],
@@ -2697,7 +2718,7 @@ def _sync_bundle(network_id: str, *, name: str | None = None,
 def _sync_seed(networks: list[dict[str, Any]] | None = None, *, session_token: str = "sess-1",
                api_url: str = "https://api.example.com", user: dict[str, Any] | None = None) -> None:
     """Seed credentials.toml as a prior `grid login` would (the active grid lives in state.json)."""
-    from cloud import credentials
+    from internet import credentials
 
     data = {"session_token": session_token, "api_url": api_url}
     if user is not None:
@@ -2710,7 +2731,7 @@ def _sync_seed(networks: list[dict[str, Any]] | None = None, *, session_token: s
 def _sync_patch_fetch(monkeypatch: pytest.MonkeyPatch, networks: list[dict[str, Any]],
                       calls: list[dict[str, Any]] | None = None) -> None:
     """Patch control_plane.fetch_tokens to return `networks` (no live control plane)."""
-    from cloud import control_plane
+    from internet import control_plane
 
     def fake_fetch_tokens(session_token, device_id, api_url=None):
         if calls is not None:
@@ -2732,27 +2753,27 @@ def test_sync_parser_wires_handler_and_json_flag():
     assert parser.parse_args(["sync", "--json"]).json is True
 
 
-def test_sync_classified_cloud_only():
-    assert "sync" in dispatch.CLOUD_ONLY
+def test_sync_classified_internet_only():
+    assert "sync" in dispatch.INTERNET_ONLY
     assert not (set(dispatch.AGNOSTIC) & {"sync"})
-    assert not (set(dispatch.CLOUD_HANDLERS) & {"sync"})
+    assert not (set(dispatch.INTERNET_HANDLERS) & {"sync"})
 
 
 def test_sync_gated_in_lan_mode(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is lan
     called = []
     monkeypatch.setattr(control_plane, "fetch_tokens", lambda *a, **k: called.append(1) or [])
     with pytest.raises(SystemExit) as exc:
         cli.main(["sync"])
-    assert "cloud" in str(exc.value).lower()
+    assert "internet" in str(exc.value).lower()
     assert not called  # gated before any control-plane call
     assert not paths.credentials_file().exists()
 
 
 def test_sync_requires_login(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # not signed in
     called = []
@@ -2764,7 +2785,7 @@ def test_sync_requires_login(monkeypatch, tmp_path):
 
 
 def test_sync_adds_new_grid_and_preserves_session_fields(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")], session_token="sess-1",
@@ -2786,7 +2807,7 @@ def test_sync_adds_new_grid_and_preserves_session_fields(monkeypatch, tmp_path):
 
 
 def test_sync_removes_stale_grid(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a"), _sync_bundle("net-b")])
@@ -2798,7 +2819,7 @@ def test_sync_removes_stale_grid(monkeypatch, tmp_path):
 
 
 def test_sync_refreshes_existing_token(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a", access_token="old")])
@@ -2811,18 +2832,18 @@ def test_sync_refreshes_existing_token(monkeypatch, tmp_path):
 
 
 def test_sync_never_touches_active_when_grid_vanishes(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")])
-    state.set_active("cloud", "net-a")
+    state.set_active("internet", "net-a")
     _sync_patch_fetch(monkeypatch, [_sync_bundle("net-b")])  # net-a is gone
 
     assert _run_sync() == 0
     data = credentials.load_credentials()
     assert [n["network_id"] for n in data["networks"]] == ["net-b"]
     # Q1: the active pointer is left as a tolerated stale value — sync never writes state.json
-    assert state.get_active("cloud") == "net-a"
+    assert state.get_active("internet") == "net-a"
 
 
 def test_sync_never_auto_selects_active(monkeypatch, tmp_path):
@@ -2831,15 +2852,15 @@ def test_sync_never_auto_selects_active(monkeypatch, tmp_path):
     _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a"), _sync_bundle("net-b")])
 
     assert _run_sync() == 0
-    assert state.get_active("cloud") is None  # mirrors login: never auto-selects
+    assert state.get_active("internet") is None  # mirrors login: never auto-selects
 
 
 def test_sync_empty_list_clears_warns_and_keeps_active(monkeypatch, tmp_path, capsys):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")])
-    state.set_active("cloud", "net-a")
+    state.set_active("internet", "net-a")
     _sync_patch_fetch(monkeypatch, [])
 
     assert _run_sync() == 0
@@ -2848,14 +2869,14 @@ def test_sync_empty_list_clears_warns_and_keeps_active(monkeypatch, tmp_path, ca
     err = capsys.readouterr().err
     assert "cleared locally" in err  # stderr-unique token (stdout also says "0 grids")
     # Q1: active is never written, even when the list is wiped
-    assert state.get_active("cloud") == "net-a"
+    assert state.get_active("internet") == "net-a"
 
 
 def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_path):
     """A `grid logout` racing mid-sync must not yield a partial file missing the session: the merge
     writes the single snapshot it gated on, so session/user survive (mirrors the concurrent-logout
     guard in credentials.update_network_tokens)."""
-    from cloud import control_plane, credentials
+    from internet import control_plane, credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")], session_token="sess-1", user={"email": "u@x"})
@@ -2873,7 +2894,7 @@ def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_pa
 
 
 def test_sync_rejects_malformed_bundle_and_keeps_store(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")])
@@ -2889,7 +2910,7 @@ def test_sync_rejects_malformed_bundle_and_keeps_store(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("status", [401, 403])
 def test_sync_expired_session_is_actionable(monkeypatch, tmp_path, status):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")])
@@ -2907,7 +2928,7 @@ def test_sync_expired_session_is_actionable(monkeypatch, tmp_path, status):
 
 
 def test_sync_other_error_propagates_unchanged(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _sync_seed([_sync_bundle("net-a")])
@@ -2955,11 +2976,11 @@ def test_sync_json_survives_empty_list_warning(monkeypatch, tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Cloud grid lifecycle — control plane (cloud/control_plane.py managed-networks)
+# Internet grid lifecycle — control plane (internet/control_plane.py managed-networks)
 # ---------------------------------------------------------------------------
 
 def test_create_managed_network_posts_name_and_type_with_bearer(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -2982,7 +3003,7 @@ def test_create_managed_network_posts_name_and_type_with_bearer(monkeypatch, tmp
 
 
 def test_start_managed_network_posts_to_start_endpoint(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3000,7 +3021,7 @@ def test_start_managed_network_posts_to_start_endpoint(monkeypatch, tmp_path):
 
 
 def test_stop_managed_network_posts_to_stop_endpoint(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3016,7 +3037,7 @@ def test_stop_managed_network_posts_to_stop_endpoint(monkeypatch, tmp_path):
 
 
 def test_get_managed_network_status_gets_status_endpoint(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3034,7 +3055,7 @@ def test_get_managed_network_status_gets_status_endpoint(monkeypatch, tmp_path):
 
 
 def test_add_network_appends_and_is_idempotent_by_id(monkeypatch, tmp_path):
-    from cloud import credentials
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "tok", "api_url": "https://api", "networks": []})
@@ -3053,26 +3074,26 @@ def test_add_network_appends_and_is_idempotent_by_id(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Cloud grid lifecycle — commands (cli/cloud_grid.py via dispatch)
+# Internet grid lifecycle — commands (cli/internet_grid.py via dispatch)
 # ---------------------------------------------------------------------------
 
-def _seed_cloud(monkeypatch, tmp_path, networks=None, session="sess-tok", active=None):
-    """Sign in + switch to cloud mode for the lifecycle command tests."""
-    from cloud import credentials
+def _seed_internet(monkeypatch, tmp_path, networks=None, session="sess-tok", active=None):
+    """Sign in + switch to internet mode for the lifecycle command tests."""
+    from internet import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")
+    state.set_mode("internet")
     credentials.save_credentials({
         "session_token": session, "api_url": "https://api.example",
         "user": {"email": "a@b.com"}, "networks": networks or [],
     })
     if active:
-        state.set_active("cloud", active)
+        state.set_active("internet", active)
 
 
 def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=None):
     """Stub the four control-plane lifecycle calls; record what each was invoked with."""
-    from cloud import control_plane
+    from internet import control_plane
 
     calls = {}
 
@@ -3099,8 +3120,8 @@ def _mock_lifecycle(monkeypatch, *, create=None, start=None, stop=None, status=N
     return calls
 
 
-def test_cloud_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path)
+def test_internet_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path)
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n-new", "name": "team", "network_type": "permissioned-public",
         "signaling_url": "https://relay.example", "status": "running",
@@ -3112,14 +3133,14 @@ def test_cloud_up_creates_when_name_unknown(monkeypatch, tmp_path, capsys):
     assert "create" in calls and "start" not in calls
     assert "grid=team" in out and "grid_url=https://relay.example" in out
 
-    from cloud import credentials
+    from internet import credentials
     nets = credentials.load_credentials()["networks"]  # persisted so ls/use/info see it
     assert [n["network_id"] for n in nets] == ["n-new"]
     assert nets[0]["signaling_url"] == "https://relay.example"
 
 
-def test_cloud_up_starts_when_name_known(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_up_starts_when_name_known(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
          "signaling_url": "https://relay.example", "status": "stopped"}])
     calls = _mock_lifecycle(monkeypatch, start={"status": "running", "signaling_url": "https://relay.example"})
@@ -3131,8 +3152,8 @@ def test_cloud_up_starts_when_name_known(monkeypatch, tmp_path, capsys):
     assert "grid=team" in out and "grid_url=https://relay.example" in out
 
 
-def test_cloud_up_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_up_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "signaling_url": "https://r1"},
         {"network_id": "n2", "name": "lab", "signaling_url": "https://r2"}],
         active="lab")
@@ -3145,16 +3166,16 @@ def test_cloud_up_bare_starts_active_grid(monkeypatch, tmp_path, capsys):
     assert "grid=lab" in out
 
 
-def test_cloud_up_bare_errors_when_unresolvable(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path, networks=[])  # signed in, but no grids and no active
+def test_internet_up_bare_errors_when_unresolvable(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path, networks=[])  # signed in, but no grids and no active
     _mock_lifecycle(monkeypatch)
     with pytest.raises(SystemExit) as exc:
         cli.main(["up"])
     assert "name" in str(exc.value).lower()  # guidance to name a grid to create
 
 
-def test_cloud_up_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path)
+def test_internet_up_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path)
     calls = _mock_lifecycle(monkeypatch, create={
         "network_id": "n1", "name": "lab", "network_type": "permissioned-providers",
         "signaling_url": "https://r"})
@@ -3164,8 +3185,8 @@ def test_cloud_up_type_on_create_sets_network_type(monkeypatch, tmp_path, capsys
     assert calls["create"]["network_type"] == "permissioned-providers"
 
 
-def test_cloud_up_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_up_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "signaling_url": "https://r"}])
     calls = _mock_lifecycle(monkeypatch, start={"status": "running"})
 
@@ -3176,10 +3197,10 @@ def test_cloud_up_type_on_start_warns_and_ignores(monkeypatch, tmp_path, capsys)
     assert calls["start"] == {"session": "sess-tok", "network_id": "n1"}  # start carries no type
 
 
-def test_cloud_up_start_reports_grid_url_from_status(monkeypatch, tmp_path, capsys):
+def test_internet_up_start_reports_grid_url_from_status(monkeypatch, tmp_path, capsys):
     # Live shape: start → {network_id, status} (no signaling_url); the bundle has none stored either,
     # so `up` reads the address from the status endpoint.
-    _seed_cloud(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
+    _seed_internet(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     _mock_lifecycle(monkeypatch, start={"network_id": "n1", "status": "running"},
                     status={"state": "running", "signaling_url": "https://live.relay"})
 
@@ -3187,8 +3208,8 @@ def test_cloud_up_start_reports_grid_url_from_status(monkeypatch, tmp_path, caps
     assert "grid_url=https://live.relay" in capsys.readouterr().out
 
 
-def test_cloud_down_stops(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
+def test_internet_down_stops(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     calls = _mock_lifecycle(monkeypatch, stop={"status": "stopped"})
 
     assert cli.main(["down", "team"]) == 0
@@ -3197,16 +3218,16 @@ def test_cloud_down_stops(monkeypatch, tmp_path, capsys):
     assert "team" in out and "down" in out.lower()
 
 
-def test_cloud_down_errors_when_unresolvable(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
+def test_internet_down_errors_when_unresolvable(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     _mock_lifecycle(monkeypatch)
     with pytest.raises(SystemExit) as exc:
         cli.main(["down", "ghost"])  # not a known grid
     assert "ghost" in str(exc.value)
 
 
-def test_cloud_ls_lists_local_without_network_call(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_ls_lists_local_without_network_call(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"},
         {"network_id": "n2", "name": "lab", "network_type": "permissioned-providers"}])
 
@@ -3220,30 +3241,30 @@ def test_cloud_ls_lists_local_without_network_call(monkeypatch, tmp_path, capsys
     assert "lab" in out and "permissioned-providers" in out
 
 
-def test_cloud_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
     assert cli.main(["ls", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [{"grid": "team", "type": "permissioned-public"}]
 
 
-def test_cloud_list_alias_lists_like_ls(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_list_alias_lists_like_ls(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
-    assert cli.main(["list"]) == 0  # alias of `ls` must work in cloud, not the stub
+    assert cli.main(["list"]) == 0  # alias of `ls` must work in internet mode, not the stub
     assert "team" in capsys.readouterr().out
 
 
-def test_cloud_ls_requires_session(monkeypatch, tmp_path):
+def test_internet_ls_requires_session(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")  # cloud mode, but not signed in
+    state.set_mode("internet")  # internet mode, but not signed in
     with pytest.raises(SystemExit) as exc:
         cli.main(["ls"])
     assert "login" in str(exc.value).lower()
 
 
-def test_cloud_info_maps_status_and_hides_internals(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_info_maps_status_and_hides_internals(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
     # Real managed-network status shape (see live probe): run state is `state`, plus server-side
     # internals we must not surface.
@@ -3261,8 +3282,8 @@ def test_cloud_info_maps_status_and_hides_internals(monkeypatch, tmp_path, capsy
         assert internal not in out  # proprietary server internals never reach the surface
 
 
-def test_cloud_info_json_projects_fixed_shape(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_info_json_projects_fixed_shape(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
     _mock_lifecycle(monkeypatch, status={
         "state": "running", "signaling_url": "https://relay.example", "server_pid": 4242})
@@ -3273,14 +3294,14 @@ def test_cloud_info_json_projects_fixed_shape(monkeypatch, tmp_path, capsys):
                     "grid_url": "https://relay.example"}
 
 
-def test_cloud_info_member_falls_back_to_bundle_url(monkeypatch, tmp_path, capsys):
+def test_internet_info_member_falls_back_to_bundle_url(monkeypatch, tmp_path, capsys):
     """`grid info` for a member (can't read creator-only status) shows the bundle's relay URL and a
     blank run-state instead of erroring."""
-    from cloud import control_plane
+    from internet import control_plane
 
     net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
            "access_token": "AT", "lan_signaling_url": "https://grid.example/n1"}
-    _seed_cloud(monkeypatch, tmp_path, networks=[net], active="team")
+    _seed_internet(monkeypatch, tmp_path, networks=[net], active="team")
 
     def _forbidden(session_token, network_id, api_url=None):
         raise SystemExit("GET .../status failed (403): Only the network creator can manage it")
@@ -3291,8 +3312,8 @@ def test_cloud_info_member_falls_back_to_bundle_url(monkeypatch, tmp_path, capsy
     assert "grid=team" in out and "grid_url=https://grid.example/n1" in out
 
 
-def test_cloud_lifecycle_never_prints_tokens(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_lifecycle_never_prints_tokens(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
          "signaling_url": "https://relay.example",
          "access_token": "AT-secret", "refresh_token": "RT-secret"}])
@@ -3308,12 +3329,12 @@ def test_cloud_lifecycle_never_prints_tokens(monkeypatch, tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Cloud consume path: `grid chat` / `image` / `edit` / `video` + `info --env`
-# (cli/cloud_request.py + cli/cloud_grid.cmd_cloud_info --env, via the relay)
+# Internet consume path: `grid chat` / `image` / `edit` / `video` + `info --env`
+# (cli/internet_request.py + cli/internet_grid.cmd_internet_info --env, via the relay)
 # ---------------------------------------------------------------------------
 
-def test_cloud_chat_posts_through_relay_with_bearer(monkeypatch, tmp_path, capsys):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)  # bundle has access_token "AT", no signaling_url
+def test_internet_chat_posts_through_relay_with_bearer(monkeypatch, tmp_path, capsys):
+    _seed_running_internet_grid(monkeypatch, tmp_path)  # bundle has access_token "AT", no signaling_url
     seen = {}
 
     def handler(request):
@@ -3335,21 +3356,21 @@ def test_cloud_chat_posts_through_relay_with_bearer(monkeypatch, tmp_path, capsy
     assert "hi there" in out
 
 
-def test_cloud_chat_json_prints_raw_response(monkeypatch, tmp_path, capsys):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_chat_json_prints_raw_response(monkeypatch, tmp_path, capsys):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]}))
     assert cli.main(["chat", "-m", "m", "hi", "--json"]) == 0
     assert '"choices"' in capsys.readouterr().out  # raw JSON, not the extracted content
 
 
-def test_cloud_chat_member_uses_bundle_url_when_status_forbidden(monkeypatch, tmp_path, capsys):
+def test_internet_chat_member_uses_bundle_url_when_status_forbidden(monkeypatch, tmp_path, capsys):
     """A consumer-member (not the creator) gets 403 from creator-only status; chat must still route
     through the lan_signaling_url the login bundle carries."""
-    from cloud import control_plane
+    from internet import control_plane
 
     net = {"network_id": "n1", "name": "team", "network_type": "permissioned-public",
            "access_token": "AT", "lan_signaling_url": "https://grid.example/n1"}
-    _seed_cloud(monkeypatch, tmp_path, networks=[net], active="team")
+    _seed_internet(monkeypatch, tmp_path, networks=[net], active="team")
 
     def _forbidden(session_token, network_id, api_url=None):
         raise SystemExit("GET .../status failed (403): Only the network creator can manage it")
@@ -3367,8 +3388,8 @@ def test_cloud_chat_member_uses_bundle_url_when_status_forbidden(monkeypatch, tm
     assert "from member" in capsys.readouterr().out
 
 
-def test_cloud_chat_sends_routing_headers(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_chat_sends_routing_headers(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     seen = {}
 
     def handler(request):
@@ -3381,8 +3402,8 @@ def test_cloud_chat_sends_routing_headers(monkeypatch, tmp_path):
     assert seen["tp"] == "engine-7" and seen["asp"] == "true"
 
 
-def test_cloud_chat_401_is_clear_error_without_leaking_token(monkeypatch, tmp_path, capsys):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_chat_401_is_clear_error_without_leaking_token(monkeypatch, tmp_path, capsys):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     _mock_relay(monkeypatch, lambda r: httpx.Response(401, json={"detail": "nope"}))
     assert cli.main(["chat", "-m", "m", "hi"]) == 1
     err = capsys.readouterr().err
@@ -3390,16 +3411,16 @@ def test_cloud_chat_401_is_clear_error_without_leaking_token(monkeypatch, tmp_pa
     assert "AT" not in err  # never echo the access token
 
 
-def test_cloud_chat_requires_sign_in(monkeypatch, tmp_path):
+def test_internet_chat_requires_sign_in(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")  # cloud mode, not signed in
+    state.set_mode("internet")  # internet mode, not signed in
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi"])
     assert "signed in" in str(exc.value).lower()
 
 
-def test_cloud_chat_requires_active_grid(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_chat_requires_active_grid(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "a", "access_token": "AT"},
         {"network_id": "n2", "name": "b", "access_token": "AT"},
     ])  # signed in, two grids, none active
@@ -3408,8 +3429,8 @@ def test_cloud_chat_requires_active_grid(monkeypatch, tmp_path):
     assert "name a grid" in str(exc.value).lower()
 
 
-def test_cloud_chat_requires_grid_up(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_chat_requires_grid_up(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "stopped"})
     with pytest.raises(SystemExit) as exc:
@@ -3417,16 +3438,16 @@ def test_cloud_chat_requires_grid_up(monkeypatch, tmp_path):
     assert "isn't up" in str(exc.value).lower()
 
 
-def test_cloud_chat_requires_access_token(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_chat_requires_access_token(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi"])
     assert "access token" in str(exc.value).lower()
 
 
-def test_cloud_image_streams_and_saves_output(monkeypatch, tmp_path, capsys):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_image_streams_and_saves_output(monkeypatch, tmp_path, capsys):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     b64 = base64.b64encode(b"PNGDATA").decode("ascii")
     seen = {}
 
@@ -3444,8 +3465,8 @@ def test_cloud_image_streams_and_saves_output(monkeypatch, tmp_path, capsys):
     assert saved and saved[0].read_bytes() == b"PNGDATA"
 
 
-def test_cloud_edit_posts_to_image_edit_with_routing_headers(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_edit_posts_to_image_edit_with_routing_headers(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     img = tmp_path / "a.png"
     img.write_bytes(b"x")
     b64 = base64.b64encode(b"EDITED").decode("ascii")
@@ -3468,8 +3489,8 @@ def test_cloud_edit_posts_to_image_edit_with_routing_headers(monkeypatch, tmp_pa
     assert list(outdir.glob("*.png"))[0].read_bytes() == b"EDITED"
 
 
-def test_cloud_image_result_without_files_is_an_error(monkeypatch, tmp_path, capsys):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_image_result_without_files_is_an_error(monkeypatch, tmp_path, capsys):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
 
     def handler(request):  # a result event whose only file lacks content_base64 → nothing written
         result = json.dumps({"type": "result", "output_files": [{"filename": "out.png"}]})
@@ -3480,8 +3501,8 @@ def test_cloud_image_result_without_files_is_an_error(monkeypatch, tmp_path, cap
     assert "no files" in capsys.readouterr().err.lower()
 
 
-def test_cloud_edit_rejects_more_than_three_images(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_edit_rejects_more_than_three_images(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     images = []
     for index in range(4):
         path = tmp_path / f"i{index}.png"
@@ -3492,8 +3513,8 @@ def test_cloud_edit_rejects_more_than_three_images(monkeypatch, tmp_path):
     assert "three" in str(exc.value).lower()
 
 
-def test_cloud_video_posts_to_i2v(monkeypatch, tmp_path):
-    _seed_running_cloud_grid(monkeypatch, tmp_path)
+def test_internet_video_posts_to_i2v(monkeypatch, tmp_path):
+    _seed_running_internet_grid(monkeypatch, tmp_path)
     image = tmp_path / "in.png"
     image.write_bytes(b"x")
     b64 = base64.b64encode(b"MP4DATA").decode("ascii")
@@ -3512,8 +3533,8 @@ def test_cloud_video_posts_to_i2v(monkeypatch, tmp_path):
     assert list(outdir.glob("*.mp4"))[0].read_bytes() == b"MP4DATA"
 
 
-def test_cloud_info_env_prints_relay_base_and_token(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_info_env_prints_relay_base_and_token(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
     assert cli.main(["info", "--env"]) == 0
@@ -3522,47 +3543,47 @@ def test_cloud_info_env_prints_relay_base_and_token(monkeypatch, tmp_path, capsy
     assert 'export OPENAI_API_KEY="AT"' in out  # the one deliberate token-printing carve-out
 
 
-def test_cloud_info_env_requires_access_token(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_info_env_requires_access_token(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
     with pytest.raises(SystemExit) as exc:
         cli.main(["info", "--env"])
     assert "access token" in str(exc.value).lower()
 
 
-def test_lan_chat_rejects_cloud_only_flags(monkeypatch, tmp_path):
+def test_lan_chat_rejects_internet_only_flags(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default LAN mode
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi", "--target-provider", "e1"])
-    assert "cloud mode" in str(exc.value).lower()
+    assert "internet mode" in str(exc.value).lower()
 
 
 def test_lan_image_rejects_allow_self_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default LAN mode
     with pytest.raises(SystemExit) as exc:
         cli.main(["image", "a cat", "--allow-self-provider"])
-    assert "cloud mode" in str(exc.value).lower()
+    assert "internet mode" in str(exc.value).lower()
 
 
-def test_lan_edit_and_video_reject_cloud_only_flags(monkeypatch, tmp_path):
+def test_lan_edit_and_video_reject_internet_only_flags(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default LAN mode
     img = tmp_path / "a.png"
     img.write_bytes(b"x")
     with pytest.raises(SystemExit) as exc:  # reject runs before the >3-image check / file reads
         cli.main(["edit", "p", "-i", str(img), "--target-provider", "e1"])
-    assert "cloud mode" in str(exc.value).lower()
+    assert "internet mode" in str(exc.value).lower()
     with pytest.raises(SystemExit) as exc:
         cli.main(["video", "p", "-i", str(img), "--allow-self-provider"])
-    assert "cloud mode" in str(exc.value).lower()
+    assert "internet mode" in str(exc.value).lower()
 
 
 # ---------------------------------------------------------------------------
-# Cloud membership — `grid members add|remove|list` (cli/cloud_grid.py + control_plane)
+# Internet membership — `grid members add|remove|list` (cli/internet_grid.py + control_plane)
 # ---------------------------------------------------------------------------
 
 def _mock_members(monkeypatch, *, add=None, remove=None, members=None):
     """Stub the three control-plane member calls; record what each was invoked with."""
-    from cloud import control_plane
+    from internet import control_plane
 
     calls = {}
 
@@ -3588,8 +3609,8 @@ def _mock_members(monkeypatch, *, add=None, remove=None, members=None):
 
 # -- handler: add ----------------------------------------------------------
 
-def test_cloud_members_add_defaults_to_consumer_role(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_add_defaults_to_consumer_role(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     calls = _mock_members(monkeypatch, add={"ok": True})
 
@@ -3601,8 +3622,8 @@ def test_cloud_members_add_defaults_to_consumer_role(monkeypatch, tmp_path, caps
     assert "alice@example.com" in out and "consumer" in out
 
 
-def test_cloud_members_add_role_both_is_sent_without_expansion(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_members_add_role_both_is_sent_without_expansion(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team"}, {"network_id": "n2", "name": "lab"}])
     calls = _mock_members(monkeypatch)
 
@@ -3614,8 +3635,8 @@ def test_cloud_members_add_role_both_is_sent_without_expansion(monkeypatch, tmp_
     }
 
 
-def test_cloud_members_add_role_provider(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_add_role_provider(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     calls = _mock_members(monkeypatch)
     assert cli.main(["members", "add", "c@example.com", "--role", "provider"]) == 0
@@ -3623,8 +3644,8 @@ def test_cloud_members_add_role_provider(monkeypatch, tmp_path, capsys):
     assert calls["add"]["roles"] == ["provider"]
 
 
-def test_cloud_members_add_json_echoes_raw_result(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_add_json_echoes_raw_result(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, add={"member": {"email": "alice@example.com", "roles": ["consumer"]}})
     assert cli.main(["members", "add", "alice@example.com", "--json"]) == 0
@@ -3634,8 +3655,8 @@ def test_cloud_members_add_json_echoes_raw_result(monkeypatch, tmp_path, capsys)
 
 # -- handler: remove -------------------------------------------------------
 
-def test_cloud_members_remove(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_remove(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     calls = _mock_members(monkeypatch, remove={"ok": True})
     assert cli.main(["members", "remove", "alice@example.com"]) == 0
@@ -3644,8 +3665,8 @@ def test_cloud_members_remove(monkeypatch, tmp_path, capsys):
     assert "Removed alice@example.com" in out
 
 
-def test_cloud_members_remove_json_echoes_raw_result(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_remove_json_echoes_raw_result(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, remove={"ok": True})
     assert cli.main(["members", "remove", "alice@example.com", "--json"]) == 0
@@ -3654,8 +3675,8 @@ def test_cloud_members_remove_json_echoes_raw_result(monkeypatch, tmp_path, caps
 
 # -- handler: list ---------------------------------------------------------
 
-def test_cloud_members_list_human_shows_email_and_roles(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_list_human_shows_email_and_roles(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, members=[
         {"email": "alice@example.com", "roles": ["consumer", "provider"]},
@@ -3667,24 +3688,24 @@ def test_cloud_members_list_human_shows_email_and_roles(monkeypatch, tmp_path, c
     assert "bob@example.com" in out and "provider" in out
 
 
-def test_cloud_members_list_tolerates_missing_fields(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_list_tolerates_missing_fields(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, members=[{"email": "x@example.com"}])  # no roles key
     assert cli.main(["members", "list"]) == 0  # .get() everywhere → no crash
     assert "x@example.com" in capsys.readouterr().out
 
 
-def test_cloud_members_list_json_emits_raw_list(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_list_json_emits_raw_list(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, members=[{"email": "a@example.com", "roles": ["consumer"]}])
     assert cli.main(["members", "list", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == [{"email": "a@example.com", "roles": ["consumer"]}]
 
 
-def test_cloud_members_list_empty(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_list_empty(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, members=[])
     assert cli.main(["members", "list"]) == 0
@@ -3693,38 +3714,38 @@ def test_cloud_members_list_empty(monkeypatch, tmp_path, capsys):
 
 # -- selection + gates -----------------------------------------------------
 
-def test_cloud_members_requires_sign_in(monkeypatch, tmp_path):
+def test_internet_members_requires_sign_in(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("cloud")  # cloud mode, not signed in
+    state.set_mode("internet")  # internet mode, not signed in
     with pytest.raises(SystemExit) as exc:
         cli.main(["members", "list"])
     assert "signed in" in str(exc.value).lower()
 
 
-def test_cloud_members_requires_grid_resolution(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path, networks=[
+def test_internet_members_requires_grid_resolution(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "a"}, {"network_id": "n2", "name": "b"}])  # none active
     with pytest.raises(SystemExit) as exc:
         cli.main(["members", "list"])
     assert "name a grid" in str(exc.value).lower()
 
 
-def test_cloud_members_grid_not_found(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
+def test_internet_members_grid_not_found(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
     with pytest.raises(SystemExit) as exc:
         cli.main(["members", "list", "nope"])
     assert "not found" in str(exc.value).lower()
 
 
-def test_cloud_members_gated_in_lan_mode(monkeypatch, tmp_path):
+def test_internet_members_gated_in_lan_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default LAN mode
     with pytest.raises(SystemExit) as exc:
         cli.main(["members", "list"])
-    assert "cloud" in str(exc.value).lower()
+    assert "internet" in str(exc.value).lower()
 
 
-def test_cloud_members_never_prints_session_token(monkeypatch, tmp_path, capsys):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_never_prints_session_token(monkeypatch, tmp_path, capsys):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch, add={"member": {"email": "a@example.com"}}, remove={"ok": True},
                   members=[{"email": "a@example.com", "roles": ["consumer"]}])
@@ -3734,31 +3755,31 @@ def test_cloud_members_never_prints_session_token(monkeypatch, tmp_path, capsys)
     assert "sess-tok" not in capsys.readouterr().out
 
 
-def test_cloud_members_unknown_subcommand_errors(monkeypatch, tmp_path):
-    _seed_cloud(monkeypatch, tmp_path,
+def test_internet_members_unknown_subcommand_errors(monkeypatch, tmp_path):
+    _seed_internet(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_members(monkeypatch)
     with pytest.raises(SystemExit) as exc:  # the parser blocks this via the CLI; the guard catches misuse
-        cli.cmd_cloud_members(SimpleNamespace(subcommand="bogus", grid=None, json=False))
+        cli.cmd_internet_members(SimpleNamespace(subcommand="bogus", grid=None, json=False))
     assert "subcommand" in str(exc.value).lower()
 
 
-def test_members_classified_cloud_only():
-    assert "members" in dispatch.CLOUD_ONLY
-    assert not (set(dispatch.AGNOSTIC) & set(dispatch.CLOUD_ONLY))
-    assert not (set(dispatch.CLOUD_HANDLERS) & set(dispatch.CLOUD_ONLY))
+def test_members_classified_internet_only():
+    assert "members" in dispatch.INTERNET_ONLY
+    assert not (set(dispatch.AGNOSTIC) & set(dispatch.INTERNET_ONLY))
+    assert not (set(dispatch.INTERNET_HANDLERS) & set(dispatch.INTERNET_ONLY))
 
 
 def test_members_parser_wires_subcommands_to_handler():
     parser = cli.build_parser()
     for argv in (["members", "add", "e@x.com"], ["members", "remove", "e@x.com"], ["members", "list"]):
-        assert parser.parse_args(argv).handler is cli.cmd_cloud_members
+        assert parser.parse_args(argv).handler is cli.cmd_internet_members
 
 
 # -- control-plane wire contract -------------------------------------------
 
 def test_control_plane_add_member_posts_with_session_bearer(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3778,7 +3799,7 @@ def test_control_plane_add_member_posts_with_session_bearer(monkeypatch, tmp_pat
 
 
 def test_control_plane_remove_member_deletes_with_encoded_email(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3797,7 +3818,7 @@ def test_control_plane_remove_member_deletes_with_encoded_email(monkeypatch, tmp
 
 
 def test_control_plane_remove_member_email_cannot_traverse_path(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3813,7 +3834,7 @@ def test_control_plane_remove_member_email_cannot_traverse_path(monkeypatch, tmp
 
 
 def test_control_plane_remove_member_handles_no_content(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(204))  # successful DELETE, empty body
@@ -3821,7 +3842,7 @@ def test_control_plane_remove_member_handles_no_content(monkeypatch, tmp_path):
 
 
 def test_control_plane_list_members_parses_envelope(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     seen = {}
@@ -3839,7 +3860,7 @@ def test_control_plane_list_members_parses_envelope(monkeypatch, tmp_path):
 
 
 def test_control_plane_list_members_tolerates_bare_array(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json=[{"email": "a@b.com"}]))
@@ -3847,7 +3868,7 @@ def test_control_plane_list_members_tolerates_bare_array(monkeypatch, tmp_path):
 
 
 def test_control_plane_list_members_defaults_missing_to_empty(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(200, json={"members": None}))
@@ -3855,7 +3876,7 @@ def test_control_plane_list_members_defaults_missing_to_empty(monkeypatch, tmp_p
 
 
 def test_control_plane_list_members_handles_no_content(monkeypatch, tmp_path):
-    from cloud import control_plane
+    from internet import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(204))  # empty body → no decode crash

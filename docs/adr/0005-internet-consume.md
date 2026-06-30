@@ -1,17 +1,17 @@
-# ADR 0005 — Cloud consume path (`grid chat`/`image`/`edit`/`video` + `info --env`)
+# ADR 0005 — Internet consume path (`grid chat`/`image`/`edit`/`video` + `info --env`)
 
 Status: accepted (2026-06-28)
 
 ## Context
 
-ADR 0001 set up modes + dispatch; 0002 sign-in + the per-grid `access_token`; 0003 the cloud grid
+ADR 0001 set up modes + dispatch; 0002 sign-in + the per-grid `access_token`; 0003 the internet grid
 lifecycle (`grid up/down/ls/info`) and the `signaling_url` relay base; 0004 the provider serve loop
-(`grid join`). This slice fills the last everyday surface: **consuming** a cloud grid. `grid chat` /
+(`grid join`). This slice fills the last everyday surface: **consuming** an internet grid. `grid chat` /
 `image` / `edit` / `video` route through the active grid's hosted relay with the per-grid token, and
 `grid info --env` prints the relay base URL + token for any OpenAI SDK — the same verbs as LAN, routed
 to the relay instead of the local proxy.
 
-This **fulfils ADR 0003 §6's deferral** of the cloud `info --env` token-printing form (that ADR, written
+This **fulfils ADR 0003 §6's deferral** of the internet `info --env` token-printing form (that ADR, written
 before the issues were renumbered, calls it "issue 05"; the use-path is issue 06). The relay consumer
 wire contract is ported from the reference client `grid-src/grid_cli/cli.py:cmd_request_*`; the
 proprietary backend stays out.
@@ -21,19 +21,19 @@ no off-LAN calls leak into `shared/`/`lan/`. Tokens are never printed except the
 
 ## Decisions
 
-1. **Separate `cli/cloud_request.py`, wired into `dispatch.CLOUD_HANDLERS`.** It mirrors the cloud
-   handler modules from the prior slices (`cli/cloud_grid.py`, `cli/cloud_provider.py`) rather than
+1. **Separate `cli/internet_request.py`, wired into `dispatch.INTERNET_HANDLERS`.** It mirrors the internet
+   handler modules from the prior slices (`cli/internet_grid.py`, `cli/internet_provider.py`) rather than
    making `cli/request.py` mode-aware — the dispatch design already routes by mode to a per-mode
    handler, so each handler stays thin and single-purpose. `chat`/`image`/`edit`/`video` move from the
-   cloud stub to real handlers; they stay `CLOUD_HANDLERS` *keys*, so the classification/partition test
+   internet stub to real handlers; they stay `INTERNET_HANDLERS` *keys*, so the classification/partition test
    is unchanged.
 
 2. **Shared media IO extracted to `cli/media_io.py`.** The SSE consumption and media-file encode/write
    are transport-agnostic and were identical for both modes, so they moved out of `cli/request.py`
-   (LAN) into a leaf module imported by both LAN and cloud. Pure refactor, behaviour byte-identical;
+   (LAN) into a leaf module imported by both LAN and internet. Pure refactor, behaviour byte-identical;
    the relay/proxy difference is only how the request is built.
 
-3. **The relay wire contract lives in `cloud/relay.py`** (one place, beside the provider contract):
+3. **The relay wire contract lives in `internet/relay.py`** (one place, beside the provider contract):
    `open_consumer_client(signaling_url, access_token, *, timeout)` reuses the provider `_client`
    (`signaling_url` base + `Authorization: Bearer <access_token>`), and `consumer_headers(...)` builds
    the optional routing headers `X-Target-Provider: <id>` / `X-Allow-Self-Provider: "true"`. The
@@ -42,10 +42,10 @@ no off-LAN calls leak into `shared/`/`lan/`. Tokens are never printed except the
    existing `_mock_relay` test seam (which swaps `relay.httpx.Client` for a `MockTransport`) covers the
    consumer — including `.stream()` for media — with no new seam.
 
-4. **`--target-provider` / `--allow-self-provider` are cloud-only, transmitted as headers.** They are
+4. **`--target-provider` / `--allow-self-provider` are internet-only, transmitted as headers.** They are
    the DECISIONS D16-sanctioned exception to the vocabulary discipline (the only `provider` tokens on
    the surface); declared once on the unified `chat`/`image`/`edit`/`video` parser and **rejected in
-   LAN mode** via a local guard that mirrors `cli/provider.py:_reject_cloud_only_flags`. The boolean
+   LAN mode** via a local guard that mirrors `cli/provider.py:_reject_internet_only_flags`. The boolean
    `--allow-self-provider` (`store_true`, default `False`) needs a truthiness check, not the `is not
    None` test the value-flags use. Routing is via headers (port-source contract), never the body.
 
@@ -60,7 +60,7 @@ no off-LAN calls leak into `shared/`/`lan/`. Tokens are never printed except the
    a self-host bundle field that the hosted model no longer provides.
 
 6. **Chat mirrors LAN exactly; "streaming honoured" is about the relay, not token-by-token output.**
-   `cmd_cloud_chat` is a single non-streaming POST that prints `choices[0].message.content` (raw
+   `cmd_internet_chat` is a single non-streaming POST that prints `choices[0].message.content` (raw
    fallback; `--json` prints the raw body) — identical to LAN `cmd_chat`. Neither mode streams chat
    tokens to the terminal; media *does* stream SSE (progress → result), and the relay relays a
    provider's stream end-to-end. The acceptance criterion's "streaming honoured" means that relay
@@ -71,7 +71,7 @@ no off-LAN calls leak into `shared/`/`lan/`. Tokens are never printed except the
    to stderr (exit 1), never echoing the token. Refresh-on-401 stays scoped to the long-running serve
    loop (ADR 0004 §4); a one-shot command refreshing + persisting tokens is unwarranted coupling
    (KISS/YAGNI). Resolution gates in order: signed in (`require_session`) → a grid resolves
-   (`cloud_grid._select`) → it has an access token → it is up.
+   (`internet_grid._select`) → it has an access token → it is up.
 
 8. **`info --env` is the one deliberate token-printing carve-out (ADR 0003 §6).** It prints
    `OPENAI_BASE_URL="{signaling_url}/relay/v1"` + `OPENAI_API_KEY="{access_token}"` — an explicit,
@@ -82,7 +82,7 @@ no off-LAN calls leak into `shared/`/`lan/`. Tokens are never printed except the
 
 ## Consequences
 
-- LAN is untouched: the media-IO extraction is a pure refactor, the cloud-only flags are rejected in
+- LAN is untouched: the media-IO extraction is a pure refactor, the internet-only flags are rejected in
   LAN, and no new code runs for LAN users. The existing suite stays green (the obsolete
   `info --env`-deferred placeholder test is replaced by real `info --env` coverage).
 - The relay layer is the one place the consumer wire contract lives; tests mock it via

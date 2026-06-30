@@ -2,9 +2,9 @@
 
 Encode a local file for upload, consume the streamed media SSE, and write the returned
 files to disk. These are shared by both modes — LAN (`cli/request.py`) talks to the grid
-proxy and cloud (`cli/cloud_request.py`) talks to the relay, but the request body, the SSE
+proxy and internet (`cli/internet_request.py`) talks to the relay, but the request body, the SSE
 event shape (`progress` / `result` / `[DONE]`), and the on-disk output are identical, so the
-only difference is how the request is built. Keep this module free of any LAN/cloud routing.
+only difference is how the request is built. Keep this module free of any LAN/internet routing.
 """
 from __future__ import annotations
 

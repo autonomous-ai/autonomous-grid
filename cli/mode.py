@@ -1,7 +1,7 @@
 """`grid mode` and `grid use`: read/switch the mode and the per-mode active grid.
 
 Both are mode-agnostic (they run in either mode and are never gated). `cmd_mode`
-reports/sets the *persisted* mode and deliberately ignores the `--lan`/`--cloud`
+reports/sets the *persisted* mode and deliberately ignores the `--lan`/`--internet`
 override; `cmd_use` acts on the *resolved* mode that dispatch stamps on ``args.mode``.
 """
 from __future__ import annotations
@@ -22,8 +22,8 @@ def cmd_mode(args: argparse.Namespace) -> int:
         print(json.dumps({"mode": mode}))
         return 0
     print(mode)
-    if target == "cloud":
-        print("Cloud mode: `grid login` to sign in, then `grid up` to bring a cloud grid online, "
+    if target == "internet":
+        print("Internet mode: `grid login` to sign in, then `grid up` to bring an internet grid online, "
               "`grid join` to serve models to it, and `grid chat -m <model> \"…\"` to use them.")
     return 0
 
