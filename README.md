@@ -2,11 +2,7 @@
 
 # ⚡ Grid
 
-### The orchestration layer for local AI.
-
-Grid unifies the inference engines you already run — **Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI** —
-behind **one OpenAI-compatible endpoint**. Run it as an unauthenticated proxy on your **local network**, or sign in
-and reach your engines remotely through autonomous's hosted **relay** — same commands, two modes.
+### Orchestrate the computers you already own to run AI inference.
 
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -15,9 +11,15 @@ and reach your engines remotely through autonomous's hosted **relay** — same c
 
 [**Quickstart**](#quickstart) · [Two modes](#two-modes) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
-<img src="docs/home-grid.png" alt="Your Home Grid sits above your engines — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever machine serves the model" width="860">
+<img src="docs/home-grid.png" alt="Your Home Grid sits above your computers — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever computer serves the model" width="860">
 
 </div>
+
+Grid pools the computers you already have — your Mac, your NVIDIA desktop, the workstation in the corner — behind **one OpenAI-compatible endpoint**, and routes each request to whichever one is running the right model.
+
+The inference servers you run (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI) stay where they are — Grid just ties them together.
+
+Run it on your **local** network, or sign in to reach your computers **remotely** through **Autonomous Relay**, our hosted connection. Same commands, two modes.
 
 ## Two modes
 
@@ -25,19 +27,19 @@ Grid runs in one of two **modes**, and the same verbs (`up`, `join`, `chat`, `in
 
 | | **`local`** _(default)_ | **`remote`** |
 |---|---|---|
-| What it is | Unauthenticated, local-only proxy | Signed-in thin client to autonomous's hosted relay |
+| What it is | Unauthenticated, local-only proxy | Signed-in thin client to Autonomous Relay (our hosted connection) |
 | Reach | Same network only | From anywhere |
 | Sign-in | None | `grid login` (your account) |
 | API key | `local-grid` placeholder — auth is off | Your per-grid access token |
 | How requests flow | Engines poll the relay for work; apps consume through it | |
 
 The chosen mode is persisted to **`~/.grid/state.json`**, and each mode remembers its own active grid there.
-Switch any time with `grid mode local|remote`, or override a single command with `--local` / `--remote`. A machine
+Switch any time with `grid mode local|remote`, or override a single command with `--local` / `--remote`. A computer
 with no state file behaves exactly as a `local`-only install.
 
 ## Quickstart
 
-**Install** — on each machine (macOS / Linux):
+**Install** — on each computer (macOS / Linux):
 
 ```bash
 curl -fsSL https://grid.autonomous.ai/install.sh | bash
@@ -69,7 +71,7 @@ grid mode local
 
 ### 2 · Sign in
 
-**🌐 Remote** — sign in once with the device-code flow (opens a browser; `--no-browser` prints the code for headless boxes):
+**🌐 Remote** — sign in once with the device-code flow (opens a browser; `--no-browser` prints the code for headless computers):
 ```bash
 grid login
 # To sign in, open this URL and approve with Google:
@@ -92,18 +94,18 @@ grid use research
 ```
 `grid ls` lists the grids your sign-in can reach; `--type permissioned-providers` restricts who may serve to it.
 
-**🏠 local** — bring up the default `home` grid on this machine:
+**🏠 local** — bring up the default `home` grid on this computer:
 ```bash
 grid up
 # grid=home
 # grid_url=http://192.168.1.25:8090            ← the one address engines + apps use
 ```
 
-### 4 · Add an engine
+### 4 · Add a computer
 
-Point Grid at an inference server you already run (here, a vLLM box serving `qwen3-coder`), and name the box.
+Point Grid at an inference server you already run (here, a computer running vLLM to serve `qwen3-coder`), and name it.
 
-**🌐 Remote** — serve your local engine to the remote grid. The engine polls the relay outbound, so `--at` is its address **on this machine** (`localhost`) — no inbound port or public IP needed:
+**🌐 Remote** — serve your local engine to the remote grid. The engine polls the relay outbound, so `--at` is its address **on this computer** (`localhost`) — no inbound port or public IP needed:
 ```bash
 grid join research --at http://localhost:8000/v1 -m qwen3-coder --name gpu-4090
 # Joining engine gpu-4090 to research (pid=12345) — serving via the relay.
@@ -117,7 +119,7 @@ grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-cod
 # models=qwen3-coder
 ```
 
-Add as many boxes as you like — repeat `grid join` for each MLX, vLLM, or Ollama you run.
+Add as many computers as you like — repeat `grid join` for each MLX, vLLM, or Ollama you run.
 
 ### 5 · Use a model
 
@@ -133,13 +135,13 @@ grid chat -m qwen3-coder "write a haiku about local GPUs"
 grid chat -m qwen3-coder "write a haiku about local GPUs"
 ```
 
-> **🏠 local tip:** see every model across every joined box with `grid models --verbose`:
+> **🏠 local tip:** see every model across every joined computer with `grid models --verbose`:
 > ```text
 > MODEL        ENGINE      WHERE
 > qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
 > gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
 > ```
-> Two machines, two frameworks — one endpoint serves both. (The same `grid models` and `grid engines` now work for remote grids too — `grid models --verbose` shows each model's engine and node.)
+> Two computers, two frameworks — one endpoint serves both. (The same `grid models` and `grid engines` now work for remote grids too — `grid models --verbose` shows each model's engine and node.)
 
 ### 6 · Point your apps at the grid
 
@@ -152,7 +154,7 @@ grid info --env
 # export OPENAI_API_KEY="<your access token>"
 ```
 
-**🏠 local** — the local endpoint and a placeholder key (auth is off on your local):
+**🏠 local** — the local endpoint and a placeholder key (auth is off on your local network):
 ```bash
 grid info --env
 # export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
@@ -200,14 +202,14 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://192.168.1.25:8090/v1", api_key="local-grid")
 client.chat.completions.create(
-    model="qwen3-coder",                # routed to the 4090 box automatically
+    model="qwen3-coder",                # routed to the 4090 computer automatically
     messages=[{"role": "user", "content": "hello"}],
 )
 ```
 
-**That's it.** Every model on every machine answers at one endpoint — on your local network, or remotely. Add another box anytime with `grid join`.
+**That's it.** Every model on every computer answers at one endpoint — on your local network, or remotely. Add another computer anytime with `grid join`.
 
-### No engine on a box yet?
+### No engine on a computer yet?
 
 Grid installs and joins a built-in engine for you — `llama.cpp` for text, ComfyUI for media. `grid engine install`
 and `grid pull` work the same in both modes; only the grid you join differs (a remote grid **name**, or a local
@@ -232,14 +234,14 @@ grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.
 
 ## How it works
 
-Grid sits **above** your engines — like an API gateway above your services, or Tailscale above
-your network. Your machines are the inference engines, your grid is the one address everything
-talks through, and your apps draw from it.
+Grid sits **above** your computers — like an API gateway above your services, or Tailscale above
+your network. Each computer runs one or more inference servers (an **engine** — Ollama, vLLM, llama.cpp,
+ComfyUI); your grid is the one address everything talks through, and your apps draw from it.
 
-- **the grid** — one endpoint that routes each request to a machine serving that model. On your **local** it's a
-  local proxy you create with `grid up`; in **remote** it's a hosted grid on autonomous's relay you bring up the
+- **the grid** — one endpoint that routes each request to a computer serving that model. On your **local** it's a
+  local proxy you create with `grid up`; in **remote** it's a hosted grid on Autonomous Relay you bring up the
   same way after `grid login`.
-- **engines** — the tools you already run. `grid join` advertises a machine's engines and heartbeats them; Grid
+- **engines** — the tools you already run. `grid join` advertises a computer's engines and heartbeats them; Grid
   never restarts or replaces them. On local they register directly with the grid; in remote they poll the relay
   outbound for work, so they serve from behind a NAT with no inbound port.
 - **apps** — anything that speaks the OpenAI API. Text on `/v1/chat`, images and video on `/v1/media`.
