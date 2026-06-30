@@ -42,6 +42,24 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# Resolve the newest release tag WITHOUT api.github.com — its unauthenticated limit is
+# 60 req/hr per IP, so shared office/NAT IPs exhaust it and every install behind that IP
+# 403s. Both sources below go through github.com, which is NOT rate-limited:
+#   1) the redirect of /releases/latest  ->  /releases/tag/<tag>
+#   2) fallback: the releases Atom feed (newest entry first)
+latest_release_tag() {
+  local loc tag
+  loc="$(curl -fsS --proto '=https' --tlsv1.2 -o /dev/null \
+           -w '%{redirect_url}' "https://github.com/$OWNER/$REPO/releases/latest" 2>/dev/null || true)"
+  tag="${loc##*/}"; tag="${tag%%\?*}"
+  if [ -z "$tag" ]; then
+    tag="$(curl -fsSL --proto '=https' "https://github.com/$OWNER/$REPO/releases.atom" 2>/dev/null \
+            | grep -oE '/releases/tag/[^"<]+' | head -1 || true)"
+    tag="${tag##*/}"
+  fi
+  printf '%s' "$tag"
+}
+
 # --- Linux: self-contained binary, verified against the release's SHA256SUMS --
 install_linux_binary() {
   local asset="grid-linux-${arch_tag}" base want got
@@ -73,7 +91,7 @@ install_linux_binary() {
 
 # --- macOS: universal wheel via uv (uv installs both grid + agrid) ------------
 install_macos_wheel() {
-  local src api
+  local src tag ver
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   if ! command -v uv >/dev/null 2>&1; then
     info "Installing uv (Python runtime manager)…"
@@ -86,12 +104,15 @@ install_macos_wheel() {
   if   [ -n "${GRID_WHEEL_URL:-}" ]; then src="$GRID_WHEEL_URL"
   elif [ -n "${GRID_PACKAGE:-}"   ]; then src="$GRID_PACKAGE"
   else
-    if [ "$VERSION" = latest ]; then api="https://api.github.com/repos/$OWNER/$REPO/releases/latest"
-    else                            api="https://api.github.com/repos/$OWNER/$REPO/releases/tags/v$VERSION"; fi
-    info "Resolving grid wheel from $OWNER/$REPO ($VERSION)…"
-    src="$(curl -fsSL "$api" | grep -oE 'https://[^"]+grid-[^"]+-py3-none-any\.whl' | head -1)" \
-      || die "could not query the $VERSION release"
-    [ -n "$src" ] || die "no grid wheel asset in the $VERSION release"
+    if [ "$VERSION" = latest ]; then
+      tag="$(latest_release_tag)"
+      [ -n "$tag" ] || die "could not resolve the latest grid release — set GRID_VERSION=X.Y.Z or GRID_WHEEL_URL=…"
+      ver="${tag#v}"
+    else
+      ver="$VERSION"; tag="v$VERSION"
+    fi
+    info "Resolving grid wheel from $OWNER/$REPO ($VERSION → $tag)…"
+    src="https://github.com/$OWNER/$REPO/releases/download/$tag/grid-${ver}-py3-none-any.whl"
   fi
   info "Installing grid…"
   uv tool install --force "$src" >/dev/null || die "uv tool install failed for $src"
