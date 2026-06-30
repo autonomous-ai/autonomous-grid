@@ -18,7 +18,7 @@ from typing import NoReturn
 
 from shared import state
 
-from . import remote_grid, remote_provider, remote_request
+from . import remote_grid, remote_overview, remote_provider, remote_request
 
 
 # Commands that behave identically in both modes: local engine/model setup, plus the
@@ -75,6 +75,8 @@ REMOTE_HANDLERS = {
     "ls": remote_grid.cmd_remote_ls,
     "list": remote_grid.cmd_remote_ls,
     "info": remote_grid.cmd_remote_info,
+    "engines": remote_overview.cmd_remote_engines,
+    "models": remote_overview.cmd_remote_models,
     "join": remote_provider.cmd_remote_join,
     "leave": remote_provider.cmd_remote_leave,
     "chat": remote_request.cmd_remote_chat,

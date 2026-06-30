@@ -106,9 +106,9 @@ persisted mode > `local`. `grid use <name>` sets the persistent default grid, so
 `grid info` / `grid models` target it without naming it — an explicit `[grid]` positional still
 wins, and a stale selection (its grid was removed) is ignored.
 
-In `remote` mode the grid lifecycle (`up`/`down`/`ls`/`info`), sign-in (`login`/`logout`), serving
-(`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`), and membership admin (`grid members`)
-all work. `grid members` is remote-only — in `local` mode it exits with guidance to switch. The shared
+In `remote` mode the grid lifecycle (`up`/`down`/`ls`/`info`), live reads (`engines`/`models`),
+sign-in (`login`/`logout`), serving (`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`), and
+membership admin (`grid members`) all work. `grid members` is remote-only — in `local` mode it exits with guidance to switch. The shared
 local commands (`catalog`, `pull`, `rm`, `engine …`) work in either mode. A machine with no state
 file behaves exactly as a `local`-only install.
 
@@ -265,6 +265,11 @@ devstral-small-2          gpu-4090     http://192.168.1.30:8000/v1
 glm-4.5-air               gpu-5090     http://192.168.1.40:8000/v1
 comfyui:image_generation  media-mac    http://192.168.1.30:8190
 ```
+
+In `remote` mode `grid models` and `grid engines` read the grid's live overview from its public
+relay endpoint (no token needed, so they work even before `grid sync`). The output is the same
+shape, but `--verbose` shows the **node** serving each model instead of a local `WHERE` URL —
+remote engines sit behind the relay, not at an address you call directly.
 
 ## Use
 

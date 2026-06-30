@@ -1089,16 +1089,17 @@ def test_resolve_override_strips_flag_in_any_position():
         dispatch.resolve_override(["--local", "--remote", "up"])
 
 
-def test_dispatch_stubs_unimplemented_remote_commands(monkeypatch, tmp_path):
+def test_remote_engines_models_require_session_when_signed_out(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    state.set_mode("remote")
+    state.set_mode("remote")  # remote mode, but not signed in
 
-    # Gated commands without a real remote handler yet still hit the "not available" stub.
-    # (up/down/ls/info and join/leave now have handlers — covered by their own tests below.)
-    for command in ("models", "engines"):
+    # engines/models now have real handlers (the last GATED stubs to land): signed out they reach
+    # the auth gate, not the old "remote mode yet" stub.
+    for command in ("engines", "models"):
         with pytest.raises(SystemExit) as exc:
             cli.main([command])
-        assert "remote mode yet" in str(exc.value).lower()
+        assert "login" in str(exc.value).lower()
+        assert "remote mode yet" not in str(exc.value).lower()
 
 
 def test_remote_lifecycle_requires_session_when_signed_out(monkeypatch, tmp_path):
@@ -3427,6 +3428,152 @@ def test_remote_chat_requires_sign_in(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["chat", "-m", "m", "hi"])
     assert "signed in" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Remote `grid engines` / `grid models` (cli/remote_overview.py + dispatch, via the relay overview)
+# ---------------------------------------------------------------------------
+
+_OVERVIEW_2NODES = {
+    "grid": {"state": "running"},
+    "stats": {"models": 2, "nodes": 2},
+    "models": [],
+    "nodes": [
+        {"name": "mac-studio", "device": "Mac Studio", "chip": "M2 Ultra", "memory_gb": 192,
+         "device_class": "gpu", "model": "glm-5.2", "models": ["glm-5.2", "qwen-3"],
+         "engine": "MLX", "throughput_tok_s": 58.0, "max_concurrency": 1, "online": True},
+        {"name": "ollama-box", "device": "Linux x86_64", "chip": None, "memory_gb": 64,
+         "device_class": "gpu", "model": "glm-5.2", "models": ["glm-5.2"],
+         "engine": "ollama", "throughput_tok_s": 120.0, "max_concurrency": 4, "online": True},
+    ],
+}
+
+
+def _mock_overview(monkeypatch, payload, seen=None):
+    """Serve GET /relay/v1/grid/overview with `payload` via the relay MockTransport."""
+    def handler(request):
+        if seen is not None:
+            seen["method"], seen["path"] = request.method, request.url.path
+            seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=payload)
+
+    _mock_relay(monkeypatch, handler)
+
+
+def test_remote_engines_lists_nodes_with_engine_device_and_models(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    seen = {}
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES, seen)
+    assert cli.main(["engines"]) == 0
+    out = capsys.readouterr().out
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/grid/overview")
+    assert "mac-studio" in out and "MLX" in out and "Mac Studio" in out
+    assert "ollama-box" in out and "ollama" in out
+    assert "glm-5.2,qwen-3" in out  # the MLX node's models, joined
+
+
+def test_remote_engines_json_passes_through_nodes_verbatim(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["engines", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == _OVERVIEW_2NODES["nodes"]  # verbatim, incl. model(singular)/online/max_concurrency
+
+
+def test_remote_engines_empty_when_no_nodes(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"nodes": []})
+    assert cli.main(["engines"]) == 0
+    assert "no engines" in capsys.readouterr().out
+
+
+def test_remote_models_lists_unique_ids_deduped_across_nodes(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == ["glm-5.2", "qwen-3"]  # first-seen order, glm-5.2 not repeated
+
+
+def test_remote_models_verbose_shows_model_engine_node_rows(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models", "--verbose"]) == 0
+    out = capsys.readouterr().out
+    assert "MODEL" in out and "ENGINE" in out and "NODE" in out
+    assert "glm-5.2" in out and "MLX" in out and "mac-studio" in out
+    assert "qwen-3" in out and "ollama-box" in out  # both nodes' rows present
+    assert out.count("glm-5.2") == 2  # served by both nodes → one row each
+
+
+def test_remote_models_json_maps_name_to_node_key(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio"} in payload
+    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio"} in payload
+    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box"} in payload
+
+
+def test_remote_models_empty_when_no_nodes(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"nodes": []})
+    assert cli.main(["models"]) == 0
+    assert "no live models" in capsys.readouterr().out
+
+
+def test_remote_engines_requires_grid_up(monkeypatch, tmp_path):
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team", "access_token": "AT", "refresh_token": "RT"}],
+                active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "stopped"})  # down → no relay address
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["engines"])
+    assert "grid up" in str(exc.value).lower()
+
+
+def test_remote_engines_works_without_access_token(monkeypatch, tmp_path, capsys):
+    """The overview route is public — listing must work before `grid sync` stores a per-grid token."""
+    _seed_remote(monkeypatch, tmp_path,
+                networks=[{"network_id": "n1", "name": "team"}], active="team")  # no access_token
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["engines"]) == 0
+    assert "mac-studio" in capsys.readouterr().out
+
+
+def test_dispatch_routes_engines_and_models_to_real_handlers(monkeypatch, tmp_path, capsys):
+    """engines/models are no longer stubbed in remote mode."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models"]) == 0
+    assert "isn't available in remote mode" not in capsys.readouterr().out  # stub message gone
+
+
+def test_remote_engines_non_json_body_is_clean_error(monkeypatch, tmp_path):
+    """A 200 with a non-JSON body (e.g. a proxy maintenance page) → clean SystemExit, not a traceback."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, text="<html>maintenance</html>"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["engines"])
+    assert "non-json" in str(exc.value).lower()
+
+
+def test_remote_engines_tolerates_malformed_nodes(monkeypatch, tmp_path, capsys):
+    """A non-dict node entry and a scalar `models` field render as empty, never crash the table."""
+    payload = {"nodes": [
+        {"name": "n1", "engine": "MLX", "models": "llama3"},   # models is a bare string, not a list
+        "junk",                                                 # not an object at all
+        {"name": "n2", "engine": "ollama", "models": ["real-model"]},
+    ]}
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, payload)
+    assert cli.main(["engines"]) == 0
+    out = capsys.readouterr().out
+    assert "n1" in out and "n2" in out and "real-model" in out
+    assert "(none)" in out          # n1's bad `models` → no models, not split characters
+    assert "l,l,a,m,a" not in out   # the bare string was NOT iterated into characters
 
 
 def test_remote_chat_requires_active_grid(monkeypatch, tmp_path):

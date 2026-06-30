@@ -139,7 +139,7 @@ grid chat -m qwen3-coder "write a haiku about local GPUs"
 > qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
 > gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
 > ```
-> Two machines, two frameworks — one endpoint serves both. _(A CLI listing for remote grids is on the way; for now your remote grid's models show on its web page.)_
+> Two machines, two frameworks — one endpoint serves both. (The same `grid models` and `grid engines` now work for remote grids too — `grid models --verbose` shows each model's engine and node.)
 
 ### 6 · Point your apps at the grid
 
