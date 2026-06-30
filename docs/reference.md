@@ -14,7 +14,7 @@ Local state is stored under `~/.grid` unless the `GRID_HOME` environment variabl
 
 Ollama, vLLM, LM Studio, MLX, and llama.cpp all expose an OpenAI-compatible `/v1`
 endpoint. `grid join --at <url>` advertises that existing engine without launching
-anything new. Run it on the engine's machine and use **that machine's LAN IP** (not
+anything new. Run it on the engine's machine and use **that machine's local IP** (not
 `localhost`) so the grid server can reach it. `-m/--model` is repeatable, so one endpoint
 can advertise several model names:
 
@@ -24,10 +24,10 @@ grid join home --at http://192.168.1.10:11434/v1 -m llama3 -m qwen2.5-coder
 
 > **`--at <url>` must be reachable from the grid server**, which proxies requests from
 > its own process:
-> - Use the engine machine's LAN IP, not `localhost` (localhost only works if the engine
+> - Use the engine machine's local IP, not `localhost` (localhost only works if the engine
 >   runs on the grid-server machine). `--advertise-host` does not apply to `--at` — put
 >   the host directly in the URL.
-> - The engine must listen on the LAN: Ollama `OLLAMA_HOST=0.0.0.0`; LM Studio "Serve on
+> - The engine must listen on the local: Ollama `OLLAMA_HOST=0.0.0.0`; LM Studio "Serve on
 >   Local Network"; vLLM `--host 0.0.0.0`.
 > - Verify from the grid-server machine: `curl http://192.168.1.10:11434/v1/models`.
 
@@ -171,11 +171,11 @@ All three come back from the grid's `/v1` endpoint:
 
 | Error | Likely cause |
 | --- | --- |
-| `No active LAN engine for model 'X'` (Grid; `code: engine_unavailable`) | No live engine advertises exactly `X`. Check `grid models` / `grid engines`; the requested name must match an advertised model exactly (case-sensitive). |
+| `No active local engine for model 'X'` (Grid; `code: engine_unavailable`) | No live engine advertises exactly `X`. Check `grid models` / `grid engines`; the requested name must match an advertised model exactly (case-sensitive). |
 | `Engine request failed: All connection attempts failed` (Grid; `code: engine_error`) | The grid server can't open a connection to the engine's `endpoint_url`. The URL points at `localhost`/an unreachable host, the engine listens only on loopback, or a firewall blocks the port. |
 | `model 'X' not found`, `type: not_found_error`, no Grid `code` | The request *reached* an engine, but that engine doesn't serve `X`. Usually a `localhost` endpoint that resolved to the wrong machine, or an advertised name the engine doesn't recognize (Grid forwards `model` verbatim). |
 
-Make the engine listen on the LAN (not just loopback): Ollama → `OLLAMA_HOST=0.0.0.0`
+Make the engine listen on the local (not just loopback): Ollama → `OLLAMA_HOST=0.0.0.0`
 then restart; LM Studio → enable "Serve on Local Network"; vLLM → `--host 0.0.0.0`.
 
 Two checks that resolve most issues:

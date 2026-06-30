@@ -1,8 +1,8 @@
-"""Probe a running OpenAI-compatible engine for the capabilities an internet node advertises on
+"""Probe a running OpenAI-compatible engine for the capabilities a remote node advertises on
 register, and benchmark its throughput.
 
 Ported from ``grid-src/grid_cli/provider_runtime/engine/probe.py`` + ``provider/benchmark.py``,
-trimmed for the internet serve path: every call goes through ``httpx.Client`` (so it mocks like the
+trimmed for the remote serve path: every call goes through ``httpx.Client`` (so it mocks like the
 relay / control-plane clients), and a failed probe degrades **silently** to "unsupported" rather
 than logging — a node still registers, just with fewer advertised features.
 

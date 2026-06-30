@@ -1,14 +1,14 @@
-"""Internet-mode `grid join` / `grid leave` — serve one engine to the active internet grid's relay.
+"""Remote-mode `grid join` / `grid leave` — serve one engine to the active remote grid's relay.
 
-Mirrors the LAN handlers (`cli/provider.py`) but resolves the grid + relay address from the internet
-credential store and spawns the internet serve loop (`__internet-engine` → `internet/serve.py`) instead of
-the LAN heartbeat loop. The engine record + teardown are the shared ones (`shared/run_records.py`),
+Mirrors the local handlers (`cli/provider.py`) but resolves the grid + relay address from the remote
+credential store and spawns the remote serve loop (`__remote-engine` → `remote/serve.py`) instead of
+the local heartbeat loop. The engine record + teardown are the shared ones (`shared/run_records.py`),
 so `grid leave` works the same in both modes. `grid join --all` serves several local engines under
-one identity (the union of their models, model→engine routing — DECISIONS D9 / ADR 0007); LAN spawns
+one identity (the union of their models, model→engine routing — DECISIONS D9 / ADR 0007); local spawns
 one identity per engine instead.
 
-Import rule mirrors `cli/internet_grid.py`: only stdlib + `shared.*` at module top; `internet.*` and the
-LAN runtime are imported lazily inside each handler, because `cli.dispatch` imports this module
+Import rule mirrors `cli/remote_grid.py`: only stdlib + `shared.*` at module top; `remote.*` and the
+local runtime are imported lazily inside each handler, because `cli.dispatch` imports this module
 while the `cli` package is still initialising.
 """
 from __future__ import annotations
@@ -23,31 +23,31 @@ import uuid
 from shared import paths, run_records
 
 
-def _reject_lan_only_flags(args: argparse.Namespace) -> None:
-    """LAN-only `grid join` flags have no meaning in internet mode (DECISIONS D8): an internet engine polls
+def _reject_local_only_flags(args: argparse.Namespace) -> None:
+    """local-only `grid join` flags have no meaning in remote mode (DECISIONS D8): a remote engine polls
     the relay outbound, so there is no inbound endpoint to advertise, and media serving is later."""
     if getattr(args, "media", False):
-        raise SystemExit("Internet media serving isn't available yet; it lands in a later release.")
+        raise SystemExit("Remote media serving isn't available yet; it lands in a later release.")
     if getattr(args, "advertise_host", None) is not None:
         raise SystemExit(
-            "--advertise-host is LAN-only. An internet engine polls the relay outbound, so there is "
+            "--advertise-host is local-only. A remote engine polls the relay outbound, so there is "
             "no inbound endpoint to advertise."
         )
     # --media-port carries a non-None default but only matters with --media, already rejected above.
 
 
-def cmd_internet_join(args: argparse.Namespace) -> int:
-    from internet import credentials
+def cmd_remote_join(args: argparse.Namespace) -> int:
+    from remote import credentials
 
-    from . import internet_grid
+    from . import remote_grid
 
-    _reject_lan_only_flags(args)
+    _reject_local_only_flags(args)
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 
     session = credentials.require_session()
-    rec = internet_grid._select(getattr(args, "grid", None))
-    network_id = internet_grid._network_id(rec)
+    rec = remote_grid._select(getattr(args, "grid", None))
+    network_id = remote_grid._network_id(rec)
     label = rec.get("name") or network_id
     if not rec.get("access_token"):
         raise SystemExit(
@@ -55,8 +55,8 @@ def cmd_internet_join(args: argparse.Namespace) -> int:
         )
 
     # Resolve the relay address (works for a member, not just the creator; a stopped grid that a
-    # member can't pre-check fails later at register). See internet_grid.resolve_relay_base.
-    signaling_url, _status = internet_grid.resolve_relay_base(session, rec, network_id, label)
+    # member can't pre-check fails later at register). See remote_grid.resolve_relay_base.
+    signaling_url, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
 
     specs = _resolve_serve_targets(args)
     if not specs:  # several engines detected and the operator declined to join them all
@@ -74,12 +74,12 @@ def cmd_internet_join(args: argparse.Namespace) -> int:
     record = _build_record(args, network_id, engine_id, signaling_url, specs)
     run_records.write_record(network_id, engine_id, record)
 
-    proc = _spawn_internet_engine(network_id, engine_id)
+    proc = _spawn_remote_engine(network_id, engine_id)
     record["pid"] = proc.pid
     run_records.write_record(network_id, engine_id, record)
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
-    if _await_internet_engine_start(proc) == "died":
+    if _await_remote_engine_start(proc) == "died":
         run_records.record_path(network_id, engine_id).unlink(missing_ok=True)
         from . import provider
 
@@ -107,7 +107,7 @@ def _resolve_serve_targets(args: argparse.Namespace) -> list[dict[str, object]]:
     `--all` (or after an interactive confirm) it returns *every* detected engine so one identity serves
     their union (DECISIONS D9); otherwise several detected engines are ambiguous and it asks for
     `--all`/`--engine`. Returns `[]` only when the operator declines the interactive "join all" prompt.
-    Mirrors LAN `cli/provider.cmd_join`, but internet registers ONE identity instead of one per engine.
+    Mirrors local `cli/provider.cmd_join`, but remote registers ONE identity instead of one per engine.
     """
     from . import provider
 
@@ -120,7 +120,7 @@ def _resolve_serve_targets(args: argparse.Namespace) -> list[dict[str, object]]:
     if args.models:
         raise SystemExit("-m/--model names models for an engine; pair it with --at <url>, or use --serve <model>.")
 
-    detected = provider._detect(None)  # advertise_host is LAN-only; internet always probes loopback
+    detected = provider._detect(None)  # advertise_host is local-only; remote always probes loopback
     if not detected:
         raise SystemExit(
             "No running engine detected on this box. Point at one with "
@@ -131,10 +131,10 @@ def _resolve_serve_targets(args: argparse.Namespace) -> list[dict[str, object]]:
         if not detected:
             raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
 
-    # Internet can't serve media engines yet: drop them from a multi-join, reject a lone one.
+    # Remote can't serve media engines yet: drop them from a multi-join, reject a lone one.
     text = [engine for engine in detected if not engine.media]
     if not text:
-        raise SystemExit("Internet media serving isn't available yet; it lands in a later release.")
+        raise SystemExit("Remote media serving isn't available yet; it lands in a later release.")
     if len(text) > 1 and not args.all:
         provider._print_plan(text)
         if provider._interactive():
@@ -144,7 +144,7 @@ def _resolve_serve_targets(args: argparse.Namespace) -> list[dict[str, object]]:
             raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
     for engine in detected:
         if engine.media:
-            print(f"Skipping {engine.label!r}: internet media serving isn't available yet.", file=sys.stderr)
+            print(f"Skipping {engine.label!r}: remote media serving isn't available yet.", file=sys.stderr)
     return [
         {"endpoint_url": engine.endpoint_url, "models": list(engine.models), "engine_label": engine.label}
         for engine in text
@@ -174,13 +174,13 @@ def _build_record(
     signaling_url: str,
     specs: list[dict[str, object]],
 ) -> dict[str, object]:
-    """The internet engine's run record — non-secret routing only; the token stays in credentials.toml.
+    """The remote engine's run record — non-secret routing only; the token stays in credentials.toml.
 
     Several engines can serve under one identity (DECISIONS D9): `engines` carries each local engine
     so the serve loop can build the model→engine table. Top-level `models` is their union and
     `endpoint_url` is the single engine's URL (None when several) — kept for display + back-compat.
     """
-    from lan import runtime
+    from local import runtime
 
     union = list(dict.fromkeys(model for spec in specs for model in spec["models"]))
     single_endpoint = specs[0]["endpoint_url"] if len(specs) == 1 else None
@@ -188,7 +188,7 @@ def _build_record(
     return {
         "engine_id": engine_id,
         "node_id": f"node-{uuid.uuid4().hex[:12]}",
-        "grid_id": network_id,  # the internet network_id doubles as the run record's grid_id
+        "grid_id": network_id,  # the remote network_id doubles as the run record's grid_id
         "pid": 0,
         "signaling_url": signaling_url,
         "endpoint_url": single_endpoint,
@@ -210,14 +210,14 @@ def _build_record(
     }
 
 
-def _spawn_internet_engine(network_id: str, engine_id: str) -> subprocess.Popen:
-    from lan import runtime
+def _spawn_remote_engine(network_id: str, engine_id: str) -> subprocess.Popen:
+    from local import runtime
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("ab")
     return subprocess.Popen(
-        runtime.cli_command() + ["__internet-engine", network_id, engine_id],
+        runtime.cli_command() + ["__remote-engine", network_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -225,10 +225,10 @@ def _spawn_internet_engine(network_id: str, engine_id: str) -> subprocess.Popen:
     )
 
 
-def _await_internet_engine_start(proc: subprocess.Popen, grace: float = 3.0) -> str:
-    """Block briefly to tell a freshly-spawned internet engine "died" from "starting".
+def _await_remote_engine_start(proc: subprocess.Popen, grace: float = 3.0) -> str:
+    """Block briefly to tell a freshly-spawned remote engine "died" from "starting".
 
-    Unlike LAN there is no local registry to poll (the relay isn't locally reachable), so this
+    Unlike local there is no local registry to poll (the relay isn't locally reachable), so this
     only checks the process stayed alive — registration shows up on the grid page, not here.
     """
     deadline = time.time() + grace
@@ -239,14 +239,14 @@ def _await_internet_engine_start(proc: subprocess.Popen, grace: float = 3.0) -> 
     return "starting" if proc.poll() is None else "died"
 
 
-def cmd_internet_leave(args: argparse.Namespace) -> int:
-    from internet import credentials
+def cmd_remote_leave(args: argparse.Namespace) -> int:
+    from remote import credentials
 
-    from . import internet_grid
+    from . import remote_grid
 
     credentials.require_session()
-    rec = internet_grid._select(getattr(args, "grid", None))
-    network_id = internet_grid._network_id(rec)
+    rec = remote_grid._select(getattr(args, "grid", None))
+    network_id = remote_grid._network_id(rec)
     label = rec.get("name") or network_id
     records = run_records.read_records(network_id)
 

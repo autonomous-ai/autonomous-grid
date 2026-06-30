@@ -1,12 +1,12 @@
 """Generic atomic read/write, shared by both modes.
 
-Extracted from ``lan/config.py`` so the shared kernel (e.g. ``shared/state.py``)
-can persist JSON without importing ``lan/``. ``lan/config.py`` re-imports these
+Extracted from ``local/config.py`` so the shared kernel (e.g. ``shared/state.py``)
+can persist JSON without importing ``local/``. ``local/config.py`` re-imports these
 names, so ``config.load_json`` / ``config.atomic_write_json`` keep resolving for
 existing callers.
 
 ``atomic_write_bytes`` is the single hardened write primitive both the JSON state
-file and the internet TOML credential store go through, so secret-bearing files are
+file and the remote TOML credential store go through, so secret-bearing files are
 never briefly world-readable (see its docstring).
 """
 from __future__ import annotations

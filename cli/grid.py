@@ -7,8 +7,8 @@ from typing import Any
 
 import httpx
 
-from lan import config
-from lan import runtime
+from local import config
+from local import runtime
 from shared import state
 from shared._version import __version__
 
@@ -102,33 +102,33 @@ def cmd_overview(args: argparse.Namespace) -> int:
     # Mode is stamped by dispatch; fall back to the persisted mode for direct calls.
     mode = getattr(args, "mode", None) or state.get_mode()
     as_json = getattr(args, "json", False)
-    if mode == "internet":
-        return _overview_internet(as_json)
-    return _overview_lan(as_json)
+    if mode == "remote":
+        return _overview_remote(as_json)
+    return _overview_local(as_json)
 
 
-def _overview_internet(as_json: bool) -> int:
-    active = state.get_active("internet")
+def _overview_remote(as_json: bool) -> int:
+    active = state.get_active("remote")
     if as_json:
-        print(json.dumps({"mode": "internet", "grid": active}, indent=2))
+        print(json.dumps({"mode": "remote", "grid": active}, indent=2))
         return 0
-    print("mode: internet")
+    print("mode: remote")
     print(f"active grid: {active}" if active else "active grid: (none)")
-    print("\nSign in with `grid login`, then manage your internet grids with `grid up`/`ls`/`info`, "
+    print("\nSign in with `grid login`, then manage your remote grids with `grid up`/`ls`/`info`, "
           "serve models with `grid join`, and use them with `grid chat -m <model> \"…\"`.")
     return 0
 
 
-def _overview_lan(as_json: bool) -> int:
+def _overview_local(as_json: bool) -> int:
     grids = config.iter_grid_configs()
     if not grids:
         if as_json:
             print(json.dumps(
-                {"mode": "lan", "grid": None, "grid_url": None, "engines": [], "models": []},
+                {"mode": "local", "grid": None, "grid_url": None, "engines": [], "models": []},
                 indent=2,
             ))
             return 0
-        print("mode: lan\n")
+        print("mode: local\n")
         print("No grid yet.\n")
         print("Start one:\n  grid up\n")
         print("Then join an engine:\n  grid join")
@@ -141,7 +141,7 @@ def _overview_lan(as_json: bool) -> int:
 
     if as_json:
         print(json.dumps({
-            "mode": "lan",
+            "mode": "local",
             "grid": default["name"],
             "grid_url": grid_url,
             "engines": [_engine_entry(engine) for engine in engines],
@@ -149,7 +149,7 @@ def _overview_lan(as_json: bool) -> int:
         }, indent=2))
         return 0
 
-    print("mode: lan")
+    print("mode: local")
     print(f"Grid: {default['name']}")
     print(f"grid_url: {grid_url}")
     if not reachable:
@@ -177,7 +177,7 @@ def _grid_by_name(name: str) -> dict[str, Any] | None:
 
 
 def _has_default(grids: list[dict[str, Any]]) -> bool:
-    active = state.get_active("lan")
+    active = state.get_active("local")
     if active and any(cfg.get("grid_id") == active or cfg.get("name") == active for cfg in grids):
         return True
     return len(grids) == 1 or any(cfg.get("name") == "home" for cfg in grids)

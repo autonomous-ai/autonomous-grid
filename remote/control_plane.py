@@ -1,12 +1,12 @@
-"""Thin HTTP client for autonomous's hosted control plane (internet mode).
+"""Thin HTTP client for autonomous's hosted control plane (remote mode).
 
 Ported and trimmed from ``grid-src/grid_cli/control_plane.py``: the device-code sign-in
-surface (start/poll), the post-login token fetch, and the internet-grid lifecycle
+surface (start/poll), the post-login token fetch, and the remote-grid lifecycle
 (``*_managed_network`` — create/start/stop/status, repointed to ``/v1/grid/managed-networks``
 per DECISIONS D11, authenticated with the account session token). The proprietary backend
 (relay, Postgres, billing) is not here; this is a synchronous ``httpx`` client to the public
-API. Internet mode is *allowed* to reach the internet — that is the feature — but nothing here
-is reached in LAN mode (dispatch gates the internet commands to internet mode).
+API. Remote mode is *allowed* to reach the remote — that is the feature — but nothing here
+is reached in local mode (dispatch gates the remote commands to remote mode).
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def fetch_tokens(session_token: str, device_id: str, api_url: str | None = None)
 def refresh_network_token(
     *, network_id: str, refresh_token: str, api_url: str | None = None
 ) -> dict[str, Any]:
-    """Exchange a per-grid refresh token for a fresh access token (relay auth, internet serve loop).
+    """Exchange a per-grid refresh token for a fresh access token (relay auth, remote serve loop).
 
     Unauthenticated by design — the ``refresh_token`` in the body *is* the credential, so no
     session/access Bearer is attached (matches the reference client). A failed refresh surfaces as
@@ -86,7 +86,7 @@ def get_managed_network_status(session_token: str, network_id: str, api_url: str
 def add_member(
     session_token: str, network_id: str, email: str, roles: list[str], api_url: str | None = None
 ) -> dict[str, Any]:
-    """Add (or update) a member of an internet grid with the given role(s). Account-level — the session
+    """Add (or update) a member of a remote grid with the given role(s). Account-level — the session
     token authorises it. ``roles`` is sent as-is: ``both`` is a first-class role, not an expansion."""
     with _client(api_url, session_token) as client:
         return _json_or_empty(_send(
@@ -98,9 +98,9 @@ def add_member(
 def remove_member(
     session_token: str, network_id: str, email: str, api_url: str | None = None
 ) -> dict[str, Any]:
-    """Remove a member from an internet grid. ``email`` is percent-encoded into a single path segment so a
+    """Remove a member from a remote grid. ``email`` is percent-encoded into a single path segment so a
     stray ``/`` (or other path char) cannot re-target the request — the boundary ``network_id``'s
-    regex guards in ``cli/internet_grid.py``. A successful DELETE may answer ``204 No Content``."""
+    regex guards in ``cli/remote_grid.py``. A successful DELETE may answer ``204 No Content``."""
     with _client(api_url, session_token) as client:
         return _json_or_empty(_send(
             client, "DELETE",
@@ -111,7 +111,7 @@ def remove_member(
 def list_members(
     session_token: str, network_id: str, api_url: str | None = None
 ) -> list[dict[str, Any]]:
-    """The members of an internet grid. Unwrap defensively: accept both the ``{"members": [...]}``
+    """The members of a remote grid. Unwrap defensively: accept both the ``{"members": [...]}``
     envelope (like ``fetch_tokens``) and a bare array; ``or []`` coerces a missing key / null."""
     with _client(api_url, session_token) as client:
         data = _json_or_empty(_send(client, "GET", f"/v1/grid/managed-networks/{network_id}/members"))

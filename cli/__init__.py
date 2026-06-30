@@ -13,18 +13,18 @@ import httpx  # noqa: F401
 
 from ._main import cmd_internal_media_server, cmd_internal_server, main
 from .auth import cmd_login, cmd_logout, cmd_sync
-from .internet_grid import (
-    cmd_internet_down,
-    cmd_internet_info,
-    cmd_internet_ls,
-    cmd_internet_members,
-    cmd_internet_up,
+from .remote_grid import (
+    cmd_remote_down,
+    cmd_remote_info,
+    cmd_remote_ls,
+    cmd_remote_members,
+    cmd_remote_up,
 )
-from .internet_request import (
-    cmd_internet_chat,
-    cmd_internet_edit,
-    cmd_internet_image,
-    cmd_internet_video,
+from .remote_request import (
+    cmd_remote_chat,
+    cmd_remote_edit,
+    cmd_remote_image,
+    cmd_remote_video,
 )
 from .engine import (
     cmd_engine_install,
@@ -70,15 +70,15 @@ __all__ = [
     "cmd_login",
     "cmd_logout",
     "cmd_sync",
-    "cmd_internet_up",
-    "cmd_internet_down",
-    "cmd_internet_ls",
-    "cmd_internet_info",
-    "cmd_internet_members",
-    "cmd_internet_chat",
-    "cmd_internet_image",
-    "cmd_internet_edit",
-    "cmd_internet_video",
+    "cmd_remote_up",
+    "cmd_remote_down",
+    "cmd_remote_ls",
+    "cmd_remote_info",
+    "cmd_remote_members",
+    "cmd_remote_chat",
+    "cmd_remote_image",
+    "cmd_remote_edit",
+    "cmd_remote_video",
     "cmd_chat",
     "cmd_image",
     "cmd_edit",

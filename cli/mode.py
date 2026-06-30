@@ -1,7 +1,7 @@
 """`grid mode` and `grid use`: read/switch the mode and the per-mode active grid.
 
 Both are mode-agnostic (they run in either mode and are never gated). `cmd_mode`
-reports/sets the *persisted* mode and deliberately ignores the `--lan`/`--internet`
+reports/sets the *persisted* mode and deliberately ignores the `--local`/`--remote`
 override; `cmd_use` acts on the *resolved* mode that dispatch stamps on ``args.mode``.
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from lan import config
+from local import config
 from shared import state
 
 
@@ -22,8 +22,8 @@ def cmd_mode(args: argparse.Namespace) -> int:
         print(json.dumps({"mode": mode}))
         return 0
     print(mode)
-    if target == "internet":
-        print("Internet mode: `grid login` to sign in, then `grid up` to bring an internet grid online, "
+    if target == "remote":
+        print("Remote mode: `grid login` to sign in, then `grid up` to bring a remote grid online, "
               "`grid join` to serve models to it, and `grid chat -m <model> \"…\"` to use them.")
     return 0
 
@@ -49,14 +49,14 @@ def cmd_use(args: argparse.Namespace) -> int:
             print("(no active grid — set one with `grid use <name>`)")
         return 0
 
-    if mode == "lan":
-        _require_lan_grid(name)
+    if mode == "local":
+        _require_local_grid(name)
     state.set_active(mode, name)
     print(f"active grid for {mode} mode: {name}")
     return 0
 
 
-def _require_lan_grid(name: str) -> None:
+def _require_local_grid(name: str) -> None:
     for cfg in config.iter_grid_configs():
         if cfg.get("name") == name or cfg.get("grid_id") == name:
             return

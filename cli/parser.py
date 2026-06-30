@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 
-from lan import runtime
+from local import runtime
 from shared._version import __version__
 from ._constants import (
     VALID_I2V_ASPECT_RATIOS,
@@ -15,7 +15,7 @@ from ._constants import (
     VALID_MEDIA_BUNDLES,
 )
 from .auth import cmd_login, cmd_logout, cmd_sync
-from .internet_grid import cmd_internet_members
+from .remote_grid import cmd_remote_members
 from .engine import (
     cmd_engine_install,
     cmd_engine_pull,
@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="grid",
         description=(
             "Grid: one private OpenAI endpoint for the engines you already run. "
-            "Use --lan/--internet before any command to override the active mode for that one run."
+            "Use --local/--remote before any command to override the active mode for that one run."
         ),
     )
     parser.add_argument("--version", action="version", version=f"grid {__version__}")
@@ -75,13 +75,13 @@ def _add_grid_lifecycle(sub) -> None:
     up.add_argument("--port", type=int, default=runtime.DEFAULT_PORT)
     up.add_argument("--host", default=runtime.DEFAULT_HOST)
     up.add_argument("--advertise-host", default=None)
-    # Internet-only (LAN cmd_up ignores it): the network type set when `grid up` creates an internet grid.
-    # default=None lets the internet handler tell an explicit value on a *start* from this create default.
+    # Remote-only (local cmd_up ignores it): the network type set when `grid up` creates a remote grid.
+    # default=None lets the remote handler tell an explicit value on a *start* from this create default.
     up.add_argument(
         "--type",
         choices=("permissioned-public", "permissioned-providers"),
         default=None,
-        help="Internet grid network type, set on create (default permissioned-public).",
+        help="Remote grid network type, set on create (default permissioned-public).",
     )
     up.set_defaults(handler=cmd_up)
 
@@ -138,19 +138,19 @@ def _add_engines(sub) -> None:
     join.add_argument("--temp", type=float, default=None)
     join.add_argument("--reasoning-budget", type=int, default=None)
     join.add_argument("--comfyui-port", type=int, default=8188)
-    # LAN-only: internet has no inbound endpoint, so there is nothing to advertise (rejected in internet mode).
+    # local-only: remote has no inbound endpoint, so there is nothing to advertise (rejected in remote mode).
     join.add_argument("--advertise-host", default=None)
     join.add_argument("--media-port", type=int, default=8190)
-    # Internet-only: billing + pull-based capacity + grid-page display (rejected in LAN). default=None
+    # Remote-only: billing + pull-based capacity + grid-page display (rejected in local). default=None
     # so a wrong-mode use is detectable.
     join.add_argument("--engine-label", default=None,
-                      help="Internet-only: label for this engine's kind on the grid page.")
+                      help="Remote-only: label for this engine's kind on the grid page.")
     join.add_argument("--pricing-input", type=float, default=None,
-                      help="Internet-only: price charged per 1K input tokens.")
+                      help="Remote-only: price charged per 1K input tokens.")
     join.add_argument("--pricing-output", type=float, default=None,
-                      help="Internet-only: price charged per 1K output tokens.")
+                      help="Remote-only: price charged per 1K output tokens.")
     join.add_argument("--max-concurrency", type=int, default=None,
-                      help="Internet-only: how many requests this engine serves at once.")
+                      help="Remote-only: how many requests this engine serves at once.")
     join.set_defaults(handler=cmd_join)
 
     leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")
@@ -194,7 +194,7 @@ def _add_use(sub) -> None:
     chat.add_argument("--grid", default=None)
     chat.add_argument("--json", action="store_true", help="Print the full JSON response.")
     chat.add_argument("--timeout", type=float, default=600.0)
-    _add_internet_use_flags(chat)
+    _add_remote_use_flags(chat)
     chat.set_defaults(handler=cmd_chat)
 
     image = sub.add_parser("image", help="Generate an image")
@@ -203,7 +203,7 @@ def _add_use(sub) -> None:
     image.add_argument("--width", type=int, default=720)
     image.add_argument("--height", type=int, default=720)
     image.add_argument("--steps", type=int, default=4)
-    _add_internet_use_flags(image)
+    _add_remote_use_flags(image)
     image.set_defaults(handler=cmd_image)
 
     edit = sub.add_parser("edit", help="Edit one to three images")
@@ -218,7 +218,7 @@ def _add_use(sub) -> None:
         help="Input image path. Repeat up to three times.",
     )
     edit.add_argument("--steps", type=int, default=4)
-    _add_internet_use_flags(edit)
+    _add_remote_use_flags(edit)
     edit.set_defaults(handler=cmd_edit)
 
     video = sub.add_parser("video", help="Generate a short video from an image")
@@ -227,16 +227,16 @@ def _add_use(sub) -> None:
     video.add_argument("-i", "--image", required=True, help="Input image path.")
     video.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
     video.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")
-    _add_internet_use_flags(video)
+    _add_remote_use_flags(video)
     video.set_defaults(handler=cmd_video)
 
 
 def _add_state(sub) -> None:
-    mode = sub.add_parser("mode", help="Show or switch the active mode (lan/internet)")
+    mode = sub.add_parser("mode", help="Show or switch the active mode (local/remote)")
     mode.add_argument(
         "target",
         nargs="?",
-        choices=("lan", "internet"),
+        choices=("local", "remote"),
         default=None,
         help="Switch to this mode and persist it; omit to print the current mode.",
     )
@@ -256,7 +256,7 @@ def _add_state(sub) -> None:
 
 
 def _add_auth(sub) -> None:
-    login = sub.add_parser("login", help="Sign in to internet mode")
+    login = sub.add_parser("login", help="Sign in to remote mode")
     login.add_argument(
         "--no-browser",
         action="store_true",
@@ -265,21 +265,21 @@ def _add_auth(sub) -> None:
     login.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     login.set_defaults(handler=cmd_login)
 
-    logout = sub.add_parser("logout", help="Sign out of internet mode")
+    logout = sub.add_parser("logout", help="Sign out of remote mode")
     logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     logout.set_defaults(handler=cmd_logout)
 
-    sync = sub.add_parser("sync", help="Refresh your internet grids without signing in again")
+    sync = sub.add_parser("sync", help="Refresh your remote grids without signing in again")
     sync.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     sync.set_defaults(handler=cmd_sync)
 
 
 def _add_members(sub) -> None:
-    """Internet-only membership admin (DECISIONS D13): `grid members add|remove [grid] <email>` and
-    `grid members list [grid]`. Gated in LAN mode by dispatch (`members` is in `INTERNET_ONLY`). On
+    """Remote-only membership admin (DECISIONS D13): `grid members add|remove [grid] <email>` and
+    `grid members list [grid]`. Gated in local mode by dispatch (`members` is in `REMOTE_ONLY`). On
     add/remove the `[grid]` positional is declared first so argparse binds a lone positional to the
     required `email`; omitting it falls back to the active grid."""
-    members = sub.add_parser("members", help="Manage who may use or serve an internet grid")
+    members = sub.add_parser("members", help="Manage who may use or serve a remote grid")
     members_sub = members.add_subparsers(dest="subcommand", required=True)
 
     add = members_sub.add_parser("add", help="Add a member to a grid")
@@ -292,18 +292,18 @@ def _add_members(sub) -> None:
         help="Member role (default: consumer).",
     )
     add.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    add.set_defaults(handler=cmd_internet_members)
+    add.set_defaults(handler=cmd_remote_members)
 
     remove = members_sub.add_parser("remove", help="Remove a member from a grid")
     remove.add_argument("grid", nargs="?", default=None)
     remove.add_argument("email")
     remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    remove.set_defaults(handler=cmd_internet_members)
+    remove.set_defaults(handler=cmd_remote_members)
 
     listing = members_sub.add_parser("list", help="List a grid's members and roles")
     listing.add_argument("grid", nargs="?", default=None)
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    listing.set_defaults(handler=cmd_internet_members)
+    listing.set_defaults(handler=cmd_remote_members)
 
 
 def _add_engine_setup(sub) -> None:
@@ -359,18 +359,18 @@ def _add_media_common(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_internet_use_flags(parser: argparse.ArgumentParser) -> None:
-    """Internet-only request-routing flags shared by chat/image/edit/video (DECISIONS D16). Declared on
-    the unified parser; the LAN handlers reject them (cli/request.py) since the concept is internet-only.
+def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
+    """Remote-only request-routing flags shared by chat/image/edit/video (DECISIONS D16). Declared on
+    the unified parser; the local handlers reject them (cli/request.py) since the concept is remote-only.
     ``--target-provider`` defaults to ``None`` and ``--allow-self-provider`` to ``False`` so a wrong-mode
     use is detectable."""
     parser.add_argument(
         "--target-provider",
         default=None,
-        help="Internet only: pin this request to a specific engine by id.",
+        help="Remote only: pin this request to a specific engine by id.",
     )
     parser.add_argument(
         "--allow-self-provider",
         action="store_true",
-        help="Internet only: let your own engine serve this request.",
+        help="Remote only: let your own engine serve this request.",
     )

@@ -8,16 +8,16 @@ from typing import Any
 
 import httpx
 
-from lan import config
+from local import config
 from shared import paths
-from lan import runtime
+from local import runtime
 
 from . import media_io
 
 
-# Internet-only request-routing flags (DECISIONS D16): rejected in LAN mode, where the concept doesn't
-# exist — the mirror of `cli/provider.py:_reject_internet_only_flags` for `grid join`.
-def _reject_internet_only_flags(args: argparse.Namespace) -> None:
+# Remote-only request-routing flags (DECISIONS D16): rejected in local mode, where the concept doesn't
+# exist — the mirror of `cli/provider.py:_reject_remote_only_flags` for `grid join`.
+def _reject_remote_only_flags(args: argparse.Namespace) -> None:
     used = []
     if getattr(args, "target_provider", None) is not None:
         used.append("--target-provider")
@@ -26,13 +26,13 @@ def _reject_internet_only_flags(args: argparse.Namespace) -> None:
         used.append("--allow-self-provider")
     if used:
         raise SystemExit(
-            f"{', '.join(used)} only applies in internet mode. "
-            "Switch with `grid mode internet` (or pass --internet)."
+            f"{', '.join(used)} only applies in remote mode. "
+            "Switch with `grid mode remote` (or pass --remote)."
         )
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    _reject_internet_only_flags(args)
+    _reject_remote_only_flags(args)
     cfg = config.select_grid(getattr(args, "grid", None))
     try:
         resp = httpx.post(
@@ -54,7 +54,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def cmd_image(args: argparse.Namespace) -> int:
-    _reject_internet_only_flags(args)
+    _reject_remote_only_flags(args)
     return _post_media_request(
         args,
         "media/image/generate",
@@ -68,7 +68,7 @@ def cmd_image(args: argparse.Namespace) -> int:
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
-    _reject_internet_only_flags(args)
+    _reject_remote_only_flags(args)
     if len(args.input_images) > 3:
         raise SystemExit("Image editing supports at most three -i/--image values.")
     return _post_media_request(
@@ -83,7 +83,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
 
 def cmd_video(args: argparse.Namespace) -> int:
-    _reject_internet_only_flags(args)
+    _reject_remote_only_flags(args)
     payload = {
         "prompt": args.prompt,
         "duration": args.duration,

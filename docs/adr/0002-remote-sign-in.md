@@ -1,33 +1,33 @@
-# ADR 0002 — Internet sign-in (`grid login` / `grid logout`)
+# ADR 0002 — Remote sign-in (`grid login` / `grid logout`)
 
 Status: accepted (2026-06-27); amended 2026-06-29 — added Decision 11 (`grid sync`, issue 10)
 
 ## Context
 
-ADR 0001 set up modes, `state.json`, and mode-aware dispatch with internet as a stub. This slice
-fills the first real internet surface: **sign-in**. `grid login` runs the Google device-code flow
+ADR 0001 set up modes, `state.json`, and mode-aware dispatch with remote as a stub. This slice
+fills the first real remote surface: **sign-in**. `grid login` runs the Google device-code flow
 against autonomous's hosted control plane, fetches the caller's grid tokens, and persists them;
 `grid logout` clears them. It introduces the credential store and the "you're not signed in"
-gate that every later internet command (request/info/members) will reuse.
+gate that every later remote command (request/info/members) will reuse.
 
 The API contract is ported verbatim from the reference client `grid-src/grid_cli/`
 (`control_plane.py`, `config.py`, `cli.py:cmd_auth_login/_browser_login`); only the thin client
 (device flow + token fetch + TOML credential store) is taken — the proprietary backend
 (relay, Postgres, billing) stays out.
 
-Hard invariant: LAN mode stays LAN-only, unauthenticated, stateless — unchanged. Internet mode is
-*allowed* to reach the internet to the control plane; that is the feature.
+Hard invariant: local mode stays local-only, unauthenticated, stateless — unchanged. Remote mode is
+*allowed* to reach the remote to the control plane; that is the feature.
 
 ## Decisions
 
-1. **Internet-only commands gated symmetrically (`cli/dispatch.py`).** A new `INTERNET_ONLY =
-   {"login", "logout"}` set joins `AGNOSTIC` and `INTERNET_HANDLERS`; the three now partition every
-   registered command (the classification test asserts coverage *and* disjointness). In internet mode
-   `INTERNET_ONLY` falls through to its real handler; in LAN mode it hits `lan_stub` — the mirror of
-   the existing `internet_stub`. The LAN gate is an **`elif`** after the `if mode == "internet"` block:
-   `dispatch` has no `else`, so a bare `if` would fire in internet mode too and break login/logout there.
+1. **Remote-only commands gated symmetrically (`cli/dispatch.py`).** A new `REMOTE_ONLY =
+   {"login", "logout"}` set joins `AGNOSTIC` and `REMOTE_HANDLERS`; the three now partition every
+   registered command (the classification test asserts coverage *and* disjointness). In remote mode
+   `REMOTE_ONLY` falls through to its real handler; in local mode it hits `local_stub` — the mirror of
+   the existing `remote_stub`. The local gate is an **`elif`** after the `if mode == "remote"` block:
+   `dispatch` has no `else`, so a bare `if` would fire in remote mode too and break login/logout there.
 
-2. **Device-code flow, ported and trimmed (`internet/control_plane.py`).** Three functions only —
+2. **Device-code flow, ported and trimmed (`remote/control_plane.py`).** Three functions only —
    `start_device_login` → `POST /v1/grid/auth/device/start`, `poll_device_login` →
    `POST /v1/grid/auth/device/poll`, `fetch_tokens` → `GET /v1/grid/tokens?device_id=…`. `cmd_login`
    prints the sign-in URL + code, opens a browser (unless `--no-browser`), polls until `approved`
@@ -55,14 +55,14 @@ Hard invariant: LAN mode stays LAN-only, unauthenticated, stateless — unchange
    also hardens `state.json` for free.
 
 6. **Login never auto-selects an active grid (supersedes D10).** D10 had `grid login` write the
-   active internet grid; we deliberately don't. Login lists the available grids and instructs
+   active remote grid; we deliberately don't. Login lists the available grids and instructs
    `grid use <name>`; selection is always explicit. This keeps `state.json` the lone owner of the
    active pointer and avoids guessing when the caller belongs to several grids.
 
 7. **Re-login refreshes by re-auth; no silent refresh.** Re-running `grid login` performs a fresh
    device flow and overwrites the store (User Story 20). The per-network `refresh_token` is
    persisted for the later provider runtime, but no automatic token refresh ships in this slice
-   (YAGNI). `grid logout` deletes `credentials.toml` and clears `active.internet`; it keeps
+   (YAGNI). `grid logout` deletes `credentials.toml` and clears `active.remote`; it keeps
    `device.toml` and does not change the mode; it is idempotent.
 
 8. **Config: keep grid-src's env vars + defaults, evaluated at call time.** Only two values are
@@ -73,11 +73,11 @@ Hard invariant: LAN mode stays LAN-only, unauthenticated, stateless — unchange
    it monkeypatchable per test.
 
 9. **Dependencies: `tomli-w` only, in base.** Writing TOML needs `tomli-w` (added to base
-   `dependencies`, not an extra, so LAN-only use is unaffected); reads use stdlib `tomllib`.
+   `dependencies`, not an extra, so local-only use is unaffected); reads use stdlib `tomllib`.
    `psutil` is **not** pulled in — it is provider-runtime host metrics (D14), not sign-in.
 
 10. **The auth gate: `credentials.require_session()`.** Returns the stored session token or raises
-    `SystemExit("You're not signed in. Run `grid login` to sign in.")`. No auth-requiring internet
+    `SystemExit("You're not signed in. Run `grid login` to sign in.")`. No auth-requiring remote
     command ships this slice, so it is unit-tested directly; later slices call it. **Secrets are
     never printed or logged** — not on the human path, not in `--json` (which emits grid
     names/types only), asserted by tests on both paths.
@@ -96,24 +96,24 @@ Hard invariant: LAN mode stays LAN-only, unauthenticated, stateless — unchange
     login`" — distinct from the *relay access-token* 401 on the consume path (ADR 0005), so it is a
     new message, not a reuse; a previously non-empty list returned empty is cleared but **warns on
     stderr** first (a transient backend hiccup must not silently wipe every credential); any other
-    control-plane error propagates unchanged. Surface: `sync` joins `INTERNET_ONLY` (now `{"login",
-    "logout", "sync"}`), gated with guidance in LAN; `--json` carries grid names/types only, never a
+    control-plane error propagates unchanged. Surface: `sync` joins `REMOTE_ONLY` (now `{"login",
+    "logout", "sync"}`), gated with guidance in local; `--json` carries grid names/types only, never a
     token. Code: a standalone `cmd_sync` in `cli/auth.py` (no `cmd_login` refactor, no `--api-url`
     flag — `api_url` resolves from stored credentials). (This ADR-local "Decision 11" is
-    unrelated to `DECISIONS.md`'s D11, the managed-networks repoint cited in `internet/control_plane.py`.)
+    unrelated to `DECISIONS.md`'s D11, the managed-networks repoint cited in `remote/control_plane.py`.)
 
 ## Consequences
 
-- LAN mode is untouched: login/logout are gated with guidance, and no new code runs for LAN users.
+- local mode is untouched: login/logout are gated with guidance, and no new code runs for local users.
 - `state.json` remains the single owner of the active selection; `credentials.toml` holds tokens
   only. Later slices resolve the active grid name against the persisted bundles.
 - The hardened `atomic_write_bytes` is now the one place secret/state files are written; future
   stores should reuse it rather than re-rolling temp-file logic.
-- A future internet-only command added without placing it in `INTERNET_ONLY` fails the classification
-  test rather than silently running LAN code (or erroring opaquely) in the wrong mode.
-- The control plane is reachable only in internet mode and only via `internet/`; `shared/`/`lan/` gain no
-  off-LAN calls.
-- `grid sync` (amendment) makes `INTERNET_ONLY` `{"login", "logout", "sync"}`; the classification test
+- A future remote-only command added without placing it in `REMOTE_ONLY` fails the classification
+  test rather than silently running local code (or erroring opaquely) in the wrong mode.
+- The control plane is reachable only in remote mode and only via `remote/`; `shared/`/`local/` gain no
+  off-local calls.
+- `grid sync` (amendment) makes `REMOTE_ONLY` `{"login", "logout", "sync"}`; the classification test
   covers it. Sync is the first command to find a **session** token expired long after login, so it
   introduces the session-expiry → re-login message; the other account-level commands
   (`up`/`down`/`ls`/`info`/`members`) still surface raw control-plane errors today, and unifying that

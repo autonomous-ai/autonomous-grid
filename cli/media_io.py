@@ -1,10 +1,10 @@
 """Transport-agnostic media IO for the `grid image`/`edit`/`video` clients.
 
 Encode a local file for upload, consume the streamed media SSE, and write the returned
-files to disk. These are shared by both modes — LAN (`cli/request.py`) talks to the grid
-proxy and internet (`cli/internet_request.py`) talks to the relay, but the request body, the SSE
+files to disk. These are shared by both modes — local (`cli/request.py`) talks to the grid
+proxy and remote (`cli/remote_request.py`) talks to the relay, but the request body, the SSE
 event shape (`progress` / `result` / `[DONE]`), and the on-disk output are identical, so the
-only difference is how the request is built. Keep this module free of any LAN/internet routing.
+only difference is how the request is built. Keep this module free of any local/remote routing.
 """
 from __future__ import annotations
 

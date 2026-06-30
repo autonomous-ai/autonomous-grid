@@ -80,8 +80,8 @@ echo ">>> Compiling with Nuitka (standalone onefile, $OS_SUFFIX)"
   --product-version="0.1.0" \
   --include-package=cli \
   --include-package=shared \
-  --include-package=lan \
-  --include-package=internet \
+  --include-package=local \
+  --include-package=remote \
   --include-package=uvicorn \
   --include-package-data=shared \
   --include-package-data=certifi \

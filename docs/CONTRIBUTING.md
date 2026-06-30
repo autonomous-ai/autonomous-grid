@@ -29,7 +29,7 @@ uv run --extra dev pytest
 > the optional `dev` dependency group and isn't installed otherwise.
 
 All tests live in `tests/`. Please keep the suite green and add a test with any
-behavior change — `tests/test_lan_cli.py` shows the patterns (FastAPI `TestClient`,
+behavior change — `tests/test_local_cli.py` shows the patterns (FastAPI `TestClient`,
 monkeypatching subprocess launches).
 
 ## Project layout
@@ -76,8 +76,8 @@ as implementation details (`node` in the registry, the `provider/` package name)
   docstrings explaining *why*.
 - Prefer small, focused functions; keep the CLI handlers thin and push logic into the
   relevant top-level module or package.
-- Keep the LAN-only, unauthenticated assumptions intact (see ARCHITECTURE.md). Don't add
-  network calls that leave the LAN or features that require auth.
+- Keep the local-only, unauthenticated assumptions intact (see ARCHITECTURE.md). Don't add
+  network calls that leave the local or features that require auth.
 - Vendored files (annotated in their docstrings) should keep edits bracketed and minimal.
 
 ## Commits & pull requests

@@ -1,4 +1,4 @@
-"""Internet-mode credential store: the signed-in session + per-grid tokens.
+"""Remote-mode credential store: the signed-in session + per-grid tokens.
 
 Ported and trimmed from ``grid-src/grid_cli/config.py``. Persists to
 ``~/.grid/credentials.toml`` (TOML, ``0o600``) through the shared
@@ -81,7 +81,7 @@ def save_credentials(data: dict[str, Any]) -> None:
 
 
 def add_network(record: dict[str, Any]) -> None:
-    """Register an internet grid in the local store (e.g. one just created by ``grid up``).
+    """Register a remote grid in the local store (e.g. one just created by ``grid up``).
 
     Idempotent by ``network_id`` — re-adding the same grid drops the stale entry and re-appends
     the new one — and preserves the rest of the credential file (session token, api_url, user).
@@ -97,7 +97,7 @@ def update_network_tokens(
 ) -> None:
     """Persist refreshed per-grid tokens for one network, in place.
 
-    Used by the internet serve loop after a relay 401 → token refresh. Immutable update: rebuilds the
+    Used by the remote serve loop after a relay 401 → token refresh. Immutable update: rebuilds the
     file with the matching bundle's ``access_token`` (and ``refresh_token`` when the server rotated
     it) replaced — every other bundle and the rest of the file untouched and in original order. A
     no-op if no bundle matches ``network_id`` (the caller resolved it before joining, so it exists).
@@ -143,7 +143,7 @@ def api_url(explicit: str | None = None) -> str:
 def require_session() -> str:
     """The stored session token, or a clear 'sign in first' error.
 
-    The auth gate every internet command that needs identity calls before doing work.
+    The auth gate every remote command that needs identity calls before doing work.
     """
     token = load_credentials().get("session_token")
     if not token:

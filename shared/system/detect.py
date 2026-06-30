@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from lan import runtime
+from local import runtime
 
 
 @dataclass(frozen=True)
@@ -38,36 +38,36 @@ _PROBES: tuple[tuple[str, int, str], ...] = (
 
 def detect_engines(*, advertise_host: str | None = None, timeout: float = 0.75) -> list[DetectedEngine]:
     """Probe localhost for running engines and return the ones that answer."""
-    lan_host = advertise_host or runtime.detect_lan_ip()
+    local_host = advertise_host or runtime.detect_local_ip()
     found: list[DetectedEngine] = []
     for label, port, kind in _PROBES:
         if kind == "comfyui":
             if _comfyui_reachable("127.0.0.1", port, timeout):
-                host = _reachable_host(lan_host, advertise_host, port, kind, timeout)
+                host = _reachable_host(local_host, advertise_host, port, kind, timeout)
                 found.append(DetectedEngine(label=label, endpoint_url=f"http://{host}:{port}", models=[], media=True))
             continue
         models = _probe("127.0.0.1", port, kind, timeout)
         if models is None:
             continue
-        host = _reachable_host(lan_host, advertise_host, port, kind, timeout)
+        host = _reachable_host(local_host, advertise_host, port, kind, timeout)
         found.append(DetectedEngine(label=label, endpoint_url=f"http://{host}:{port}/v1", models=models))
     return found
 
 
-def _reachable_host(lan_host: str, advertise_host: str | None, port: int, kind: str, timeout: float) -> str:
+def _reachable_host(local_host: str, advertise_host: str | None, port: int, kind: str, timeout: float) -> str:
     """Pick the host to advertise.
 
-    Prefer the LAN address so other machines can reach the engine, but only if
+    Prefer the local address so other machines can reach the engine, but only if
     the engine is actually bound there — many engines default to loopback. When
     it is not, keep `127.0.0.1` (correct when the grid runs on this same box).
     An explicit --advertise-host is always trusted.
     """
     if advertise_host:
-        return lan_host
-    if lan_host == "127.0.0.1":
+        return local_host
+    if local_host == "127.0.0.1":
         return "127.0.0.1"
-    reachable = _comfyui_reachable(lan_host, port, timeout) if kind == "comfyui" else _probe(lan_host, port, kind, timeout) is not None
-    return lan_host if reachable else "127.0.0.1"
+    reachable = _comfyui_reachable(local_host, port, timeout) if kind == "comfyui" else _probe(local_host, port, kind, timeout) is not None
+    return local_host if reachable else "127.0.0.1"
 
 
 def _probe(host: str, port: int, kind: str, timeout: float) -> list[str] | None:

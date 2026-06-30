@@ -1,4 +1,4 @@
-"""HTTP client for an internet grid's hosted relay — the provider (engine) side of the serve loop.
+"""HTTP client for a remote grid's hosted relay — the provider (engine) side of the serve loop.
 
 The relay base is the grid's ``signaling_url``; a joined engine authenticates every call with its
 per-grid ``access_token`` (Bearer). It registers its capabilities (``PUT /nodes/{node_id}``),
@@ -9,7 +9,7 @@ Ported and trimmed from ``grid-src/grid_cli/provider_runtime/provider/{register,
 heartbeat}.py``, repointed onto the in-repo ``signaling_url`` base (DECISIONS D11/ADR 0003). Unlike
 ``control_plane`` — which raises a ``SystemExit`` on any ``>=400`` — the relay layer maps status
 codes so the *long-running* serve loop can refresh on 401, re-register on 404, and back off on a
-transient error instead of dying. The serve loop (`internet/serve.py`) owns that orchestration; this
+transient error instead of dying. The serve loop (`remote/serve.py`) owns that orchestration; this
 module is the stateless wire boundary.
 """
 from __future__ import annotations
@@ -192,7 +192,7 @@ def submit_error(
 # ---------------------------------------------------------------------------
 # Consumer (app) side: send a request through the relay and read the result.
 # The orchestration (resolve grid, build payload, consume the SSE) lives in
-# cli/internet_request.py; this module owns only the wire boundary (base URL,
+# cli/remote_request.py; this module owns only the wire boundary (base URL,
 # Bearer, the optional routing headers) so it stays the one relay contract.
 # ---------------------------------------------------------------------------
 
@@ -211,7 +211,7 @@ def open_consumer_client(
 def consumer_headers(
     *, target_provider: str | None = None, allow_self_provider: bool = False
 ) -> dict[str, str]:
-    """The optional routing headers for a consumer request (the internet-only ``--target-provider`` /
+    """The optional routing headers for a consumer request (the remote-only ``--target-provider`` /
     ``--allow-self-provider``, DECISIONS D16). Each is omitted unless set, so a plain request carries
     neither; the relay reads ``X-Allow-Self-Provider`` as the string ``"true"``.
     """

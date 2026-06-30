@@ -1,8 +1,8 @@
-"""Internet-mode `grid chat` / `image` / `edit` / `video`: requests through the active grid's relay.
+"""Remote-mode `grid chat` / `image` / `edit` / `video`: requests through the active grid's relay.
 
-Mirrors the LAN handlers (`cli/request.py`) — same verbs, same output — but routes to the hosted
+Mirrors the local handlers (`cli/request.py`) — same verbs, same output — but routes to the hosted
 relay (`{signaling_url}/relay/v1/...`) with the per-grid **access token** (Bearer) instead of the
-local grid proxy, and accepts the internet-only `--target-provider` / `--allow-self-provider` routing
+local grid proxy, and accepts the remote-only `--target-provider` / `--allow-self-provider` routing
 flags (DECISIONS D16). The media SSE consumption + file IO are the shared ones (`cli/media_io.py`).
 
 The relay address is **live-only** (the login bundle carries the access token but not the
@@ -10,7 +10,7 @@ The relay address is **live-only** (the login bundle carries the access token bu
 A 401 is a clear "run `grid login`" — refresh-on-401 stays in the long-running serve loop (ADR 0004),
 not on this one-shot path.
 
-Import rule mirrors `cli/internet_grid.py`: `internet.*` and the internet-specific `cli` siblings are imported
+Import rule mirrors `cli/remote_grid.py`: `remote.*` and the remote-specific `cli` siblings are imported
 lazily inside each handler, because `cli.dispatch` imports this module while the `cli` package is
 still initialising. `cli.media_io` is a leaf (stdlib + httpx only), so it is safe at module top.
 """
@@ -32,30 +32,30 @@ _TOKEN_EXPIRED = "Your access token has expired. Run `grid login` to refresh, th
 
 
 def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
-    """``(relay base, access token, grid label)`` for the active internet grid, or a clean ``SystemExit``.
+    """``(relay base, access token, grid label)`` for the active remote grid, or a clean ``SystemExit``.
 
     Gates in order — signed in → a grid resolves → it has an access token → it is up — mirroring the
-    guard in ``cli/internet_provider.cmd_internet_join``. The relay address comes from live status (creator)
-    or the login bundle (member), via ``internet_grid.resolve_relay_base``.
+    guard in ``cli/remote_provider.cmd_remote_join``. The relay address comes from live status (creator)
+    or the login bundle (member), via ``remote_grid.resolve_relay_base``.
     """
-    from internet import credentials
+    from remote import credentials
 
-    from . import internet_grid
+    from . import remote_grid
 
     session = credentials.require_session()
-    rec = internet_grid._select(getattr(args, "grid", None))
-    network_id = internet_grid._network_id(rec)
+    rec = remote_grid._select(getattr(args, "grid", None))
+    network_id = remote_grid._network_id(rec)
     label = rec.get("name") or network_id
     if not rec.get("access_token"):
         raise SystemExit(
             f"Grid {label} has no access token locally. Run `grid login` to refresh your grids."
         )
-    base, _status = internet_grid.resolve_relay_base(session, rec, network_id, label)
+    base, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
     return base, str(rec["access_token"]), label
 
 
 def _consumer_headers(args: argparse.Namespace) -> dict[str, str]:
-    from internet import relay
+    from remote import relay
 
     target = getattr(args, "target_provider", None)
     # The value lands in an HTTP header; a control char (e.g. a stray CR/LF) would be a header-
@@ -68,8 +68,8 @@ def _consumer_headers(args: argparse.Namespace) -> dict[str, str]:
     )
 
 
-def cmd_internet_chat(args: argparse.Namespace) -> int:
-    from internet import relay
+def cmd_remote_chat(args: argparse.Namespace) -> int:
+    from remote import relay
 
     base, token, _label = _resolve(args)
     body = {"model": args.model, "messages": [{"role": "user", "content": args.message}]}
@@ -83,7 +83,7 @@ def cmd_internet_chat(args: argparse.Namespace) -> int:
             if getattr(args, "json", False) or resp.status_code >= 400:
                 print(resp.text)
                 return 0 if resp.status_code < 400 else 1
-            # Default: print just the assistant message; fall back to raw on any surprise (mirrors LAN).
+            # Default: print just the assistant message; fall back to raw on any surprise (mirrors local).
             try:
                 print(resp.json()["choices"][0]["message"]["content"])
             except (KeyError, IndexError, ValueError):
@@ -93,7 +93,7 @@ def cmd_internet_chat(args: argparse.Namespace) -> int:
         raise SystemExit(f"Request failed: {exc}") from exc
 
 
-def cmd_internet_image(args: argparse.Namespace) -> int:
+def cmd_remote_image(args: argparse.Namespace) -> int:
     return _post_media(
         args,
         "media/image/generate",
@@ -106,7 +106,7 @@ def cmd_internet_image(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_internet_edit(args: argparse.Namespace) -> int:
+def cmd_remote_edit(args: argparse.Namespace) -> int:
     if len(args.input_images) > 3:
         raise SystemExit("Image editing supports at most three -i/--image values.")
     return _post_media(
@@ -120,7 +120,7 @@ def cmd_internet_edit(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_internet_video(args: argparse.Namespace) -> int:
+def cmd_remote_video(args: argparse.Namespace) -> int:
     return _post_media(
         args,
         "media/video/i2v",
@@ -134,7 +134,7 @@ def cmd_internet_video(args: argparse.Namespace) -> int:
 
 
 def _post_media(args: argparse.Namespace, endpoint_path: str, payload: dict[str, Any]) -> int:
-    from internet import relay
+    from remote import relay
 
     base, token, _label = _resolve(args)
     headers = _consumer_headers(args)

@@ -13,7 +13,7 @@ def home() -> Path:
 
 
 def credentials_file() -> Path:
-    """Internet-mode credential store (TOML, 0o600). Absent ⇒ signed out."""
+    """Remote-mode credential store (TOML, 0o600). Absent ⇒ signed out."""
     return grid_home() / "credentials.toml"
 
 

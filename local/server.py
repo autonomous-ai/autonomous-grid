@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from lan.runtime import GRID_TYPE
+from local.runtime import GRID_TYPE
 
 
 NODE_TTL_SECONDS = 60
@@ -67,8 +67,8 @@ class Node:
 
 def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
     app = FastAPI(
-        title="Grid LAN Signaling Server",
-        description="Unauthenticated LAN-only engine discovery and OpenAI-compatible request proxy.",
+        title="Grid Local Signaling Server",
+        description="Unauthenticated local-only engine discovery and OpenAI-compatible request proxy.",
         version="0.1.0",
     )
     app.state.nodes = {}
@@ -193,7 +193,7 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
 
     engine = _choose_engine(app, model)
     if not engine:
-        return _openai_error(503, f"No active LAN engine for model {model!r}", "engine_unavailable")
+        return _openai_error(503, f"No active local engine for model {model!r}", "engine_unavailable")
 
     url = f"{engine.endpoint_url.rstrip('/')}/{endpoint_path}"
     headers = {"content-type": request.headers.get("content-type", "application/json")}
@@ -244,7 +244,7 @@ async def _proxy_media(
     raw_body = await request.body()
     engine = _choose_engine(app, model)
     if not engine:
-        return _openai_error(503, f"No active LAN media engine for {model!r}", "engine_unavailable")
+        return _openai_error(503, f"No active local media engine for {model!r}", "engine_unavailable")
     if not engine.media_url:
         return _openai_error(503, f"Engine {engine.node_id} did not advertise a media URL", "engine_unavailable")
 

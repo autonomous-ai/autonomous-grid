@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from lan import config
+from local import config
 from shared import paths
 
 
@@ -31,7 +31,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def detect_lan_ip() -> str:
+def detect_local_ip() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.connect(("8.8.8.8", 80))
@@ -40,8 +40,8 @@ def detect_lan_ip() -> str:
         return "127.0.0.1"
 
 
-def make_lan_url(port: int, advertise_host: str | None = None) -> str:
-    host = (advertise_host or detect_lan_ip()).strip()
+def make_local_url(port: int, advertise_host: str | None = None) -> str:
+    host = (advertise_host or detect_local_ip()).strip()
     return f"http://{host}:{int(port)}"
 
 
@@ -70,7 +70,7 @@ def init_grid_config(
         "managed_server": True,
         "host": host,
         "port": int(port),
-        "lan_signaling_url": make_lan_url(port, advertise_host),
+        "lan_signaling_url": make_local_url(port, advertise_host),
         "server_pid": 0,
         "created_at": utc_now(),
         "updated_at": utc_now(),
@@ -81,7 +81,7 @@ def init_grid_config(
 
 def start_grid(cfg: dict[str, Any]) -> int:
     if not cfg.get("managed_server", True):
-        raise SystemExit(f"{cfg['name']} is a remote LAN signaling URL; there is no local server to start.")
+        raise SystemExit(f"{cfg['name']} is a remote signaling URL; there is no local server to start.")
 
     pid = int(cfg.get("server_pid") or 0)
     if pid and _pid_alive(pid):
@@ -139,7 +139,7 @@ def wait_for_health(cfg: dict[str, Any], timeout: int = 30) -> None:
             pass
         time.sleep(0.25)
     log = paths.grid_dir(cfg["grid_id"]) / "server.log"
-    raise SystemExit(f"LAN signaling server did not become healthy. See {log}")
+    raise SystemExit(f"local signaling server did not become healthy. See {log}")
 
 
 def grid_url(cfg: dict[str, Any]) -> str:
@@ -149,7 +149,7 @@ def grid_url(cfg: dict[str, Any]) -> str:
 def engine_endpoint_url(endpoint_url: str | None, port: int, advertise_host: str | None = None) -> str:
     if endpoint_url:
         return normalize_url(endpoint_url)
-    return f"{make_lan_url(port, advertise_host)}/v1"
+    return f"{make_local_url(port, advertise_host)}/v1"
 
 
 def _pid_alive(pid: int) -> bool:

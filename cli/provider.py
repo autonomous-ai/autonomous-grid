@@ -21,18 +21,18 @@ from typing import Any
 
 import httpx
 
-from lan import config
+from local import config
 from shared import paths, run_records
-from lan import runtime
+from local import runtime
 
 
 # ---------------------------------------------------------------------------
 # grid join
 # ---------------------------------------------------------------------------
 
-# Internet-only `grid join` flags (DECISIONS D6/D8): rejected in LAN mode, where the concept
-# doesn't exist. (attr on args, surface flag) — kept here next to the LAN handler that guards them.
-_INTERNET_ONLY_JOIN_FLAGS = (
+# Remote-only `grid join` flags (DECISIONS D6/D8): rejected in local mode, where the concept
+# doesn't exist. (attr on args, surface flag) — kept here next to the local handler that guards them.
+_REMOTE_ONLY_JOIN_FLAGS = (
     ("engine_label", "--engine-label"),
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
@@ -40,17 +40,17 @@ _INTERNET_ONLY_JOIN_FLAGS = (
 )
 
 
-def _reject_internet_only_flags(args: argparse.Namespace) -> None:
-    used = [flag for attr, flag in _INTERNET_ONLY_JOIN_FLAGS if getattr(args, attr, None) is not None]
+def _reject_remote_only_flags(args: argparse.Namespace) -> None:
+    used = [flag for attr, flag in _REMOTE_ONLY_JOIN_FLAGS if getattr(args, attr, None) is not None]
     if used:
         raise SystemExit(
-            f"{', '.join(used)} only applies in internet mode. "
-            "Switch with `grid mode internet` (or pass --internet)."
+            f"{', '.join(used)} only applies in remote mode. "
+            "Switch with `grid mode remote` (or pass --remote)."
         )
 
 
 def cmd_join(args: argparse.Namespace) -> int:
-    _reject_internet_only_flags(args)
+    _reject_remote_only_flags(args)
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]
@@ -466,7 +466,7 @@ def _run_engine(args: SimpleNamespace) -> int:
             launcher.stop(launched)
             print(f"Stopped llama-server on :{args.endpoint_port}")
         if media_proc is not None:
-            from lan import media_runtime
+            from local import media_runtime
 
             media_runtime.stop_media_server(media_proc)
             print(f"Stopped engine media server on :{args.media_port}")
@@ -531,7 +531,7 @@ def _advertised_text_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _prepare_media_engine(args: SimpleNamespace) -> dict[str, Any]:
-    from lan import media_runtime
+    from local import media_runtime
     from shared.engine import comfyui
     from shared.models import media_bundles
     from shared.media import media_gating

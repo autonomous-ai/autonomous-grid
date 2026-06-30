@@ -2,11 +2,11 @@
 
 State lives at ``~/.grid/state.json`` (``GRID_HOME`` overrides the base)::
 
-    {"version": 1, "mode": "lan", "active": {"lan": <name|null>, "internet": <name|null>}}
+    {"version": 1, "mode": "local", "active": {"local": <name|null>, "remote": <name|null>}}
 
-A missing file means mode ``lan`` with no active selection — so an existing LAN user
+A missing file means mode ``local`` with no active selection — so an existing local user
 behaves exactly as before. This module is pure: it imports only ``shared.paths`` and
-``shared.jsonio`` (never ``lan``/``internet``), because mode is shared by both modes.
+``shared.jsonio`` (never ``local``/``remote``), because mode is shared by both modes.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from typing import Any
 from shared import jsonio, paths
 
 
-VALID_MODES = ("lan", "internet")
-DEFAULT_MODE = "lan"
+VALID_MODES = ("local", "remote")
+DEFAULT_MODE = "local"
 STATE_VERSION = 1
 STATE_FILE = "state.json"
 
@@ -56,7 +56,7 @@ def get_mode() -> str:
 
 
 def resolve_mode(override: str | None) -> str:
-    """Effective mode for one invocation: ``--lan``/``--internet`` override > persisted > default."""
+    """Effective mode for one invocation: ``--local``/``--remote`` override > persisted > default."""
     return validate_mode(override) if override else get_mode()
 
 

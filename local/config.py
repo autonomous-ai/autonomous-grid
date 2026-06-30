@@ -68,7 +68,7 @@ def select_grid(name_or_id: str | None) -> dict[str, Any]:
     grids = iter_grid_configs()
     if not grids:
         raise SystemExit("No grids yet. Run `grid up` to bring one online.")
-    active = state.get_active("lan")
+    active = state.get_active("local")
     if active:
         for cfg in grids:
             if cfg.get("grid_id") == active or cfg.get("name") == active:

@@ -1,4 +1,4 @@
-"""Curated GGUF model catalog for LAN providers."""
+"""Curated GGUF model catalog for local providers."""
 
 from __future__ import annotations
 
