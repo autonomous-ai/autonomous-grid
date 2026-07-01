@@ -94,6 +94,8 @@ grid use research
 ```
 `grid ls` lists the grids your sign-in can reach; `--type permissioned-providers` restricts who may serve to it.
 
+Invite people with `grid members add research <email>` — remote-only, `--role consumer|provider|both` (default `consumer`), and the active grid when the name is omitted. See [Members](docs/cli.md#members).
+
 **🏠 local** — bring up the default `home` grid on this computer:
 ```bash
 grid up
