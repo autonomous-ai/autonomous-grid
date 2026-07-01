@@ -293,8 +293,8 @@ def _add_members(sub) -> None:
     add.add_argument(
         "--role",
         choices=("consumer", "provider", "both"),
-        default="consumer",
-        help="Member role (default: consumer).",
+        default="both",
+        help="Member role (default: both).",
     )
     add.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     add.set_defaults(handler=cmd_remote_members)

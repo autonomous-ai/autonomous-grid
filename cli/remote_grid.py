@@ -280,7 +280,7 @@ def cmd_remote_members(args: argparse.Namespace) -> int:
     network_id = _network_id(_select(args.grid))
 
     if args.subcommand == "add":
-        role = args.role  # parser default is "consumer"; choices constrain it to the three roles
+        role = args.role  # parser default is "both"; choices constrain it to the three roles
         result = control_plane.add_member(session, network_id, args.email, [role])
         if args.json:
             print(json.dumps(result, indent=2))

@@ -299,7 +299,7 @@ Check engines:
 ## Members
 
 ```
-grid members add [grid] <email> [--role consumer|provider|both] [--json]   # default role: consumer
+grid members add [grid] <email> [--role consumer|provider|both] [--json]   # default role: both
 grid members remove [grid] <email> [--json]
 grid members list [grid] [--json]
 ```

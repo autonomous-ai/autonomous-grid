@@ -94,7 +94,7 @@ grid use research
 ```
 `grid ls` lists the grids your sign-in can reach; `--type permissioned-providers` restricts who may serve to it.
 
-Invite people with `grid members add research <email>` — remote-only, `--role consumer|provider|both` (default `consumer`), and the active grid when the name is omitted. See [Members](docs/cli.md#members).
+Invite people with `grid members add research <email>`. See [Members](docs/cli.md#members).
 
 **🏠 local** — bring up the default `home` grid on this computer:
 ```bash
@@ -103,7 +103,7 @@ grid up
 # grid_url=http://192.168.1.25:8090            ← the one address engines + apps use
 ```
 
-### 4 · Add a computer
+### 4 · Add a node
 
 Point Grid at an inference server you already run (here, a computer running vLLM to serve `qwen3-coder`), and name it.
 

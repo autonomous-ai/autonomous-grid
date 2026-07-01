@@ -3766,7 +3766,7 @@ def _mock_members(monkeypatch, *, add=None, remove=None, members=None):
 
 # -- handler: add ----------------------------------------------------------
 
-def test_remote_members_add_defaults_to_consumer_role(monkeypatch, tmp_path, capsys):
+def test_remote_members_add_defaults_to_both_role(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team"}], active="team")
     calls = _mock_members(monkeypatch, add={"ok": True})
@@ -3774,9 +3774,9 @@ def test_remote_members_add_defaults_to_consumer_role(monkeypatch, tmp_path, cap
     assert cli.main(["members", "add", "alice@example.com"]) == 0
     out = capsys.readouterr().out
     assert calls["add"] == {
-        "session": "sess-tok", "network_id": "n1", "email": "alice@example.com", "roles": ["consumer"],
+        "session": "sess-tok", "network_id": "n1", "email": "alice@example.com", "roles": ["both"],
     }
-    assert "alice@example.com" in out and "consumer" in out
+    assert "alice@example.com" in out and "both" in out
 
 
 def test_remote_members_add_role_both_is_sent_without_expansion(monkeypatch, tmp_path, capsys):
