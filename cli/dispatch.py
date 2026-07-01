@@ -31,6 +31,7 @@ AGNOSTIC = frozenset({
     "pull",
     "rm",
     "remove",
+    "ctx",
     "engine",
     "mode",
     "use",

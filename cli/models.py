@@ -51,6 +51,33 @@ def cmd_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ctx(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from shared.models import gguf, store
+
+    candidate = Path(args.model).expanduser()
+    if candidate.is_file():
+        path = candidate
+    else:
+        model = store.find(args.model)
+        if not model:
+            raise SystemExit(
+                f"No such model: {args.model} (not a file, and not under ~/.grid/models/)"
+            )
+        path = model.path
+
+    ctx = gguf.read_context_length(path)
+    if ctx is None:
+        raise SystemExit(f"Could not read context length from GGUF metadata: {path}")
+
+    if getattr(args, "json", False):
+        print(json.dumps({"file": str(path), "context_length": ctx}))
+    else:
+        print(ctx)
+    return 0
+
+
 def cmd_rm(args: argparse.Namespace) -> int:
     from shared.models import store
 

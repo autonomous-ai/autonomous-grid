@@ -32,7 +32,7 @@ from .grid import (
     cmd_version,
 )
 from .mode import cmd_mode, cmd_use
-from .models import cmd_catalog, cmd_pull, cmd_rm
+from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
@@ -185,6 +185,11 @@ def _add_models(sub) -> None:
         rm.add_argument("model", help="Filename under ~/.grid/models/")
         rm.add_argument("--yes", action="store_true", help="Skip confirmation.")
         rm.set_defaults(handler=cmd_rm)
+
+    ctx = sub.add_parser("ctx", help="Show a model's max context length (from GGUF metadata)")
+    ctx.add_argument("model", help="Filename under ~/.grid/models/ or a path to a .gguf")
+    ctx.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    ctx.set_defaults(handler=cmd_ctx)
 
 
 def _add_use(sub) -> None:

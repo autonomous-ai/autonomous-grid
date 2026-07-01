@@ -4038,3 +4038,56 @@ def test_control_plane_list_members_handles_no_content(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     _mock_control_plane(monkeypatch, lambda r: httpx.Response(204))  # empty body → no decode crash
     assert control_plane.list_members("sess-tok", "n1") == []
+
+
+def _build_gguf(kvs: list[tuple[str, int, object]]) -> bytes:
+    """Minimal GGUF v3 blob carrying the given (key, value_type, value) metadata."""
+    import struct
+
+    def gstr(s: str) -> bytes:
+        b = s.encode("utf-8")
+        return struct.pack("<Q", len(b)) + b
+
+    out = bytearray(b"GGUF")
+    out += struct.pack("<I", 3)          # version
+    out += struct.pack("<Q", 0)          # tensor count
+    out += struct.pack("<Q", len(kvs))   # kv count
+    for key, vtype, value in kvs:
+        out += gstr(key) + struct.pack("<I", vtype)
+        if vtype == 8:      # string
+            out += gstr(value)
+        elif vtype == 4:    # uint32
+            out += struct.pack("<I", value)
+        else:
+            raise ValueError(f"test helper does not encode type {vtype}")
+    return bytes(out)
+
+
+def test_gguf_read_context_length(tmp_path):
+    from shared.models import gguf
+
+    path = tmp_path / "m.gguf"
+    path.write_bytes(_build_gguf([
+        ("general.architecture", 8, "llama"),
+        ("general.name", 8, "unused"),
+        ("llama.context_length", 4, 4096),
+    ]))
+    assert gguf.read_context_length(path) == 4096
+
+
+def test_gguf_read_context_length_rejects_non_gguf(tmp_path):
+    from shared.models import gguf
+
+    path = tmp_path / "not.gguf"
+    path.write_bytes(b"NOPE, not a gguf header")
+    assert gguf.read_context_length(path) is None
+
+
+def test_ctx_command_wired_to_handler():
+    from cli.models import cmd_ctx
+
+    parser = cli.build_parser()
+    ns = parser.parse_args(["ctx", "some-model.gguf", "--json"])
+    assert ns.handler is cmd_ctx
+    assert ns.model == "some-model.gguf"
+    assert ns.json is True
