@@ -9,7 +9,7 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-[**Quickstart**](#quickstart) · [Two modes](#two-modes) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [Two modes](#two-modes) · [How it works](#how-it-works) · [Where Grid fits](#where-grid-fits) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 <img src="docs/home-grid.png" alt="Your Home Grid sits above your computers — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever computer serves the model" width="860">
 
@@ -250,6 +250,19 @@ ComfyUI); your grid is the one address everything talks through, and your apps d
 
 Full request flow in **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**; the complete command surface — including
 membership (`grid members`) and remote grid types — in **[docs/cli.md](docs/cli.md)**.
+
+## Where Grid fits
+
+**Grid is the orchestration layer, not another engine.** Ollama, vLLM, LM Studio, MLX, and llama.cpp are
+**engines** — each runs a model on one machine. Grid sits above them: point it at the engines you already run,
+and every model on every computer answers at one endpoint. If you love Ollama, keep Ollama — Grid just makes
+your Ollama box and your vLLM box answer on the same address. It starts nothing it doesn't have to, and
+replaces nothing.
+
+**Isn't this what Ray Serve and KServe do?** They orchestrate inference too — but over a cluster **you stand up
+and operate**: dedicated GPU servers, one network, Kubernetes underneath. Grid does it over the machines **you
+already own** — your Mac, a gaming PC, the workstation in the corner — mixed hardware, mixed engines, **one
+command, no cluster**. Same job, a different substrate: the computers you already have, not servers you provision.
 
 ## Contributing
 
