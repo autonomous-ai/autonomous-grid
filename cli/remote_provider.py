@@ -24,16 +24,14 @@ from shared import paths, run_records
 
 
 def _reject_local_only_flags(args: argparse.Namespace) -> None:
-    """local-only `grid join` flags have no meaning in remote mode (DECISIONS D8): a remote engine polls
-    the relay outbound, so there is no inbound endpoint to advertise, and media serving is later."""
-    if getattr(args, "media", False):
-        raise SystemExit("Remote media serving isn't available yet; it lands in a later release.")
+    """local-only `grid join` flags have no meaning in remote mode (DECISIONS D8): a remote engine
+    polls the relay outbound, so there is no inbound endpoint to advertise. (`--media` IS supported —
+    a remote media engine's server is reached by the serve loop on loopback, not advertised.)"""
     if getattr(args, "advertise_host", None) is not None:
         raise SystemExit(
             "--advertise-host is local-only. A remote engine polls the relay outbound, so there is "
             "no inbound endpoint to advertise."
         )
-    # --media-port carries a non-None default but only matters with --media, already rejected above.
 
 
 def cmd_remote_join(args: argparse.Namespace) -> int:
@@ -64,8 +62,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # member can't pre-check fails later at register). See remote_grid.resolve_relay_base.
     signaling_url, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
 
-    specs = _resolve_serve_targets(args)
-    if not specs:  # several engines detected and the operator declined to join them all
+    specs, media_detected = _resolve_serve_targets(args)
+    media = bool(getattr(args, "media", False)) or media_detected
+    if not specs and not media:  # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
     if len(specs) > 1 and (getattr(args, "advertise_as", []) or []):
@@ -77,7 +76,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     if existing and run_records.pid_alive(int(existing.get("pid") or 0)):
         raise SystemExit(f"Engine {engine_id!r} is already joined to {label}. Use a different --name.")
 
-    record = _build_record(args, network_id, engine_id, signaling_url, specs)
+    record = _build_record(args, network_id, engine_id, signaling_url, specs, media=media)
     run_records.write_record(network_id, engine_id, record)
 
     proc = _spawn_remote_engine(network_id, engine_id)
@@ -100,31 +99,40 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print(f"endpoint_url={record['endpoint_url']}")
     if record["models"]:
         print(f"models={','.join(record['models'])}")
+    if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
+        print("media=on (serving comfyui:* workflows via the relay)")
     print(f"log={log_path}")
     # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
     print(f"(starting — stop with `grid leave {label} --engine {engine_id}`)")
     return 0
 
 
-def _resolve_serve_targets(args: argparse.Namespace) -> list[dict[str, object]]:
-    """What to serve, as a list of engine specs `{endpoint_url, models, engine_label}`.
+def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
+    """What to serve: `(text_engine_specs, media_detected)`.
 
-    External `--at` and built-in `--serve` resolve to one spec. A bare `grid join` auto-detects: with
-    `--all` (or after an interactive confirm) it returns *every* detected engine so one identity serves
-    their union (DECISIONS D9); otherwise several detected engines are ambiguous and it asks for
-    `--all`/`--engine`. Returns `[]` only when the operator declines the interactive "join all" prompt.
-    Mirrors local `cli/provider.cmd_join`, but remote registers ONE identity instead of one per engine.
+    Text specs are `{endpoint_url, models, engine_label}`. `media_detected` is True when auto-detect
+    finds a media (ComfyUI) engine, so the caller brings the media engine up alongside the text ones.
+    External `--at` and built-in `--serve` each resolve to one text spec (media comes only from an
+    explicit `--media`). An explicit `--media` with no text engine is media-only: return `([], False)`
+    and let `args.media` carry it. A bare `grid join` auto-detects: text engines join under one
+    identity (DECISIONS D9) — `--all` (or an interactive confirm) accepts several, otherwise it asks —
+    and any detected media engine flips `media_detected`. Returns `([], False)` when the operator
+    declines the "join all" prompt. Mirrors local `cli/provider.cmd_join` (remote → ONE identity).
     """
     from . import provider
 
     if args.at:
         if not args.models:
             raise SystemExit("--at requires at least one -m/--model naming what that engine serves.")
-        return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}]
+        return [{"endpoint_url": args.at, "models": list(args.models), "engine_label": None}], False
     if args.serve:
-        return [{"endpoint_url": None, "models": [args.serve], "engine_label": None}]
+        return [{"endpoint_url": None, "models": [args.serve], "engine_label": None}], False
     if args.models:
         raise SystemExit("-m/--model names models for an engine; pair it with --at <url>, or use --serve <model>.")
+    if getattr(args, "media", False):
+        # Explicit `--media` with no text engine → media-only. Skip detection; the serve loop brings up
+        # the media engine from the bundle gating.
+        return [], False
 
     detected = provider._detect(None)  # advertise_host is local-only; remote always probes loopback
     if not detected:
@@ -137,24 +145,19 @@ def _resolve_serve_targets(args: argparse.Namespace) -> list[dict[str, object]]:
         if not detected:
             raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
 
-    # Remote can't serve media engines yet: drop them from a multi-join, reject a lone one.
+    media_detected = any(engine.media for engine in detected)
     text = [engine for engine in detected if not engine.media]
-    if not text:
-        raise SystemExit("Remote media serving isn't available yet; it lands in a later release.")
     if len(text) > 1 and not args.all:
         provider._print_plan(text)
         if provider._interactive():
             if not provider._confirm("Join all detected engines?"):
-                return []
+                return [], False
         else:
             raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
-    for engine in detected:
-        if engine.media:
-            print(f"Skipping {engine.label!r}: remote media serving isn't available yet.", file=sys.stderr)
     return [
         {"endpoint_url": engine.endpoint_url, "models": list(engine.models), "engine_label": engine.label}
         for engine in text
-    ]
+    ], media_detected
 
 
 def _warn_shadowed_models(specs: list[dict[str, object]]) -> None:
@@ -179,12 +182,15 @@ def _build_record(
     engine_id: str,
     signaling_url: str,
     specs: list[dict[str, object]],
+    media: bool = False,
 ) -> dict[str, object]:
     """The remote engine's run record — non-secret routing only; the token stays in credentials.toml.
 
     Several engines can serve under one identity (DECISIONS D9): `engines` carries each local engine
     so the serve loop can build the model→engine table. Top-level `models` is their union and
     `endpoint_url` is the single engine's URL (None when several) — kept for display + back-compat.
+    `media` (+ bundles/ports) mirror the local record fields so the serve loop brings up ComfyUI + the
+    media server; a media-only join has empty `specs`/`models` and derives `comfyui:*` at serve time.
     """
     from local import runtime
 
@@ -200,6 +206,10 @@ def _build_record(
         "endpoint_url": single_endpoint,
         "models": union,
         "engines": specs,
+        "media": bool(media),
+        "media_bundles": list(getattr(args, "bundles", []) or []),
+        "comfyui_port": getattr(args, "comfyui_port", 8188),
+        "media_port": getattr(args, "media_port", 8190),
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
         "engine_label": getattr(args, "engine_label", None),
         "pricing_input": getattr(args, "pricing_input", None),

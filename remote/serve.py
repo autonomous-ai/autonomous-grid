@@ -27,10 +27,12 @@ from shared import run_records
 # Engine read budget when the relay doesn't advertise one (older relay); matches its default.
 _DEFAULT_INFERENCE_TIMEOUT = 600.0
 
-# The relay-supplied endpoint is interpolated into the local engine URL, so only forward known text
+# The relay-supplied endpoint is interpolated into a local engine URL, so only forward known
 # endpoints — this stops a buggy or compromised relay from probing other local paths via `../`.
-# (Media is a later slice and is rejected with its own message.)
+# Text goes to the LLM engine; media goes to this box's media server, each with its own fixed
+# allowlist (the media paths are NOT under `_ALLOWED_ENDPOINTS` — they route to a different URL).
 _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
+_MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
 
 
 # ---------------------------------------------------------------------------
@@ -65,13 +67,47 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
 
     launched: list[Any] = []
     launcher = None
+    media_proc = None
+    comfyui_started = False
     state = None
     rc = 0
     try:
-        engine_results, launched, launcher = _bring_up_engines(record)
+        # Bring up text engines only when the record names some — a media-only join (`grid join
+        # --media`) has no text spec, and `_bring_up_engines` would otherwise error on the empty spec.
+        has_text = bool(record.get("engines")) or bool(record.get("models")) or bool(record.get("endpoint_url"))
+        if has_text:
+            engine_results, launched, launcher = _bring_up_engines(record)
+        else:
+            engine_results = []
         routes, upstream, union_models, capabilities, warnings = _build_routing(engine_results)
         for line in warnings:  # surface shadowed-duplicate models so routing isn't a silent surprise
             print(line, file=sys.stderr)
+
+        # Media engine (ComfyUI + the provider media server) — brought up on this same box and
+        # reached by the poll loop on loopback (the relay forwards `media/*` jobs to us like text).
+        # Its `comfyui:*` models + caps merge into the one identity we register (DECISIONS D9).
+        media_url = None
+        if record.get("media"):
+            from local import media_engine
+            from shared.media import media_gating
+
+            media_port = int(record.get("media_port") or 8190)
+            prepared = media_engine.prepare_media_engine(
+                media_bundles=list(record.get("media_bundles") or []) or None,
+                comfyui_port=int(record.get("comfyui_port") or 8188),
+                media_port=media_port,
+                advertise_host=None,  # loopback forward — no LAN-facing URL needed in remote mode
+            )
+            media_proc = prepared["proc"]
+            comfyui_started = bool(prepared["comfyui_started"])
+            media_url = f"http://127.0.0.1:{media_port}"
+            caps_models = dict((capabilities or {}).get("models") or {})
+            for model in prepared["models"]:
+                if model not in union_models:
+                    union_models.append(model)
+                caps_models[model] = media_gating.capability_entry()
+            capabilities = {"schema_version": 1, "models": caps_models} if caps_models else {}
+
         state = _ServeState(
             signaling_url=signaling_url,
             node_id=node_id,
@@ -86,6 +122,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             max_concurrency=int(record.get("max_concurrency") or 1),
             routes=routes,
             upstream=upstream,
+            media_url=media_url,
         )
         register(state)
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
@@ -112,6 +149,22 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                     print(f"Stopped llama-server (pid={proc.proc.pid}).")
                 except Exception as exc:  # best-effort teardown; never mask the real exit
                     print(f"Stopping llama-server failed (ignoring): {exc}", file=sys.stderr)
+        if media_proc is not None:  # stop the media server we launched
+            from local import media_runtime
+
+            try:
+                media_runtime.stop_media_server(media_proc)
+                print("Stopped engine media server.")
+            except Exception as exc:  # best-effort teardown; never mask the real exit
+                print(f"Stopping media server failed (ignoring): {exc}", file=sys.stderr)
+        if comfyui_started:  # only stop ComfyUI if WE started it (not one the operator was running)
+            from shared.engine import comfyui
+
+            try:
+                comfyui.stop()
+                print("Stopped ComfyUI.")
+            except Exception as exc:  # best-effort teardown; never mask the real exit
+                print(f"Stopping ComfyUI failed (ignoring): {exc}", file=sys.stderr)
     return rc
 
 
@@ -289,7 +342,16 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
         kinds = [e.get("engine_label") for e in (record.get("engines") or []) if e.get("engine_label")]
         if kinds:
             label = "+".join(dict.fromkeys(kinds))
-    return {"name": engine_id, "engine": label or ("external" if record.get("endpoint_url") else "llama.cpp")}
+    if not label:
+        if record.get("endpoint_url"):
+            label = "external"
+        elif record.get("models") or record.get("engines"):
+            label = "llama.cpp"
+        elif record.get("media"):  # a media-only identity has no text engine to name
+            label = "comfyui"
+        else:
+            label = "llama.cpp"
+    return {"name": engine_id, "engine": label}
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
@@ -347,12 +409,17 @@ class _ServeState:
         max_concurrency: int,
         routes: dict[str, str] | None = None,
         upstream: dict[str, str] | None = None,
+        media_url: str | None = None,
     ) -> None:
         self.signaling_url = signaling_url
         self.node_id = node_id
         self.network_id = network_id
         self.llm_url = llm_url.rstrip("/")
         self.models = list(models)
+        # This box's media server base (`http://127.0.0.1:<media_port>`) when the identity serves
+        # media, else None. `media/*` jobs forward here instead of an LLM engine; all media models
+        # share the one server, so a single URL (not a per-model route) is enough.
+        self.media_url = media_url.rstrip("/") if media_url else None
         # model → local engine URL. Several engines may serve under one identity (DECISIONS D9); for
         # the single-engine case the map is derived so every advertised model points at the one engine.
         if routes is not None:
@@ -519,8 +586,21 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     is_stream = bool(job.get("is_stream", False))
     read_timeout = float(job.get("inference_timeout_seconds") or _DEFAULT_INFERENCE_TIMEOUT)
 
-    if endpoint.startswith("media/"):  # remote media serving is a later slice
-        _try_submit_error(state, txn, "media serving isn't available in remote mode yet")
+    if endpoint in _MEDIA_ENDPOINTS:  # media → this box's media server; always SSE, so always stream
+        if not state.media_url:
+            _try_submit_error(state, txn, f"this engine does not serve media (endpoint {endpoint!r})")
+            return
+        state.enter_inference()
+        try:
+            _forward_stream(state, txn, endpoint, body, read_timeout, state.media_url)
+        except Exception as exc:  # one bad media job must not kill the loop
+            print(f"\nMedia job {txn} failed: {exc!r}", file=sys.stderr)
+            _try_submit_error(state, txn, str(exc))
+        finally:
+            state.exit_inference()
+        return
+    if endpoint.startswith("media/"):  # a media path we don't serve — never blind-forward it
+        _try_submit_error(state, txn, f"unsupported media endpoint: {endpoint!r}")
         return
     if endpoint not in _ALLOWED_ENDPOINTS:  # don't forward an unknown path to the local engine
         _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")
