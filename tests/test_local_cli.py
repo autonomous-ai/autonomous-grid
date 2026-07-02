@@ -1973,6 +1973,82 @@ def test_probe_capabilities_degrades_to_text_only_on_probe_failure(monkeypatch, 
     assert entry["features"]["json_object"] is False
 
 
+def _ollama_handler(caps):
+    """An Ollama-shaped engine: no /props, /v1/models without capabilities, /api/show declares `caps`,
+    and its OpenAI endpoint ignores a forced tool_choice (replies with content, never tool_calls)."""
+    def handler(request):
+        path = request.url.path
+        if path == "/props":
+            return httpx.Response(404)  # Ollama serves no llama-server /props
+        if path == "/api/show":
+            return httpx.Response(200, json={"capabilities": caps})
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})  # no per-model capabilities
+        if path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+        return httpx.Response(404)
+    return handler
+
+
+def test_probe_tools_from_ollama_show_when_live_probe_silent(monkeypatch, tmp_path):
+    """Ollama declares tool support via /api/show even though the forced-tool_choice probe stays
+    silent and there is no /props — the node must still advertise tools (else the relay 400s tool calls)."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, _ollama_handler(["completion", "tools"]))
+
+    env = probe.capabilities("http://h:11434/v1", "deepseek-r1:1.5b")
+
+    assert env["models"]["deepseek-r1:1.5b"]["features"]["tools"] is True
+
+
+def test_probe_vision_from_ollama_show_capabilities(monkeypatch, tmp_path):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, _ollama_handler(["completion", "vision"]))
+
+    env = probe.capabilities("http://h:11434/v1", "llava")
+    entry = env["models"]["llava"]
+    assert entry["features"]["vision"] is True and entry["input_modalities"] == ["text", "image"]
+
+
+def test_probe_ollama_show_without_tools_stays_text_only(monkeypatch, tmp_path):
+    """/api/show that omits `tools` must not fabricate tool support — a non-tool model stays tools=False."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, _ollama_handler(["completion"]))
+
+    env = probe.capabilities("http://h:11434/v1", "gemma")
+    assert env["models"]["gemma"]["features"]["tools"] is False
+
+
+def test_probe_tools_from_live_probe_without_props_or_show(monkeypatch, tmp_path):
+    """An OpenAI engine with no /props and no /api/show (LM Studio / MLX / vLLM shape) still detects
+    tools via the live forced-tool_choice probe when the engine honors it and emits a tool_call."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    def handler(request):
+        path = request.url.path
+        if path in ("/props", "/api/show"):
+            return httpx.Response(404)  # neither llama.cpp nor Ollama metadata
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        if path.endswith("/chat/completions"):
+            if json.loads(request.content).get("tools"):
+                return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [{"id": "1"}]}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    env = probe.capabilities("http://h:1234/v1", "m")
+    assert env["models"]["m"]["features"]["tools"] is True  # live probe carries LM Studio/MLX/vLLM
+
+
 def test_probe_benchmark_tok_s_prefers_predicted_per_second(monkeypatch, tmp_path):
     from remote import probe
 
@@ -2296,6 +2372,33 @@ def test_serve_handle_job_single_engine_forwards_unknown_model(monkeypatch, tmp_
     assert "error" not in captured  # forwarded to the sole engine, not rejected
 
 
+def test_serve_handle_job_rewrites_alias_to_upstream_model(monkeypatch, tmp_path):
+    """The consumer addresses the model by its advertised alias; the external engine only knows its
+    real name. handle_job must rewrite body['model'] alias→real before forwarding (Issue 1: 404)."""
+    from remote import relay, serve
+
+    state = _serve_state(
+        monkeypatch, tmp_path, models=["ollama-model"],
+        routes={"ollama-model": "http://sole.local/v1"},
+        upstream={"ollama-model": "qwen3.5:0.8b"},
+    )
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(content=content))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def engine(request):
+        # the LOCAL engine must receive its real model name, not the advertised alias
+        assert json.loads(request.content)["model"] == "qwen3.5:0.8b"
+        return httpx.Response(200, json={"ok": True})
+
+    _mock_serve_engine(monkeypatch, engine)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "ollama-model", "messages": []}, "is_stream": False})
+    assert "error" not in captured and b'"ok"' in captured["content"]
+
+
 def test_serve_heartbeat_loop_stops_when_auth_exhausted(monkeypatch, tmp_path):
     from remote import relay, serve
 
@@ -2316,10 +2419,11 @@ def test_serve_heartbeat_loop_stops_when_auth_exhausted(monkeypatch, tmp_path):
 def test_build_routing_single_engine_maps_each_model(monkeypatch, tmp_path):
     from remote import serve
 
-    routes, union, caps, warns = serve._build_routing([
-        ("http://127.0.0.1:8081/v1", ["m1", "m2"], {"schema_version": 1, "models": {"m1": {"x": 1}}}),
+    routes, upstream, union, caps, warns = serve._build_routing([
+        ("http://127.0.0.1:8081/v1", ["m1", "m2"], ["m1", "m2"], {"schema_version": 1, "models": {"m1": {"x": 1}}}),
     ])
     assert routes == {"m1": "http://127.0.0.1:8081/v1", "m2": "http://127.0.0.1:8081/v1"}
+    assert upstream == {"m1": "m1", "m2": "m2"}  # no alias → identity
     assert union == ["m1", "m2"]  # both advertised; only the probed first model carries caps
     assert caps == {"schema_version": 1, "models": {"m1": {"x": 1}}}
     assert warns == []
@@ -2328,11 +2432,12 @@ def test_build_routing_single_engine_maps_each_model(monkeypatch, tmp_path):
 def test_build_routing_disjoint_engines_union_and_merge(monkeypatch, tmp_path):
     from remote import serve
 
-    routes, union, caps, warns = serve._build_routing([
-        ("http://127.0.0.1:8081/v1", ["a"], {"schema_version": 1, "models": {"a": {"f": "A"}}}),
-        ("http://127.0.0.1:8000/v1", ["b"], {"schema_version": 1, "models": {"b": {"f": "B"}}}),
+    routes, upstream, union, caps, warns = serve._build_routing([
+        ("http://127.0.0.1:8081/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {"f": "A"}}}),
+        ("http://127.0.0.1:8000/v1", ["b"], ["b"], {"schema_version": 1, "models": {"b": {"f": "B"}}}),
     ])
     assert routes == {"a": "http://127.0.0.1:8081/v1", "b": "http://127.0.0.1:8000/v1"}
+    assert upstream == {"a": "a", "b": "b"}
     assert union == ["a", "b"]
     assert caps == {"schema_version": 1, "models": {"a": {"f": "A"}, "b": {"f": "B"}}}
     assert warns == []
@@ -2341,11 +2446,12 @@ def test_build_routing_disjoint_engines_union_and_merge(monkeypatch, tmp_path):
 def test_build_routing_duplicate_model_first_wins_with_warning(monkeypatch, tmp_path):
     from remote import serve
 
-    routes, union, caps, warns = serve._build_routing([
-        ("http://127.0.0.1:8081/v1", ["dup"], {"schema_version": 1, "models": {"dup": {"f": "first"}}}),
-        ("http://127.0.0.1:8000/v1", ["dup"], {"schema_version": 1, "models": {"dup": {"f": "second"}}}),
+    routes, upstream, union, caps, warns = serve._build_routing([
+        ("http://127.0.0.1:8081/v1", ["dup"], ["dup"], {"schema_version": 1, "models": {"dup": {"f": "first"}}}),
+        ("http://127.0.0.1:8000/v1", ["dup"], ["dup"], {"schema_version": 1, "models": {"dup": {"f": "second"}}}),
     ])
     assert routes == {"dup": "http://127.0.0.1:8081/v1"}  # first detected wins
+    assert upstream == {"dup": "dup"}  # winner's upstream, shadowed duplicate ignored
     assert union == ["dup"]  # advertised once
     assert caps == {"schema_version": 1, "models": {"dup": {"f": "first"}}}  # caps follow the winner
     assert len(warns) == 1 and "dup" in warns[0]
@@ -2355,11 +2461,28 @@ def test_build_routing_tolerates_failed_probe_empty_caps(monkeypatch, tmp_path):
     from remote import serve
 
     # A failed probe degrades to {} upstream — the merge must still route, not KeyError.
-    routes, union, caps, warns = serve._build_routing([
-        ("http://127.0.0.1:8081/v1", ["m"], {}),
+    routes, upstream, union, caps, warns = serve._build_routing([
+        ("http://127.0.0.1:8081/v1", ["m"], ["m"], {}),
     ])
     assert routes == {"m": "http://127.0.0.1:8081/v1"} and union == ["m"]
+    assert upstream == {"m": "m"}
     assert caps == {}  # no capabilities → registers text-only
+    assert warns == []
+
+
+def test_build_routing_maps_alias_to_upstream_real_name(monkeypatch, tmp_path):
+    """A `--advertise-as` alias routes + registers under the alias, but upstream carries the engine's
+    real model name so a forwarded job can be rewritten to what the engine actually serves."""
+    from remote import serve
+
+    routes, upstream, union, caps, warns = serve._build_routing([
+        ("http://h:11434/v1", ["ollama-model"], ["qwen3.5:0.8b"],
+         {"schema_version": 1, "models": {"ollama-model": {"x": 1}}}),
+    ])
+    assert routes == {"ollama-model": "http://h:11434/v1"}
+    assert upstream == {"ollama-model": "qwen3.5:0.8b"}  # alias → real, the crux of the forward fix
+    assert union == ["ollama-model"]
+    assert caps == {"schema_version": 1, "models": {"ollama-model": {"x": 1}}}
     assert warns == []
 
 
@@ -2374,16 +2497,42 @@ def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
         "advertise_as": [],
     }
     seen = []
-    monkeypatch.setattr(probe, "capabilities", lambda url, model: seen.append((url, model))
-                        or {"schema_version": 1, "models": {model: {"f": model}}})
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, *, advertise_as=None: seen.append((url, model))
+                        or {"schema_version": 1, "models": {advertise_as or model: {"f": model}}})
 
     results, launched, launcher = serve._bring_up_engines(record)
     assert launched == [] and launcher is None  # external engines: nothing launched/owned
     assert results == [
-        ("http://h:11434/v1", ["llama3"], {"schema_version": 1, "models": {"llama3": {"f": "llama3"}}}),
-        ("http://h:8000/v1", ["mistral"], {"schema_version": 1, "models": {"mistral": {"f": "mistral"}}}),
+        ("http://h:11434/v1", ["llama3"], ["llama3"], {"schema_version": 1, "models": {"llama3": {"f": "llama3"}}}),
+        ("http://h:8000/v1", ["mistral"], ["mistral"], {"schema_version": 1, "models": {"mistral": {"f": "mistral"}}}),
     ]
-    assert seen == [("http://h:11434/v1", "llama3"), ("http://h:8000/v1", "mistral")]  # each probed once
+    assert seen == [("http://h:11434/v1", "llama3"), ("http://h:8000/v1", "mistral")]  # each probed by real name
+
+
+def test_bring_up_engines_external_alias_probes_real_name_keys_alias(monkeypatch, tmp_path):
+    """`--advertise-as` on an external engine: probe by the engine's REAL model name (Ollama/vLLM
+    don't know the alias) but return caps + upstream so the loop registers/forwards under the alias."""
+    from remote import probe, serve
+
+    record = {
+        "engines": [{"endpoint_url": "http://h:11434/v1", "models": ["qwen3.5:0.8b"], "engine_label": "ollama"}],
+        "advertise_as": ["ollama-model"],
+    }
+    seen = {}
+
+    def fake_caps(url, model, *, advertise_as=None):
+        seen.update(url=url, model=model, advertise_as=advertise_as)
+        return {"schema_version": 1, "models": {advertise_as or model: {"f": model}}}
+
+    monkeypatch.setattr(probe, "capabilities", fake_caps)
+
+    results, launched, _ = serve._bring_up_engines(record)
+    assert launched == []
+    assert seen["model"] == "qwen3.5:0.8b"  # probed by the real name the engine answers to
+    assert seen["advertise_as"] == "ollama-model"  # caps keyed by the advertised alias
+    llm_url, advertised, upstream, caps = results[0]
+    assert advertised == ["ollama-model"] and upstream == ["qwen3.5:0.8b"]
+    assert set(caps["models"]) == {"ollama-model"}  # relay registers under the advertised name
 
 
 def test_bring_up_engines_falls_back_to_flat_record(monkeypatch, tmp_path):
@@ -2391,12 +2540,14 @@ def test_bring_up_engines_falls_back_to_flat_record(monkeypatch, tmp_path):
 
     # A record written before multi-engine has no `engines` list — synthesise one spec from flat fields.
     record = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "advertise_as": []}
-    monkeypatch.setattr(probe, "capabilities", lambda url, model: {"schema_version": 1, "models": {model: {}}})
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, *, advertise_as=None: {"schema_version": 1, "models": {advertise_as or model: {}}})
 
     results, launched, _ = serve._bring_up_engines(record)
     assert launched == []  # external engine: nothing launched
     assert results[0][0] == "http://h:11434/v1"
     assert results[0][1] == ["llama3"]
+    assert results[0][2] == ["llama3"]  # upstream == advertised when no alias
 
 
 def test_bring_up_engines_rejects_multi_without_endpoints(monkeypatch, tmp_path):

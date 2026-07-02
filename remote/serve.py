@@ -69,7 +69,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     rc = 0
     try:
         engine_results, launched, launcher = _bring_up_engines(record)
-        routes, union_models, capabilities, warnings = _build_routing(engine_results)
+        routes, upstream, union_models, capabilities, warnings = _build_routing(engine_results)
         for line in warnings:  # surface shadowed-duplicate models so routing isn't a silent surprise
             print(line, file=sys.stderr)
         state = _ServeState(
@@ -85,6 +85,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             pricing=_pricing(record),
             max_concurrency=int(record.get("max_concurrency") or 1),
             routes=routes,
+            upstream=upstream,
         )
         register(state)
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
@@ -120,31 +121,36 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
 
 def _bring_up_engines(
     record: dict[str, Any],
-) -> tuple[list[tuple[str, list[str], dict[str, Any]]], list[Any], Any]:
+) -> tuple[list[tuple[str, list[str], list[str], dict[str, Any]]], list[Any], Any]:
     """Bring up every engine the record lists and probe each (mirrors cli/provider._run_engine).
 
     Returns ``(engine_results, launched, launcher_module)`` where ``engine_results`` is
-    ``[(llm_url, advertised_models, caps_envelope), ...]`` in record order — fed to ``_build_routing``.
-    ``launched`` collects the built-in llama-servers to stop on teardown (empty when every engine is
-    external). Only a built-in ``--serve`` launches, and only as the **sole** engine: ``grid join
-    --all`` gathers already-running engines, so a multi-engine record is all external URLs.
+    ``[(llm_url, advertised_models, upstream_models, caps_envelope), ...]`` in record order — fed to
+    ``_build_routing``. ``upstream_models`` is what the *local engine answers to* (the real model name
+    for an external ``--at`` engine; the ``--advertise-as`` alias for a built-in llama-server launched
+    with ``--alias``), so a job's advertised model can be rewritten to it before forwarding. Each engine
+    is probed by its upstream name (Ollama/vLLM only know that) but the caps envelope is keyed by the
+    advertised name (what consumers ask for). ``launched`` collects the built-in llama-servers to stop
+    on teardown (empty when every engine is external). Only a built-in ``--serve`` launches, and only as
+    the **sole** engine: ``grid join --all`` gathers already-running engines, so a multi-engine record
+    is all external URLs.
     """
     specs = record.get("engines") or [_flat_spec(record)]
     aliases = list(record.get("advertise_as") or [])
     if len(specs) > 1 and any(not spec.get("endpoint_url") for spec in specs):
         raise SystemExit("Serving several engines needs external endpoints; the built-in engine serves one model.")
 
-    results: list[tuple[str, list[str], dict[str, Any]]] = []
+    results: list[tuple[str, list[str], list[str], dict[str, Any]]] = []
     launched: list[Any] = []
     launcher_mod = None
     try:
         for spec in specs:
-            llm_url, proc, mod, advertised = _bring_up_one(spec, record, aliases)
+            llm_url, proc, mod, advertised, upstream = _bring_up_one(spec, record, aliases)
             if proc is not None:
                 launched.append(proc)
                 launcher_mod = mod
-            caps = probe.capabilities(llm_url, advertised[0]) if advertised else {}
-            results.append((llm_url, advertised, caps))
+            caps = probe.capabilities(llm_url, upstream[0], advertise_as=advertised[0]) if upstream else {}
+            results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
         if launcher_mod is not None:
             for proc in launched:
@@ -164,18 +170,21 @@ def _flat_spec(record: dict[str, Any]) -> dict[str, Any]:
 
 def _bring_up_one(
     spec: dict[str, Any], record: dict[str, Any], aliases: list[str]
-) -> tuple[str, Any, Any, list[str]]:
+) -> tuple[str, Any, Any, list[str], list[str]]:
     """Resolve one engine's URL, launching the built-in llama-server for ``--serve``.
 
-    Returns ``(llm_url, launched, launcher_module, advertised_models)``. For an external engine
-    nothing is launched (``launched``/``launcher`` are ``None``). Launch tuning (port, ctx, …) comes
-    from the record's top-level fields — only the single built-in path consumes them.
+    Returns ``(llm_url, launched, launcher_module, advertised_models, upstream_models)``. ``upstream``
+    is what the engine itself answers to: the **real** model names for an external ``--at`` engine
+    (Ollama/vLLM don't know the ``--advertise-as`` alias), but the **alias** for a built-in llama-server
+    — it is launched with ``--alias advertised``, so that alias *is* its model name. For an external
+    engine nothing is launched (``launched``/``launcher`` are ``None``). Launch tuning (port, ctx, …)
+    comes from the record's top-level fields — only the single built-in path consumes them.
     """
     models = list(spec.get("models") or [])
     advertised = _advertised_models(models, aliases)
     endpoint_url = spec.get("endpoint_url")
-    if endpoint_url:  # external engine: forward to it, launch nothing
-        return endpoint_url.rstrip("/"), None, None, advertised
+    if endpoint_url:  # external engine: forward to it (by its real model name), launch nothing
+        return endpoint_url.rstrip("/"), None, None, advertised, list(models)
     if not models:
         raise SystemExit("Provide a model to serve (--serve <model>) or point at one (--at <url> -m <model>).")
     if len(models) != 1:
@@ -205,8 +214,9 @@ def _bring_up_one(
         # Don't orphan the llama-server if it never became ready (load failure / timeout / SIGTERM).
         launcher_mod.stop(launched)
         raise
-    # The relay forwards to the engine on *this* box, so the loop reaches it on loopback.
-    return f"http://127.0.0.1:{port}/v1", launched, launcher_mod, advertised
+    # The relay forwards to the engine on *this* box, so the loop reaches it on loopback. The built-in
+    # llama-server is launched with ``--alias advertised[0]``, so it answers to the alias: upstream == advertised.
+    return f"http://127.0.0.1:{port}/v1", launched, launcher_mod, advertised, list(advertised)
 
 
 def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
@@ -223,14 +233,17 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _build_routing(
-    engine_results: list[tuple[str, list[str], dict[str, Any]]],
-) -> tuple[dict[str, str], list[str], dict[str, Any], list[str]]:
+    engine_results: list[tuple[str, list[str], list[str], dict[str, Any]]],
+) -> tuple[dict[str, str], dict[str, str], list[str], dict[str, Any], list[str]]:
     """Merge several local engines into one remote identity's routing state (DECISIONS D9).
 
-    ``engine_results`` is ``[(llm_url, models, caps_envelope), ...]`` in detect order. Returns
-    ``(routes, union_models, merged_caps, warnings)``:
+    ``engine_results`` is ``[(llm_url, advertised, upstream, caps_envelope), ...]`` in detect order —
+    ``advertised`` and ``upstream`` are parallel per-engine lists (the advertised name and the name the
+    engine itself answers to). Returns ``(routes, upstream_routes, union_models, merged_caps, warnings)``:
 
-    - ``routes`` — ``{model: llm_url}``; the **first** engine to advertise a model wins (deterministic).
+    - ``routes`` — ``{advertised_model: llm_url}``; the **first** engine to advertise a model wins.
+    - ``upstream_routes`` — ``{advertised_model: upstream_model}``; how a forwarded job's model is
+      rewritten to what the local engine expects (identity unless ``--advertise-as`` aliased it).
     - ``union_models`` — every advertised model once, in first-seen order (what the identity registers).
     - ``merged_caps`` — one ``{"schema_version": 1, "models": {...}}`` envelope, first-wins per model;
       ``{}`` when nothing probed (registers text-only, like the single-engine path).
@@ -241,12 +254,13 @@ def _build_routing(
     ``env.get("models") or {}`` and never KeyErrors the whole table on one bad engine.
     """
     routes: dict[str, str] = {}
+    upstream_routes: dict[str, str] = {}
     union_models: list[str] = []
     merged_models: dict[str, Any] = {}
     warnings: list[str] = []
-    for llm_url, models, caps in engine_results:
+    for llm_url, advertised, upstream, caps in engine_results:
         caps_models = (caps or {}).get("models") or {}
-        for model in models:
+        for model, upstream_model in zip(advertised, upstream):
             if model in routes:
                 warnings.append(
                     f"Two engines serve model {model!r}; routing it to the first ({routes[model]!r}) "
@@ -254,11 +268,12 @@ def _build_routing(
                 )
                 continue
             routes[model] = llm_url
+            upstream_routes[model] = upstream_model
             union_models.append(model)
             if model in caps_models:
                 merged_models[model] = caps_models[model]
     merged_caps = {"schema_version": 1, "models": merged_models} if merged_models else {}
-    return routes, union_models, merged_caps, warnings
+    return routes, upstream_routes, union_models, merged_caps, warnings
 
 
 def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
@@ -331,6 +346,7 @@ class _ServeState:
         pricing: dict[str, float],
         max_concurrency: int,
         routes: dict[str, str] | None = None,
+        upstream: dict[str, str] | None = None,
     ) -> None:
         self.signaling_url = signaling_url
         self.node_id = node_id
@@ -343,6 +359,9 @@ class _ServeState:
             self._routes = {model: url.rstrip("/") for model, url in routes.items()}
         else:
             self._routes = {model: self.llm_url for model in self.models}
+        # advertised model → the name the local engine answers to (``--advertise-as`` maps the
+        # consumer-facing alias back to the engine's real model name). Empty means identity.
+        self._upstream = dict(upstream or {})
         self.capabilities = dict(capabilities or {})
         self.meta = dict(meta or {})
         self.pricing = dict(pricing or {})
@@ -368,6 +387,15 @@ class _ServeState:
         distinct = set(self._routes.values())
         if len(distinct) == 1:
             return next(iter(distinct))
+        return None
+
+    def upstream_model(self, model: str | None) -> str | None:
+        """The name the local engine answers to for an advertised ``model`` (``--advertise-as`` maps the
+        consumer-facing alias back to the engine's real model name). ``None`` when unmapped — the caller
+        then forwards the body's model unchanged (single-engine fallback / built-in, where they match).
+        """
+        if model and model in self._upstream:
+            return self._upstream[model]
         return None
 
     def token(self) -> str:
@@ -504,12 +532,18 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         _try_submit_error(state, txn, f"no engine serves model {model!r}")
         return
 
+    # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
+    # only knows its real name, so rewrite the body's model before forwarding (a new dict — never
+    # mutate the job). No mapping / already-equal → forward unchanged (built-in + single-engine paths).
+    upstream_model = state.upstream_model(model)
+    forward_body = {**body, "model": upstream_model} if upstream_model and upstream_model != model else body
+
     state.enter_inference()
     try:
         if is_stream:
-            _forward_stream(state, txn, endpoint, body, read_timeout, target)
+            _forward_stream(state, txn, endpoint, forward_body, read_timeout, target)
         else:
-            _forward_whole(state, txn, endpoint, body, read_timeout, target)
+            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target)
     except Exception as exc:  # one bad job must not kill the loop
         print(f"\nJob {txn} failed: {exc!r}", file=sys.stderr)
         _try_submit_error(state, txn, str(exc))
