@@ -44,9 +44,13 @@ COMFYUI_PORT_DEFAULT = 8188
 COMFYUI_PINNED_COMMIT = "47ccecaee009cce148e8c2a5bdc2ecb302cc52ee"
 COMFYUI_GGUF_PINNED_COMMIT = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
 GGUF_PINNED_VERSION = "gguf==0.18.0"
-TORCH_PINNED = "torch==2.13.0.dev20260423"
-TORCHVISION_PINNED = "torchvision==0.27.0.dev20260423"
-TORCHAUDIO_PINNED = "torchaudio==2.11.0"
+# PyTorch nightly (CPU/MPS index below). Bumped 2026-07-02: the prior dev20260423 pins aged out of
+# the nightly index (it keeps only ~recent dates), and torchaudio==2.11.0 only exists as a nightly —
+# dev20260504 is the earliest date with matching torch/torchvision/torchaudio cp311 arm64 wheels on
+# the same 2.13.0 line as the original pin.
+TORCH_PINNED = "torch==2.13.0.dev20260504"
+TORCHVISION_PINNED = "torchvision==0.27.0.dev20260504"
+TORCHAUDIO_PINNED = "torchaudio==2.11.0.dev20260504"
 TORCH_NIGHTLY_INDEX = "https://download.pytorch.org/whl/nightly/cpu"
 MACOS_MEDIA_PACKAGE_LOCK = "comfyui_macos_package_lock.txt"
 
