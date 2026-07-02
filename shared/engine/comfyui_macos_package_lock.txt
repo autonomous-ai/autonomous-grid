@@ -91,10 +91,10 @@ spandrel==0.4.2
 starlette==0.27.0
 sympy==1.14.0
 tokenizers==0.22.2
-torch==2.13.0.dev20260423
-torchaudio==2.11.0
+torch==2.13.0.dev20260504
+torchaudio==2.11.0.dev20260504
 torchsde==0.2.6
-torchvision==0.27.0.dev20260423
+torchvision==0.27.0.dev20260504
 tqdm==4.67.3
 trampoline==0.1.2
 transformers==5.8.1

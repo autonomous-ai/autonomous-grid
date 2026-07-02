@@ -324,7 +324,7 @@ def test_media_pinned_engine_versions_and_bundles_are_ported():
     assert comfyui.COMFYUI_PINNED_COMMIT == "47ccecaee009cce148e8c2a5bdc2ecb302cc52ee"
     assert comfyui.COMFYUI_GGUF_PINNED_COMMIT == "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
     assert comfyui.GGUF_PINNED_VERSION == "gguf==0.18.0"
-    assert comfyui.TORCH_PINNED == "torch==2.13.0.dev20260423"
+    assert comfyui.TORCH_PINNED == "torch==2.13.0.dev20260504"
     assert comfyui.COMFYUI_REQUIREMENT_PINS == (
         "comfyui_frontend_package==1.42.14",
         "comfyui_workflow_templates==0.9.62",
