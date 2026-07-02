@@ -333,6 +333,24 @@ def test_media_pinned_engine_versions_and_bundles_are_ported():
     assert media_bundles.CAPABILITY_NAME["image_generation"] == "comfyui:image_generation"
 
 
+def test_create_venv_seeds_pip_into_the_uv_venv(monkeypatch, tmp_path):
+    """`uv venv` ships no pip; when uv resolves a system Python that lacks ensurepip (a 3.11 rc did
+    exactly this) grid's pip bootstrap has nothing to fall back to. `_create_venv` must pass `--seed`
+    so uv installs pip directly, independent of the base interpreter."""
+    from shared.engine import comfyui
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(comfyui.shutil, "which", lambda name: "/opt/uv" if name == "uv" else None)
+    monkeypatch.setattr(comfyui, "comfyui_venv", lambda: tmp_path / "ComfyUI" / ".venv")
+    monkeypatch.setattr(comfyui, "_run", lambda cmd, **kw: calls.append(list(cmd)))
+
+    comfyui._create_venv()
+
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert cmd[0] == "/opt/uv" and cmd[1] == "venv" and "--seed" in cmd
+
+
 def test_provider_media_server_streams_sse_events(monkeypatch):
     class FakeHandler:
         def __init__(self, comfyui_url):
