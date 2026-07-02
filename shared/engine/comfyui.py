@@ -140,7 +140,12 @@ def _create_venv() -> None:
     venv.parent.mkdir(parents=True, exist_ok=True)
     uv = shutil.which("uv")
     if uv:
-        _run([uv, "venv", "-p", "3.11", str(venv)])
+        # `--seed` installs pip into the venv. Without it, `uv venv` ships no pip, and when uv
+        # resolves a *system* Python that lacks `ensurepip` (e.g. a distro's python3.11, or a 3.11
+        # rc build), grid's pip bootstrap has nothing to fall back to and the install dies with
+        # "No module named ensurepip". `--seed` makes uv install pip directly, independent of the
+        # base interpreter, so bring-up works on any host uv can find a 3.11 on.
+        _run([uv, "venv", "--seed", "-p", "3.11", str(venv)])
     else:
         # Fall back to stdlib venv. The user has to make sure pip is bootstrapped.
         _run(["python3.11", "-m", "venv", str(venv)])
