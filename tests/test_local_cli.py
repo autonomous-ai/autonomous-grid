@@ -366,6 +366,75 @@ def test_create_venv_errors_clearly_without_uv_or_python311(monkeypatch, tmp_pat
     assert "uv" in msg and "python 3.11" in msg
 
 
+def test_create_venv_fallback_errors_when_stdlib_venv_cannot_bootstrap_pip(monkeypatch, tmp_path):
+    """No uv, python3.11 present but `-m venv` fails (stripped ensurepip) → actionable SystemExit, not
+    a raw CalledProcessError."""
+    from shared.engine import comfyui
+
+    monkeypatch.setattr(comfyui.shutil, "which",
+                        lambda name: "/usr/bin/python3.11" if name == "python3.11" else None)
+    monkeypatch.setattr(comfyui, "comfyui_venv", lambda: tmp_path / "ComfyUI" / ".venv")
+
+    def boom(cmd, **kw):
+        raise comfyui.subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(comfyui, "_run", boom)
+    with pytest.raises(SystemExit) as exc:
+        comfyui._create_venv()
+    assert "ensurepip" in str(exc.value).lower()
+
+
+def _seed_media_bringup(monkeypatch, tmp_path):
+    """Common mocks so `prepare_media_engine` reaches the ComfyUI/media-server bring-up: ComfyUI
+    'installed', one bundle gated in, its files 'present'."""
+    from shared.engine import comfyui
+    from shared.media import media_gating
+    from shared.models import media_bundles as mb
+
+    present = tmp_path / "present"
+    present.write_text("x")
+    monkeypatch.setattr(comfyui, "comfyui_dir", lambda: tmp_path)
+    monkeypatch.setattr(media_gating, "select_bundles", lambda mem, requested=None: [media_gating.GATES[0]])
+    monkeypatch.setattr(mb, "target_path", lambda spec: present)
+
+
+def test_prepare_media_engine_rejects_colliding_ports(monkeypatch, tmp_path):
+    """comfyui_port == media_port is rejected before anything is spawned."""
+    from local import media_engine
+    from shared.engine import comfyui
+
+    _seed_media_bringup(monkeypatch, tmp_path)
+    monkeypatch.setattr(comfyui, "is_running", lambda port: pytest.fail("must reject before starting ComfyUI"))
+    with pytest.raises(SystemExit) as exc:
+        media_engine.prepare_media_engine(
+            media_bundles=["image_generation"], comfyui_port=8188, media_port=8188, advertise_host=None)
+    assert "differ" in str(exc.value).lower()
+
+
+def test_prepare_media_engine_stops_comfyui_when_media_server_fails(monkeypatch, tmp_path):
+    """If the media server fails to launch after ComfyUI started, the ComfyUI we started is stopped,
+    not orphaned (the reviewers' HIGH finding)."""
+    from local import media_engine, media_runtime
+    from shared.engine import comfyui
+
+    _seed_media_bringup(monkeypatch, tmp_path)
+    monkeypatch.setattr(comfyui, "is_running", lambda port: False)
+    monkeypatch.setattr(comfyui, "start",
+                        lambda port: type("CP", (), {"proc": type("P", (), {"pid": 7})(), "log": "l"})())
+    monkeypatch.setattr(comfyui, "wait_for_ready", lambda port: None)
+    stops = {"n": 0}
+    monkeypatch.setattr(comfyui, "stop", lambda **kw: stops.__setitem__("n", stops["n"] + 1))
+
+    def media_boom(**kw):
+        raise SystemExit("media server failed to start")
+
+    monkeypatch.setattr(media_runtime, "start_media_server", media_boom)
+    with pytest.raises(SystemExit):
+        media_engine.prepare_media_engine(
+            media_bundles=["image_generation"], comfyui_port=8188, media_port=8190, advertise_host=None)
+    assert stops["n"] == 1  # the ComfyUI we started was stopped, not left orphaned
+
+
 def test_provider_media_server_streams_sse_events(monkeypatch):
     class FakeHandler:
         def __init__(self, comfyui_url):
@@ -1407,6 +1476,20 @@ def test_remote_join_media_with_serve_carries_both(monkeypatch, tmp_path):
     assert record["models"] == ["m"] and record["engines"][0]["models"] == ["m"]
 
 
+def test_remote_join_detect_requires_confirmation_for_text_plus_media(monkeypatch, tmp_path):
+    """A detected media engine counts toward the multi-engine prompt (like local): a bare join with
+    1 text + 1 media must not silently join both — non-interactive, it asks for --all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_detect", lambda host: [
+        detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
+        detect.DetectedEngine(label="comfyui", endpoint_url="http://h:8188", models=[], media=True),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join"])
+    assert "multiple engines" in str(exc.value).lower()
+
+
 def test_remote_join_rejects_advertise_host(monkeypatch, tmp_path):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
@@ -2333,6 +2416,77 @@ def test_serve_handle_job_rejects_unknown_media_endpoint(monkeypatch, tmp_path):
 
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/bogus", "body": {}})
     assert "unsupported media endpoint" in captured["error"].lower()
+
+
+def test_serve_submit_response_refreshes_and_retries_on_401(monkeypatch, tmp_path):
+    """A completed non-stream result whose token expired mid-run isn't discarded: submit refreshes
+    once and retries with the new token (mirrors poll/heartbeat)."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def submit(url, tok, txn, *, content, stream):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayUnauthorized()
+        calls["tok"] = tok
+
+    monkeypatch.setattr(relay, "submit_response", submit)
+
+    def fake_refresh(stale_token=None):
+        state._access_token = "AT2"
+        return True
+
+    monkeypatch.setattr(state, "refresh", fake_refresh)
+    serve._submit_response(state, "t1", content=b"result", stream=False)
+    assert calls["n"] == 2 and calls["tok"] == "AT2"
+
+
+def test_serve_submit_response_stream_does_not_retry_on_401(monkeypatch, tmp_path):
+    """A streamed body is single-use, so a 401 re-raises rather than replaying (handle_job then reports
+    it via _try_submit_error, which refreshes)."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda *a, **k: (_ for _ in ()).throw(relay.RelayUnauthorized()))
+    monkeypatch.setattr(state, "refresh", lambda stale_token=None: pytest.fail("stream must not refresh/retry"))
+    with pytest.raises(relay.RelayUnauthorized):
+        serve._submit_response(state, "t1", content=iter([b"x"]), stream=True)
+
+
+def test_serve_try_submit_error_refreshes_on_401(monkeypatch, tmp_path):
+    """Job-failure reporting survives token expiry — else the consumer gets no terminal signal."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    calls = {"n": 0}
+
+    def submit_err(url, tok, txn, *, message, tokens_delivered=0):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayUnauthorized()
+        calls["tok"] = tok
+
+    monkeypatch.setattr(relay, "submit_error", submit_err)
+
+    def fake_refresh(stale_token=None):
+        state._access_token = "AT2"
+        return True
+
+    monkeypatch.setattr(state, "refresh", fake_refresh)
+    serve._try_submit_error(state, "t1", "boom")
+    assert calls["n"] == 2 and calls["tok"] == "AT2"
+
+
+def test_serve_advertised_models_rejects_comfyui_alias():
+    """A text --advertise-as alias can't hijack the reserved comfyui:* media namespace."""
+    from remote import serve
+
+    with pytest.raises(SystemExit) as exc:
+        serve._advertised_models(["mymodel"], ["comfyui:image_generation"])
+    assert "comfyui" in str(exc.value).lower()
 
 
 def test_run_remote_engine_media_only_registers_comfyui_models(monkeypatch, tmp_path):

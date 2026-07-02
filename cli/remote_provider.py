@@ -147,8 +147,11 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
 
     media_detected = any(engine.media for engine in detected)
     text = [engine for engine in detected if not engine.media]
-    if len(text) > 1 and not args.all:
-        provider._print_plan(text)
+    # Gate on ALL detected engines (incl. a media/ComfyUI one) and show them in the plan, so a
+    # detected media engine is never silently joined without confirmation, nor silently dropped on
+    # decline (mirrors local `cli/provider.cmd_join`, which counts + prints the full detected list).
+    if len(detected) > 1 and not args.all:
+        provider._print_plan(detected)
         if provider._interactive():
             if not provider._confirm("Join all detected engines?"):
                 return [], False

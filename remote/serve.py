@@ -282,6 +282,10 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
     cleaned = [alias.strip() for alias in aliases]
     if any(not alias for alias in cleaned):
         raise SystemExit("--advertise-as values cannot be empty.")
+    if any(alias.startswith("comfyui:") for alias in cleaned):
+        # `comfyui:*` is the reserved media namespace; aliasing a text model into it would clobber a
+        # media capability entry at register time (matches the guard in cli/provider._advertised_text_models).
+        raise SystemExit("--advertise-as is only for text models; media models use fixed comfyui:* names.")
     if len(set(cleaned)) != len(cleaned):
         raise SystemExit("--advertise-as values must be unique.")
     return cleaned
@@ -632,11 +636,36 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
 
 
 def _try_submit_error(state: _ServeState, txn: str, message: str) -> None:
-    """Report a job failure to the relay, best-effort — a failed report is logged, never raised."""
+    """Report a job failure to the relay, best-effort. Refresh the token once on a 401 — otherwise a
+    job whose token expired mid-run gets NO terminal signal and the consumer hangs. A still-failed
+    report is logged, never raised (one bad job must not kill the loop)."""
+    for attempt in (1, 2):
+        token = state.token()
+        try:
+            relay.submit_error(state.signaling_url, token, txn, message=message)
+            return
+        except relay.RelayUnauthorized:
+            if attempt == 2 or not state.refresh(stale_token=token):
+                print(f"\nCouldn't report job {txn} failure: relay rejected the token.", file=sys.stderr)
+                return
+            # refreshed — loop retries once with the new token
+        except relay.RelayError as exc:
+            print(f"\nCouldn't report job {txn} failure to the relay: {exc}", file=sys.stderr)
+            return
+
+
+def _submit_response(state: _ServeState, txn: str, *, content: Any, stream: bool) -> None:
+    """Post a result to the relay, refreshing the token once on a 401 (mirrors poll_once/heartbeat_once
+    — without this, a completed job whose token expired mid-run is silently discarded). A streamed body
+    is a single-use iterator that can't be replayed, so a 401 there re-raises; `handle_job` then reports
+    it via `_try_submit_error` (which also refreshes), so the consumer gets a terminal signal."""
+    token = state.token()
     try:
-        relay.submit_error(state.signaling_url, state.token(), txn, message=message)
-    except (relay.RelayError, relay.RelayUnauthorized) as exc:
-        print(f"\nCouldn't report job {txn} failure to the relay: {exc}", file=sys.stderr)
+        relay.submit_response(state.signaling_url, token, txn, content=content, stream=stream)
+    except relay.RelayUnauthorized:
+        if stream or not state.refresh(stale_token=token):
+            raise
+        relay.submit_response(state.signaling_url, state.token(), txn, content=content, stream=stream)
 
 
 def _forward_whole(
@@ -650,9 +679,9 @@ def _forward_whole(
             f"{target_url}/{endpoint}", json=body, headers={"Content-Type": "application/json"}
         )
     if resp.status_code != 200:
-        _try_submit_error(state, txn, f"engine error: {resp.status_code}")
+        _try_submit_error(state, txn, f"engine error {resp.status_code}: {resp.text[:200]}")
         return
-    relay.submit_response(state.signaling_url, state.token(), txn, content=resp.content, stream=False)
+    _submit_response(state, txn, content=resp.content, stream=False)
 
 
 def _forward_stream(
@@ -667,12 +696,10 @@ def _forward_stream(
         ) as engine_resp:
             if engine_resp.status_code != 200:
                 engine_resp.read()
-                _try_submit_error(state, txn, f"engine error: {engine_resp.status_code}")
+                _try_submit_error(state, txn, f"engine error {engine_resp.status_code}: {engine_resp.text[:200]}")
                 return
             # Pass the engine's SSE bytes straight through while its stream is open.
-            relay.submit_response(
-                state.signaling_url, state.token(), txn, content=engine_resp.iter_bytes(), stream=True
-            )
+            _submit_response(state, txn, content=engine_resp.iter_bytes(), stream=True)
 
 
 # ---------------------------------------------------------------------------
