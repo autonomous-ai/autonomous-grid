@@ -71,16 +71,29 @@ def prepare_media_engine(
             "for each enabled bundle. Missing:\n  " + "\n  ".join(missing[:10])
         )
 
-    comfyui_started = False
-    if not comfyui.is_running(comfyui_port):
-        cp = comfyui.start(comfyui_port)
-        comfyui_started = True
-        print(f"Spawned ComfyUI pid={cp.proc.pid}, log={cp.log}")
-        comfyui.wait_for_ready(comfyui_port)
-        print(f"ComfyUI ready on http://localhost:{comfyui_port}")
+    if comfyui_port == media_port:
+        raise SystemExit(
+            f"--comfyui-port and --media-port must differ (both are {comfyui_port}); ComfyUI and the "
+            "provider media server cannot share a port."
+        )
 
-    comfyui_url = f"http://localhost:{comfyui_port}/api"
-    proc = media_runtime.start_media_server(port=media_port, comfyui_url=comfyui_url)
+    comfyui_started = False
+    try:
+        if not comfyui.is_running(comfyui_port):
+            cp = comfyui.start(comfyui_port)
+            comfyui_started = True
+            print(f"Spawned ComfyUI pid={cp.proc.pid}, log={cp.log}")
+            comfyui.wait_for_ready(comfyui_port)
+            print(f"ComfyUI ready on http://localhost:{comfyui_port}")
+
+        comfyui_url = f"http://localhost:{comfyui_port}/api"
+        proc = media_runtime.start_media_server(port=media_port, comfyui_url=comfyui_url)
+    except BaseException:
+        # Never orphan a ComfyUI *we* started: if readiness or the media-server launch fails after
+        # start(), stop it before propagating (mirrors _bring_up_one's launched-server cleanup).
+        if comfyui_started:
+            comfyui.stop()
+        raise
     media_url = runtime.engine_endpoint_url(None, media_port, advertise_host).removesuffix("/v1")
     print(f"Spawned engine media server pid={proc.pid}, url={media_url}")
     advertised = [gate.advertise_as for gate in gates]

@@ -158,7 +158,18 @@ def _create_venv() -> None:
             "  Install uv:  curl -LsSf https://astral.sh/uv/install.sh | sh    (then re-run)\n"
             "  or install Python 3.11 so `python3.11` is on PATH."
         )
-    _run([python311, "-m", "venv", str(venv)])
+    try:
+        _run([python311, "-m", "venv", str(venv)])
+    except subprocess.CalledProcessError as exc:
+        # stdlib `venv` fails when the interpreter's `ensurepip` is stripped (common on minimal
+        # Debian/Ubuntu images). uv sidesteps this via `uv venv --seed`, so recommend it rather than
+        # let an opaque non-zero exit surface.
+        raise SystemExit(
+            f"`python3.11 -m venv` failed (exit {exc.returncode}); this Python likely lacks pip/"
+            "ensurepip.\n"
+            "  Install uv:  curl -LsSf https://astral.sh/uv/install.sh | sh    (then re-run)\n"
+            "  or install your distro's python3.11-venv (ensurepip) package."
+        ) from exc
 
 
 def _pip_install(
