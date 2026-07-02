@@ -21,12 +21,19 @@ import httpx
 
 _PROBE_TIMEOUT = 15.0
 _PROPS_TIMEOUT = 5.0
+_SHOW_TIMEOUT = 5.0
 _BENCHMARK_TIMEOUT = 60.0
 
 
-def capabilities(llm_url: str, model: str) -> dict[str, Any]:
-    """One-call public API: live-probe ``llm_url`` for ``model`` and return the register envelope."""
-    return envelope(model, probe_llama_capabilities(llm_url, model))
+def capabilities(llm_url: str, model: str, *, advertise_as: str | None = None) -> dict[str, Any]:
+    """One-call public API: live-probe ``llm_url`` for ``model`` and return the register envelope.
+
+    ``advertise_as`` keys the envelope under the *advertised* name when the engine serves ``model``
+    under a different alias (``--advertise-as``). The relay drops caps whose model keys don't match
+    the advertised list, so an aliased external engine must probe by its real name (what the engine
+    answers to) yet register under the alias (what consumers ask for).
+    """
+    return envelope(advertise_as or model, probe_llama_capabilities(llm_url, model))
 
 
 # --- HTTP (routed through httpx.Client so tests can inject a MockTransport) ---
@@ -51,6 +58,23 @@ def _post_chat(llm_url: str, payload: dict[str, Any], *, timeout: float = _PROBE
         return resp.json()
     except ValueError:
         return None
+
+
+def _post_json(url: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any] | None:
+    """POST ``payload`` to an arbitrary URL and return the parsed JSON object, or ``None`` on any
+    transport / non-200 / non-JSON response (used for Ollama's native ``/api/show``)."""
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, json=payload)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 # --- response parsing ---
@@ -131,6 +155,30 @@ def _probe_props(llm_url: str, timeout: float = _PROPS_TIMEOUT) -> dict[str, boo
     }
 
 
+def _ollama_base(llm_url: str) -> str:
+    """Ollama's native API (``/api/...``) lives at the server root, not under ``/v1``."""
+    base = llm_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base.rstrip("/")
+
+
+def _probe_ollama_caps(llm_url: str, model: str, timeout: float = _SHOW_TIMEOUT) -> dict[str, bool]:
+    """Read Ollama's declared model capabilities from ``POST /api/show`` (``capabilities: [...]``).
+
+    Authoritative where a live forced-tool probe stays silent: Ollama serves no ``/props``, and its
+    OpenAI endpoint may ignore a forced ``tool_choice`` so a small model emits no tool call — yet
+    Ollama still *knows* the template supports tools. Best-effort: a non-Ollama engine (llama.cpp,
+    vLLM, …) 404s here and we return ``{}``, leaving the live probe + ``/props`` to decide.
+    """
+    payload = _post_json(f"{_ollama_base(llm_url)}/api/show", {"model": model}, timeout=timeout)
+    caps = (payload or {}).get("capabilities")
+    if not isinstance(caps, list):
+        return {}
+    names = {str(c).lower() for c in caps}
+    return {"vision": "vision" in names, "tools": "tools" in names}
+
+
 def _probe_models(llm_url: str, llm_model: str, timeout: float = _PROPS_TIMEOUT) -> set[str]:
     resp = _get(f"{llm_url.rstrip('/')}/models", timeout=timeout)
     if resp is None or resp.status_code != 200:
@@ -174,9 +222,11 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
     }
 
     props_caps = _probe_props(llm_url)
+    ollama_caps = _probe_ollama_caps(llm_url, llm_model)
     probed["vision"] = bool(
         (_probe_models(llm_url, llm_model) & {"image", "multimodal", "vision"})
         or props_caps.get("vision")
+        or ollama_caps.get("vision")
     )
 
     json_object_resp = _post_chat(llm_url, {
@@ -228,6 +278,7 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
     probed["tools"] = bool(
         (isinstance(tools_resp, dict) and _probe_has_tool_calls(tools_resp))
         or (props_caps.get("tools") and props_caps.get("tool_calls"))
+        or ollama_caps.get("tools")
     )
     probed["parallel_tool_calls"] = bool(probed["tools"] and props_caps.get("parallel_tool_calls"))
     return probed
