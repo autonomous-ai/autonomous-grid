@@ -351,6 +351,21 @@ def test_create_venv_seeds_pip_into_the_uv_venv(monkeypatch, tmp_path):
     assert cmd[0] == "/opt/uv" and cmd[1] == "venv" and "--seed" in cmd
 
 
+def test_create_venv_errors_clearly_without_uv_or_python311(monkeypatch, tmp_path):
+    """Neither uv nor python3.11 on PATH → an actionable SystemExit naming both, not a raw
+    FileNotFoundError from a bare `python3.11 -m venv`."""
+    from shared.engine import comfyui
+
+    monkeypatch.setattr(comfyui.shutil, "which", lambda name: None)  # no uv, no python3.11
+    monkeypatch.setattr(comfyui, "comfyui_venv", lambda: tmp_path / "ComfyUI" / ".venv")
+    monkeypatch.setattr(comfyui, "_run", lambda cmd, **kw: pytest.fail(f"must not exec anything: {cmd}"))
+
+    with pytest.raises(SystemExit) as exc:
+        comfyui._create_venv()
+    msg = str(exc.value).lower()
+    assert "uv" in msg and "python 3.11" in msg
+
+
 def test_provider_media_server_streams_sse_events(monkeypatch):
     class FakeHandler:
         def __init__(self, comfyui_url):

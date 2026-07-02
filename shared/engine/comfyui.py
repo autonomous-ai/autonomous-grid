@@ -146,9 +146,19 @@ def _create_venv() -> None:
         # "No module named ensurepip". `--seed` makes uv install pip directly, independent of the
         # base interpreter, so bring-up works on any host uv can find a 3.11 on.
         _run([uv, "venv", "--seed", "-p", "3.11", str(venv)])
-    else:
-        # Fall back to stdlib venv. The user has to make sure pip is bootstrapped.
-        _run(["python3.11", "-m", "venv", str(venv)])
+        return
+    # No uv: fall back to the stdlib venv, but only if a real python3.11 is on PATH. A bare
+    # `python3.11 -m venv` otherwise dies with an opaque FileNotFoundError — surface actionable
+    # guidance instead (uv is the recommended toolchain and auto-provisions a 3.11).
+    python311 = shutil.which("python3.11")
+    if not python311:
+        raise SystemExit(
+            "Creating the ComfyUI environment needs `uv` (recommended) or Python 3.11, but neither "
+            "is on PATH.\n"
+            "  Install uv:  curl -LsSf https://astral.sh/uv/install.sh | sh    (then re-run)\n"
+            "  or install Python 3.11 so `python3.11` is on PATH."
+        )
+    _run([python311, "-m", "venv", str(venv)])
 
 
 def _pip_install(
