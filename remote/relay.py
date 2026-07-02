@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 from typing import Any, Iterable
+from urllib.parse import quote
 
 import httpx
 
@@ -206,6 +207,78 @@ def open_consumer_client(
     context manager closes the response, not the client.
     """
     return _client(signaling_url, access_token, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Provider model pricing (one-shot, not the serve loop): set / remove / show this
+# engine's authoritative price for a model it serves, via the relay's `/relay/v1/grid/models`.
+# Unlike the serve-loop calls above (which map 401→refresh / 404→re-register so the loop
+# survives), these are one-shot CLI calls, so any failure is a clean SystemExit.
+# ---------------------------------------------------------------------------
+
+
+def _price_oneshot(signaling_url: str, access_token: str, method: str, path: str, **kwargs: Any) -> Any:
+    """One request to the relay with both failure modes as a clean SystemExit (CLI semantics)."""
+    try:
+        with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
+            resp = client.request(method, path, **kwargs)
+    except httpx.HTTPError as exc:
+        raise SystemExit(f"Cannot reach the relay ({method} {path}): {exc}") from None
+    if resp.status_code >= 400:
+        raise SystemExit(f"{method} {path} failed ({resp.status_code}): {resp.text[:400]}")
+    return resp.json() if resp.content else {}
+
+
+def set_model_price(
+    signaling_url: str,
+    access_token: str,
+    *,
+    model: str,
+    modality: str,
+    input_rate: float,
+    output_rate: float,
+    cache_rate: float,
+    name: str | None = None,
+    maker: str | None = None,
+    status: str | None = None,
+    context_length: int | None = None,
+) -> dict[str, Any]:
+    """Set this engine's authoritative price for ``model`` (``PUT /relay/v1/grid/models``). The relay
+    authorizes it only for a provider whose live node serves the model (else 403) — so the engine must be
+    joined. Rates are USD per 1,000,000 tokens.
+
+    The same endpoint also records optional model *metadata* (``name``, ``maker``, ``status``,
+    ``context_length``): each is sent only when provided, so a rates-only call stays a minimal body and
+    doesn't clobber previously-set metadata."""
+    body: dict[str, Any] = {
+        "model": model,
+        "modality": modality,
+        "input_rate": input_rate,
+        "output_rate": output_rate,
+        "cache_rate": cache_rate,
+    }
+    for key, value in (
+        ("name", name),
+        ("maker", maker),
+        ("status", status),
+        ("context_length", context_length),
+    ):
+        if value is not None:
+            body[key] = value
+    return _price_oneshot(signaling_url, access_token, "PUT", "/relay/v1/grid/models", json=body)
+
+
+def delete_model_price(signaling_url: str, access_token: str, model: str) -> dict[str, Any]:
+    """Remove this engine's price for ``model`` (``DELETE /relay/v1/grid/models/{model}``). Does not
+    require a live node — a provider can clean up its own price after leaving."""
+    return _price_oneshot(
+        signaling_url, access_token, "DELETE", f"/relay/v1/grid/models/{quote(model, safe='')}"
+    )
+
+
+def list_model_prices(signaling_url: str, access_token: str) -> dict[str, Any]:
+    """List the grid's curated models + prices (``GET /relay/v1/grid/models``)."""
+    return _price_oneshot(signaling_url, access_token, "GET", "/relay/v1/grid/models")
 
 
 def consumer_headers(

@@ -16,6 +16,7 @@ from ._constants import (
 )
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .remote_grid import cmd_remote_members
+from .remote_price import cmd_remote_price
 from .engine import (
     cmd_engine_install,
     cmd_engine_pull,
@@ -64,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_state(sub)
     _add_auth(sub)
     _add_members(sub)
+    _add_price(sub)
     _add_engine_setup(sub)
 
     return parser
@@ -145,10 +147,12 @@ def _add_engines(sub) -> None:
     # so a wrong-mode use is detectable.
     join.add_argument("--engine-label", default=None,
                       help="Remote-only: label for this engine's kind on the grid page.")
+    # Deprecated: pricing now lives in the authoritative per-provider table — set it with
+    # `grid price set` instead. Kept so old invocations don't hard-error; they no longer advertise a price.
     join.add_argument("--pricing-input", type=float, default=None,
-                      help="Remote-only: price charged per 1K input tokens.")
+                      help="Deprecated — use `grid price set`. (No longer advertises a price.)")
     join.add_argument("--pricing-output", type=float, default=None,
-                      help="Remote-only: price charged per 1K output tokens.")
+                      help="Deprecated — use `grid price set`. (No longer advertises a price.)")
     join.add_argument("--max-concurrency", type=int, default=None,
                       help="Remote-only: how many requests this engine serves at once.")
     join.set_defaults(handler=cmd_join)
@@ -309,6 +313,44 @@ def _add_members(sub) -> None:
     listing.add_argument("grid", nargs="?", default=None)
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     listing.set_defaults(handler=cmd_remote_members)
+
+
+def _add_price(sub) -> None:
+    """Remote-only `grid price set|rm|show` — this engine's authoritative model price (grid_chat_pricing).
+    Gated in local mode by dispatch (`price` is in `REMOTE_ONLY`). `--type` defaults to chat; image/video are
+    not priced yet (the handler rejects them). `--grid` selects the grid (active grid when omitted)."""
+    price = sub.add_parser("price", help="Set or remove this engine's model price (remote)")
+    price_sub = price.add_subparsers(dest="subcommand", required=True)
+
+    pset = price_sub.add_parser("set", help="Set the price for a model this engine serves")
+    pset.add_argument("-m", "--model", required=True, help="Model id (as advertised to the grid).")
+    pset.add_argument(
+        "--type",
+        choices=("chat", "image", "video"),
+        default="chat",
+        help="Model type (default chat). image/video pricing isn't supported yet.",
+    )
+    pset.add_argument("--input", type=float, required=True, help="USD per 1M input tokens.")
+    pset.add_argument("--output", type=float, required=True, help="USD per 1M output tokens.")
+    pset.add_argument("--cache", type=float, default=0.0, help="USD per 1M cached input tokens (default 0).")
+    # Optional model metadata recorded on the same relay endpoint; each is sent only when given.
+    pset.add_argument("--name", default=None, help="Display name shown on the grid page (e.g. 'Ornith 1.0 397B').")
+    pset.add_argument("--maker", default=None, help="Model maker/vendor (e.g. 'DeepReinforce AI').")
+    pset.add_argument("--status", default=None, help="Model status on the grid (e.g. 'available').")
+    pset.add_argument("--context-length", type=int, default=None, help="Max context length in tokens.")
+    pset.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    pset.set_defaults(handler=cmd_remote_price)
+
+    for verb, help_text in (("rm", "Remove your price for a model"), ("delete", "Alias for `grid price rm`")):
+        prm = price_sub.add_parser(verb, help=help_text)
+        prm.add_argument("-m", "--model", required=True, help="Model id whose price to remove.")
+        prm.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+        prm.set_defaults(handler=cmd_remote_price)
+
+    show = price_sub.add_parser("show", help="Show the grid's model prices")
+    show.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    show.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    show.set_defaults(handler=cmd_remote_price)
 
 
 def _add_engine_setup(sub) -> None:

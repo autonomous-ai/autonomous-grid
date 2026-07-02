@@ -2548,7 +2548,8 @@ def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
         "advertise_as": [],
     }
     seen = []
-    monkeypatch.setattr(probe, "capabilities", lambda url, model, *, advertise_as=None: seen.append((url, model))
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, *, advertise_as=None, context_window=None: seen.append((url, model))
                         or {"schema_version": 1, "models": {advertise_as or model: {"f": model}}})
 
     results, launched, launcher = serve._bring_up_engines(record)
@@ -2571,7 +2572,7 @@ def test_bring_up_engines_external_alias_probes_real_name_keys_alias(monkeypatch
     }
     seen = {}
 
-    def fake_caps(url, model, *, advertise_as=None):
+    def fake_caps(url, model, *, advertise_as=None, context_window=None):
         seen.update(url=url, model=model, advertise_as=advertise_as)
         return {"schema_version": 1, "models": {advertise_as or model: {"f": model}}}
 
@@ -2592,7 +2593,7 @@ def test_bring_up_engines_falls_back_to_flat_record(monkeypatch, tmp_path):
     # A record written before multi-engine has no `engines` list — synthesise one spec from flat fields.
     record = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "advertise_as": []}
     monkeypatch.setattr(probe, "capabilities",
-                        lambda url, model, *, advertise_as=None: {"schema_version": 1, "models": {advertise_as or model: {}}})
+                        lambda url, model, *, advertise_as=None, context_window=None: {"schema_version": 1, "models": {advertise_as or model: {}}})
 
     results, launched, _ = serve._bring_up_engines(record)
     assert launched == []  # external engine: nothing launched
@@ -4293,3 +4294,186 @@ def test_ctx_command_wired_to_handler():
     assert ns.handler is cmd_ctx
     assert ns.model == "some-model.gguf"
     assert ns.json is True
+
+
+# -- grid price (remote provider model pricing) ----------------------------
+
+def test_price_classified_remote_only():
+    assert "price" in dispatch.REMOTE_ONLY
+    assert not (set(dispatch.AGNOSTIC) & {"price"})
+    assert not (set(dispatch.REMOTE_HANDLERS) & {"price"})
+
+
+def test_price_parser_wires_subcommands_to_handler():
+    parser = cli.build_parser()
+    for argv in (
+        ["price", "set", "-m", "glm-5.1", "--input", "0.3", "--output", "1.0"],
+        ["price", "rm", "-m", "glm-5.1"],
+        ["price", "delete", "-m", "glm-5.1"],
+        ["price", "show"],
+    ):
+        assert parser.parse_args(argv).handler is cli.cmd_remote_price
+    a = parser.parse_args(["price", "set", "-m", "m", "--input", "0.3", "--output", "1.0", "--cache", "0.05"])
+    assert (a.type, a.input, a.output, a.cache) == ("chat", 0.3, 1.0, 0.05)
+
+
+def test_price_set_rejects_non_chat_type():
+    from cli.remote_price import cmd_remote_price
+
+    args = SimpleNamespace(subcommand="set", type="image", model="m", input=0.1, output=0.2, cache=0.0, grid=None)
+    with pytest.raises(SystemExit, match="isn't supported yet"):
+        cmd_remote_price(args)
+
+
+def test_relay_set_model_price_puts_with_bearer(monkeypatch, tmp_path):
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"model": "glm-5.1", "provider_id": "grid:n:s"})
+
+    _mock_relay(monkeypatch, handler)
+    relay.set_model_price("https://relay.example", "AT", model="glm-5.1", modality="chat",
+                          input_rate=0.3, output_rate=1.0, cache_rate=0.05)
+    assert (seen["method"], seen["path"]) == ("PUT", "/relay/v1/grid/models")
+    assert seen["auth"] == "Bearer AT"
+    assert seen["body"] == {"model": "glm-5.1", "modality": "chat",
+                            "input_rate": 0.3, "output_rate": 1.0, "cache_rate": 0.05}
+
+
+def test_relay_set_model_price_403_is_systemexit(monkeypatch, tmp_path):
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(403, text="not serving"))
+    with pytest.raises(SystemExit, match=r"\(403\)"):
+        relay.set_model_price("https://r", "AT", model="m", modality="chat",
+                              input_rate=0.1, output_rate=0.2, cache_rate=0.0)
+
+
+def test_relay_delete_model_price_encodes_model(monkeypatch, tmp_path):
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["url"] = request.method, str(request.url)
+        return httpx.Response(200, json={"deleted": True})
+
+    _mock_relay(monkeypatch, handler)
+    relay.delete_model_price("https://relay.example", "AT", "z-ai/glm-5.1")
+    assert seen["method"] == "DELETE"
+    # the model id is percent-encoded into one path segment (no traversal)
+    assert "/relay/v1/grid/models/z-ai%2Fglm-5.1" in seen["url"]
+
+
+def test_relay_set_model_price_includes_metadata_when_given(monkeypatch, tmp_path):
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"model": "deepreinforce-ai/ornith-1.0-397b"})
+
+    _mock_relay(monkeypatch, handler)
+    relay.set_model_price(
+        "https://relay.example", "AT", model="deepreinforce-ai/ornith-1.0-397b", modality="chat",
+        input_rate=0.3, output_rate=1.0, cache_rate=0.05,
+        name="Ornith 1.0 397B", maker="DeepReinforce AI", status="available", context_length=128000,
+    )
+    assert seen["body"] == {
+        "model": "deepreinforce-ai/ornith-1.0-397b", "modality": "chat",
+        "input_rate": 0.3, "output_rate": 1.0, "cache_rate": 0.05,
+        "name": "Ornith 1.0 397B", "maker": "DeepReinforce AI",
+        "status": "available", "context_length": 128000,
+    }
+
+
+def test_relay_set_model_price_omits_unset_metadata(monkeypatch, tmp_path):
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    _mock_relay(monkeypatch, handler)
+    relay.set_model_price("https://relay.example", "AT", model="m", modality="chat",
+                          input_rate=0.3, output_rate=1.0, cache_rate=0.0)
+    # a rates-only call sends only the five rate/id keys — no name/maker/status/context_length keys at all
+    assert set(seen["body"]) == {"model", "modality", "input_rate", "output_rate", "cache_rate"}
+
+
+def test_price_set_end_to_end_through_cli_main(monkeypatch, tmp_path):
+    """Full remote-mode round trip: parser -> dispatch -> cmd_remote_price -> relay PUT.
+    A signed-in user with a running grid runs `grid price set` and we capture the wire body."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"model": "glm-5.1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main([
+        "price", "set", "-m", "glm-5.1", "--input", "0.3", "--output", "1.0", "--cache", "0.05",
+        "--name", "GLM 5.1", "--maker", "Z.ai", "--status", "available", "--context-length", "200000",
+    ])
+    assert rc == 0
+    assert (seen["method"], seen["path"], seen["auth"]) == ("PUT", "/relay/v1/grid/models", "Bearer AT")
+    assert seen["body"] == {
+        "model": "glm-5.1", "modality": "chat",
+        "input_rate": 0.3, "output_rate": 1.0, "cache_rate": 0.05,
+        "name": "GLM 5.1", "maker": "Z.ai", "status": "available", "context_length": 200000,
+    }
+
+
+def test_price_set_403_maps_to_join_first_through_cli_main(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(403, text="not serving"))
+    with pytest.raises(SystemExit, match="Join it first"):
+        cli.main(["price", "set", "-m", "glm-5.1", "--input", "0.3", "--output", "1.0"])
+
+
+def test_price_is_gated_in_local_mode_through_cli_main(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit, match="remote-mode command"):
+        cli.main(["price", "show"])
+
+
+def test_capability_entry_uses_ctx_size_when_given():
+    from remote import probe
+
+    probed = {"vision": False, "tools": False, "parallel_tool_calls": False,
+              "json_object": False, "json_schema": False}
+    entry = probe.capability_entry(probed, 200000)
+    assert entry["context_window"] == 200000
+    assert entry["limits"]["max_context_tokens"] == 200000
+    # falls back to the default when unknown
+    default = probe.capability_entry(probed)
+    assert default["context_window"] == probe.DEFAULT_CONTEXT_WINDOW
+
+
+def test_capabilities_threads_ctx_size_into_envelope(monkeypatch):
+    from remote import probe
+
+    monkeypatch.setattr(probe, "probe_llama_capabilities", lambda url, model: {
+        "vision": False, "tools": False, "parallel_tool_calls": False,
+        "json_object": False, "json_schema": False})
+    env = probe.capabilities("http://h:8081/v1", "qwen3.5:0.8b", context_window=200000)
+    assert env["models"]["qwen3.5:0.8b"]["context_window"] == 200000

@@ -25,15 +25,23 @@ _SHOW_TIMEOUT = 5.0
 _BENCHMARK_TIMEOUT = 60.0
 
 
-def capabilities(llm_url: str, model: str, *, advertise_as: str | None = None) -> dict[str, Any]:
+def capabilities(
+    llm_url: str,
+    model: str,
+    *,
+    advertise_as: str | None = None,
+    context_window: int | None = None,
+) -> dict[str, Any]:
     """One-call public API: live-probe ``llm_url`` for ``model`` and return the register envelope.
 
     ``advertise_as`` keys the envelope under the *advertised* name when the engine serves ``model``
     under a different alias (``--advertise-as``). The relay drops caps whose model keys don't match
     the advertised list, so an aliased external engine must probe by its real name (what the engine
     answers to) yet register under the alias (what consumers ask for).
+
+    ``context_window`` (the engine's ``--ctx-size``) is advertised so the master can catalog it.
     """
-    return envelope(advertise_as or model, probe_llama_capabilities(llm_url, model))
+    return envelope(advertise_as or model, probe_llama_capabilities(llm_url, model), context_window)
 
 
 # --- HTTP (routed through httpx.Client so tests can inject a MockTransport) ---
@@ -284,14 +292,20 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
     return probed
 
 
-def capability_entry(probed: dict[str, bool]) -> dict[str, Any]:
-    """Render one model's capability entry (matches the desktop/relay shape)."""
+DEFAULT_CONTEXT_WINDOW = 128000
+
+
+def capability_entry(probed: dict[str, bool], context_window: int | None = None) -> dict[str, Any]:
+    """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` reflects
+    the engine's ``--ctx-size`` when known (the master reads it into the model catalog); it falls back to
+    the default when unknown."""
     input_modalities = ["text", "image"] if probed["vision"] else ["text"]
+    ctx = int(context_window) if context_window else DEFAULT_CONTEXT_WINDOW
     return {
         "endpoints": ["chat/completions", "completions"],
         "input_modalities": input_modalities,
         "output_modalities": ["text"],
-        "context_window": 128000,
+        "context_window": ctx,
         "max_output_tokens": 64000,
         "features": {
             "vision": probed["vision"],
@@ -304,7 +318,7 @@ def capability_entry(probed: dict[str, bool]) -> dict[str, Any]:
             "top_logprobs": False,
         },
         "limits": {
-            "max_context_tokens": 128000,
+            "max_context_tokens": ctx,
             "max_output_tokens": 64000,
             "max_images": 8,
             "max_image_bytes": 4_000_000,
@@ -313,9 +327,9 @@ def capability_entry(probed: dict[str, bool]) -> dict[str, Any]:
     }
 
 
-def envelope(model_name: str, probed: dict[str, bool]) -> dict[str, Any]:
+def envelope(model_name: str, probed: dict[str, bool], context_window: int | None = None) -> dict[str, Any]:
     """Wrap a probed-features dict in the ``{schema_version, models}`` envelope the relay requires."""
-    return {"schema_version": 1, "models": {model_name: capability_entry(probed)}}
+    return {"schema_version": 1, "models": {model_name: capability_entry(probed, context_window)}}
 
 
 # --- throughput benchmark ---
