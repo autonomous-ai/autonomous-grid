@@ -540,71 +540,16 @@ def _advertised_text_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _prepare_media_engine(args: SimpleNamespace) -> dict[str, Any]:
-    from local import media_runtime
-    from shared.engine import comfyui
-    from shared.models import media_bundles
-    from shared.media import media_gating
-    from shared.system import gpu as gpu_probe
-    from shared.system import host as host_probe
+    # The bring-up itself lives in `local/media_engine.py` so the remote serve loop can reuse it
+    # without a `remote → cli` back-dependency (ADR 0004 §2). This wrapper adapts the local `args`.
+    from local import media_engine
 
-    if not comfyui.comfyui_dir().exists():
-        raise SystemExit(
-            "ComfyUI is not installed. Run `grid engine install comfyui` first, then "
-            "`grid engine pull <bundle>` for each bundle you want to serve."
-        )
-
-    requested = list(args.media_bundles) if args.media_bundles else None
-    if media_gating.is_apple_silicon():
-        host_info = host_probe.gather()
-        memory_mb = [host_info.memory_total_gb * 1024]
-        memory_label = f"unified memory = {host_info.memory_total_gb:.1f} GB"
-    else:
-        gpus = gpu_probe.enumerate_gpus()
-        memory_mb = [item.memory_total_mb for item in gpus]
-        memory_label = f"VRAM = {[round(value / 1024, 1) for value in memory_mb] or 'none'} GB"
-
-    gates = media_gating.select_bundles(memory_mb, requested=requested)
-    if not gates:
-        raise SystemExit(
-            "No media bundles meet the memory threshold for this host "
-            f"(detected {memory_label}). Either skip --media or run on a larger GPU/system."
-        )
-
-    missing: list[str] = []
-    for gate in gates:
-        for spec in media_bundles.BUNDLES[gate.bundle]:
-            if not media_bundles.target_path(spec).exists():
-                missing.append(f"{gate.bundle}/{spec.hf_path}")
-    if missing:
-        raise SystemExit(
-            "ComfyUI bundles are missing files. Run `grid engine pull <bundle>` "
-            "for each enabled bundle. Missing:\n  " + "\n  ".join(missing[:10])
-        )
-
-    comfyui_started = False
-    if not comfyui.is_running(args.comfyui_port):
-        cp = comfyui.start(args.comfyui_port)
-        comfyui_started = True
-        print(f"Spawned ComfyUI pid={cp.proc.pid}, log={cp.log}")
-        comfyui.wait_for_ready(args.comfyui_port)
-        print(f"ComfyUI ready on http://localhost:{args.comfyui_port}")
-
-    comfyui_url = f"http://localhost:{args.comfyui_port}/api"
-    proc = media_runtime.start_media_server(port=args.media_port, comfyui_url=comfyui_url)
-    media_url = runtime.engine_endpoint_url(
-        None,
-        args.media_port,
-        args.advertise_host,
-    ).removesuffix("/v1")
-    print(f"Spawned engine media server pid={proc.pid}, url={media_url}")
-    advertised = [gate.advertise_as for gate in gates]
-    print(f"Media enabled: advertising {advertised}")
-    return {
-        "models": advertised,
-        "proc": proc,
-        "media_url": media_url,
-        "comfyui_started": comfyui_started,
-    }
+    return media_engine.prepare_media_engine(
+        media_bundles=list(args.media_bundles) if args.media_bundles else None,
+        comfyui_port=args.comfyui_port,
+        media_port=args.media_port,
+        advertise_host=args.advertise_host,
+    )
 
 
 def _media_capabilities(models: list[str]) -> dict[str, Any]:

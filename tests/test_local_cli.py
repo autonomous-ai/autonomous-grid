@@ -1346,12 +1346,32 @@ def test_remote_join_all_rejects_advertise_as(monkeypatch, tmp_path):
     assert "advertise-as" in str(exc.value).lower()
 
 
-def test_remote_join_rejects_media(monkeypatch, tmp_path):
+def test_remote_join_media_only_writes_media_record_and_spawns(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--media", "--bundle", "image_generation"]) == 0
+
+    records = cli.provider._read_records("n1")
+    (engine_id, record), = records.items()
+    assert record["media"] is True
+    assert record["media_bundles"] == ["image_generation"]
+    # A media-only join carries no text engine; the comfyui:* models are resolved from bundle gating
+    # at serve time, so the record's models/endpoint stay empty.
+    assert record["models"] == [] and record["endpoint_url"] is None and record["engines"] == []
+    assert record["comfyui_port"] == 8188 and record["media_port"] == 8190
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", engine_id]
+
+
+def test_remote_join_media_with_serve_carries_both(monkeypatch, tmp_path):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["join", "--media"])
-    assert "media" in str(exc.value).lower()
+
+    assert cli.main(["join", "--serve", "m", "--media"]) == 0
+
+    record = next(iter(cli.provider._read_records("n1").values()))
+    assert record["media"] is True  # media coexists with a built-in text engine under one identity
+    assert record["models"] == ["m"] and record["engines"][0]["models"] == ["m"]
 
 
 def test_remote_join_rejects_advertise_host(monkeypatch, tmp_path):
@@ -2231,15 +2251,98 @@ def test_serve_handle_job_engine_error_submits_error(monkeypatch, tmp_path):
     assert "500" in captured["error"] and "submitted" not in captured
 
 
-def test_serve_handle_job_rejects_media(monkeypatch, tmp_path):
+def test_serve_handle_job_media_without_media_url_submits_error(monkeypatch, tmp_path):
+    """A text-only identity that gets a media job (mis-routed by the relay) reports it, never crashes."""
     from remote import relay, serve
 
-    state = _serve_state(monkeypatch, tmp_path)
+    state = _serve_state(monkeypatch, tmp_path)  # no media_url → this engine serves no media
     captured = {}
     monkeypatch.setattr(relay, "submit_error", lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
 
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate", "body": {}})
     assert "media" in captured["error"].lower()
+
+
+def test_serve_handle_job_forwards_media_to_media_server(monkeypatch, tmp_path):
+    """A media identity forwards the job to its local media server and streams the SSE back — always
+    streamed (media responses are SSE), regardless of the job's is_stream flag."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, media_url="http://127.0.0.1:8190")
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, txn=txn, body=b"".join(content))  # drain the generator while open
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+    monkeypatch.setattr(relay, "submit_error", lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def media_server(request):
+        assert request.url.path == "/media/image/generate"  # forwarded to the media server, not /v1
+        assert json.loads(request.content)["prompt"] == "a cat"
+        return httpx.Response(200, content=b'data: {"type":"result"}\n\ndata: [DONE]\n\n')
+
+    _mock_serve_engine(monkeypatch, media_server)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate",
+                             "body": {"prompt": "a cat"}, "is_stream": False})
+    assert captured["stream"] is True and captured["txn"] == "t1"
+    assert b"[DONE]" in captured["body"] and "error" not in captured
+
+
+def test_serve_handle_job_rejects_unknown_media_endpoint(monkeypatch, tmp_path):
+    """The relay's endpoint_path is untrusted: a media path outside the fixed allowlist is refused even
+    on a media engine, so a traversal like `media/../` can never reach the media server (ADR 0004 §6)."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, media_url="http://127.0.0.1:8190")
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error", lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/bogus", "body": {}})
+    assert "unsupported media endpoint" in captured["error"].lower()
+
+
+def test_run_remote_engine_media_only_registers_comfyui_models(monkeypatch, tmp_path):
+    """A media-only record: bring up the media engine (no text engine), register the comfyui:* models
+    + media caps, and pass the loopback media_url to the serve state. Guards the has_text skip so the
+    empty text spec never reaches `_bring_up_engines`."""
+    import base64
+    import json as _json
+
+    from shared import run_records
+    from local import media_engine, media_runtime
+    from remote import relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "media1", {
+        "engine_id": "media1", "node_id": "ignored", "grid_id": "n1", "pid": 0,
+        "signaling_url": "https://relay.example", "endpoint_url": None, "models": [], "engines": [],
+        "media": True, "media_bundles": ["image_generation"], "comfyui_port": 8188, "media_port": 8190,
+    })
+    # A per-grid token whose JWT carries the node_id claim (register addresses the token's own node).
+    claims = base64.urlsafe_b64encode(_json.dumps({"node_id": "node-xyz"}).encode()).decode().rstrip("=")
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: (f"h.{claims}.s", "RT"))
+
+    class _Proc:
+        pid = 1234
+
+    monkeypatch.setattr(media_engine, "prepare_media_engine", lambda **kw: {
+        "models": ["comfyui:image_generation"], "proc": _Proc(), "media_url": "unused", "comfyui_started": False,
+    })
+    monkeypatch.setattr(serve, "_bring_up_engines",
+                        lambda rec: pytest.fail("media-only join must not bring up a text engine"))
+    captured = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: captured.update(node=node, **kw))
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: (captured.update(media_url=state.media_url), state.stop.set()))
+    monkeypatch.setattr(relay, "heartbeat", lambda *a, **k: "ok")
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(media_runtime, "stop_media_server", lambda proc, **k: None)
+
+    assert serve.run_remote_engine_from_record("n1", "media1") == 0
+    assert captured["node"] == "node-xyz"
+    assert captured["models"] == ["comfyui:image_generation"]
+    assert captured["capabilities"]["models"]["comfyui:image_generation"]["endpoints"] == ["media"]
+    assert captured["media_url"] == "http://127.0.0.1:8190"  # loopback forward target for the poll loop
 
 
 def test_serve_poll_once_returns_none_when_no_work(monkeypatch, tmp_path):

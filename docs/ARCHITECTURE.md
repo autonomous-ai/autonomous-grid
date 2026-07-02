@@ -197,7 +197,11 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
 4. `grid join --all` serves several local engines under **one** identity: it registers the union
    of their models and routes each polled job to the engine serving the requested `body["model"]`
    (first-detected wins on a duplicate). See [ADR 0007](adr/0007-remote-multi-engine-routing.md).
-5. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
+5. `grid join --media` also brings up ComfyUI + the media server, registers the `comfyui:*`
+   workflows the host's VRAM gates in, and forwards `media/*` jobs to the media server on loopback
+   (always streamed SSE) — media-only or alongside a text engine. See
+   [ADR 0008](adr/0008-remote-media-serve.md).
+6. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
    drains queued work, and stops anything it launched. See
    [ADR 0004](adr/0004-remote-provider-serve.md).
 

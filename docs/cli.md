@@ -217,22 +217,29 @@ join --all` serves several detected engines under **one** identity: it advertise
 models and routes each job to the engine that serves the requested model (first-detected wins when
 two engines share a model name).
 
+`grid join --media [--bundle <bundle>]...` serves this box's built-in media (ComfyUI) engine to the
+relay — media-only, or alongside a text engine (`--serve`/`--at` + `--media`). The serve loop brings
+up ComfyUI + the media server, registers the `comfyui:*` workflows the host's VRAM gates in, and the
+relay forwards `media/*` jobs to the media server on loopback; the SSE (progress + base64 result
+files) streams back exactly as in local mode.
+
 The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--engine <kind>` / `--name` / `--all`,
-  `--advertise-as`, `--endpoint-port` (alias `--llama-port`), `--comfyui-port`, and the llama
-  tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`).
-- **local-only:** `--advertise-host`, `--media-port` (a remote engine polls outbound — no inbound
+  `--advertise-as`, `--endpoint-port` (alias `--llama-port`), the llama tuning flags
+  (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`), and the media flags
+  `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
+- **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
 - **Remote-only:** `--engine-label` (the engine kind shown on the grid page), `--max-concurrency`.
 - **Deprecated:** `--pricing-input` / `--pricing-output` — kept so old invocations don't hard-error,
   but they no longer advertise a price. Set your authoritative per-model price with `grid price set`
   (see [Price](#price)) instead.
 
-A flag used in the wrong mode fails with a clear message. (`--media` serving in remote mode is a later
-slice; `--advertise-as` is single-engine only and is rejected with `--all`.) See
-[ADR 0004](./adr/0004-remote-provider-serve.md) and
-[ADR 0007](./adr/0007-remote-multi-engine-routing.md).
+A flag used in the wrong mode fails with a clear message. (`--advertise-as` is single-engine only and
+is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
+[ADR 0007](./adr/0007-remote-multi-engine-routing.md), and
+[ADR 0008](./adr/0008-remote-media-serve.md).
 
 ## Models
 
