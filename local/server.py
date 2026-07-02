@@ -34,6 +34,9 @@ class NodeUpdateRequest(BaseModel):
     capabilities: dict[str, Any] = Field(default_factory=dict)
     load: dict[str, Any] = Field(default_factory=dict)
     name: str | None = None
+    # advertised model → the name the engine answers to (`--advertise-as` maps a consumer-facing alias
+    # back to the engine's real model name). Empty means identity; only external `--at` aliases differ.
+    upstream: dict[str, str] = Field(default_factory=dict)
 
 
 class HeartbeatRequest(BaseModel):
@@ -52,6 +55,7 @@ class Node:
     capabilities: dict[str, Any] = field(default_factory=dict)
     load: dict[str, Any] = field(default_factory=dict)
     name: str | None = None
+    upstream: dict[str, str] = field(default_factory=dict)
     first_seen_at: str = field(default_factory=lambda: _utc_now_iso())
     last_heartbeat: float = field(default_factory=time.time)
 
@@ -119,6 +123,7 @@ def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
         node.capabilities = dict(req.capabilities)
         node.load = dict(req.load)
         node.name = req.name
+        node.upstream = dict(req.upstream)
         node.last_heartbeat = time.time()
         _nodes(app)[node_id] = node
         return {"status": "updated", "node": node.public_dict()}
@@ -194,6 +199,13 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     engine = _choose_engine(app, model)
     if not engine:
         return _openai_error(503, f"No active local engine for model {model!r}", "engine_unavailable")
+
+    # An external engine advertised under `--advertise-as` only knows its real model name; rewrite the
+    # body's model alias→real before forwarding. Re-serialise only when it differs — otherwise forward
+    # the original bytes untouched (no mapping / built-in / no alias, where advertised == real).
+    upstream_model = engine.upstream.get(model)
+    if upstream_model and upstream_model != model:
+        raw_body = json.dumps({**body, "model": upstream_model}).encode()
 
     url = f"{engine.endpoint_url.rstrip('/')}/{endpoint_path}"
     headers = {"content-type": request.headers.get("content-type", "application/json")}

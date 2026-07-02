@@ -421,6 +421,14 @@ def _run_engine(args: SimpleNamespace) -> int:
             print(f"llama-server is ready on :{args.endpoint_port}")
 
         advertised_models = list(text_advertised_models)
+        # Map each advertised (possibly `--advertise-as` alias) text model to the name the engine
+        # answers to, so the local proxy can rewrite the model before forwarding: the real model for
+        # an external `--at` engine, the alias itself for a built-in (llama-server is launched with
+        # `--alias`, so it *is* the alias). Media models keep their fixed `comfyui:*` names — no rewrite.
+        if args.endpoint_url:
+            upstream = dict(zip(text_advertised_models, args.models))
+        else:
+            upstream = {name: name for name in text_advertised_models}
         if args.enable_media:
             prepared = _prepare_media_engine(args)
             advertised_models.extend(prepared["models"])
@@ -437,6 +445,7 @@ def _run_engine(args: SimpleNamespace) -> int:
             "pricing": {},
             "capabilities": _media_capabilities(advertised_models) if args.enable_media else {},
             "load": {"active_tasks": 0},
+            "upstream": upstream,
         }
         _register_engine(grid_url, node_id, payload)
         registered = True

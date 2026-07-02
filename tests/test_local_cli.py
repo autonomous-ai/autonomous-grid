@@ -584,6 +584,8 @@ def test_run_engine_advertise_as_routes_alias_and_sets_llama_alias(monkeypatch, 
     assert calls["kwargs"]["alias"] == "your-model"
     assert calls["payload"]["models"] == ["your-model"]
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
+    # built-in llama-server answers to its --alias, so upstream is identity (no forward rewrite)
+    assert calls["payload"]["upstream"] == {"your-model": "your-model"}
 
 
 def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path):
@@ -599,6 +601,55 @@ def test_run_engine_endpoint_url_skips_local_llama_server(monkeypatch, tmp_path)
 
     assert cli.provider._run_engine(args) == 0
     assert calls["payload"]["endpoint_url"] == "http://192.168.1.50:8081/v1"
+
+
+def test_run_engine_external_advertise_as_maps_upstream(monkeypatch, tmp_path):
+    """External `--at` engine under `--advertise-as`: upstream maps the alias to the engine's REAL
+    model name so the local proxy can rewrite it before forwarding (mirrors the remote serve fix)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    calls = {}
+    monkeypatch.setattr(launcher, "start_llm", lambda *a, **k: pytest.fail("start_llm should not be called"))
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: calls.setdefault("payload", payload))
+    monkeypatch.setattr(cli.httpx, "delete", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    args = _engine_args(models=["qwen3:0.6b"], advertise_as=["ollama-model"],
+                        endpoint_url="http://192.168.1.9:11434/v1")
+    assert cli.provider._run_engine(args) == 0
+    assert calls["payload"]["models"] == ["ollama-model"]  # consumers see the alias
+    assert calls["payload"]["upstream"] == {"ollama-model": "qwen3:0.6b"}  # engine gets the real name
+
+
+def test_local_proxy_rewrites_alias_to_upstream_model(monkeypatch):
+    """The local grid proxy must forward the engine's REAL model name, not the advertised alias the
+    consumer used — else an external engine (Ollama/vLLM) 404s on the unknown alias (Issue 1, local)."""
+    from local import server as local_server
+
+    app = create_app(grid_id="ag-test", grid_name="test")
+    client = TestClient(app)
+    reg = client.put("/nodes/node-ext", json={
+        "role": "engine",
+        "models": ["ollama-model"],
+        "endpoint_url": "http://192.168.1.9:11434/v1",
+        "upstream": {"ollama-model": "qwen3:0.6b"},
+    })
+    assert reg.status_code == 200
+
+    seen = {}
+
+    def engine(request):
+        seen["path"] = request.url.path
+        seen["model"] = json.loads(request.content)["model"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(local_server.httpx, "AsyncClient",
+                        lambda *a, **k: real(*a, **{**k, "transport": httpx.MockTransport(engine)}))
+
+    resp = client.post("/v1/chat/completions", json={"model": "ollama-model", "messages": []})
+    assert resp.status_code == 200
+    assert seen["path"].endswith("/chat/completions")
+    assert seen["model"] == "qwen3:0.6b"  # alias rewritten to the engine's real model name
 
 
 def test_run_engine_enable_media_advertises_media_models(monkeypatch, tmp_path):
