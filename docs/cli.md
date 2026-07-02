@@ -90,7 +90,8 @@ Grid runs in one of two modes. **`local`** (the default) is everything documente
 unauthenticated in-memory grid on your local network. **`remote`** is a signed-in thin client to
 autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **remote
 grids** with the same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
-(`chat`/`image`/`edit`/`video`), and manage who may join or use them (`grid members`).
+(`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
+use them (`grid members`).
 
 ```
 grid mode                             # print the current mode
@@ -223,8 +224,10 @@ The `grid join` flag set is the union of both modes, gated by mode:
   tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`).
 - **local-only:** `--advertise-host`, `--media-port` (a remote engine polls outbound — no inbound
   endpoint to advertise).
-- **Remote-only:** `--engine-label` (the engine kind shown on the grid page), `--pricing-input` /
-  `--pricing-output` (price per 1K tokens), `--max-concurrency`.
+- **Remote-only:** `--engine-label` (the engine kind shown on the grid page), `--max-concurrency`.
+- **Deprecated:** `--pricing-input` / `--pricing-output` — kept so old invocations don't hard-error,
+  but they no longer advertise a price. Set your authoritative per-model price with `grid price set`
+  (see [Price](#price)) instead.
 
 A flag used in the wrong mode fails with a clear message. (`--media` serving in remote mode is a later
 slice; `--advertise-as` is single-engine only and is rejected with `--all`.) See
@@ -310,6 +313,31 @@ is `consumer` (use models), `provider` (serve models), or `both`. `grid members 
 member's email and roles (`--json` for the raw list). These authenticate with your account sign-in
 (not a per-grid token) and don't need the grid to be running. In `local` mode the command exits with
 guidance to switch — membership is a remote concept. See [ADR 0006](./adr/0006-remote-membership.md).
+
+## Price
+
+```
+grid price set -m <model> [--type chat] --input <usd> --output <usd> [--cache <usd>] \
+               [--name <str>] [--maker <str>] [--status <str>] [--context-length <n>] [--grid <grid>]
+grid price rm  -m <model> [--grid <grid>]            # alias: grid price delete
+grid price show [--grid <grid>] [--json]
+```
+
+**Remote-only.** Set this engine's **authoritative** price for a model it serves — the rate the relay
+uses to bill and to pick the cheapest engine (it replaces the deprecated advertise-only
+`grid join --pricing-input/--pricing-output`). Rates are **USD per 1,000,000 tokens**; `--cache`
+defaults to 0. `--type` defaults to `chat`; `image`/`video` aren't priced yet (the command rejects
+them). `[grid]`/`--grid` follows the usual selection (active grid when omitted) and the call uses the
+grid's per-grid access token.
+
+`set` can also record optional model **metadata** on the same relay endpoint — `--name` (display
+name), `--maker` (vendor), `--status` (e.g. `available`), and `--context-length` (max tokens). Each is
+sent only when given, so a rates-only `set` stays minimal and doesn't clobber metadata set earlier.
+
+`set` requires the engine to be **joined and serving the model** — the relay rejects a price for a
+model you aren't currently serving (`grid join` first). `rm` does not (you can clean up a price after
+`grid leave`). `show` lists the grid's models and prices. In `local` mode the command exits with
+guidance to switch.
 
 ## Engine Setup
 

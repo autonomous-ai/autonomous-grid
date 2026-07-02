@@ -18,9 +18,10 @@
 #   4. [MacBook]     ./test_remote_mode_e2e.sh chat      # <-- core round-trip test
 #   5. [MacBook]     ./test_remote_mode_e2e.sh env       # OpenAI-compatible env for apps
 #   6. [MacBook]     ./test_remote_mode_e2e.sh members   # membership admin (remote-only)
-#   7. [Mac Studio]  ./test_remote_mode_e2e.sh leave     # stop serving (optional)
-#   8. [MacBook]     ./test_remote_mode_e2e.sh down      # take the grid offline
-#   9. [both]        ./test_remote_mode_e2e.sh logout    # sign out
+#   7. [Mac Studio]  ./test_remote_mode_e2e.sh price     # set this engine's model price (remote-only)
+#   8. [Mac Studio]  ./test_remote_mode_e2e.sh leave     # stop serving (optional)
+#   9. [MacBook]     ./test_remote_mode_e2e.sh down      # take the grid offline
+#  10. [both]        ./test_remote_mode_e2e.sh logout    # sign out
 #
 set -uo pipefail
 
@@ -127,6 +128,20 @@ step_members(){
   bold "members after remove:"; grid members list "$GRID_NAME" || true
 }
 
+step_price(){
+  bold "[Mac Studio] set this engine's authoritative price for '$MODEL' (remote-only)"
+  preflight
+  grid use "$GRID_NAME" >/dev/null 2>&1 || true
+  echo "  rates are USD per 1,000,000 tokens; the engine must be SERVING the model (join first, else 403)."
+  echo "  signature: grid price set -m <model> --input <usd> --output <usd> [--cache <usd>]"
+  run grid price set -m "$MODEL" --input 0.3 --output 1.0 --cache 0.05 \
+      --name "$MODEL" --maker "e2e" --status available --context-length 128000 \
+    || warn "price set failed (must be serving '$MODEL' on this grid — run 'serve' first)"
+  bold "prices on '$GRID_NAME':"; grid price show || true
+  run grid price rm -m "$MODEL" || warn "price rm failed"
+  bold "prices after remove:"; grid price show || true
+}
+
 step_leave(){
   bold "[Mac Studio] stop serving the engine"
   preflight
@@ -153,8 +168,9 @@ case "${1:-}" in
   chat)    step_chat ;;
   env)     step_env ;;
   members) step_members ;;
+  price)   step_price ;;
   leave)   step_leave ;;
   down)    step_down ;;
   logout)  step_logout ;;
-  *) sed -n '2,34p' "$0"; echo; echo "usage: $0 {login|up|serve|chat|env|members|leave|down|logout}"; exit 2 ;;
+  *) sed -n '2,34p' "$0"; echo; echo "usage: $0 {login|up|serve|chat|env|members|price|leave|down|logout}"; exit 2 ;;
 esac

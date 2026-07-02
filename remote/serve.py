@@ -149,7 +149,9 @@ def _bring_up_engines(
             if proc is not None:
                 launched.append(proc)
                 launcher_mod = mod
-            caps = probe.capabilities(llm_url, upstream[0], advertise_as=advertised[0]) if upstream else {}
+            caps = probe.capabilities(
+                llm_url, upstream[0], advertise_as=advertised[0], context_window=record.get("ctx_size"),
+            ) if upstream else {}
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
         if launcher_mod is not None:
@@ -291,12 +293,10 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
-    pricing: dict[str, float] = {}
-    if record.get("pricing_input") is not None:
-        pricing["input_per_1k_tokens"] = float(record["pricing_input"])
-    if record.get("pricing_output") is not None:
-        pricing["output_per_1k_tokens"] = float(record["pricing_output"])
-    return pricing
+    # Deprecated: the engine no longer advertises a price at register time. Pricing is authoritative,
+    # per-provider, and set explicitly with `grid price set` (relay `grid_chat_pricing`). Always {} so a
+    # stale `--pricing-input/output` in an old run record can't reintroduce an advertised price.
+    return {}
 
 
 def _load_tokens(network_id: str) -> tuple[str | None, str | None]:

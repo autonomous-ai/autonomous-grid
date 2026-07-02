@@ -42,6 +42,12 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     from . import remote_grid
 
     _reject_local_only_flags(args)
+    if getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None:
+        print(
+            "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
+            "Set your model price with `grid price set` after joining.",
+            file=sys.stderr,
+        )
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 

@@ -89,7 +89,7 @@ REMOTE_HANDLERS = {
 
 # Remote-only commands: they run their real handlers in remote mode and are gated with
 # guidance in local mode — the mirror image of ``remote_stub`` for the GATED commands.
-REMOTE_ONLY = frozenset({"login", "logout", "members", "sync"})
+REMOTE_ONLY = frozenset({"login", "logout", "members", "sync", "price"})
 
 
 def local_stub(command: str | None) -> NoReturn:
