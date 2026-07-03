@@ -123,6 +123,14 @@ grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-cod
 
 Add as many computers as you like — repeat `grid join` for each MLX, vLLM, or Ollama you run.
 
+> **🌐 Remote tip:** a beefy engine can serve **several requests at once** — pass
+> `--max-concurrency N` to match its batch width (llama.cpp `--parallel`, vLLM `max_num_seqs`),
+> so the relay keeps it fed in parallel instead of one job at a time:
+> ```bash
+> grid join research --at http://localhost:8000/v1 -m qwen3-coder --max-concurrency 4
+> ```
+> See what each engine is serving at with `grid engines`. Defaults to 1 (serial).
+
 ### 5 · Use a model
 
 The same `grid chat` works in both modes — a quick smoke test, and a handy daily command:
