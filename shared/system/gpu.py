@@ -61,3 +61,19 @@ def enumerate_gpus(timeout: float = 5.0) -> list[GpuInfo]:
             continue
     return gpus
 
+
+def load_snapshot(timeout: float = 3.0) -> dict[str, float]:
+    """Lightweight GPU totals for the provider heartbeat load payload — summed/maxed across all NVIDIA
+    GPUs on this host. Returns ``{}`` when there is no GPU (nvidia-smi missing) so the caller sends no
+    VRAM. Keys: ``gpu_count``, ``memory_total_mb`` (advertised VRAM — what the grid aggregates per
+    provider), ``memory_used_mb``, ``gpu_util`` (max across cards)."""
+    gpus = enumerate_gpus(timeout=timeout)
+    if not gpus:
+        return {}
+    return {
+        "gpu_count": float(len(gpus)),
+        "memory_total_mb": sum(g.memory_total_mb for g in gpus),
+        "memory_used_mb": sum(g.memory_used_mb for g in gpus),
+        "gpu_util": max(g.utilization_pct for g in gpus),
+    }
+

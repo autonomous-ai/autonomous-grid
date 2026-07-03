@@ -497,7 +497,13 @@ class _ServeState:
 
     def load(self) -> dict[str, Any]:
         with self._lock:
-            return {"active_tasks": self._inflight}
+            load = {"active_tasks": self._inflight}
+        # VRAM/GPU load for the grid page (per-provider VRAM roll-up). Probed OUTSIDE the lock — it
+        # shells out to nvidia-smi (up to a few seconds); absent a GPU it returns {} and we send none.
+        from shared.system import gpu
+
+        load.update(gpu.load_snapshot())
+        return load
 
     def enter_inference(self) -> None:
         with self._lock:
