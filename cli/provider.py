@@ -249,6 +249,18 @@ def cmd_leave(args: argparse.Namespace) -> int:
 
 def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
     run_records.stop_engine(grid_id, engine_id, record)
+    # Reap ONLY a ComfyUI this engine itself started (`comfyui_started` persisted at bring-up) — never one
+    # shared with another media engine or started by the operator — and target its specific port so a
+    # co-resident engine's ComfyUI is untouched. Covers the case where the engine's own teardown was
+    # SIGKILLed mid-stop or the media server restarted ComfyUI in a separate session.
+    if record.get("media") and record.get("comfyui_started"):
+        from shared.engine import comfyui
+
+        port = record.get("comfyui_port", comfyui.COMFYUI_PORT_DEFAULT)
+        try:
+            comfyui.stop_running(port)
+        except OSError as exc:  # best-effort: one media engine's reap must not abort a `leave --all`
+            print(f"Reaping ComfyUI on :{port} failed (ignoring): {exc}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +447,10 @@ def _run_engine(args: SimpleNamespace) -> int:
             media_proc = prepared["proc"]
             media_url = prepared["media_url"]
             comfyui_started = bool(prepared["comfyui_started"])
+            if comfyui_started:
+                # Persist ownership so `grid leave` reaps only a ComfyUI THIS engine started — never one
+                # shared with another media engine or already running when we joined.
+                run_records.update_record(args.grid, args.name, comfyui_started=True)
 
         payload = {
             "role": "engine",
@@ -484,6 +500,11 @@ def _run_engine(args: SimpleNamespace) -> int:
 
             comfyui.stop()
             print(f"Stopped ComfyUI on :{args.comfyui_port}")
+        if not registered:
+            # An engine that exited before registering (e.g. a media engine whose ComfyUI never became
+            # ready — it slips past the 3s spawn grace, so nothing else reaps it) must not leave a stale
+            # record, or `grid leave --all` is needed just to clear the ghost.
+            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

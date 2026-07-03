@@ -90,8 +90,10 @@ def output_dir() -> Path:
     return paths.home() / "public" / "temp_comfy_output"
 
 
-def comfyui_pid_file() -> Path:
-    return paths.run_dir() / "comfyui.pid"
+def comfyui_pid_file(port: int = COMFYUI_PORT_DEFAULT) -> Path:
+    # Per-port so a box running more than one ComfyUI (distinct --comfyui-port per media engine) can be
+    # torn down without one engine's `grid leave` signaling another engine's ComfyUI.
+    return paths.run_dir() / f"comfyui_{port}.pid"
 
 
 def _is_macos() -> bool:
@@ -170,6 +172,24 @@ def _create_venv() -> None:
             "  Install uv:  curl -LsSf https://astral.sh/uv/install.sh | sh    (then re-run)\n"
             "  or install your distro's python3.11-venv (ensurepip) package."
         ) from exc
+
+
+def _ensure_c_compiler() -> None:
+    """ComfyUI's Triton backend JIT-compiles a CUDA driver module at first start, which needs a C
+    compiler (`cc`/`gcc`/`clang`) on PATH. On `nvidia/cuda:*-runtime` images none is present, so the
+    install would "succeed" and only crash at serve time with "Failed to find C compiler". Fail early
+    with actionable guidance instead. Skipped on macOS: Triton is CUDA-only there, and Xcode CLT
+    provides `cc` anyway."""
+    if _is_macos():
+        return
+    if shutil.which("cc") or shutil.which("gcc") or shutil.which("clang"):
+        return
+    raise SystemExit(
+        "ComfyUI needs a C compiler (its Triton backend JIT-compiles a CUDA module at start), but none "
+        "of `cc`/`gcc`/`clang` is on PATH.\n"
+        "  Install one:  apt-get install -y build-essential    (Debian/Ubuntu; then re-run)\n"
+        "  or install your distro's gcc/clang package so a compiler is on PATH."
+    )
 
 
 def _pip_install(
@@ -288,6 +308,9 @@ def install() -> None:
     if shutil.which("git") is None:
         raise SystemExit("git is required to install ComfyUI. Install it via your distro's package manager.")
 
+    # Fail before ~40 GB of clone/venv/torch work if the C compiler ComfyUI needs at serve time is absent.
+    _ensure_c_compiler()
+
     if not comfyui_dir().exists():
         # Full clone (no --depth 1) so we can check out the pinned commit even
         # if it's not the tip.
@@ -401,12 +424,30 @@ def start(port: int = COMFYUI_PORT_DEFAULT) -> ComfyProcess:
     return cp
 
 
-def wait_for_ready(port: int = COMFYUI_PORT_DEFAULT, timeout: float = 180.0) -> None:
-    """Block until ComfyUI answers /system_stats with 200."""
+def wait_for_ready(
+    port: int = COMFYUI_PORT_DEFAULT,
+    timeout: float = 180.0,
+    proc: subprocess.Popen | None = None,
+) -> None:
+    """Block until ComfyUI answers /system_stats with 200.
+
+    If ``proc`` is given, fail fast the instant it exits rather than polling the full timeout — a
+    ComfyUI that crashed on startup (e.g. Triton can't find a C compiler) will never answer, and waiting
+    180s for a corpse helps no one. On any failure, surface the tail of the ComfyUI log so the real
+    crash reason is visible instead of a bare "Connection refused".
+    """
+    from shared.engine import launcher  # peer helper; reuse its _log_tail rather than a third copy
+
     url = f"http://localhost:{port}/api/system_stats"
+    log_path = paths.logs_dir() / f"comfyui_{port}.log"
     deadline = time.monotonic() + timeout
     last_exc: Exception | None = None
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            raise SystemExit(
+                f"ComfyUI exited (code {proc.returncode}) before becoming ready on port {port}. "
+                f"Last log lines from {log_path}:\n{launcher._log_tail(log_path)}"
+            )
         try:
             resp = httpx.get(url, timeout=5.0)
             if resp.status_code == 200:
@@ -415,21 +456,24 @@ def wait_for_ready(port: int = COMFYUI_PORT_DEFAULT, timeout: float = 180.0) -> 
             last_exc = exc
         time.sleep(2.0)
     raise SystemExit(
-        f"ComfyUI did not become ready on port {port} within {timeout}s "
-        f"(last error: {last_exc})"
+        f"ComfyUI did not become ready on port {port} within {timeout}s (last error: {last_exc}). "
+        f"Last log lines from {log_path}:\n{launcher._log_tail(log_path)}"
     )
 
 
 def stop(*, timeout: float = 60.0) -> None:
     global _active
-    if _active is not None and _active.proc.poll() is None:
+    if _active is None:
+        return
+    port = _active.port
+    if _active.proc.poll() is None:
         _active.proc.terminate()
         try:
             _active.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _active.proc.kill()
-        _active = None
-    _remove_pid_file()
+    _active = None
+    _remove_pid_file(port)
 
 
 def is_running(port: int = COMFYUI_PORT_DEFAULT) -> bool:
@@ -450,8 +494,8 @@ def ensure_running(comfyui_url: str = "http://localhost:8188/api") -> None:
     port = _port_from_url(comfyui_url)
     if is_running(port):
         return
-    start(port)
-    wait_for_ready(port)
+    cp = start(port)
+    wait_for_ready(port, proc=cp.proc)
 
 
 def _port_from_url(url: str) -> int:
@@ -465,21 +509,21 @@ def _port_from_url(url: str) -> int:
 
 def _write_pid_file(pid: int, port: int) -> None:
     paths.run_dir().mkdir(parents=True, exist_ok=True)
-    comfyui_pid_file().write_text(f"{pid}\n{port}\n")
+    comfyui_pid_file(port).write_text(f"{pid}\n{port}\n")
 
 
-def _remove_pid_file() -> None:
+def _remove_pid_file(port: int) -> None:
     try:
-        comfyui_pid_file().unlink(missing_ok=True)
+        comfyui_pid_file(port).unlink(missing_ok=True)
     except OSError:
         pass
 
 
-def stop_running() -> int:
-    """Stop a previously-started ComfyUI process referenced by the PID file."""
-    pid_path = comfyui_pid_file()
+def stop_running(port: int = COMFYUI_PORT_DEFAULT) -> int:
+    """Stop a previously-started ComfyUI process referenced by its per-port PID file."""
+    pid_path = comfyui_pid_file(port)
     if not pid_path.exists():
-        print("No ComfyUI process tracked.")
+        print(f"No ComfyUI process tracked on port {port}.")
         return 0
     lines = pid_path.read_text().splitlines()
     if not lines:
@@ -488,6 +532,7 @@ def stop_running() -> int:
     try:
         pid = int(lines[0])
     except ValueError:
+        print(f"ComfyUI PID file for port {port} is malformed; discarding.")
         pid_path.unlink(missing_ok=True)
         return 1
     try:
@@ -495,5 +540,5 @@ def stop_running() -> int:
     except ProcessLookupError:
         pass
     pid_path.unlink(missing_ok=True)
-    print(f"Sent SIGTERM to ComfyUI pid={pid}.")
+    print(f"Sent SIGTERM to ComfyUI pid={pid} (port {port}).")
     return 0

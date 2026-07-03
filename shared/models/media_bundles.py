@@ -126,6 +126,22 @@ def target_path(spec: FileSpec) -> Path:
     return base / name
 
 
+def bundle_is_present(name: str) -> bool:
+    """True when every file of the named bundle is already downloaded to disk."""
+    if name not in BUNDLES:
+        raise SystemExit(f"Unknown media bundle: {name!r}. Known: {sorted(BUNDLES)}")
+    return all(target_path(spec).exists() for spec in BUNDLES[name])
+
+
+def present_bundles() -> list[str]:
+    """The bundles fully pulled to disk, in canonical (BUNDLES) order.
+
+    Used to default `grid join --media` (no `--bundle`) to what's actually pullable, so the happy
+    path (pull one bundle → join) works instead of hard-failing on the un-pulled bundles.
+    """
+    return [name for name in BUNDLES if bundle_is_present(name)]
+
+
 def pull_bundle(name: str, *, on_progress=None) -> list[Path]:
     """Download every file in the named bundle into the ComfyUI/models tree."""
     if name not in BUNDLES:

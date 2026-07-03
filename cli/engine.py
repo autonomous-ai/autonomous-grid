@@ -48,7 +48,7 @@ def cmd_engine_start(args: argparse.Namespace) -> int:
 
     cp = comfyui.start(args.port)
     print(f"Spawned ComfyUI pid={cp.proc.pid}, log={cp.log}")
-    comfyui.wait_for_ready(args.port)
+    comfyui.wait_for_ready(args.port, proc=cp.proc)
     print(f"ComfyUI ready on http://localhost:{args.port}")
     if args.detach:
         return 0

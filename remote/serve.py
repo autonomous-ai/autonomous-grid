@@ -70,6 +70,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     media_proc = None
     comfyui_started = False
     state = None
+    registered = False
     rc = 0
     try:
         # Bring up text engines only when the record names some — a media-only join (`grid join
@@ -100,6 +101,9 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             )
             media_proc = prepared["proc"]
             comfyui_started = bool(prepared["comfyui_started"])
+            if comfyui_started:
+                # Persist ownership so `grid leave` reaps only a ComfyUI THIS engine started.
+                run_records.update_record(grid_id, engine_id, comfyui_started=True)
             media_url = f"http://127.0.0.1:{media_port}"
             caps_models = dict((capabilities or {}).get("models") or {})
             for model in prepared["models"]:
@@ -125,6 +129,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             media_url=media_url,
         )
         register(state)
+        registered = True
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
         print("Send SIGTERM (grid leave) to unregister.")
         heartbeat = threading.Thread(target=_heartbeat_loop, args=(state,), daemon=True)
@@ -165,6 +170,13 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                 print("Stopped ComfyUI.")
             except Exception as exc:  # best-effort teardown; never mask the real exit
                 print(f"Stopping ComfyUI failed (ignoring): {exc}", file=sys.stderr)
+        if not registered:
+            # Reap the on-disk record for an engine that died before registering (e.g. a media engine
+            # whose ComfyUI never became ready), so it doesn't linger and force a `grid leave --all`.
+            try:
+                run_records.record_path(grid_id, engine_id).unlink(missing_ok=True)
+            except OSError as exc:  # best-effort teardown; never mask the real exit
+                print(f"Reaping stale record failed (ignoring): {exc}", file=sys.stderr)
     return rc
 
 

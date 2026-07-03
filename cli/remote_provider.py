@@ -284,7 +284,9 @@ def cmd_remote_leave(args: argparse.Namespace) -> int:
         names = ", ".join(sorted(records))
         raise SystemExit(f"Several engines joined ({names}); pass --engine <id> or --all.")
 
+    from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
+
     for engine_id in targets:
-        run_records.stop_engine(network_id, engine_id, records[engine_id])
+        provider._stop_engine(network_id, engine_id, records[engine_id])
         print(f"Left engine {engine_id} on {label}.")
     return 0
