@@ -5225,3 +5225,43 @@ def test_capabilities_threads_ctx_size_into_envelope(monkeypatch):
         "json_object": False, "json_schema": False})
     env = probe.capabilities("http://h:8081/v1", "qwen3.5:0.8b", context_window=200000)
     assert env["models"]["qwen3.5:0.8b"]["context_window"] == 200000
+
+
+# -- provider heartbeat VRAM (grid provider VRAM roll-up on the grid page) --
+
+def test_gpu_load_snapshot_sums_across_cards(monkeypatch):
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [
+        gpu.GpuInfo(0, "A", "550", "8.9", memory_total_mb=49152, memory_used_mb=8000, utilization_pct=10),
+        gpu.GpuInfo(1, "B", "550", "8.9", memory_total_mb=131072, memory_used_mb=1000, utilization_pct=42),
+    ])
+    snap = gpu.load_snapshot()
+    assert snap == {"gpu_count": 2.0, "memory_total_mb": 180224.0, "memory_used_mb": 9000.0, "gpu_util": 42.0}
+
+
+def test_gpu_load_snapshot_empty_without_gpu(monkeypatch):
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    assert gpu.load_snapshot() == {}   # no GPU → provider sends no VRAM
+
+
+def test_serve_load_merges_vram_with_active_tasks(monkeypatch, tmp_path):
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {
+        "gpu_count": 1.0, "memory_total_mb": 24576.0, "memory_used_mb": 2048.0, "gpu_util": 5.0})
+    state = _serve_state(monkeypatch, tmp_path)
+    state.enter_inference()  # active_tasks = 1
+    load = state.load()
+    assert load["active_tasks"] == 1
+    assert load["memory_total_mb"] == 24576.0 and load["gpu_count"] == 1.0
+
+
+def test_serve_load_omits_vram_without_gpu(monkeypatch, tmp_path):
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    load = _serve_state(monkeypatch, tmp_path).load()
+    assert load == {"active_tasks": 0}   # no VRAM keys when no GPU
