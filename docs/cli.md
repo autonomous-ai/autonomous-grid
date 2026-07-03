@@ -231,7 +231,8 @@ The `grid join` flag set is the union of both modes, gated by mode:
   `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
 - **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
-- **Remote-only:** `--engine-label` (the engine kind shown on the grid page), `--max-concurrency`.
+- **Remote-only:** `--engine-label` (the engine kind shown on the grid page), `--max-concurrency`
+  (how many requests this engine serves at once; default 1 — the provider runs one poll worker per slot).
 - **Deprecated:** `--pricing-input` / `--pricing-output` — kept so old invocations don't hard-error,
   but they no longer advertise a price. Set your authoritative per-model price with `grid price set`
   (see [Price](#price)) instead.

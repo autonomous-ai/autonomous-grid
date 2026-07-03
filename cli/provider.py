@@ -315,6 +315,7 @@ def cmd_engines(args: argparse.Namespace) -> int:
                     "engine": _engine_label(engine),
                     "where": engine.get("endpoint_url") or engine.get("media_url") or "",
                     "models": engine.get("models") or [],
+                    "max_concurrency": engine.get("max_concurrency"),
                 }
                 for engine in engines
             ],
@@ -332,8 +333,13 @@ def cmd_engines(args: argparse.Namespace) -> int:
     for engine, label in zip(engines, labels):
         where = engine.get("endpoint_url") or engine.get("media_url") or ""
         models = ",".join(engine.get("models") or []) or "(none)"
+        # max_concurrency is a remote-only advertised field — show it only when the engine reports it.
+        concurrency = engine.get("max_concurrency")
+        detail = f"models: {models}"
+        if concurrency is not None:
+            detail += f"   concurrency: {concurrency}"
         print(f"{label:<{ewidth}}  {where}")
-        print(f"{'':<{ewidth}}  models: {models}")
+        print(f"{'':<{ewidth}}  {detail}")
     return 0
 
 

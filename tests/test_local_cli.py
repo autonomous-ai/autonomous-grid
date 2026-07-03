@@ -6,6 +6,8 @@ import json
 import os
 import stat
 import subprocess
+import threading
+import time
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -1284,7 +1286,8 @@ def test_cli_accepts_engines_and_json_and_aliases():
 
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
-    {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
+    {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"],
+     "max_concurrency": 4},
 ]
 
 
@@ -1321,6 +1324,24 @@ def test_engines_json_lists_joined_engines(monkeypatch, tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert [e["engine"] for e in payload] == ["mac", "gpu"]
     assert payload[1]["models"] == ["devstral", "gemma4-31b"]
+
+
+def test_engines_shows_max_concurrency(monkeypatch, tmp_path, capsys):
+    """`grid engines` surfaces the advertised max_concurrency (remote-only): in --json always (null
+    when the engine didn't advertise it), and in the table only for engines that report it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(cli.provider, "_discover", lambda cfg: _FAKE_ENGINES)
+
+    assert cli.cmd_engines(cli.build_parser().parse_args(["engines", "home", "--json"])) == 0
+    by_name = {e["engine"]: e for e in json.loads(capsys.readouterr().out)}
+    assert by_name["gpu"]["max_concurrency"] == 4
+    assert by_name["mac"]["max_concurrency"] is None  # engine didn't advertise it
+
+    assert cli.cmd_engines(cli.build_parser().parse_args(["engines", "home"])) == 0
+    out = capsys.readouterr().out
+    assert "concurrency: 4" in out            # gpu advertised it
+    assert out.count("concurrency:") == 1     # mac (no field) omits it
 
 
 def test_info_json_uses_contract_keys(monkeypatch, tmp_path, capsys):
@@ -2547,6 +2568,153 @@ def _serve_state(monkeypatch, tmp_path, **overrides):
     )
     kwargs.update(overrides)
     return serve._ServeState(**kwargs)
+
+
+def test_serve_loop_runs_one_poll_worker_per_slot(monkeypatch, tmp_path):
+    """Each concurrency slot gets its own poll worker, so up to max_concurrency jobs run at once."""
+    from remote import serve
+
+    calls: list[str] = []
+
+    def fake_poll(state):
+        calls.append(threading.current_thread().name)
+        state.stop.set()  # release the main-thread waiter so _serve_loop returns
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=4)
+
+    serve._serve_loop(state)
+
+    assert len(calls) == 4
+
+
+def test_serve_loop_single_worker_by_default(monkeypatch, tmp_path):
+    """Default max_concurrency=1 runs exactly one poll worker — the pre-fix behavior, unchanged."""
+    from remote import serve
+
+    calls: list[str] = []
+
+    def fake_poll(state):
+        calls.append(threading.current_thread().name)
+        state.stop.set()
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=1)
+
+    serve._serve_loop(state)
+
+    assert len(calls) == 1
+
+
+def test_serve_loop_starts_heartbeat_once(monkeypatch, tmp_path):
+    """One heartbeat thread regardless of how many poll workers run."""
+    from remote import serve
+
+    heartbeats: list[str] = []
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: heartbeats.append("hb"))
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=3)
+
+    serve._serve_loop(state)
+
+    assert heartbeats == ["hb"]
+
+
+def test_serve_loop_teardown_bounded_by_drain_timeout(monkeypatch, tmp_path, capsys):
+    """Shutdown is bounded by one shared drain deadline, not summed per parked worker: workers stuck
+    in a long-poll must not serialize teardown (state.stop can't wake a blocking relay.poll)."""
+    from remote import serve
+
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 0.2)
+    parked = threading.Event()  # never set during drain → workers stay "in a long-poll"
+
+    def stuck_poll(state):
+        state.stop.set()   # trigger shutdown (release the main-thread waiter)
+        parked.wait(30)    # then block, ignoring state.stop, like a real relay.poll
+
+    monkeypatch.setattr(serve, "_poll_loop", stuck_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: parked.wait(30))
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=8)
+
+    start = time.monotonic()
+    try:
+        serve._serve_loop(state)
+        elapsed = time.monotonic() - start
+    finally:
+        parked.set()  # release the daemon workers so they don't linger across the suite
+
+    # One shared 0.2s deadline → ~0.2s total; a per-worker join would be ~8 × 0.2 = 1.6s.
+    assert elapsed < 1.0
+    # Workers still in flight at the deadline are logged, not dropped silently.
+    assert "still in flight after" in capsys.readouterr().err
+
+
+def test_serve_state_inflight_counter_is_thread_safe(monkeypatch, tmp_path):
+    """enter/exit_inference must be atomic — the N poll workers now hit the counter concurrently."""
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=8)
+
+    def hammer():
+        for _ in range(1000):
+            state.enter_inference()
+            state.exit_inference()
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert state.load() == {"active_tasks": 0}
+
+
+def test_serve_loop_worker_death_stops_engine(monkeypatch, tmp_path):
+    """A poll worker dying from an unexpected fault stops the whole engine (sets stop) instead of
+    silently vanishing and stranding the node at reduced/zero capacity."""
+    from remote import serve
+
+    def boom(state):
+        raise RuntimeError("relay handed us garbage")
+
+    monkeypatch.setattr(serve, "_poll_loop", boom)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: state.stop.wait(60))
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=3)
+
+    serve._serve_loop(state)  # returns only because a dead worker set state.stop
+
+    assert state.stop.is_set()
+
+
+def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
+    """A job that finishes within the drain budget submits its result before _serve_loop returns —
+    'drain', not 'kill on stop'."""
+    from remote import serve
+
+    submitted: list[str] = []
+
+    def fake_poll(state):
+        state.stop.set()          # shutdown begins while this 'job' is mid-flight
+        time.sleep(0.05)          # in-flight work, well within _DRAIN_TIMEOUT
+        submitted.append("done")  # result submitted before the worker returns
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=1)
+
+    serve._serve_loop(state)
+
+    assert submitted == ["done"]
+
+
+def test_relay_poll_malformed_body_raises_relay_error(monkeypatch):
+    """A 200 with a non-JSON body is a transient relay fault → RelayError (retryable by _poll_loop),
+    not a raw JSONDecodeError that would escape the loop's guards and kill the worker."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(200, content=b"<html>gateway hiccup</html>"))
+    with pytest.raises(relay.RelayError):
+        relay.poll("https://relay.example", "AT")
 
 
 def test_serve_node_id_comes_from_access_token_jwt():

@@ -18,7 +18,9 @@ import json
 import signal
 import sys
 import threading
-from typing import Any
+import time
+import traceback
+from typing import Any, Callable
 
 from remote import control_plane, credentials, probe, relay
 from shared import run_records
@@ -26,6 +28,16 @@ from shared import run_records
 
 # Engine read budget when the relay doesn't advertise one (older relay); matches its default.
 _DEFAULT_INFERENCE_TIMEOUT = 600.0
+
+# Bounded drain: total budget (shared across workers) for in-flight jobs to finish + submit on
+# shutdown before we unregister. A worker parked in a long-poll can't be woken by state.stop, so this
+# caps teardown regardless of how many workers are parked.
+_DRAIN_TIMEOUT = 5.0
+
+# Sanity ceiling on max_concurrency: each slot is a real OS thread holding a long-poll, so an absurd
+# value (a typo like 200000) would exhaust threads/sockets and crash the process. 256 is at/above any
+# realistic single-node batch width (e.g. vLLM max_num_seqs) while keeping a mistyped flag survivable.
+_MAX_CONCURRENCY = 256
 
 # The relay-supplied endpoint is interpolated into a local engine URL, so only forward known
 # endpoints — this stops a buggy or compromised relay from probing other local paths via `../`.
@@ -132,9 +144,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         registered = True
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
         print("Send SIGTERM (grid leave) to unregister.")
-        heartbeat = threading.Thread(target=_heartbeat_loop, args=(state,), daemon=True)
-        heartbeat.start()
-        _poll_loop(state)  # blocks until the loop stops or SIGTERM
+        _serve_loop(state)  # heartbeat + max_concurrency poll workers; blocks until stop/SIGTERM
     except KeyboardInterrupt:
         print("\nEngine unregistered.")
     except (Exception, SystemExit) as exc:  # detached top level: report, tear down, exit non-zero
@@ -448,7 +458,7 @@ class _ServeState:
         self.capabilities = dict(capabilities or {})
         self.meta = dict(meta or {})
         self.pricing = dict(pricing or {})
-        self.max_concurrency = max(1, int(max_concurrency))
+        self.max_concurrency = min(_MAX_CONCURRENCY, max(1, int(max_concurrency)))
         self.stop = threading.Event()
         self._lock = threading.Lock()  # guards the token + inflight count (short critical sections)
         self._refresh_lock = threading.Lock()  # serializes refreshes WITHOUT blocking token() readers
@@ -751,3 +761,65 @@ def _heartbeat_loop(state: _ServeState) -> None:
         except relay.RelayError as exc:
             print(f"\nHeartbeat error: {exc}", file=sys.stderr)
         state.stop.wait(relay.HEARTBEAT_INTERVAL)
+
+
+def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
+    """Run one serve-loop thread (``_poll_loop``/``_heartbeat_loop``); if it dies from an unexpected
+    fault, stop the whole engine loudly instead of letting the thread vanish.
+
+    A dead *job* must not kill the loop (``handle_job`` guards that), but a dead *loop* is different: a
+    background worker that silently exits would strand the node advertising capacity it no longer serves
+    (and if all die, a heartbeating zombie at zero capacity). So catch everything — including the
+    ``SystemExit`` a corrupt ``credentials.toml`` raises on refresh — log it with the thread name, and
+    set ``state.stop`` so the main waiter tears the engine down deterministically, as the pre-fix single
+    main-thread loop did when it raised.
+    """
+    try:
+        loop(state)
+    except BaseException as exc:  # a loop-level fault must fail loud, not vanish (a job fault can't reach here)
+        print(f"\n{threading.current_thread().name} stopped unexpectedly: {exc!r}", file=sys.stderr)
+        traceback.print_exc()
+        state.stop.set()
+
+
+def _serve_loop(state: _ServeState) -> None:
+    """Heartbeat + one poll worker per concurrency slot, until stop / SIGTERM.
+
+    ``max_concurrency`` independent daemon workers each long-poll the relay and forward one job, so up
+    to N are in flight while the local engine batches them (a single loop capped real throughput at 1
+    regardless of the advertised capacity). The main thread only parks on ``state.stop``: SIGTERM's
+    KeyboardInterrupt unwinds *here*, never inside a worker's ``handle_job``, so no in-flight job is
+    killed by the signal. Each loop runs under ``_supervise`` so a worker/heartbeat that dies from an
+    unexpected fault stops the engine instead of vanishing. On stop, workers are joined against one
+    shared deadline, so total teardown is bounded by ``_DRAIN_TIMEOUT`` even when every worker is parked
+    in a long-poll (``state.stop`` can't wake a blocking ``relay.poll``); a job that finishes within the
+    budget submits, and any worker still in flight when the budget expires is logged, not dropped silently.
+    """
+    heartbeat = threading.Thread(
+        target=_supervise, args=(_heartbeat_loop, state), daemon=True, name="heartbeat"
+    )
+    heartbeat.start()
+    workers = [
+        threading.Thread(
+            target=_supervise, args=(_poll_loop, state), daemon=True, name=f"poll-worker-{i + 1}"
+        )
+        for i in range(max(1, state.max_concurrency))  # state already clamps to [1, _MAX_CONCURRENCY]
+    ]
+    for worker in workers:
+        worker.start()
+    try:
+        while not state.stop.is_set():
+            state.stop.wait(60)  # park; a worker/heartbeat may set stop, or SIGTERM unwinds here
+    finally:
+        state.stop.set()
+        deadline = time.monotonic() + _DRAIN_TIMEOUT
+        for worker in workers:
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        heartbeat.join(timeout=max(0.0, deadline - time.monotonic()))
+        stragglers = [worker.name for worker in workers if worker.is_alive()]
+        if stragglers:
+            print(
+                f"\n{len(stragglers)} poll worker(s) still in flight after {_DRAIN_TIMEOUT}s drain — "
+                f"abandoning ({', '.join(stragglers)}); their consumers may see no terminal response.",
+                file=sys.stderr,
+            )

@@ -134,7 +134,10 @@ def poll(signaling_url: str, access_token: str, *, timeout: float = POLL_TIMEOUT
     if resp.status_code == 204:
         return None
     if resp.status_code == 200:
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:  # a malformed 200 body is a transient relay fault — back off, don't die
+            raise RelayError(f"poll returned a malformed body: {exc}") from None
     _guard(resp, "poll")
     raise RelayError(f"poll returned unexpected {resp.status_code}")
 

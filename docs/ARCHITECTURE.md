@@ -192,6 +192,8 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
 2. Registers with the relay (`PUT /nodes/{node_id}` via `remote/relay.py`), then loops
    **poll → forward → submit**: long-poll `GET /relay/v1/poll`, forward each claimed job to the
    local engine, and post the result back (`POST /relay/v1/response/{txn}`, or `/error/{txn}`).
+   `--max-concurrency N` runs N such poll workers under the one identity, serving N jobs at once
+   (see [ADR 0009](adr/0009-remote-provider-concurrency.md)).
 3. A heartbeat thread keeps the node live (`POST /nodes/heartbeat`); a 401 on any call refreshes
    the per-grid token (`control_plane.refresh_network_token`) and retries.
 4. `grid join --all` serves several local engines under **one** identity: it registers the union
