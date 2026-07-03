@@ -52,6 +52,15 @@ def read_record(grid_id: str, engine_id: str) -> dict[str, Any] | None:
     return read_records(grid_id).get(engine_id)
 
 
+def update_record(grid_id: str, engine_id: str, **fields: Any) -> None:
+    """Merge fields into an existing engine record; no-op if the record is already gone."""
+    record = read_records(grid_id).get(engine_id)
+    if record is None:
+        return
+    record.update(fields)
+    write_record(grid_id, engine_id, record)
+
+
 def pid_alive(pid: int) -> bool:
     if not pid:
         return False

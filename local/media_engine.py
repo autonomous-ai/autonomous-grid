@@ -43,7 +43,18 @@ def prepare_media_engine(
             "`grid engine pull <bundle>` for each bundle you want to serve."
         )
 
+    # No explicit --bundle: default to what's actually pulled, so `pull image_generation` → `join
+    # --media` just works instead of hard-failing on the un-pulled image_editing/i2v bundles. An
+    # explicit --bundle stays strict (the missing-files check below still errors if it isn't pulled).
     requested = list(media_bundles) if media_bundles else None
+    if requested is None:
+        requested = bundles_mod.present_bundles()
+        if not requested:
+            raise SystemExit(
+                "No media bundles are pulled yet. Run `grid engine pull <bundle>` "
+                "(image_generation | image_editing | i2v) before joining with --media, "
+                "or pass --bundle <name> to name one explicitly."
+            )
     if media_gating.is_apple_silicon():
         host_info = host_probe.gather()
         memory_mb = [host_info.memory_total_gb * 1024]
@@ -83,7 +94,7 @@ def prepare_media_engine(
             cp = comfyui.start(comfyui_port)
             comfyui_started = True
             print(f"Spawned ComfyUI pid={cp.proc.pid}, log={cp.log}")
-            comfyui.wait_for_ready(comfyui_port)
+            comfyui.wait_for_ready(comfyui_port, proc=cp.proc)
             print(f"ComfyUI ready on http://localhost:{comfyui_port}")
 
         comfyui_url = f"http://localhost:{comfyui_port}/api"

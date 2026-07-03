@@ -384,6 +384,81 @@ def test_create_venv_fallback_errors_when_stdlib_venv_cannot_bootstrap_pip(monke
     assert "ensurepip" in str(exc.value).lower()
 
 
+def test_ensure_c_compiler_errors_without_compiler_on_linux(monkeypatch):
+    """No cc/gcc/clang on a non-macOS host → actionable SystemExit at install time, not a Triton
+    'Failed to find C compiler' crash after ~40 GB of downloads at serve time."""
+    from shared.engine import comfyui
+
+    monkeypatch.setattr(comfyui, "_is_macos", lambda: False)
+    monkeypatch.setattr(comfyui.shutil, "which", lambda name: None)  # nothing on PATH
+    with pytest.raises(SystemExit) as exc:
+        comfyui._ensure_c_compiler()
+    msg = str(exc.value).lower()
+    assert "compiler" in msg and ("gcc" in msg or "build-essential" in msg)
+
+
+def test_ensure_c_compiler_ok_when_present(monkeypatch):
+    from shared.engine import comfyui
+
+    monkeypatch.setattr(comfyui, "_is_macos", lambda: False)
+    monkeypatch.setattr(comfyui.shutil, "which", lambda name: "/usr/bin/cc" if name == "cc" else None)
+    comfyui._ensure_c_compiler()  # must not raise
+
+
+def test_ensure_c_compiler_skips_on_macos(monkeypatch):
+    """Triton is CUDA-only; on macOS the compiler check must not fire even with nothing on PATH."""
+    from shared.engine import comfyui
+
+    monkeypatch.setattr(comfyui, "_is_macos", lambda: True)
+    monkeypatch.setattr(comfyui.shutil, "which", lambda name: None)
+    comfyui._ensure_c_compiler()  # must not raise
+
+
+def test_wait_for_ready_fails_fast_when_comfyui_exited(monkeypatch, tmp_path):
+    """A ComfyUI whose process already exited must raise immediately (not poll the full timeout) and
+    surface the log tail, not a bare connection error."""
+    from shared.engine import comfyui
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "comfyui_8188.log").write_text("Traceback ...\nRuntimeError: Failed to find C compiler.\n")
+
+    class _DeadProc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(comfyui.httpx, "get",
+                        lambda *a, **k: pytest.fail("must not poll a dead ComfyUI proc"))
+    with pytest.raises(SystemExit) as exc:
+        comfyui.wait_for_ready(port=8188, proc=_DeadProc())
+    assert "Failed to find C compiler" in str(exc.value)
+
+
+def test_wait_for_ready_surfaces_comfyui_log_on_timeout(monkeypatch, tmp_path):
+    """On timeout the error includes the ComfyUI log tail so the real crash reason is visible."""
+    from shared.engine import comfyui
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "comfyui_8188.log").write_text("some import error deep in comfy\n")
+
+    def _refuse(*a, **k):
+        raise comfyui.httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(comfyui.httpx, "get", _refuse)
+    monkeypatch.setattr(comfyui.time, "sleep", lambda s: None)
+    # deadline call, one in-loop check (enter), one check (exit) → force a fast single-pass timeout.
+    ticks = iter([0.0, 0.0, 1000.0])
+    monkeypatch.setattr(comfyui.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(SystemExit) as exc:
+        comfyui.wait_for_ready(port=8188, timeout=1.0)
+    assert "some import error deep in comfy" in str(exc.value)
+
+
 def _seed_media_bringup(monkeypatch, tmp_path):
     """Common mocks so `prepare_media_engine` reaches the ComfyUI/media-server bring-up: ComfyUI
     'installed', one bundle gated in, its files 'present'."""
@@ -396,6 +471,87 @@ def _seed_media_bringup(monkeypatch, tmp_path):
     monkeypatch.setattr(comfyui, "comfyui_dir", lambda: tmp_path)
     monkeypatch.setattr(media_gating, "select_bundles", lambda mem, requested=None: [media_gating.GATES[0]])
     monkeypatch.setattr(mb, "target_path", lambda spec: present)
+
+
+def test_present_bundles_helper(monkeypatch, tmp_path):
+    """`present_bundles()` returns only bundles whose every file is on disk, in canonical order."""
+    from shared.models import media_bundles as mb
+
+    present = tmp_path / "present"
+    present.write_text("x")
+    missing = tmp_path / "missing"
+    monkeypatch.setattr(mb, "target_path",
+                        lambda spec: present if spec in mb.IMAGE_GENERATION else missing)
+
+    assert mb.bundle_is_present("image_generation") is True
+    assert mb.bundle_is_present("image_editing") is False
+    assert mb.present_bundles() == ["image_generation"]
+
+
+def _seed_media_probe(monkeypatch):
+    """Force the NVIDIA path with one >=22 GB card so the real `select_bundles` gates a bundle in
+    (a no-GPU dev/CI box otherwise returns [] and short-circuits before the assertion)."""
+    from shared.media import media_gating
+    from shared.system import gpu as gpu_probe
+
+    monkeypatch.setattr(media_gating, "is_apple_silicon", lambda: False)
+    monkeypatch.setattr(gpu_probe, "enumerate_gpus", lambda: [SimpleNamespace(memory_total_mb=24564)])
+
+
+def test_prepare_media_engine_defaults_to_present_bundles(monkeypatch, tmp_path):
+    """`grid join --media` with no --bundle advertises only the bundle(s) actually pulled, not all 3."""
+    from local import media_engine, media_runtime, runtime
+    from shared.engine import comfyui
+    from shared.models import media_bundles as mb
+
+    monkeypatch.setattr(comfyui, "comfyui_dir", lambda: tmp_path)
+    present = tmp_path / "present"
+    present.write_text("x")
+    missing = tmp_path / "missing"
+    monkeypatch.setattr(mb, "target_path",
+                        lambda spec: present if spec in mb.IMAGE_GENERATION else missing)
+    _seed_media_probe(monkeypatch)
+    monkeypatch.setattr(comfyui, "is_running", lambda port: True)  # skip real ComfyUI start()
+    monkeypatch.setattr(media_runtime, "start_media_server", lambda **kw: SimpleNamespace(pid=7))
+    monkeypatch.setattr(runtime, "engine_endpoint_url", lambda *a, **k: "http://x/v1")
+
+    out = media_engine.prepare_media_engine(
+        media_bundles=None, comfyui_port=8188, media_port=8190, advertise_host=None)
+    assert out["models"] == ["comfyui:image_generation"]
+
+
+def test_prepare_media_engine_errors_when_no_bundle_present(monkeypatch, tmp_path):
+    """No --bundle and nothing pulled → a clear 'pull a bundle' SystemExit, not a confusing all-3 fail."""
+    from local import media_engine
+    from shared.engine import comfyui
+    from shared.models import media_bundles as mb
+
+    monkeypatch.setattr(comfyui, "comfyui_dir", lambda: tmp_path)
+    monkeypatch.setattr(mb, "target_path", lambda spec: tmp_path / "missing")  # nothing present
+    _seed_media_probe(monkeypatch)
+    monkeypatch.setattr(comfyui, "is_running", lambda port: pytest.fail("must fail before starting ComfyUI"))
+
+    with pytest.raises(SystemExit) as exc:
+        media_engine.prepare_media_engine(
+            media_bundles=None, comfyui_port=8188, media_port=8190, advertise_host=None)
+    assert "pull" in str(exc.value).lower()
+
+
+def test_prepare_media_engine_explicit_bundle_missing_still_errors(monkeypatch, tmp_path):
+    """Explicit --bundle stays strict: naming an un-pulled bundle errors with 'missing files'."""
+    from local import media_engine
+    from shared.engine import comfyui
+    from shared.models import media_bundles as mb
+
+    monkeypatch.setattr(comfyui, "comfyui_dir", lambda: tmp_path)
+    monkeypatch.setattr(mb, "target_path", lambda spec: tmp_path / "missing")
+    _seed_media_probe(monkeypatch)
+    monkeypatch.setattr(comfyui, "is_running", lambda port: pytest.fail("must fail before starting ComfyUI"))
+
+    with pytest.raises(SystemExit) as exc:
+        media_engine.prepare_media_engine(
+            media_bundles=["image_editing"], comfyui_port=8188, media_port=8190, advertise_host=None)
+    assert "missing files" in str(exc.value).lower()
 
 
 def test_prepare_media_engine_rejects_colliding_ports(monkeypatch, tmp_path):
@@ -421,7 +577,7 @@ def test_prepare_media_engine_stops_comfyui_when_media_server_fails(monkeypatch,
     monkeypatch.setattr(comfyui, "is_running", lambda port: False)
     monkeypatch.setattr(comfyui, "start",
                         lambda port: type("CP", (), {"proc": type("P", (), {"pid": 7})(), "log": "l"})())
-    monkeypatch.setattr(comfyui, "wait_for_ready", lambda port: None)
+    monkeypatch.setattr(comfyui, "wait_for_ready", lambda port, proc=None: None)
     stops = {"n": 0}
     monkeypatch.setattr(comfyui, "stop", lambda **kw: stops.__setitem__("n", stops["n"] + 1))
 
@@ -1023,6 +1179,95 @@ def test_leave_all_removes_records(monkeypatch, tmp_path):
     assert cli.provider._read_records(grid_id) == {}
 
 
+def test_leave_media_engine_stops_comfyui(monkeypatch, tmp_path):
+    """Leaving a media engine reaps the ComfyUI it OWNS, targeting that engine's port."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "media1",
+                               {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": 0,
+                                "media": True, "comfyui_started": True, "comfyui_port": 8288})
+
+    calls = []
+    monkeypatch.setattr(comfyui, "stop_running", lambda port=8188: calls.append(port) or 0)
+    args = cli.build_parser().parse_args(["leave", "home", "--engine", "media1"])
+    assert cli.cmd_leave(args) == 0
+    assert calls == [8288]  # reaped the engine's own port, not the global default
+    assert cli.provider._read_records(grid_id) == {}
+
+
+def test_leave_non_media_engine_skips_comfyui(monkeypatch, tmp_path):
+    """A text engine's leave must not touch ComfyUI."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "text1",
+                               {"engine_id": "text1", "node_id": "n", "grid_id": grid_id, "pid": 0, "media": False})
+
+    monkeypatch.setattr(comfyui, "stop_running",
+                        lambda *a, **k: pytest.fail("must not reap ComfyUI for a text engine"))
+    args = cli.build_parser().parse_args(["leave", "home", "--engine", "text1"])
+    assert cli.cmd_leave(args) == 0
+
+
+def test_leave_media_engine_without_ownership_skips_comfyui(monkeypatch, tmp_path):
+    """A media engine that did NOT start ComfyUI (reused a shared/pre-existing one) must not reap it —
+    else leaving one media join kills another engine's still-serving ComfyUI."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "shared1",
+                               {"engine_id": "shared1", "node_id": "n", "grid_id": grid_id, "pid": 0,
+                                "media": True, "comfyui_started": False, "comfyui_port": 8188})
+
+    monkeypatch.setattr(comfyui, "stop_running",
+                        lambda *a, **k: pytest.fail("must not reap a ComfyUI this engine didn't start"))
+    args = cli.build_parser().parse_args(["leave", "home", "--engine", "shared1"])
+    assert cli.cmd_leave(args) == 0
+    assert cli.provider._read_records(grid_id) == {}
+
+
+def test_run_engine_reaps_record_when_never_registered(monkeypatch, tmp_path):
+    """A media engine that dies before registering (ComfyUI never ready) must reap its own record,
+    not leave a ghost that needs `grid leave --all` to clear."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "media1",
+                               {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": 123, "media": True})
+
+    def boom(_args):
+        raise SystemExit("ComfyUI did not become ready")
+
+    monkeypatch.setattr(cli.provider, "_prepare_media_engine", boom)
+    args = _engine_args(grid=grid_id, name="media1", enable_media=True)
+    with pytest.raises(SystemExit):
+        cli.provider._run_engine(args)
+    assert cli.provider._read_records(grid_id) == {}
+
+
+def test_run_engine_persists_comfyui_ownership(monkeypatch, tmp_path):
+    """When the engine starts ComfyUI, `comfyui_started` is written to the record so a later
+    `grid leave` reaps only a ComfyUI this engine owns."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "media1",
+                               {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": 1, "media": True})
+
+    monkeypatch.setattr(cli.provider, "_prepare_media_engine", lambda args: {
+        "models": ["comfyui:image_generation"], "proc": None,
+        "media_url": "http://x:8190", "comfyui_started": True,
+    })
+    monkeypatch.setattr(cli.provider, "_register_engine", lambda url, node_id, payload: None)
+    monkeypatch.setattr(cli.httpx, "delete", lambda *a, **k: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    args = _engine_args(grid=grid_id, name="media1", enable_media=True)
+    assert cli.provider._run_engine(args) == 0
+    assert cli.provider._read_records(grid_id)["media1"]["comfyui_started"] is True
+
+
 def test_cli_accepts_engines_and_json_and_aliases():
     parser = cli.build_parser()
 
@@ -1556,6 +1801,23 @@ def test_remote_leave_stops_and_removes_record(monkeypatch, tmp_path, capsys):
     assert cli.main(["leave", "--engine", "rig"]) == 0
     assert cli.provider._read_records("n1") == {}
     assert "Left engine rig" in capsys.readouterr().out
+
+
+def test_remote_leave_media_engine_stops_comfyui(monkeypatch, tmp_path, capsys):
+    """Remote `grid leave` on a media engine reaps ComfyUI too (same shared teardown as local)."""
+    from shared import run_records
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+    run_records.write_record("n1", "rig",
+                             {"engine_id": "rig", "node_id": "node-x", "grid_id": "n1", "pid": 0,
+                              "media": True, "comfyui_started": True, "comfyui_port": 8188})
+
+    calls = []
+    monkeypatch.setattr(comfyui, "stop_running", lambda port=8188: calls.append(port) or 0)
+    assert cli.main(["leave", "--engine", "rig"]) == 0
+    assert calls == [8188]
+    assert cli.provider._read_records("n1") == {}
 
 
 def test_dispatch_runs_agnostic_command_in_remote(monkeypatch, tmp_path, capsys):
@@ -2530,6 +2792,34 @@ def test_run_remote_engine_media_only_registers_comfyui_models(monkeypatch, tmp_
     assert captured["models"] == ["comfyui:image_generation"]
     assert captured["capabilities"]["models"]["comfyui:image_generation"]["endpoints"] == ["media"]
     assert captured["media_url"] == "http://127.0.0.1:8190"  # loopback forward target for the poll loop
+
+
+def test_run_remote_engine_reaps_record_when_never_registered(monkeypatch, tmp_path):
+    """A remote media engine that dies before registering (ComfyUI never ready) must not leave a
+    stale on-disk record behind."""
+    import base64
+    import json as _json
+
+    from shared import run_records
+    from local import media_engine
+    from remote import serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "media1", {
+        "engine_id": "media1", "node_id": "ignored", "grid_id": "n1", "pid": 0,
+        "signaling_url": "https://relay.example", "endpoint_url": None, "models": [], "engines": [],
+        "media": True, "media_bundles": ["image_generation"], "comfyui_port": 8188, "media_port": 8190,
+    })
+    claims = base64.urlsafe_b64encode(_json.dumps({"node_id": "node-xyz"}).encode()).decode().rstrip("=")
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: (f"h.{claims}.s", "RT"))
+
+    def boom(**kw):
+        raise SystemExit("ComfyUI did not become ready")
+
+    monkeypatch.setattr(media_engine, "prepare_media_engine", boom)
+
+    assert serve.run_remote_engine_from_record("n1", "media1") == 1  # detached top level reports failure
+    assert run_records.read_records("n1") == {}  # record reaped, not left stale
 
 
 def test_serve_poll_once_returns_none_when_no_work(monkeypatch, tmp_path):
