@@ -48,13 +48,16 @@ printed. Vocabulary: `engine` / `grid` / `model` on the surface — `node_id` is
    `None` and the job is failed with "no engine serves model …", never silently mis-routed.
 
 3. **One heartbeat, aggregate load, merged capabilities.** The identity has one `node_id`, one
-   heartbeat thread, and `load = {"active_tasks": <aggregate inflight>}` across the single poll loop.
+   heartbeat thread, and `load = {"active_tasks": <aggregate inflight>}` across its poll worker(s).
    Capabilities are probed **once per engine** (its first model, as the single-engine path did) into a
    one-key envelope, then merged first-wins into one `{schema_version:1, models:{…}}`; sibling models
    on a multi-model engine stay capability-less exactly as before — we do **not** fabricate entries for
    them. A failed probe degrades to `{}` and is tolerated by the merge (registers text-only). Known
    limitation: `max_concurrency` is a single aggregate value advertised for the identity, not tracked
    per engine — acceptable for this slice; revisit if per-engine batch widths diverge materially.
+   **Update (ADR 0009):** that aggregate is now actually enforced — the serve loop runs one poll worker
+   per slot, so the provider serves `max_concurrency` jobs concurrently and `<aggregate inflight>`
+   genuinely ranges 0..N instead of being capped at 1 by a single synchronous loop.
 
 4. **Multi-engine is external-only; the built-in launch stays single-engine.** `--all` only gathers
    already-running engines (each has an `endpoint_url`), so nothing is launched for a multi-engine
