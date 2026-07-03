@@ -52,6 +52,19 @@ def read_record(grid_id: str, engine_id: str) -> dict[str, Any] | None:
     return read_records(grid_id).get(engine_id)
 
 
+def media_signature(record: dict[str, Any]) -> tuple[bool, tuple[str, ...], int, int]:
+    """A comparable fingerprint of an identity's media config (on/off, bundles, ports). A SIGHUP
+    hot-reload can't bring media up/down or swap bundles, so ``grid join``/``leave`` (CLI) and the serve
+    loop's reload both compare this to choose hot-reload vs respawn — ONE definition so the two decisions
+    can never desync (ADR 0009 C3)."""
+    return (
+        bool(record.get("media")),
+        tuple(sorted(record.get("media_bundles") or [])),
+        int(record.get("comfyui_port") or 8188),
+        int(record.get("media_port") or 8190),
+    )
+
+
 def pid_alive(pid: int) -> bool:
     if not pid:
         return False

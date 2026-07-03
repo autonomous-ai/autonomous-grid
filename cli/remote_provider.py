@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -105,7 +106,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             args, network_id, engine_id, signaling_url, merged_specs,
             media=media, meta_name=meta_name, bundles=bundles,
         )
-        _respawn_identity(network_id, record, live)  # stops prior process(es) then respawns; aborts on failure
+        # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place. Fall back to
+        # stop-respawn for a first join, a legacy/pre-handler process, a launch, or a media change.
+        reloaded = _hot_reloadable(live, merged_specs, record)
+        if reloaded:
+            reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
+        else:
+            _respawn_identity(network_id, record, live)  # stops prior process(es) then respawns; aborts on failure
 
     appended = bool(live)
     verb = "Appended to" if appended else "Joining"
@@ -119,8 +126,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
         print("media=on (serving comfyui:* workflows via the relay)")
     print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
-    # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
-    print(f"(starting — stop with `grid leave {label}`)")
+    if reloaded:  # the live process re-advertised in place — nothing restarted, nothing dropped
+        print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {label}`)")
+    else:
+        # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
+        print(f"(starting — stop with `grid leave {label}`)")
     return 0
 
 
@@ -208,12 +218,75 @@ def _reject_unserveable_union(
             "The built-in engine (`--serve`) serves a single model and can't join a multi-engine "
             "identity. Run `grid leave`, then re-join every engine as external `--at <url> -m <model>`."
         )
+    # --advertise-as aliases don't merge across joins (the record's `advertise_as` is a flat, positionally
+    # keyed list), so appending onto — or with — an alias would drop an alias or mismatch the alias/model
+    # counts (which crashes the reload's _advertised_models). Reject any changing append touching aliases;
+    # the no-op case already returned earlier, so `live` here means a real change (ADR 0009).
     aliased = bool(getattr(args, "advertise_as", []) or []) or any(rec.get("advertise_as") for rec in live)
-    if len(merged_specs) > 1 and aliased:
+    if aliased and (len(merged_specs) > 1 or live):
         raise SystemExit(
-            "--advertise-as aliases a single engine; this identity would serve several. Run `grid leave`, "
-            "then re-join every engine without --advertise-as."
+            "--advertise-as aliases are single-engine and don't merge across joins. Run `grid leave`, "
+            "then re-join every engine in one command with its -m/--advertise-as pairs."
         )
+
+
+def _media_key(record: dict[str, object]) -> tuple[bool, tuple[str, ...], int, int]:
+    """See ``shared.run_records.media_signature`` — one shared definition so this hot-reload-vs-respawn
+    decision and the serve loop's reload guard can't desync (ADR 0009 C3)."""
+    return run_records.media_signature(record)
+
+
+def _hot_reloadable(
+    live: list[dict[str, object]], merged_specs: list[dict[str, object]], record: dict[str, object]
+) -> bool:
+    """Whether this update can be SIGHUP-hot-reloaded into the live singleton (zero-drop) instead of a
+    stop-respawn. True only when the SOLE live process is the singleton, it was started by a build that
+    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, and the
+    media config is unchanged. Everything else — a first join, a legacy/pre-handler sibling, a built-in
+    ``--serve`` launch, or any media/bundle change — still respawns (ADR 0009 D3 / C1 / C3).
+    """
+    if len(live) != 1:
+        return False
+    singleton = live[0]
+    if singleton.get("engine_id") != _REMOTE_IDENTITY:
+        return False
+    if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
+        return False
+    if any(not spec.get("endpoint_url") for spec in merged_specs):  # a built-in --serve needs a launch
+        return False
+    return _media_key(record) == _media_key(singleton)  # a media/bundle change needs a bring-up (C3)
+
+
+def _signal_reload(pid: int) -> None:
+    """SIGHUP the live singleton so it hot-reloads the merged record in place — no restart, no dropped
+    in-flight requests (ADR 0009 D3)."""
+    os.kill(pid, signal.SIGHUP)
+
+
+def _hot_reload_identity(
+    network_id: str, record: dict[str, object], live: list[dict[str, object]]
+) -> bool:
+    """Write the merged record then SIGHUP the live singleton so it re-advertises the union in place. The
+    process keeps its pid; write BEFORE signalling so the reload reads the new record (ADR 0009 D3).
+
+    Returns ``True`` if it hot-reloaded in place, ``False`` if it had to fall back to a respawn — so the
+    caller reports honestly instead of claiming zero-drop. The fallback fires when the singleton vanished
+    between the liveness check and the signal (``os.kill`` raises ``ProcessLookupError``); the residual
+    PID-reuse TOCTOU (same window, pid recycled to an unrelated process) is shared with
+    ``run_records.terminate_pid`` and not fully fixable without pidfd.
+    """
+    pid = int(live[0].get("pid") or 0)
+    if pid <= 0:  # defensive: a live singleton always has a real pid, and os.kill(0) hits our own group
+        _respawn_identity(network_id, record, live)
+        return False
+    record["pid"] = pid
+    run_records.write_record(network_id, _REMOTE_IDENTITY, record)
+    try:
+        _signal_reload(pid)
+        return True
+    except ProcessLookupError:  # the process died between the liveness check and the signal — respawn
+        _respawn_identity(network_id, record, [])
+        return False
 
 
 def _respawn_identity(
@@ -352,6 +425,9 @@ def _build_record(
 
     return {
         "engine_id": engine_id,
+        # Written by a build whose serve loop installs the SIGHUP reload handler, so a later `grid
+        # join`/`leave` can hot-reload this identity in place instead of stop-respawning it (ADR 0009 C1).
+        "reload_signal": "sighup",
         "node_id": f"node-{uuid.uuid4().hex[:12]}",
         "grid_id": network_id,  # the remote network_id doubles as the run record's grid_id
         "meta_name": meta_name,  # grid-page display name (--name, or hostname); NOT the record key
@@ -447,7 +523,10 @@ def _leave_one_engine(
     union = _engine_union(survivors)
     to_drop = _drop_spec(union, args.engine, label)
     if not to_drop:
-        raise SystemExit(f"No engine {args.engine!r} serving on {label}. Run `grid engines {label}` to list them.")
+        raise SystemExit(
+            f"No engine {args.engine!r} on {label} (match by endpoint URL, a served model, or a URL "
+            f"fragment). Engines: {_engines_summary(union)}."
+        )
     drop_ids = {id(spec) for spec in to_drop}  # filter by identity — value-equal specs must not both drop
     remaining = [spec for spec in union if id(spec) not in drop_ids]
     media = any(bool(rec.get("media")) for rec in survivors)
@@ -463,25 +542,55 @@ def _leave_one_engine(
     # a job for the just-dropped model now forwards to the survivor instead of erroring; existing semantics.)
     record = dict(next(iter(survivors)))
     record["engine_id"] = _REMOTE_IDENTITY
+    record["reload_signal"] = "sighup"  # stamp it so a pre-handler identity self-heals on leave (like join)
     record["engines"] = remaining
     record["models"] = list(dict.fromkeys(m for spec in remaining for m in spec.get("models") or []))
     record["endpoint_url"] = remaining[0]["endpoint_url"] if len(remaining) == 1 else None
     record["media"] = media  # recompute from the survivors, don't inherit the arbitrary template's flag
     record["media_bundles"] = list(dict.fromkeys(b for rec in survivors for b in (rec.get("media_bundles") or [])))
-    _respawn_identity(network_id, record, survivors)  # aborts on a stuck prior / raises on a dead respawn
+    if _hot_reloadable(survivors, remaining, record):
+        _hot_reload_identity(network_id, record, survivors)  # SIGHUP the survivor — zero-drop shrink
+    else:
+        _respawn_identity(network_id, record, survivors)  # aborts on a stuck prior / raises on a dead respawn
     print(f"Dropped {args.engine!r} from {label}; re-serving {len(remaining)} engine(s).")
     return 0
+
+
+def _engines_summary(union: list[dict[str, object]]) -> str:
+    """A short human list of an identity's engines for a leave error / ambiguity message."""
+    parts = []
+    for spec in union:
+        url = spec.get("endpoint_url") or "(built-in)"
+        models = ",".join(spec.get("models") or [])
+        parts.append(f"{url} [{models}]" if models else str(url))
+    return "; ".join(parts)
 
 
 def _drop_spec(
     union: list[dict[str, object]], selector: str, label: str
 ) -> list[dict[str, object]]:
-    """The spec(s) to remove for ``selector``: an exact ``endpoint_url`` match (unique in the union), else
-    a ``engine_label`` match — ambiguous when a label is shared, so require the URL then."""
+    """The spec(s) to remove for ``selector``, tried in order: exact ``endpoint_url``, exact
+    ``engine_label``, a served model, then a URL substring (host/port). Each non-URL match must resolve to
+    ONE engine or it errors and lists the engines — so `grid leave --engine mistral` (by model) or
+    `grid leave --engine :8000` (by port) work, not just the full URL."""
+
+    def unique(matches: list[dict[str, object]], how: str) -> list[dict[str, object]]:
+        if len(matches) > 1:
+            raise SystemExit(
+                f"{how} {selector!r} matches several engines on {label}; pass the exact endpoint URL "
+                f"instead. Engines: {_engines_summary(union)}."
+            )
+        return matches
+
     by_url = [spec for spec in union if spec.get("endpoint_url") == selector]
     if by_url:
         return by_url
-    by_label = [spec for spec in union if spec.get("engine_label") == selector]
-    if len(by_label) > 1:
-        raise SystemExit(f"Several engines are labelled {selector!r} on {label}; pass the endpoint URL instead.")
-    return by_label
+    by_label = unique([spec for spec in union if spec.get("engine_label") == selector], "Label")
+    if by_label:
+        return by_label
+    by_model = unique([spec for spec in union if selector in (spec.get("models") or [])], "Model")
+    if by_model:
+        return by_model
+    return unique(
+        [spec for spec in union if selector in (spec.get("endpoint_url") or "")], "URL fragment"
+    )

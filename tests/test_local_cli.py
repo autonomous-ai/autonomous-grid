@@ -1304,8 +1304,10 @@ def _seed_running_remote_grid(monkeypatch, tmp_path, *, access_token="AT"):
 
 
 def _mock_remote_spawn(monkeypatch, *, pid=4242):
-    """Capture the detached __remote-engine spawn and skip the real liveness wait."""
-    spawned = {}
+    """Capture the detached __remote-engine spawn AND any SIGHUP hot-reload signal, and skip the real
+    liveness wait. Returns a dict with 'cmd' (the spawn argv) and 'signals' (list of (pid, sig)) — the
+    os.kill mock also keeps a stray SIGHUP from ever hitting a real process with the test pid."""
+    spawned = {"signals": []}
 
     def fake_popen(cmd, **kw):
         spawned["cmd"] = cmd
@@ -1313,6 +1315,7 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "starting")
+    monkeypatch.setattr(cli.remote_provider.os, "kill", lambda p, s: spawned["signals"].append((p, s)))
     return spawned
 
 
@@ -1517,25 +1520,28 @@ def test_remote_join_died_cleans_up_record(monkeypatch, tmp_path):
     assert cli.provider._read_records("n1") == {}  # stale record removed on a failed start
 
 
-def test_remote_join_appends_via_respawn(monkeypatch, tmp_path):
-    """A second `grid join` on a remote grid is ADDITIVE: it merges into the one singleton identity and
-    respawns it (stopping the prior process first, since both share the token-pinned node_id)."""
+def test_remote_join_appends_via_hot_reload(monkeypatch, tmp_path):
+    """A second `grid join` on a remote grid is ADDITIVE and ZERO-DROP: it merges into the one singleton
+    identity and SIGHUP-hot-reloads the live process in place — no restart, no terminate (ADR 0009 D3)."""
+    import signal as _sig
+
     _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_remote_spawn(monkeypatch)
+    spawned = _mock_remote_spawn(monkeypatch)
     terminated = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
 
-    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # first join spawns
     # The first identity is now live — make its recorded pid look alive so the 2nd join appends to it.
     monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
-    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"]) == 0
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"]) == 0  # second appends via SIGHUP
 
     records = cli.provider._read_records("n1")
     assert list(records) == ["remote"]  # exactly one singleton identity per grid
     rec = records["remote"]
     assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1", "http://h:8000/v1"]  # union
     assert rec["models"] == ["llama3", "mistral"] and rec["endpoint_url"] is None
-    assert terminated == [4242]  # the 2nd join stopped the 1st process before respawning the union
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # hot-reloaded the live singleton in place
+    assert terminated == []                             # never stopped the live process (zero-drop)
 
 
 def test_remote_join_appending_same_url_is_noop(monkeypatch, tmp_path, capsys):
@@ -1627,20 +1633,23 @@ def test_remote_join_serve_rejoin_same_model_is_noop(monkeypatch, tmp_path, caps
     assert "already serving" in capsys.readouterr().out.lower()
 
 
-def test_remote_join_rename_respawns_to_apply_meta_name(monkeypatch, tmp_path):
-    """A re-join that only changes --name is not silently dropped: it respawns so the new display name
-    actually takes effect (there is no other way to rename in Slice 1)."""
+def test_remote_join_rename_hot_reloads_meta_name(monkeypatch, tmp_path):
+    """A re-join that only changes --name hot-reloads (zero-drop) so the new display name takes effect —
+    the reload recomputes meta from the rewritten record (ADR 0009 D3)."""
+    import signal as _sig
+
     _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_remote_spawn(monkeypatch)
-    respawned = []
-    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: respawned.append(pid) or True)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
 
     assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "first"]) == 0
     monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
     assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "second"]) == 0
 
     assert cli.provider._read_records("n1")["remote"]["meta_name"] == "second"  # rename applied
-    assert respawned == [4242]  # respawned to apply it
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # via a zero-drop hot-reload, not a respawn
+    assert terminated == []
 
 
 def test_remote_join_append_onto_aliased_identity_is_rejected(monkeypatch, tmp_path):
@@ -1657,15 +1666,37 @@ def test_remote_join_append_onto_aliased_identity_is_rejected(monkeypatch, tmp_p
     assert "advertise-as" in str(exc.value).lower()
 
 
-def test_remote_join_aborts_when_prior_process_wont_die(monkeypatch, tmp_path):
-    """If a prior engine can't be confirmed stopped, the join aborts BEFORE spawning — spawning anyway
-    would put two processes on the same token node_id (the original clobber bug)."""
+def test_remote_join_rejoin_aliased_engine_with_new_alias_is_rejected(monkeypatch, tmp_path):
+    """Re-joining ONE engine with a second -m/--advertise-as would mismatch the alias/model counts and
+    crash the reload's _advertised_models (SystemExit); the CLI rejects it up front instead — aliases
+    don't merge across joins (reviewer CRITICAL root cause)."""
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
-    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: False)  # won't die
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
 
-    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # first join: no prior to stop
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "m1", "--advertise-as", "a1"]) == 0
     monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--at", "http://h:11434/v1", "-m", "m2", "--advertise-as", "a2"])  # same engine, 2nd pair
+    assert "advertise-as" in str(exc.value).lower()
+
+
+def test_remote_join_aborts_when_prior_process_wont_die(monkeypatch, tmp_path):
+    """On the respawn path (here a pre-handler prior that can't be SIGHUP-hot-reloaded), if the prior
+    can't be confirmed stopped the join aborts BEFORE spawning — spawning anyway would put two processes
+    on the same token node_id (the original clobber bug)."""
+    from shared import run_records as _rr
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    _rr.write_record("n1", "remote", {  # a pre-handler (no reload_signal) live singleton → append respawns
+        "engine_id": "remote", "grid_id": "n1", "pid": 4242, "media": False, "reload_signal": None,
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "engines": [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": None}],
+        "models": ["llama3"], "endpoint_url": "http://h:11434/v1",
+    })
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: False)  # won't die
     spawns = []
     monkeypatch.setattr(cli.remote_provider, "_spawn_remote_engine",
                         lambda *a, **k: spawns.append(a) or type("P", (), {"pid": 1})())
@@ -1675,13 +1706,92 @@ def test_remote_join_aborts_when_prior_process_wont_die(monkeypatch, tmp_path):
     assert spawns == []  # never spawned the clobbering second process
 
 
-def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False):
+def test_remote_join_pre_handler_singleton_respawns_not_sighup(monkeypatch, tmp_path):
+    """C1: appending onto a live singleton with NO reload_signal (a pre-Slice-2 process with no SIGHUP
+    handler) RESPAWNS — a raw SIGHUP would terminate that process and drop every in-flight request."""
+    from shared import run_records as _rr
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    _rr.write_record("n1", "remote", {  # pre-handler live singleton (no reload_signal)
+        "engine_id": "remote", "grid_id": "n1", "pid": 4242, "media": False,
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "engines": [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": None}],
+        "models": ["llama3"], "endpoint_url": "http://h:11434/v1",
+    })
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"]) == 0
+    assert terminated == [4242]              # respawned: the pre-handler process was stopped, not SIGHUP'd
+    assert spawned["signals"] == []          # no SIGHUP to a process that can't handle it
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1", "http://h:8000/v1"]
+    assert rec["reload_signal"] == "sighup"  # the respawned record is now Slice-2 (future joins hot-reload)
+
+
+def test_remote_join_hot_reload_falls_back_to_respawn_if_pid_vanished(monkeypatch, tmp_path, capsys):
+    """If the live singleton dies between the liveness check and the SIGHUP (os.kill → ProcessLookupError),
+    the append falls back to a respawn so the merged record is actually served, not lost to a dead pid —
+    and the CLI reports the respawn honestly, not a false 'hot-reloaded, no drops' (reviewer HIGH)."""
+    from shared import run_records as _rr
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)  # provides the respawn Popen + await
+
+    def _vanished(pid, sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(cli.remote_provider.os, "kill", _vanished)  # process gone at signal time
+    _rr.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": 4242, "media": False, "reload_signal": "sighup",
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "engines": [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": None}],
+        "models": ["llama3"], "endpoint_url": "http://h:11434/v1",
+    })
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"]) == 0
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1", "http://h:8000/v1"]  # served
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]  # respawned fresh after the vanish
+    out = capsys.readouterr().out
+    assert "hot-reloaded" not in out and "starting" in out  # honest: reported the respawn, not zero-drop
+
+
+def test_remote_join_media_bundle_add_respawns_not_sighup(monkeypatch, tmp_path):
+    """C3: adding a media --bundle to a live media identity RESPAWNS (a new bundle needs a ComfyUI
+    bring-up the hot-reload can't do), rather than SIGHUP'ing and silently dropping the new models."""
+    from shared import run_records as _rr
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    _rr.write_record("n1", "remote", {  # a live Slice-2 media identity serving one bundle
+        "engine_id": "remote", "grid_id": "n1", "pid": 4242, "media": True, "reload_signal": "sighup",
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "media_bundles": ["image_generation"], "comfyui_port": 8188, "media_port": 8190,
+        "engines": [], "models": [], "endpoint_url": None,
+    })
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["join", "--media", "--bundle", "i2v"]) == 0  # add a new bundle
+    assert terminated == [4242]        # respawned to bring up the new bundle
+    assert spawned["signals"] == []    # not a SIGHUP hot-reload (which would drop the new bundle's models)
+    rec = cli.provider._read_records("n1")["remote"]
+    assert set(rec["media_bundles"]) == {"image_generation", "i2v"}
+
+
+def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False, reload_signal="sighup"):
     from shared import run_records
 
     _seed_remote(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
     run_records.write_record("n1", "remote", {
         "engine_id": "remote", "grid_id": "n1", "pid": pid, "media": media,
+        "reload_signal": reload_signal,  # a Slice-2 identity supports SIGHUP hot-reload; None = pre-handler
         "signaling_url": "https://relay.example", "meta_name": "mybox",
         "engines": engines,
         "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
@@ -1699,11 +1809,15 @@ def test_remote_leave_tears_down_the_identity(monkeypatch, tmp_path, capsys):
 
 
 def test_remote_leave_engine_shrinks_union(monkeypatch, tmp_path):
+    """`grid leave --engine` drops one engine and SIGHUP-hot-reloads the reduced union in place — zero
+    drop, no restart (ADR 0009 D3)."""
+    import signal as _sig
+
     _seed_remote_identity(monkeypatch, tmp_path, [
         {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
         {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
     ])
-    _mock_remote_spawn(monkeypatch)  # the reduced union is respawned
+    spawned = _mock_remote_spawn(monkeypatch)
     terminated = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
     monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
@@ -1712,7 +1826,8 @@ def test_remote_leave_engine_shrinks_union(monkeypatch, tmp_path):
     rec = cli.provider._read_records("n1")["remote"]
     assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:8000/v1"]  # only the survivor remains
     assert rec["models"] == ["mistral"] and rec["endpoint_url"] == "http://h:8000/v1"
-    assert terminated == [4242]  # respawned with the reduced union
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # hot-reloaded the reduced union
+    assert terminated == []                             # never stopped the live process
 
 
 def test_remote_leave_engine_last_tears_down(monkeypatch, tmp_path, capsys):
@@ -1729,32 +1844,80 @@ def test_remote_leave_engine_unknown_errors(monkeypatch, tmp_path):
                           [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}], pid=0)
     with pytest.raises(SystemExit) as exc:
         cli.main(["leave", "--engine", "http://nope:9999/v1"])
-    assert "no engine" in str(exc.value).lower()
+    msg = str(exc.value).lower()
+    assert "no engine" in msg and "http://h:11434/v1" in msg  # lists what IS serving so the operator can pick
+
+
+def test_remote_leave_engine_matches_by_served_model(monkeypatch, tmp_path):
+    """`grid leave --engine <model>` drops the engine serving that model — friendlier than the full URL."""
+    import signal as _sig
+
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ])
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", "mistral"]) == 0  # match by served model
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1"]  # mistral's engine dropped
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]
+
+
+def test_remote_leave_engine_matches_by_url_fragment(monkeypatch, tmp_path):
+    """`grid leave --engine :8000` drops the engine whose URL contains that fragment (host/port)."""
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ])
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", ":8000"]) == 0  # match by port fragment
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1"]
+
+
+def test_remote_leave_engine_ambiguous_lists_engines(monkeypatch, tmp_path):
+    """An ambiguous selector (a model two engines serve) errors and lists the engines, asking for the URL."""
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:1/v1", "models": ["shared"], "engine_label": "a"},
+        {"endpoint_url": "http://h:2/v1", "models": ["shared"], "engine_label": "b"},
+    ])
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave", "--engine", "shared"])
+    msg = str(exc.value).lower()
+    assert "several" in msg and "http://h:1/v1" in msg and "http://h:2/v1" in msg
 
 
 def test_remote_leave_shrink_preserves_media(monkeypatch, tmp_path):
-    """Dropping a text engine from an identity that also serves media keeps media on in the respawn."""
+    """Dropping a text engine from an identity that also serves media keeps media on and hot-reloads —
+    media is unchanged, so no respawn/bring-up is needed."""
+    import signal as _sig
+
     _seed_remote_identity(monkeypatch, tmp_path, [
         {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
         {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
     ], media=True)
-    _mock_remote_spawn(monkeypatch)
-    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
 
     assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0
     rec = cli.provider._read_records("n1")["remote"]
     assert rec["media"] is True  # media survives an engine drop
     assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:8000/v1"]
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # hot-reloaded (media unchanged)
 
 
 def test_remote_leave_shrink_reports_a_dead_respawn(monkeypatch, tmp_path):
-    """A shrink whose respawn dies must surface an error, not print 're-serving N engine(s)' success while
-    the grid serves nothing."""
+    """On the respawn path (a pre-handler identity), a shrink whose respawn dies must surface an error,
+    not print 're-serving N engine(s)' success while the grid serves nothing."""
     _seed_remote_identity(monkeypatch, tmp_path, [
         {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
         {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
-    ])
+    ], reload_signal=None)
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 7})())
     monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "died")
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
@@ -1763,6 +1926,24 @@ def test_remote_leave_shrink_reports_a_dead_respawn(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["leave", "--engine", "http://h:11434/v1"])
     assert "not serving" in str(exc.value).lower() or "exited" in str(exc.value).lower()
+
+
+def test_remote_leave_shrink_respawn_refreshes_reload_signal(monkeypatch, tmp_path):
+    """A leave-shrink respawn from a pre-handler identity stamps reload_signal so future ops hot-reload
+    (self-heal, matching the join side — reviewer MEDIUM)."""
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ], reload_signal=None)  # pre-handler → shrink respawns rather than hot-reloads
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0
+    rec = cli.provider._read_records("n1")["remote"]
+    assert rec["reload_signal"] == "sighup"   # respawn stamped it → future leave/join hot-reload
+    assert terminated == [4242]               # pre-handler → respawn (not SIGHUP)
 
 
 def test_dispatch_runs_agnostic_command_in_remote(monkeypatch, tmp_path, capsys):
@@ -2511,7 +2692,7 @@ def test_serve_node_id_comes_from_access_token_jwt():
     assert serve._node_id_from_token("opaque-not-a-jwt") == ""         # not a JWT at all
 
 
-def test_serve_register_sends_cached_payload(monkeypatch, tmp_path):
+def test_serve_register_once_sends_cached_payload(monkeypatch, tmp_path):
     from remote import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path,
@@ -2519,10 +2700,503 @@ def test_serve_register_sends_cached_payload(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(url=url, tok=tok, node=node, **kw))
 
-    serve.register(state)
+    serve.register_once(state)
     assert (seen["url"], seen["tok"], seen["node"]) == ("https://relay.example", "AT", "node-1")
     assert seen["models"] == ["m"] and seen["max_concurrency"] == 3
     assert seen["capabilities"] == {"schema_version": 1, "models": {"m": {}}}
+
+
+def test_serve_register_once_refreshes_then_retries_on_401(monkeypatch, tmp_path):
+    """A reload/re-register that lands at token expiry refreshes + retries once (like poll/heartbeat),
+    so it re-advertises instead of silently leaving the old union registered."""
+    from remote import control_plane, credentials, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"networks": [{"network_id": "n1", "access_token": "AT", "refresh_token": "RT"}]})
+    state = _serve_state(monkeypatch, tmp_path, access_token="AT", refresh_token="RT")
+    monkeypatch.setattr(control_plane, "refresh_network_token",
+                        lambda *, network_id, refresh_token, api_url=None: {"access_token": "AT2", "refresh_token": "RT2"})
+    tokens = []
+
+    def fake_register(url, tok, node, **kw):
+        tokens.append(tok)
+        if len(tokens) == 1:
+            raise relay.RelayUnauthorized()
+
+    monkeypatch.setattr(relay, "register_node", fake_register)
+    serve.register_once(state)
+    assert tokens == ["AT", "AT2"]  # retried with the refreshed token
+
+
+def test_serve_register_once_holds_register_lock_during_put(monkeypatch, tmp_path):
+    """The PUT runs under _register_lock so the reload's register and the heartbeat-404 re-register
+    can never interleave two PUTs on the one token-pinned node_id (ADR 0009 D4 F5)."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    held = []
+    monkeypatch.setattr(relay, "register_node", lambda *a, **k: held.append(state._register_lock.locked()))
+    serve.register_once(state)
+    assert held == [True]
+
+
+def test_serve_apply_swaps_snapshot_atomically(monkeypatch, tmp_path):
+    """apply() rebinds one immutable snapshot: readers see the new routing union, and a snapshot
+    captured before the swap stays frozen-intact (F4 — the swap never mutates a published snapshot)."""
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path, models=["a"], routes={"a": "http://e1/v1"})
+    before = state.snapshot()
+    assert state.route("a") == "http://e1/v1" and state.models == ["a"]
+
+    new = serve._Snapshot.build(
+        routes={"a": "http://e1/v1", "b": "http://e2/v1"}, upstream={},
+        models=["a", "b"], capabilities={"schema_version": 1, "models": {}},
+        meta={"name": "e1", "engine": "external"}, pricing={}, max_concurrency=1,
+    )
+    state.apply(new, [("http://e1/v1", ["a"], ["a"], {}), ("http://e2/v1", ["b"], ["b"], {})])
+
+    assert state.route("b") == "http://e2/v1"          # the appended engine is now routable
+    assert state.models == ["a", "b"]                  # the property reflects the swapped snapshot
+    assert before.routes == {"a": "http://e1/v1"}      # the captured old snapshot is unchanged
+
+
+def _seed_reload_state(monkeypatch, tmp_path, engines, *, retained, media_models=None,
+                       record_media=False, record_bundles=None, startup_bundles=None):
+    """A ``_ServeState`` wired for a ``_reload_once`` test: ``GRID_HOME`` set, the singleton record
+    written with ``engines``, and the retained probe results + media state the reload reads. ``retained``
+    is the ``[(url, advertised, upstream, caps), ...]`` the live snapshot was built from; the state's
+    ``media_signature`` reflects the STARTUP media config (``startup_bundles``), which the reload
+    compares the re-read record against."""
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    routes, upstream, models, caps, _warn = (
+        serve._build_routing([tuple(r) for r in retained]) if retained else ({}, {}, [], {}, [])
+    )
+    state = _serve_state(monkeypatch, tmp_path, models=models, routes=routes,
+                         upstream=upstream, capabilities=caps)
+    state._engine_results = [tuple(r) for r in retained]
+    state.media_models = list(media_models or [])
+    state.media_signature = serve._media_signature(
+        {"media": record_media, "media_bundles": list(startup_bundles or [])})
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "media": record_media,
+        "media_bundles": list(record_bundles if record_bundles is not None else (startup_bundles or [])),
+        "engines": engines,
+    })
+    return state
+
+
+def test_serve_reload_probes_only_new_engine_and_registers_union(monkeypatch, tmp_path):
+    """A hot-reload reuses retained caps for engines already serving and probes ONLY newly-added --at
+    endpoints, then re-registers the full union after the swap (ADR 0009 D3 / D4 F6)."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ])
+    probed = []
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, **kw: probed.append((url, model)) or {"schema_version": 1, "models": {model: {}}})
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert probed == [("http://e2/v1", "b")]            # only the new engine probed; A reused from retained
+    assert state.route("a") == "http://e1/v1" and state.route("b") == "http://e2/v1"
+    assert seen["models"] == ["a", "b"]                 # re-registered the full union after the swap
+
+
+def test_serve_reload_appended_model_kept_no_reprobe(monkeypatch, tmp_path):
+    """Re-joining an engine already serving [a] with an extra model b keeps the union [a,b] and does NOT
+    re-probe it — advertised/upstream come from the record, only the caps are reused (ADR 0009 C2)."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a", "b"], "engine_label": None},
+    ])
+    probed = []
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **kw: probed.append(url) or {})
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert probed == []                                 # same engine, first model unchanged → no re-probe
+    assert seen["models"] == ["a", "b"]                 # the appended model is served, not dropped
+    assert state.route("b") == "http://e1/v1"
+
+
+def test_serve_reload_drops_removed_engine(monkeypatch, tmp_path):
+    """Leave-shrink: dropping an engine from the record removes it from the union on the next reload."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+        ("http://e2/v1", ["b"], ["b"], {"schema_version": 1, "models": {"b": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+    ])
+    monkeypatch.setattr(probe, "capabilities", lambda *a, **k: pytest.fail("a pure drop must not probe"))
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert seen["models"] == ["a"]                      # b's engine dropped from the advertised union
+    assert state.snapshot().routes == {"a": "http://e1/v1"}  # e2 no longer routed
+
+
+def test_serve_reload_refuses_builtin_spec(monkeypatch, tmp_path):
+    """A record needing a built-in launch (a spec with no endpoint_url) is refused; the reload never
+    launches — old routing intact, nothing registered (ADR 0009 D4 F6)."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": None, "models": ["builtin"], "engine_label": None},
+    ])
+    monkeypatch.setattr(probe, "capabilities", lambda *a, **k: pytest.fail("must not probe when refusing"))
+    monkeypatch.setattr(relay, "register_node", lambda *a, **k: pytest.fail("must not register when refusing"))
+    before = state.snapshot()
+
+    serve._reload_once(state, "remote")
+    assert state.snapshot() is before                  # refused: the live snapshot is untouched
+
+
+def test_serve_reload_refuses_media_bundle_change(monkeypatch, tmp_path):
+    """A reload whose record grew media_bundles needs a ComfyUI bring-up the reload can't do → refused,
+    old snapshot intact (ADR 0009 C3)."""
+    from remote import relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], media_models=["comfyui:image_generation"], record_media=True,
+        startup_bundles=["image_generation"], record_bundles=["image_generation", "video_generation"],
+        engines=[{"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None}])
+    monkeypatch.setattr(relay, "register_node", lambda *a, **k: pytest.fail("must not register on a media change"))
+    before = state.snapshot()
+
+    serve._reload_once(state, "remote")
+    assert state.snapshot() is before                  # refused: respawn required for a media change
+
+
+def test_serve_reload_preserves_media_models_and_caps(monkeypatch, tmp_path):
+    """A reload that adds a text engine keeps the identity's media (comfyui:*) models + caps, appended
+    after the text models."""
+    from remote import probe, relay, serve
+    from shared.media import media_gating
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], media_models=["comfyui:image_generation"], record_media=True, startup_bundles=["image_generation"],
+        engines=[
+            {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+            {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+        ])
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **kw: {"schema_version": 1, "models": {model: {}}})
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert seen["models"] == ["a", "b", "comfyui:image_generation"]  # media last, preserved across reload
+    assert seen["capabilities"]["models"]["comfyui:image_generation"] == media_gating.capability_entry()
+
+
+def test_serve_reload_skips_when_record_missing(monkeypatch, tmp_path):
+    """A concurrent full `grid leave` removes the record mid-reload → keep the current snapshot, don't
+    register (SIGTERM tears the process down)."""
+    from remote import relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[{"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None}])
+    monkeypatch.setattr(serve.run_records, "read_record", lambda net, eid: None)
+    monkeypatch.setattr(relay, "register_node", lambda *a, **k: pytest.fail("must not register when record gone"))
+    before = state.snapshot()
+
+    serve._reload_once(state, "remote")
+    assert state.snapshot() is before
+
+
+def test_serve_reload_loop_runs_reload_then_clears(monkeypatch, tmp_path):
+    """The reload loop wakes on a set reload_requested, clears it, and runs one reload."""
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_reload(s, eid):
+        calls.append(eid)
+        s.stop.set()  # stop after the first reload so the loop exits
+
+    monkeypatch.setattr(serve, "_reload_once", fake_reload)
+    state.reload_requested.set()
+    serve._reload_loop(state, "remote")
+
+    assert calls == ["remote"]                    # ran the reload once
+    assert not state.reload_requested.is_set()    # cleared after handling
+
+
+def test_serve_reload_loop_stops_when_stop_set(monkeypatch, tmp_path):
+    """A stopped state exits the reload loop immediately without reloading."""
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(serve, "_reload_once", lambda *a: pytest.fail("must not reload once stopped"))
+    state.stop.set()
+    serve._reload_loop(state, "remote")  # returns immediately
+
+
+def test_serve_reload_loop_coalesces_resignal(monkeypatch, tmp_path):
+    """A write+SIGHUP that lands while a reload is running re-sets the event and is picked up by one more
+    reload — never lost (clear-before-read coalescing)."""
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_reload(s, eid):
+        calls.append(eid)
+        if len(calls) == 1:
+            s.reload_requested.set()   # a signal arrives during the first reload
+        else:
+            s.stop.set()               # the second reload handles it, then stop
+
+    monkeypatch.setattr(serve, "_reload_once", fake_reload)
+    state.reload_requested.set()
+    serve._reload_loop(state, "remote")
+
+    assert calls == ["remote", "remote"]           # the re-signal triggered exactly one more reload
+
+
+def test_serve_reload_loop_survives_a_systemexit_reload(monkeypatch, tmp_path):
+    """A reload that raises SystemExit (jsonio.load_json on a corrupt record, or _advertised_models on an
+    alias/model mismatch) must NOT kill the watcher thread — SystemExit is a BaseException, so the loop
+    catches (Exception, SystemExit) (ADR 0009 D4 F6, reviewer CRITICAL)."""
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    calls = []
+
+    def flaky_reload(s, eid):
+        calls.append(eid)
+        if len(calls) == 1:
+            s.reload_requested.set()    # keep the loop awake, then raise SystemExit
+            raise SystemExit("--advertise-as must be provided once for each model.")
+        s.stop.set()                    # the loop survived to a second reload; now stop
+
+    monkeypatch.setattr(serve, "_reload_once", flaky_reload)
+    state.reload_requested.set()
+    serve._reload_loop(state, "remote")   # must not propagate the SystemExit / kill the thread
+    assert calls == ["remote", "remote"]  # kept looping after the first reload raised SystemExit
+
+
+def test_serve_reload_rearms_on_post_swap_register_failure(monkeypatch, tmp_path):
+    """Swap succeeds but the re-register fails (transient) → the reload re-arms reload_requested so a
+    later tick retries; the new union is not left unadvertised (ADR 0009 C5)."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ])
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **kw: {"schema_version": 1, "models": {model: {}}})
+
+    def boom(*a, **k):
+        raise relay.RelayError("relay 503")
+
+    monkeypatch.setattr(relay, "register_node", boom)
+    monkeypatch.setattr(state.stop, "wait", lambda t: None)  # skip the back-off in the test
+
+    serve._reload_once(state, "remote")
+
+    assert state.route("b") == "http://e2/v1"   # the swap happened — the new union serves locally
+    assert state.reload_requested.is_set()      # re-armed to retry the re-register
+
+
+def test_serve_reload_does_not_rearm_on_exhausted_auth(monkeypatch, tmp_path):
+    """A post-swap re-register that fails auth with refresh exhausted does NOT re-arm — the heartbeat loop
+    stops the process on the same condition, so re-arming would just spin (reviewer HIGH)."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ])
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **kw: {"schema_version": 1, "models": {model: {}}})
+
+    def unauth(*a, **k):
+        raise relay.RelayUnauthorized()
+
+    monkeypatch.setattr(relay, "register_node", unauth)
+    monkeypatch.setattr(state, "refresh", lambda stale_token=None: False)  # refresh exhausted
+
+    serve._reload_once(state, "remote")
+
+    assert state.route("b") == "http://e2/v1"   # the swap still happened (serves locally)
+    assert not state.reload_requested.is_set()  # but did NOT re-arm on exhausted auth
+
+
+def test_serve_reload_failing_probe_keeps_old_routing(monkeypatch, tmp_path):
+    """If probing a newly-added --at engine raises, the reload aborts BEFORE the swap — the old snapshot
+    keeps serving and nothing is registered; the loop's guard then logs and survives (ADR 0009 D4 F6)."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ])
+
+    def boom(*a, **k):
+        raise RuntimeError("probe timeout")
+
+    monkeypatch.setattr(probe, "capabilities", boom)
+    monkeypatch.setattr(relay, "register_node", lambda *a, **k: pytest.fail("must not register on a failed probe"))
+    before = state.snapshot()
+
+    with pytest.raises(RuntimeError):
+        serve._reload_once(state, "remote")     # propagates; _reload_loop's guard catches it in production
+    assert state.snapshot() is before           # no partial apply — the old routing is untouched
+
+
+def test_serve_route_survives_concurrent_swap(monkeypatch, tmp_path):
+    """route() binds the snapshot once, so a reload swapping mid-call never raises or returns a torn
+    result; and published snapshots' dicts are never mutated in place (ADR 0009 D4 F4)."""
+    import threading as _t
+
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path, models=["a"], routes={"a": "http://e1/v1"}, upstream={})
+    snap_a = state.snapshot()
+    snap_b = serve._Snapshot.build(routes={"a": "http://e1/v1", "b": "http://e2/v1"}, upstream={},
+                                   models=["a", "b"], capabilities={}, meta={}, pricing={}, max_concurrency=1)
+    errors = []
+    iters = 5000  # fixed count → deterministic, can't hang
+
+    def swapper():
+        for i in range(iters):
+            state.apply(snap_b if i % 2 else snap_a, [])
+
+    def router():
+        for _ in range(iters):
+            try:
+                result = state.route("b")
+            except Exception as exc:  # a torn read would KeyError here
+                errors.append(exc)
+                return
+            if result not in ("http://e1/v1", "http://e2/v1"):  # both valid; never garbage/None/torn
+                errors.append(result)
+                return
+
+    threads = [_t.Thread(target=swapper, daemon=True)] + [_t.Thread(target=router, daemon=True) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert errors == []                                                  # never raised, never torn
+    assert snap_a.routes == {"a": "http://e1/v1"}                        # published snapshots not mutated
+    assert snap_b.routes == {"a": "http://e1/v1", "b": "http://e2/v1"}
+
+
+def test_serve_start_reload_watcher_installs_handler_and_thread(monkeypatch, tmp_path):
+    """_start_reload_watcher retains the reload state, installs a SIGHUP handler that ONLY sets the
+    reload flag (never raises), and starts a live reload daemon (ADR 0009 C4)."""
+    import signal as _sig
+
+    from remote import serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(serve, "_reload_loop", lambda s, e: s.stop.wait(5))  # keep the thread alive, no-op
+    orig = _sig.getsignal(_sig.SIGHUP) if hasattr(_sig, "SIGHUP") else None
+    thread = serve._start_reload_watcher(
+        state, "remote", [("http://e1/v1", ["a"], ["a"], {})], ["comfyui:x"],
+        {"media": True, "media_bundles": ["x"]})
+    try:
+        assert state.engine_results() == [("http://e1/v1", ["a"], ["a"], {})]
+        assert state.media_models == ["comfyui:x"]
+        assert state.media_signature == serve._media_signature({"media": True, "media_bundles": ["x"]})
+        assert thread.is_alive()
+        if hasattr(_sig, "SIGHUP"):
+            _sig.getsignal(_sig.SIGHUP)(_sig.SIGHUP, None)  # simulate signal delivery on the main thread
+            assert state.reload_requested.is_set()          # the handler only sets the flag
+    finally:
+        state.stop.set()
+        thread.join(2)
+        if hasattr(_sig, "SIGHUP"):
+            _sig.signal(_sig.SIGHUP, orig)
+
+
+def test_run_remote_engine_starts_reload_thread_with_sighup_blocked(monkeypatch, tmp_path):
+    """C4: the reload/heartbeat daemons start while SIGHUP is blocked (so they inherit the block and the
+    signal only lands on the main thread), and main unblocks SIGHUP last, before the poll loop."""
+    import signal as _sig
+
+    from remote import relay, serve
+
+    if not hasattr(_sig, "SIGHUP"):
+        pytest.skip("no SIGHUP on this platform")
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve, "_bring_up_engines",
+                        lambda rec: ([("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}})], [], None))
+    registered = []
+    monkeypatch.setattr(serve, "register_once", lambda s: registered.append(s))
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+
+    reload_seen = {}
+    done = threading.Event()
+
+    def fake_reload_loop(s, eid):
+        reload_seen["blocked"] = _sig.SIGHUP in _sig.pthread_sigmask(_sig.SIG_BLOCK, [])  # the thread's own mask
+        reload_seen["engine_id"] = eid
+        done.set()
+
+    poll_mask = {}
+
+    def fake_poll(s):
+        poll_mask["unblocked"] = _sig.SIGHUP not in _sig.pthread_sigmask(_sig.SIG_BLOCK, [])  # main's mask
+        done.wait(2)  # let the reload daemon run and record before we return
+
+    monkeypatch.setattr(serve, "_reload_loop", fake_reload_loop)
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+
+    orig_handler = _sig.getsignal(_sig.SIGHUP)
+    orig_blocked = _sig.SIGHUP in _sig.pthread_sigmask(_sig.SIG_BLOCK, [])
+    try:
+        rc = serve.run_remote_engine_from_record("n1", "remote")
+    finally:
+        _sig.signal(_sig.SIGHUP, orig_handler)
+        _sig.pthread_sigmask(_sig.SIG_BLOCK if orig_blocked else _sig.SIG_UNBLOCK, {_sig.SIGHUP})
+
+    assert rc == 0 and registered                   # startup registered the identity
+    assert reload_seen["blocked"] is True           # the reload daemon inherited the SIGHUP block (C4)
+    assert reload_seen["engine_id"] == "remote"
+    assert poll_mask["unblocked"] is True            # main unblocked SIGHUP before the poll loop
 
 
 def test_serve_handle_job_non_stream_forwards_then_submits(monkeypatch, tmp_path):
@@ -2729,7 +3403,7 @@ def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
     state = _serve_state(monkeypatch, tmp_path)
     monkeypatch.setattr(relay, "heartbeat", lambda url, tok, *, load: "missing")
     calls = []
-    monkeypatch.setattr(serve, "register", lambda s: calls.append(s))
+    monkeypatch.setattr(serve, "register_once", lambda s: calls.append(s))
     assert serve.heartbeat_once(state) == "missing"
     assert calls == [state]  # 404 → re-register with the cached payload
 
@@ -2971,6 +3645,26 @@ def test_meta_uses_meta_name_for_grid_page_name(monkeypatch, tmp_path):
     assert serve._meta({"meta_name": "mybox", "endpoint_url": "http://h/v1"}, "remote")["name"] == "mybox"
     # Fallback to engine_id when no display name was stored (defensive; join always sets meta_name).
     assert serve._meta({"endpoint_url": "http://h/v1"}, "remote")["name"] == "remote"
+
+
+def test_meta_labels_all_external_union_as_external(monkeypatch, tmp_path):
+    """A union of external --at engines (each engine_label=None) shows engine='external' on the grid page,
+    not the built-in 'llama.cpp' default; only a built-in --serve spec (no endpoint_url) is 'llama.cpp'
+    (ADR 0009 _meta fix)."""
+    from remote import serve
+
+    multi_external = {"meta_name": "mybox", "endpoint_url": None, "models": ["a", "b"], "engines": [
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ]}
+    assert serve._meta(multi_external, "remote") == {"name": "mybox", "engine": "external"}
+
+    single_external = {"endpoint_url": "http://h/v1", "models": ["a"]}  # flat single external → external
+    assert serve._meta(single_external, "remote")["engine"] == "external"
+
+    builtin = {"endpoint_url": None, "models": ["m"],
+               "engines": [{"endpoint_url": None, "models": ["m"], "engine_label": None}]}
+    assert serve._meta(builtin, "remote")["engine"] == "llama.cpp"  # built-in --serve still labels llama.cpp
 
 
 def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):

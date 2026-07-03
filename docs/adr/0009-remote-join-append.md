@@ -1,9 +1,10 @@
 # ADR 0009 — Remote `grid join` is additive (one identity per grid)
 
 Status: accepted (2026-07-02) — supersedes **ADR 0007 Decision 1 for remote mode**. Shipped as **Slice 1**
-(singleton + additive append via **stop-respawn** + leave + migration). **Slice 2** (SIGHUP hot-reload for
-zero-drop append, Decision 3) is a deferred fast-follow, gated on a live append-during-stream test — see
-"On the zero-drop claim" below for why it is not settled in-repo.
+(singleton + additive append via **stop-respawn** + leave + migration), then **Slice 2** (SIGHUP hot-reload
+for zero-drop append/shrink/rename, Decisions 3 & 4). Slice 2's gate — a live append-during-stream test —
+was **CLEARED 2026-07-03** on the hosted relay (see "On the zero-drop claim" below); it is now implemented,
+with the concurrency/correctness fixes recorded in **"Slice 2 as built"**.
 
 ## Context
 
@@ -52,9 +53,11 @@ default ports. No `--scan-port` flag.
 3. **The live serve process hot-reloads in place; re-register is non-destructive.** `grid join`/`grid leave`
    rewrite the record and signal the running process (**SIGHUP**, not mtime — avoids the spurious
    pid-double-write reload, coarse-mtime misses, and ~2s latency). A reload thread (like `_heartbeat_loop`)
-   rebuilds routing from the record (`_bring_up_engines` → `_build_routing`, probing **only newly-added**
-   engines), atomically swaps an immutable snapshot into `_ServeState`, then re-`register()`s the union
-   (swap **then** register). The poll loop and heartbeat never stop.
+   rebuilds routing from the record — a bespoke **external-only, probe-only** reassembly (`_reload_once`,
+   **not** `_bring_up_engines`, which would re-launch built-ins and re-probe everything): it reuses retained
+   caps for unchanged engines and probes **only newly-added** `--at` endpoints via `probe.capabilities`,
+   then `_build_routing` + `_merge_media` → atomically swaps one immutable snapshot into `_ServeState` →
+   re-`register`s the union (swap **then** register). The poll loop and heartbeat never stop.
 
    **On the zero-drop claim — NOT settled in this repo.** The relay *server* that would guarantee re-register
    preserves in-flight work lives in a **separate** repo (`grid-src/grid_cli/private_server/`, the upstream
@@ -63,7 +66,16 @@ default ports. No `--scan-port` flag.
    here. In-repo the evidence is *asymmetric*: `unregister_node` flips role→consumer specifically to make the
    relay drain (`remote/relay.py:88-91`), corroborating that a `role=provider` re-register does **not** drain
    *queued* work — but nothing in-repo corroborates in-flight **stream** survival across a re-register. So
-   hot-reload's zero-drop is gated on a live 2-host append-during-stream test before Slice 2 ships.
+   hot-reload's zero-drop is gated on a live append-during-stream test before Slice 2 ships.
+
+   **UPDATE 2026-07-03 — gate CLEARED (live test passed on the hosted relay).** Single-host test against
+   `grid.autonomous.ai`: a real streaming SSE consumer (`stream: true`) with a `PUT /nodes/{node_id}`
+   re-register (role=provider, same token/node_id) fired **mid-stream** from a separate process. The stream
+   completed uninterrupted — provider `submit_response` returned "relay accepted the full stream" at t=855.079
+   with the re-register PUT concurrent (854.343→855.079); the job was `handled in 5.20s` with no error; the
+   consumer received all 982 SSE chunks + `[DONE]`, tokens flowing during and after the PUT. (A whole-forward
+   txn survived a re-register too.) So the hosted relay preserves in-flight work across a provider re-register
+   — Slice 2 (SIGHUP hot-reload) zero-drop is viable and unblocked.
 
 4. **Concurrency correctness (from the design audit) — required, not optional.**
    - **Snapshot reads (F4):** `_ServeState.route()`/`upstream_model()` currently read `self._routes` several
@@ -108,13 +120,62 @@ hot-reload: `cli/remote_provider._respawn_identity` stops the prior process(es) 
   true no-op / respawn-to-apply — never a silent drop. Appending onto a `--advertise-as` identity is rejected
   (aliases are single-engine, ADR 0007 D4).
 
+## Slice 2 as built (SIGHUP hot-reload)
+
+Decisions 3/4 shipped: `grid join --at` (append), `grid leave --engine` (shrink), and rename now re-advertise
+the union **in place** — no restart, no dropped in-flight requests. Genuine bring-ups still respawn (below).
+
+- **Serve side (`remote/serve.py`).** One immutable `_Snapshot` (frozen dataclass: routes/upstream/models/
+  capabilities/meta/pricing/max_concurrency) holds all reload-swappable routing; `_ServeState._snapshot` is
+  rebound atomically by `apply()` under `_lock` (readers bind it once, lock-free — F4). `register_once` PUTs
+  one snapshot under `_register_lock` (serializes the reload's register vs the heartbeat-404 re-register — F5)
+  and refreshes+retries once on 401. `_reload_once` (driven by `_reload_loop`, which a SIGHUP handler wakes via
+  a `reload_requested` Event) re-reads the record, refuses anything needing a launch/media-change, reuses
+  retained caps for unchanged engines and probes only new `--at` endpoints, builds the whole snapshot, then
+  swap-then-`register_once`. `_start_reload_watcher` + the startup `pthread_sigmask` ordering keep SIGHUP off
+  the worker threads. `_meta` now labels an all-external union `external` (only a built-in `--serve` is `llama.cpp`).
+- **CLI side (`cli/remote_provider.py`).** `_hot_reloadable` picks SIGHUP (`_hot_reload_identity` → write record
+  then `os.kill(pid, SIGHUP)`) only when the sole live process is the singleton, external-only, media unchanged,
+  and the record carries the `reload_signal` marker; otherwise `_respawn_identity`. Record is written **before**
+  the signal (the reload clears its event before re-reading, so a write+signal is never lost).
+
+**Review-hardened (findings folded in before implementation):**
+- **C1 — pre-handler process.** SIGHUP's default disposition is *terminate*. `_build_record` stamps
+  `reload_signal: "sighup"`; `_hot_reloadable` requires it, so a live singleton from a pre-Slice-2 build (no
+  handler) is **respawned** once on the upgrade boundary, never SIGHUP-killed.
+- **C2 — appended-model reuse.** `_reload_once` reuses only the retained *caps* for an unchanged engine;
+  advertised/upstream come from the record, so a model appended to an existing engine is not dropped.
+- **C3 — media change.** `_media_key`/`_media_signature` compare `(media, bundles, ports)`; any media/bundle
+  change routes to respawn (a new bundle needs a ComfyUI bring-up the reload can't do).
+- **C4 — signal delivery.** Heartbeat + reload daemons start while SIGHUP is blocked (inherit the block); main
+  unblocks it **last**, so the signal always lands on the main thread → its long-poll EINTRs and the handler
+  fires promptly, not after a 35s poll.
+- **C5 — post-swap register failure.** A transient re-register failure after the swap re-arms `reload_requested`
+  (after a short back-off) so the new union self-heals rather than staying unadvertised.
+
+**Review round 3 (three parallel reviewers) — hardened before commit:**
+- The reload watcher catches `(Exception, SystemExit)` — a `SystemExit` from `jsonio.load_json` (a corrupt
+  record) or `_advertised_models` (an alias/model mismatch) no longer silently kills the daemon thread (F6).
+- `--advertise-as` doesn't merge across joins, so the CLI rejects any *changing* append onto/with an aliased
+  identity (was: a re-join could mismatch alias/model counts → crash the reload, or silently drop an alias).
+- `register_once` binds the snapshot+token INSIDE `_register_lock`, so a descheduled racer can't PUT a stale
+  union last (F5 freshness, not just non-interleaving).
+- Reload refusals/failures log unconditionally (not `GRID_ENGINE_DEBUG`-gated); the post-swap re-register
+  retry is bounded and distinguishes exhausted-auth (stop) from transient (bounded re-arm).
+- `_hot_reload_identity` returns whether it hot-reloaded or fell back to respawn, so the CLI never prints a
+  false "no in-flight requests dropped"; `grid leave` shrink also stamps `reload_signal` (self-heal parity).
+- `media_signature` factored into `shared/run_records.py` so the CLI and serve decisions can't desync.
+- **Known, pre-existing (not fixed here):** a multi-model engine registers caps only for its first model
+  (same at startup and reload; the relay may drop the whole envelope) — tracked separately, not a Slice-2
+  regression. Residual `os.kill` PID-reuse TOCTOU is shared with `run_records.terminate_pid`.
+
 ## Considered options (reload mechanism)
 
 - **Stop + respawn (Slice 1, shipped).** No new threads/locks; drops in-flight requests + a re-register gap
   (seconds, incl. re-probe) on each append. Ships the clobber fix immediately; hot-reload replaces it later
   with **no change to the singleton core** (Decisions 1/2/5/6 are shared).
-- **SIGHUP hot-reload (Slice 2, deferred).** Zero-drop, but rests on the unverified-in-repo relay behavior
-  (Decision 3) and adds the concurrency surface in Decision 4. Gated on the live test.
+- **SIGHUP hot-reload (Slice 2, shipped).** Zero-drop; rested on relay behavior confirmed by the now-cleared
+  live gate (Decision 3) and adds the concurrency surface in Decision 4 (see "Slice 2 as built").
 - **mtime-watch trigger.** Rejected in favor of SIGHUP (spurious pid-double-write reload, coarse-mtime
   misses, ~2s latency).
 
