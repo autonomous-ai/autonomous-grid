@@ -121,7 +121,8 @@ def _add_engines(sub) -> None:
         default=[],
         help="Media bundle to advertise; repeat for multiple bundles.",
     )
-    join.add_argument("--name", default=None, help="Engine id (for `grid leave --engine <id>`).")
+    join.add_argument("--name", default=None,
+                      help="Local: engine id. Remote: display name shown on the grid page.")
     join.add_argument("--all", action="store_true", help="Join every detected engine.")
     join.add_argument("--engine", default=None, help="Join only the detected engine of this kind.")
     join.add_argument(
@@ -159,7 +160,9 @@ def _add_engines(sub) -> None:
 
     leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")
     leave.add_argument("grid", nargs="?", default=None)
-    leave.add_argument("--engine", default=None, help="Engine id to leave.")
+    leave.add_argument("--engine", default=None,
+                       help="Local: engine id to leave. Remote: endpoint URL (or unique label) of one "
+                            "engine to drop from the grid's identity.")
     leave.add_argument("--all", action="store_true", help="Leave every engine on this grid.")
     leave.set_defaults(handler=cmd_leave)
 

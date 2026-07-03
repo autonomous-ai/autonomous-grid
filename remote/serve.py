@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import signal
 import sys
 import threading
+import time
 from typing import Any
 
 from remote import control_plane, credentials, probe, relay
@@ -33,6 +35,17 @@ _DEFAULT_INFERENCE_TIMEOUT = 600.0
 # allowlist (the media paths are NOT under `_ALLOWED_ENDPOINTS` — they route to a different URL).
 _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
 _MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
+
+# Opt-in poll/heartbeat tracing. Off by default so a healthy engine's log stays quiet — only errors
+# and job failures are recorded (a successful long-poll and a served job are otherwise silent).
+# Set GRID_ENGINE_DEBUG=1 before `grid join` to trace every poll cycle when debugging the relay loop.
+_DEBUG = bool(os.getenv("GRID_ENGINE_DEBUG"))
+
+
+def _debug(msg: str) -> None:
+    """Emit a poll/heartbeat trace line, but only when GRID_ENGINE_DEBUG is set."""
+    if _DEBUG:
+        print(f"[engine] {msg}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +345,12 @@ def _build_routing(
 
 
 def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
-    """How the node appears on the grid page: name (from --name/engine_id) + engine kind label.
+    """How the node appears on the grid page: name + engine kind label.
 
-    A multi-engine identity shows the kinds it gathered (e.g. ``ollama+vllm``) when no explicit
-    ``--engine-label`` was given, so the page reflects what is actually serving.
+    The display name comes from the record's ``meta_name`` (the ``--name`` a remote operator gave, or
+    the box's hostname when omitted), falling back to ``engine_id`` for a record written before the
+    singleton change. A multi-engine identity shows the kinds it gathered (e.g. ``ollama+vllm``) when no
+    explicit ``--engine-label`` was given, so the page reflects what is actually serving.
     """
     label = record.get("engine_label")
     if not label:
@@ -351,7 +366,7 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
             label = "comfyui"
         else:
             label = "llama.cpp"
-    return {"name": engine_id, "engine": label}
+    return {"name": record.get("meta_name") or engine_id, "engine": label}
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
@@ -692,17 +707,24 @@ def _poll_loop(state: _ServeState) -> None:
             state.stop.wait(2)
             continue
         if job is None:  # 204 — no work waiting; poll again
+            _debug("poll: no job (204), re-polling")
             continue
+        started = time.monotonic()
         try:
             handle_job(state, job)
         except Exception as exc:  # defence in depth: handle_job already guards, but never die here
             print(f"\nUnexpected error handling a job: {exc!r}", file=sys.stderr)
+        else:
+            if _DEBUG:
+                txn = job.get("transaction_id")
+                model = (job.get("body") or {}).get("model")
+                _debug(f"poll: job txn={txn} model={model!r} handled in {time.monotonic() - started:.2f}s")
 
 
 def _heartbeat_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
         try:
-            heartbeat_once(state)
+            result = heartbeat_once(state)
         except relay.RelayUnauthorized:
             # Auth is exhausted (refresh failed too) — stop now rather than spin re-failing until
             # the poll loop happens to notice, which can be up to a full long-poll away.
@@ -711,4 +733,6 @@ def _heartbeat_loop(state: _ServeState) -> None:
             break
         except relay.RelayError as exc:
             print(f"\nHeartbeat error: {exc}", file=sys.stderr)
+        else:
+            _debug(f"heartbeat: ok ({result})")
         state.stop.wait(relay.HEARTBEAT_INTERVAL)

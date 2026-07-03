@@ -58,6 +58,11 @@ def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except ProcessLookupError:
+        return False  # ESRCH: no such process
+    except PermissionError:
+        return True  # EPERM: the process exists, it's just owned by another uid — reporting it dead would
+        # let a join spawn a second engine under the same token node_id and clobber it.
     except OSError:
         return False
 
@@ -72,22 +77,37 @@ def kill_group(pid: int) -> None:
         pass
 
 
+def terminate_pid(pid: int) -> bool:
+    """SIGTERM a detached engine child and wait for it to exit, escalating to SIGKILL of its process
+    group after the grace window. Does **not** touch any run record — the caller decides whether to
+    remove it (a `grid leave` teardown) or keep it (a respawn that rewrites the record in place, so the
+    engine child unregisters + stops what it launched, but the merged record survives). A ``0``/dead pid
+    is a no-op.
+
+    Returns whether the process is confirmed gone. ``False`` means it survived even SIGKILL — the caller
+    must NOT spawn a replacement, because two live children on one token-pinned relay node_id clobber
+    each other (the exact bug this whole flow exists to prevent).
+    """
+    if not (pid and pid_alive(pid)):
+        return True
+    # SIGTERM the detached engine so it unregisters and stops anything it started.
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.time() + _STOP_GRACE_SECONDS
+    while time.time() < deadline and pid_alive(pid):
+        time.sleep(0.2)
+    if pid_alive(pid):
+        kill_group(pid)
+    return not pid_alive(pid)
+
+
 def stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
     """SIGTERM the detached engine child so it unregisters + tears down, then drop its record.
 
     Escalates to SIGKILL of the process group if it does not exit within the grace window. The
     record is removed either way, so a leave never leaves a stale handle behind.
     """
-    pid = int(record.get("pid") or 0)
-    if pid and pid_alive(pid):
-        # SIGTERM the detached engine so it unregisters and stops anything it started.
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        deadline = time.time() + _STOP_GRACE_SECONDS
-        while time.time() < deadline and pid_alive(pid):
-            time.sleep(0.2)
-        if pid_alive(pid):
-            kill_group(pid)
+    terminate_pid(int(record.get("pid") or 0))
     record_path(grid_id, engine_id).unlink(missing_ok=True)

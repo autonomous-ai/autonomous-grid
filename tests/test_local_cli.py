@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import threading
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -1008,6 +1009,91 @@ def test_atomic_write_bytes_is_0600_even_under_hostile_umask(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# cross-process file lock (shared/filelock.py)
+# ---------------------------------------------------------------------------
+
+def test_file_lock_is_mutually_exclusive_and_reusable(tmp_path):
+    """`file_lock` serializes a read-merge-write across processes: while held, another holder's
+    non-blocking acquire fails; after the block, it is free again (no deadlock on re-entry)."""
+    import fcntl
+
+    from shared.filelock import file_lock
+
+    target = tmp_path / "engines" / "n1" / "remote.json"  # parent dirs don't exist yet — lock must create them
+    with file_lock(target):
+        fd = os.open(str(target) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a rival can't take it while we hold it
+        finally:
+            os.close(fd)
+    with file_lock(target):  # released → reacquirable
+        pass
+    assert (target.parent / "remote.json.lock").exists()
+
+
+def test_terminate_pid_sigterms_but_does_not_touch_the_record(monkeypatch, tmp_path):
+    """`terminate_pid` stops a detached child (SIGTERM) without removing its record — the caller keeps
+    the record for a respawn that rewrites it, unlike `stop_engine` which unlinks."""
+    import signal as signal_mod
+
+    from shared import run_records
+
+    sent = []
+    alive = {"v": True}
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: alive["v"])
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: (sent.append((pid, sig)), alive.__setitem__("v", False)))
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)
+
+    record_file = run_records.record_path("n1", "remote")
+    record_file.parent.mkdir(parents=True, exist_ok=True)
+    record_file.write_text("{}")
+
+    run_records.terminate_pid(4242)
+    assert sent == [(4242, signal_mod.SIGTERM)]  # graceful stop
+    assert record_file.exists()  # record left intact for the caller to rewrite
+
+
+def test_terminate_pid_escalates_to_sigkill_group_when_stubborn(monkeypatch):
+    """A child that ignores SIGTERM past the grace window is SIGKILL'd by process group, and
+    `terminate_pid` reports False because it could not confirm the process died."""
+    from shared import run_records
+
+    killed = []
+    clock = {"v": 1000.0}
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # never dies on its own
+    monkeypatch.setattr(run_records, "kill_group", lambda pid: killed.append(pid))
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(run_records.time, "time", lambda: clock["v"])
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: clock.__setitem__("v", clock["v"] + 10))
+
+    assert run_records.terminate_pid(4242) is False  # could not confirm it died
+    assert killed == [4242]
+
+
+def test_terminate_pid_reports_true_when_process_exits(monkeypatch):
+    from shared import run_records
+
+    alive = {"v": True}
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: alive["v"])
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: alive.__setitem__("v", False))
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)
+    assert run_records.terminate_pid(4242) is True  # SIGTERM took → confirmed dead
+
+
+def test_pid_alive_treats_permission_error_as_alive(monkeypatch):
+    """A process owned by another uid answers `os.kill(pid, 0)` with EPERM — it EXISTS, so it is alive.
+    Reporting it dead would let a join spawn a clobbering second node under the same token id."""
+    from shared import run_records
+
+    def raise_eperm(pid, sig):
+        raise PermissionError()
+
+    monkeypatch.setattr(run_records.os, "kill", raise_eperm)
+    assert run_records.pid_alive(4242) is True
+
+
+# ---------------------------------------------------------------------------
 # Mode state kernel (shared/state.py)
 # ---------------------------------------------------------------------------
 
@@ -1250,8 +1336,9 @@ def test_remote_join_at_serves_external_engine(monkeypatch, tmp_path):
     _mock_remote_spawn(monkeypatch)
 
     assert cli.main(["join", "--at", "http://192.168.1.9:11434/v1", "-m", "llama3", "--name", "ext"]) == 0
-    record = cli.provider._read_records("n1")["ext"]
+    record = cli.provider._read_records("n1")["remote"]  # remote is a singleton identity per grid
     assert record["endpoint_url"] == "http://192.168.1.9:11434/v1" and record["models"] == ["llama3"]
+    assert record["meta_name"] == "ext"  # --name in remote is the grid-page display name, not the record key
 
 
 def test_remote_join_member_falls_back_to_bundle_url_when_status_forbidden(monkeypatch, tmp_path):
@@ -1430,16 +1517,252 @@ def test_remote_join_died_cleans_up_record(monkeypatch, tmp_path):
     assert cli.provider._read_records("n1") == {}  # stale record removed on a failed start
 
 
-def test_remote_leave_stops_and_removes_record(monkeypatch, tmp_path, capsys):
+def test_remote_join_appends_via_respawn(monkeypatch, tmp_path):
+    """A second `grid join` on a remote grid is ADDITIVE: it merges into the one singleton identity and
+    respawns it (stopping the prior process first, since both share the token-pinned node_id)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    # The first identity is now live — make its recorded pid look alive so the 2nd join appends to it.
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"]) == 0
+
+    records = cli.provider._read_records("n1")
+    assert list(records) == ["remote"]  # exactly one singleton identity per grid
+    rec = records["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1", "http://h:8000/v1"]  # union
+    assert rec["models"] == ["llama3", "mistral"] and rec["endpoint_url"] is None
+    assert terminated == [4242]  # the 2nd join stopped the 1st process before respawning the union
+
+
+def test_remote_join_appending_same_url_is_noop(monkeypatch, tmp_path, capsys):
+    """Re-joining an engine already in the union adds nothing and does not respawn (idempotent)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    respawned = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: respawned.append(pid))
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # same engine again
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert len(rec["engines"]) == 1  # deduped by endpoint_url
+    assert respawned == []  # nothing new → no restart
+    assert "already serving" in capsys.readouterr().out.lower()
+
+
+def test_remote_join_appending_builtin_into_external_union_is_rejected(monkeypatch, tmp_path):
+    """The built-in `--serve` engine serves one model and cannot join a multi-engine union (external-only)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: None)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--serve", "qwen"])
+    assert "leave" in str(exc.value).lower()  # guidance: leave then re-join all as --at
+
+
+def test_remote_join_adopts_and_stops_legacy_live_record(monkeypatch, tmp_path):
+    """Migration: a pre-singleton `engine-<uuid>` record that is still live gets its engines adopted into
+    the singleton and its process stopped, so two children never share the token node_id."""
+    from shared import run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    run_records.write_record("n1", "engine-abc123", {
+        "engine_id": "engine-abc123", "grid_id": "n1", "pid": 999, "media": False,
+        "engines": [{"endpoint_url": "http://legacy:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        "models": ["llama3"], "endpoint_url": "http://legacy:11434/v1",
+    })
+
+    assert cli.main(["join", "--at", "http://new:8000/v1", "-m", "mistral"]) == 0
+
+    records = cli.provider._read_records("n1")
+    assert list(records) == ["remote"]  # legacy file removed; one singleton remains
+    assert [e["endpoint_url"] for e in records["remote"]["engines"]] == [
+        "http://legacy:11434/v1", "http://new:8000/v1",  # adopted legacy engine + the new one
+    ]
+    assert 999 in terminated  # legacy process stopped so it can't clobber the token node_id
+
+
+def test_remote_join_same_url_new_model_is_added(monkeypatch, tmp_path):
+    """Re-joining an engine already in the union but with an extra `-m` model ADDS the model (additive),
+    rather than dedup-skipping the whole spec and silently dropping the new model."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "-m", "mistral"]) == 0
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert len(rec["engines"]) == 1  # still one engine (same URL)
+    assert rec["engines"][0]["models"] == ["llama3", "mistral"]  # the new model was merged in, not dropped
+    assert rec["models"] == ["llama3", "mistral"]
+
+
+def test_remote_join_serve_rejoin_same_model_is_noop(monkeypatch, tmp_path, capsys):
+    """Re-running `grid join --serve <model>` (built-in, endpoint_url=None) with the same model is a
+    no-op, not a bogus 'multiple engines' rejection."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    respawned = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: respawned.append(pid) or True)
+
+    assert cli.main(["join", "--serve", "qwen"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--serve", "qwen"]) == 0  # same built-in model again
+
+    assert respawned == []  # nothing new → no restart, no SystemExit
+    assert "already serving" in capsys.readouterr().out.lower()
+
+
+def test_remote_join_rename_respawns_to_apply_meta_name(monkeypatch, tmp_path):
+    """A re-join that only changes --name is not silently dropped: it respawns so the new display name
+    actually takes effect (there is no other way to rename in Slice 1)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    respawned = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: respawned.append(pid) or True)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "first"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "second"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["meta_name"] == "second"  # rename applied
+    assert respawned == [4242]  # respawned to apply it
+
+
+def test_remote_join_append_onto_aliased_identity_is_rejected(monkeypatch, tmp_path):
+    """Appending a 2nd engine onto a single-engine identity that uses --advertise-as is rejected (aliases
+    are single-engine only, ADR 0007 D4) instead of silently dropping the alias."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "real", "--advertise-as", "public"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"])
+    assert "advertise-as" in str(exc.value).lower()
+
+
+def test_remote_join_aborts_when_prior_process_wont_die(monkeypatch, tmp_path):
+    """If a prior engine can't be confirmed stopped, the join aborts BEFORE spawning — spawning anyway
+    would put two processes on the same token node_id (the original clobber bug)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: False)  # won't die
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # first join: no prior to stop
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawns = []
+    monkeypatch.setattr(cli.remote_provider, "_spawn_remote_engine",
+                        lambda *a, **k: spawns.append(a) or type("P", (), {"pid": 1})())
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--at", "http://h:8000/v1", "-m", "mistral"])
+    assert "could not stop" in str(exc.value).lower()
+    assert spawns == []  # never spawned the clobbering second process
+
+
+def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False):
     from shared import run_records
 
     _seed_remote(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
-    run_records.write_record("n1", "rig", {"engine_id": "rig", "node_id": "node-x", "grid_id": "n1", "pid": 0})
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": pid, "media": media,
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "engines": engines,
+        "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
+        "endpoint_url": engines[0]["endpoint_url"] if len(engines) == 1 else None,
+    })
 
-    assert cli.main(["leave", "--engine", "rig"]) == 0
+
+def test_remote_leave_tears_down_the_identity(monkeypatch, tmp_path, capsys):
+    _seed_remote_identity(monkeypatch, tmp_path,
+                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}], pid=0)
+
+    assert cli.main(["leave"]) == 0  # bare leave tears down the whole singleton identity
     assert cli.provider._read_records("n1") == {}
-    assert "Left engine rig" in capsys.readouterr().out
+    assert "Left team" in capsys.readouterr().out
+
+
+def test_remote_leave_engine_shrinks_union(monkeypatch, tmp_path):
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ])
+    _mock_remote_spawn(monkeypatch)  # the reduced union is respawned
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0  # drop one engine by endpoint URL
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:8000/v1"]  # only the survivor remains
+    assert rec["models"] == ["mistral"] and rec["endpoint_url"] == "http://h:8000/v1"
+    assert terminated == [4242]  # respawned with the reduced union
+
+
+def test_remote_leave_engine_last_tears_down(monkeypatch, tmp_path, capsys):
+    _seed_remote_identity(monkeypatch, tmp_path,
+                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}], pid=0)
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0  # the only engine
+    assert cli.provider._read_records("n1") == {}  # last engine removed → whole identity torn down
+    assert "last engine" in capsys.readouterr().out.lower()
+
+
+def test_remote_leave_engine_unknown_errors(monkeypatch, tmp_path):
+    _seed_remote_identity(monkeypatch, tmp_path,
+                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}], pid=0)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave", "--engine", "http://nope:9999/v1"])
+    assert "no engine" in str(exc.value).lower()
+
+
+def test_remote_leave_shrink_preserves_media(monkeypatch, tmp_path):
+    """Dropping a text engine from an identity that also serves media keeps media on in the respawn."""
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ], media=True)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0
+    rec = cli.provider._read_records("n1")["remote"]
+    assert rec["media"] is True  # media survives an engine drop
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:8000/v1"]
+
+
+def test_remote_leave_shrink_reports_a_dead_respawn(monkeypatch, tmp_path):
+    """A shrink whose respawn dies must surface an error, not print 're-serving N engine(s)' success while
+    the grid serves nothing."""
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ])
+    monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 7})())
+    monkeypatch.setattr(cli.remote_provider, "_await_remote_engine_start", lambda *a, **k: "died")
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave", "--engine", "http://h:11434/v1"])
+    assert "not serving" in str(exc.value).lower() or "exited" in str(exc.value).lower()
 
 
 def test_dispatch_runs_agnostic_command_in_remote(monkeypatch, tmp_path, capsys):
@@ -2638,6 +2961,16 @@ def test_build_routing_maps_alias_to_upstream_real_name(monkeypatch, tmp_path):
     assert union == ["ollama-model"]
     assert caps == {"schema_version": 1, "models": {"ollama-model": {"x": 1}}}
     assert warns == []
+
+
+def test_meta_uses_meta_name_for_grid_page_name(monkeypatch, tmp_path):
+    """The grid-page node name comes from the record's ``meta_name`` (--name, or hostname when omitted),
+    not the singleton record key ``engine_id`` (which is the constant "remote")."""
+    from remote import serve
+
+    assert serve._meta({"meta_name": "mybox", "endpoint_url": "http://h/v1"}, "remote")["name"] == "mybox"
+    # Fallback to engine_id when no display name was stored (defensive; join always sets meta_name).
+    assert serve._meta({"endpoint_url": "http://h/v1"}, "remote")["name"] == "remote"
 
 
 def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
@@ -4580,3 +4913,52 @@ def test_capabilities_threads_ctx_size_into_envelope(monkeypatch):
         "json_object": False, "json_schema": False})
     env = probe.capabilities("http://h:8081/v1", "qwen3.5:0.8b", context_window=200000)
     assert env["models"]["qwen3.5:0.8b"]["context_window"] == 200000
+
+
+def _poll_loop_state_and_poll(job_then_none):
+    """A minimal serve state + a poll_once double that yields `job_then_none` then stops the loop."""
+    from remote import serve
+
+    state = SimpleNamespace(stop=threading.Event())
+    queue = list(job_then_none)
+
+    def fake_poll(_state, **_kwargs):
+        if queue:
+            return queue.pop(0)
+        _state.stop.set()  # nothing left to serve — let the loop exit
+        return None
+
+    monkey_targets = {"poll_once": fake_poll, "handle_job": lambda _s, _job: None}
+    return serve, state, monkey_targets
+
+
+def test_poll_loop_is_silent_on_success_by_default(monkeypatch, capsys):
+    # A healthy poll (a served job, then an empty 204) must not write to the engine log — only
+    # errors and job failures are recorded, so the log stays quiet unless something is wrong.
+    serve, state, targets = _poll_loop_state_and_poll(
+        [{"transaction_id": "txn-1", "body": {"model": "qwen3:0.6b"}}, None]
+    )
+    monkeypatch.setattr(serve, "_DEBUG", False)
+    for name, fn in targets.items():
+        monkeypatch.setattr(serve, name, fn)
+
+    serve._poll_loop(state)
+
+    assert "[engine]" not in capsys.readouterr().err
+
+
+def test_poll_loop_traces_each_cycle_when_debug_enabled(monkeypatch, capsys):
+    # With GRID_ENGINE_DEBUG set, every cycle is traced: a claimed job (with its txn + model) and
+    # an empty 204 both emit an `[engine]` line so the poll loop is visible while debugging.
+    serve, state, targets = _poll_loop_state_and_poll(
+        [{"transaction_id": "txn-1", "body": {"model": "qwen3:0.6b"}}, None]
+    )
+    monkeypatch.setattr(serve, "_DEBUG", True)
+    for name, fn in targets.items():
+        monkeypatch.setattr(serve, name, fn)
+
+    serve._poll_loop(state)
+
+    err = capsys.readouterr().err
+    assert "[engine] poll: job txn=txn-1 model='qwen3:0.6b' handled" in err
+    assert "[engine] poll: no job (204)" in err
