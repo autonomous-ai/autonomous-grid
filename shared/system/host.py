@@ -25,6 +25,20 @@ class HostInfo:
     disk_free_gb: float
 
 
+def platform_kind() -> str:
+    """Coarse OS/arch class advertised in the heartbeat so the grid knows what a node runs:
+    ``linux`` · ``macos-arm64`` (Apple Silicon) · ``macos-x86_64`` (Intel Mac) · ``windows`` · ``other``.
+    Same classification drives the VRAM path in ``gpu.load_snapshot`` (Apple Silicon vs Intel Mac)."""
+    system = platform.system()
+    if system == "Linux":
+        return "linux"
+    if system == "Darwin":
+        return "macos-arm64" if platform.machine() == "arm64" else "macos-x86_64"
+    if system == "Windows":
+        return "windows"
+    return "other"
+
+
 def gather(home: str = "~") -> HostInfo:
     home_dir = os.path.expanduser(home)
     mem_total, mem_available, mem_percent = _memory_snapshot()
