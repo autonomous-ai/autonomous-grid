@@ -499,10 +499,12 @@ class _ServeState:
         with self._lock:
             load = {"active_tasks": self._inflight}
         # VRAM/GPU load for the grid page (per-provider VRAM roll-up). Probed OUTSIDE the lock — it
-        # shells out to nvidia-smi (up to a few seconds); absent a GPU it returns {} and we send none.
-        from shared.system import gpu
+        # shells out to nvidia-smi / system_profiler (up to a few seconds); absent a GPU it returns {}.
+        from shared.system import gpu, host
 
         load.update(gpu.load_snapshot())
+        # OS/arch so the grid knows what a node runs: linux / macos-arm64 / macos-x86_64 / windows / other.
+        load["platform"] = host.platform_kind()
         return load
 
     def enter_inference(self) -> None:
