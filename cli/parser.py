@@ -129,7 +129,8 @@ def _add_engines(sub) -> None:
         help="Media bundle to advertise; repeat for multiple bundles.",
     )
     choose.add_argument("--all", action="store_true", help="Join every detected engine.")
-    choose.add_argument("--engine", default=None, help="Join only the detected engine of this kind.")
+    choose.add_argument("--kind", "--engine", dest="kind", default=None,
+                        help="Join only the detected engine of this kind (e.g. ollama, vllm).")
 
     naming = join.add_argument_group("Name & display")
     naming.add_argument("--name", default=None,

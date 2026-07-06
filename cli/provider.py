@@ -79,10 +79,10 @@ def cmd_join(args: argparse.Namespace) -> int:
             "No running engine detected on this box. Point at one with "
             "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
         )
-    if args.engine:
-        detected = [engine for engine in detected if engine.label == args.engine]
+    if args.kind:
+        detected = [engine for engine in detected if engine.label == args.kind]
         if not detected:
-            raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
+            raise SystemExit(f"No detected engine of kind {args.kind!r}. Run `grid join` to list them.")
     elif len(detected) > 1 and not args.all:
         _print_plan(detected)
         if _interactive():
@@ -90,7 +90,7 @@ def cmd_join(args: argparse.Namespace) -> int:
                 print("Nothing joined.")
                 return 0
         else:
-            raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
+            raise SystemExit("Multiple engines detected; pass --all, --kind <kind>, or --at <url>.")
 
     used: set[str] = set()
     rc = 0
@@ -501,7 +501,7 @@ def _print_plan(detected: list[Any]) -> None:
     for engine in detected:
         models = ",".join(engine.models) or ("comfyui" if engine.media else "(no models listed)")
         print(f"  {engine.label:<12} {engine.endpoint_url:<34} {models}")
-    print("\nJoin them:\n  grid join --all\n  grid join --engine <kind>")
+    print("\nJoin them:\n  grid join --all\n  grid join --kind <kind>")
 
 
 def _interactive() -> bool:

@@ -983,6 +983,12 @@ def test_ls_shows_grid_id_local(monkeypatch, tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)[0]["id"] == cfg["grid_id"]
 
 
+def test_join_kind_flag_with_engine_alias():
+    parser = cli.build_parser()
+    assert parser.parse_args(["join", "--kind", "ollama"]).kind == "ollama"
+    assert parser.parse_args(["join", "--engine", "vllm"]).kind == "vllm"  # --engine is a back-compat alias
+
+
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
     {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},

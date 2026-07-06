@@ -364,10 +364,10 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             "No running engine detected on this box. Point at one with "
             "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
         )
-    if args.engine:
-        detected = [engine for engine in detected if engine.label == args.engine]
+    if args.kind:
+        detected = [engine for engine in detected if engine.label == args.kind]
         if not detected:
-            raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
+            raise SystemExit(f"No detected engine of kind {args.kind!r}. Run `grid join` to list them.")
 
     media_detected = any(engine.media for engine in detected)
     text = [engine for engine in detected if not engine.media]
@@ -377,7 +377,7 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             if not provider._confirm("Join all detected engines?"):
                 return [], False
         else:
-            raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
+            raise SystemExit("Multiple engines detected; pass --all, --kind <kind>, or --at <url>.")
     return [
         {"endpoint_url": engine.endpoint_url, "models": list(engine.models), "engine_label": engine.label}
         for engine in text
