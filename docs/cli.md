@@ -9,7 +9,8 @@ Internal protocol words stay out of the user-facing CLI.
 ```
 grid      a named local AI endpoint, usually `home` or `work`
 grid_url  the URL engines join; apps call it through `/v1`
-engine    something that runs models: Ollama, LM Studio, vLLM, MLX, llama.cpp, ComfyUI
+engine    a running instance joined to a grid: Ollama, LM Studio, vLLM, MLX, llama.cpp, ComfyUI
+kind      an engine's type (ollama, vllm, mlx, llama.cpp, comfyui) — filter auto-detect with --kind
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
 mode      which world the CLI targets: `local` (default) or `remote`
@@ -140,9 +141,9 @@ commands exit with guidance to switch — sign-in is a remote concept. See
 ## Grid Lifecycle
 
 ```
-grid up [name] [--type <t>]           # create/start a grid (--type sets a remote grid's type on create)
+grid up [name] [--type <t>]           # create/start a grid by name or id (--type: remote grid type on create)
 grid down [name]                      # stop a grid; the grid/config persists
-grid ls [--json]                      # list saved grids
+grid ls [--json]                      # list saved grids (name, id, where, url)
 grid info [grid] [--json]             # endpoint, key, engines, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
 ```
@@ -174,8 +175,8 @@ grid join [grid] --all                                # join every detected engi
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
-grid leave [grid] [--engine <id>] [--all]
-grid engines [grid] [--json]                          # live engines joined to a grid
+grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
+grid engine ls [grid] [--json]                        # live engines joined to a grid (legacy alias: grid engines)
 ```
 
 `grid join` with no flags should detect local engines in this order:
@@ -188,7 +189,7 @@ grid engines [grid] [--json]                          # live engines joined to a
 6. ComfyUI
 
 When detection finds more than one engine, print the plan and ask for confirmation in
-interactive terminals. In non-interactive mode, require `--all`, `--engine <kind>`, or
+interactive terminals. In non-interactive mode, require `--all`, `--kind <kind>`, or
 explicit `--at`.
 
 Example detection output:
@@ -196,16 +197,17 @@ Example detection output:
 ```text
 Detected engines on this machine:
 
-  mac-studio     MLX        http://192.168.1.10:8080/v1      gemma4-31b
-  gpu-4090       vLLM       http://192.168.1.20:8000/v1      devstral-small-2
+  mlx          http://192.168.1.10:8080/v1        gemma4-31b
+  vllm         http://192.168.1.20:8000/v1        devstral-small-2
 
 Join them:
   grid join --all
-  grid join --engine gpu-4090
+  grid join --kind <kind>
 ```
 
-Engine IDs are local names shown by `grid engines`, `grid info`, and
-`grid models --verbose`; they are accepted by `grid leave --engine <id>`.
+Engine IDs are local names shown by `grid engine ls`, `grid info`, and `grid models --verbose`.
+`grid leave --engine <sel>` takes an exact engine id, or — tried in that order — an endpoint URL,
+a served model, or a URL fragment such as `:8000`.
 
 ### `grid join` in remote mode
 
@@ -225,16 +227,17 @@ files) streams back exactly as in local mode.
 
 The `grid join` flag set is the union of both modes, gated by mode:
 
-- **Both modes:** `--at` / `--serve` / `-m,--model` / `--engine <kind>` / `--name` / `--all`,
-  `--advertise-as`, `--endpoint-port` (alias `--llama-port`), the llama tuning flags
-  (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`), and the media flags
-  `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
+- **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
+  / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
+  the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`),
+  and the media flags `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
 - **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
-- **Remote-only:** `--engine-label` (the engine kind shown on the grid page), `--max-concurrency`.
-- **Deprecated:** `--pricing-input` / `--pricing-output` — kept so old invocations don't hard-error,
-  but they no longer advertise a price. Set your authoritative per-model price with `grid price set`
-  (see [Price](#price)) instead.
+- **Remote-only:** `--max-concurrency`.
+- **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
+  accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
+  `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.
+  Set your authoritative per-model price with `grid price set` (see [Price](#price)) instead.
 
 A flag used in the wrong mode fails with a clear message. (`--advertise-as` is single-engine only and
 is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
@@ -352,6 +355,7 @@ guidance to switch.
 grid engine install llama.cpp          # default text engine
 grid engine install comfyui            # default media engine
 grid engine pull <bundle>              # ComfyUI media bundle: image_generation, image_editing, i2v
+grid engine ls [grid] [--json]         # live engines joined to a grid (same view as grid engines)
 ```
 
 Grid has no inference engine of its own. These commands install open-source default
@@ -361,6 +365,8 @@ engines so a bare machine can join a grid without Ollama, LM Studio, or vLLM.
 
 ```
 grid list                              # alias for grid ls
+grid engine list                       # alias for grid engine ls
+grid engines                           # legacy alias for grid engine ls
 grid remove <model> [--yes]            # alias for grid rm
 ```
 
