@@ -52,6 +52,41 @@ def read_record(grid_id: str, engine_id: str) -> dict[str, Any] | None:
     return read_records(grid_id).get(engine_id)
 
 
+def match_engine(
+    specs: list[dict[str, Any]],
+    selector: str,
+    *,
+    label: str,
+    summary: str,
+    hint: str = "pass the exact endpoint URL instead",
+) -> list[dict[str, Any]]:
+    """Engine spec(s) a `grid leave --engine <selector>` picks out of ``specs``, tried in order: exact
+    ``endpoint_url`` → exact ``engine_label`` → a served model → an ``endpoint_url`` substring. Each match
+    must resolve to exactly ONE engine or it raises ``SystemExit`` (naming ``summary`` and ``hint``);
+    returns ``[]`` on no match so the caller raises its own not-found. Returned dicts are the SAME objects
+    passed in — identity is preserved for an ``id()``-based drop filter. An exact engine-*id* match is the
+    caller's job BEFORE this (remote keys engines by URL/label; local by record id). ``hint`` is the
+    disambiguation instruction, per mode: remote points at the endpoint URL, local at the engine id."""
+
+    def unique(matches: list[dict[str, Any]], how: str) -> list[dict[str, Any]]:
+        if len(matches) > 1:
+            raise SystemExit(
+                f"{how} {selector!r} matches several engines on {label}; {hint}. Engines: {summary}."
+            )
+        return matches
+
+    by_url = unique([s for s in specs if s.get("endpoint_url") == selector], "URL")
+    if by_url:
+        return by_url
+    by_label = unique([s for s in specs if s.get("engine_label") == selector], "Label")
+    if by_label:
+        return by_label
+    by_model = unique([s for s in specs if selector in (s.get("models") or [])], "Model")
+    if by_model:
+        return by_model
+    return unique([s for s in specs if selector in (s.get("endpoint_url") or "")], "URL fragment")
+
+
 def media_signature(record: dict[str, Any]) -> tuple[bool, tuple[str, ...], int, int]:
     """A comparable fingerprint of an identity's media config (on/off, bundles, ports). A SIGHUP
     hot-reload can't bring media up/down or swap bundles, so ``grid join``/``leave`` (CLI) and the serve

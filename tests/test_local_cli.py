@@ -922,6 +922,74 @@ def test_leave_all_removes_records(monkeypatch, tmp_path):
     assert cli.provider._read_records(grid_id) == {}
 
 
+def _seed_local_engine(grid_id, engine_id, *, endpoint_url=None, models=None):
+    cli.provider._write_record(grid_id, engine_id, {
+        "engine_id": engine_id, "node_id": engine_id, "grid_id": grid_id, "pid": 0,
+        "endpoint_url": endpoint_url, "models": models or [],
+    })
+
+
+def _leave(*argv):
+    return cli.cmd_leave(cli.build_parser().parse_args(["leave", *argv]))
+
+
+def test_leave_local_matches_by_endpoint_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["devstral"])
+    assert _leave("home", "--engine", "http://h:8000/v1") == 0
+    assert set(cli.provider._read_records(grid_id)) == {"gpu"}
+
+
+def test_leave_local_matches_by_served_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["devstral"])
+    assert _leave("home", "--engine", "devstral") == 0
+    assert set(cli.provider._read_records(grid_id)) == {"mac"}
+
+
+def test_leave_local_matches_by_url_fragment(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["devstral"])
+    assert _leave("home", "--engine", ":9000") == 0
+    assert set(cli.provider._read_records(grid_id)) == {"mac"}
+
+
+def test_leave_local_exact_id_wins_over_url_substring(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["m1"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://mac-host:9000/v1", models=["m2"])
+    assert _leave("home", "--engine", "mac") == 0  # exact id, not the substring of gpu's URL
+    assert set(cli.provider._read_records(grid_id)) == {"gpu"}
+
+
+def test_leave_local_ambiguous_model_lists_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["shared"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["shared"])
+    with pytest.raises(SystemExit) as exc:
+        _leave("home", "--engine", "shared")
+    msg = str(exc.value)
+    assert "several" in msg.lower() and "mac" in msg and "gpu" in msg
+
+
+def test_leave_local_unknown_selector_errors(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    with pytest.raises(SystemExit) as exc:
+        _leave("home", "--engine", "ghost")
+    assert "ghost" in str(exc.value)
+    assert set(cli.provider._read_records(grid_id)) == {"mac"}  # nothing dropped on a miss
+
+
 def test_cli_accepts_engines_and_json_and_aliases():
     parser = cli.build_parser()
 

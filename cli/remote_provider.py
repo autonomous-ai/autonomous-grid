@@ -576,28 +576,7 @@ def _engines_summary(union: list[dict[str, object]]) -> str:
 def _drop_spec(
     union: list[dict[str, object]], selector: str, label: str
 ) -> list[dict[str, object]]:
-    """The spec(s) to remove for ``selector``, tried in order: exact ``endpoint_url``, exact
-    ``engine_label``, a served model, then a URL substring (host/port). Each non-URL match must resolve to
-    ONE engine or it errors and lists the engines — so `grid leave --engine mistral` (by model) or
-    `grid leave --engine :8000` (by port) work, not just the full URL."""
-
-    def unique(matches: list[dict[str, object]], how: str) -> list[dict[str, object]]:
-        if len(matches) > 1:
-            raise SystemExit(
-                f"{how} {selector!r} matches several engines on {label}; pass the exact endpoint URL "
-                f"instead. Engines: {_engines_summary(union)}."
-            )
-        return matches
-
-    by_url = [spec for spec in union if spec.get("endpoint_url") == selector]
-    if by_url:
-        return by_url
-    by_label = unique([spec for spec in union if spec.get("engine_label") == selector], "Label")
-    if by_label:
-        return by_label
-    by_model = unique([spec for spec in union if selector in (spec.get("models") or [])], "Model")
-    if by_model:
-        return by_model
-    return unique(
-        [spec for spec in union if selector in (spec.get("endpoint_url") or "")], "URL fragment"
-    )
+    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → served model → URL
+    substring — via the shared matcher (`shared.run_records.match_engine`). Remote engines are keyed by
+    URL/label, so no exact-id short-circuit here (that's the local caller's job)."""
+    return run_records.match_engine(union, selector, label=label, summary=_engines_summary(union))

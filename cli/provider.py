@@ -260,9 +260,7 @@ def cmd_leave(args: argparse.Namespace) -> int:
     if args.all:
         targets = list(records)
     elif args.engine:
-        if args.engine not in records:
-            raise SystemExit(f"No engine {args.engine!r} joined to {cfg['name']}.")
-        targets = [args.engine]
+        targets = [_resolve_leave_target(records, args.engine, cfg["name"])]
     elif len(records) == 1:
         targets = list(records)
     elif not records:
@@ -276,6 +274,37 @@ def cmd_leave(args: argparse.Namespace) -> int:
         _stop_engine(grid_id, engine_id, records[engine_id])
         print(f"Left engine {engine_id} on {cfg['name']}.")
     return 0
+
+
+def _resolve_leave_target(records: dict[str, dict[str, Any]], selector: str, grid_name: str) -> str:
+    """The engine id to leave for ``--engine <selector>``: an exact engine id wins; otherwise match by
+    endpoint URL, a served model, or a URL fragment — the same order as remote (ADR 0010 D-d)."""
+    if selector in records:
+        return selector
+    specs = [
+        {"id": engine_id, "endpoint_url": record.get("endpoint_url"),
+         "models": record.get("models") or [], "engine_label": None}  # local records carry no label
+        for engine_id, record in records.items()
+    ]
+    matched = run_records.match_engine(
+        specs, selector, label=grid_name, summary=_leave_summary(records),
+        hint="pass the exact engine id instead",
+    )
+    if not matched:
+        raise SystemExit(
+            f"No engine {selector!r} joined to {grid_name} (match by id, endpoint URL, a served "
+            f"model, or a URL fragment). Engines: {_leave_summary(records)}."
+        )
+    return str(matched[0]["id"])
+
+
+def _leave_summary(records: dict[str, dict[str, Any]]) -> str:
+    """A short human list of joined engines for a leave error / ambiguity message."""
+    parts = []
+    for engine_id, record in records.items():
+        models = ",".join(record.get("models") or [])
+        parts.append(f"{engine_id} [{models}]" if models else engine_id)
+    return "; ".join(parts)
 
 
 def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
