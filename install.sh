@@ -18,6 +18,11 @@
 #   GRID_WHEEL_URL / GRID_PACKAGE   macOS: install this wheel URL / PyPI name instead
 set -euo pipefail
 
+# The user's real PATH, captured before this script augments its own (install_macos_wheel
+# prepends ~/.local/bin). The post-install hint must test THIS, not the augmented PATH,
+# or the hint never fires and macOS users end up with grid installed but not found.
+ORIG_PATH="$PATH"
+
 OWNER="${GRID_REPO_OWNER:-autonomous-ai}"
 REPO="${GRID_REPO_NAME:-autonomous-grid}"
 VERSION="${GRID_VERSION:-latest}"
@@ -132,7 +137,7 @@ fi
 [ -n "$grid_bin" ] || die "installed, but 'grid' isn't on PATH — add ~/.local/bin to PATH and reopen your shell"
 
 bindir="$(cd "$(dirname "$grid_bin")" && pwd)"
-case ":$PATH:" in
+case ":$ORIG_PATH:" in
   *":$bindir:"*) ;;
   *) info "Add $bindir to PATH:  echo 'export PATH=\"$bindir:\$PATH\"' >> ~/.zshrc && exec \$SHELL" ;;
 esac
