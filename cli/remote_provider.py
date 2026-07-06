@@ -57,6 +57,12 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             "Set your model price with `grid price set` after joining.",
             file=sys.stderr,
         )
+    if getattr(args, "engine_label", None) is not None:
+        print(
+            "Note: --engine-label is deprecated and no longer changes the grid page — the engine's kind "
+            "is derived automatically. (It still matches `grid leave --engine <label>`.)",
+            file=sys.stderr,
+        )
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 

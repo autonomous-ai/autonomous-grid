@@ -166,7 +166,8 @@ def _add_engines(sub) -> None:
     # Remote-only: billing + pull-based capacity + grid-page display (rejected in local). default=None
     # so a wrong-mode use is detectable.
     remote_only.add_argument("--engine-label", default=None,
-                             help="Remote-only: label for this engine's kind on the grid page.")
+                             help="Deprecated — the grid page derives the engine kind automatically; "
+                                  "no longer changes display (remote only).")
     # Deprecated: pricing now lives in the authoritative per-provider table — set it with
     # `grid price set` instead. Kept so old invocations don't hard-error; they no longer advertise a price.
     remote_only.add_argument("--pricing-input", type=float, default=None,

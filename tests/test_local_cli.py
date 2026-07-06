@@ -1051,6 +1051,16 @@ def test_remote_join_inline_alias_desugars_into_record(monkeypatch, tmp_path):
     assert rec["advertise_as"] == ["pub-a"]
 
 
+def test_engine_label_is_deprecated_but_still_recorded(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    assert cli.main(["join", "--serve", "m", "--engine-label", "rig"]) == 0
+    err = capsys.readouterr().err
+    assert "engine-label" in err and "deprecated" in err.lower()
+    # still stored so `grid leave --engine <label>` keeps matching (ADR 0010 D-c)
+    assert cli.provider._read_records("n1")["remote"]["engine_label"] == "rig"
+
+
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
     {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
