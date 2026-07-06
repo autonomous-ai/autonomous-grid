@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from typing import Any
 
 import httpx
@@ -20,12 +21,22 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 def cmd_up(args: argparse.Namespace) -> int:
     name = args.name or "home"
-    cfg = _grid_by_name(name) or runtime.init_grid_config(
-        name=name,
-        port=args.port,
-        host=args.host,
-        advertise_host=args.advertise_host,
-    )
+    cfg = _grid_by_name(name)
+    if cfg is None:
+        if _looks_like_grid_id(name):
+            # An unsynced grid id, not a new grid's name — the old behaviour created a junk grid named
+            # after the id string. Point at the real grid instead (ADR 0010 D-f). Guard runs before any
+            # create/start, so nothing is written or spawned.
+            raise SystemExit(
+                f"No local grid with id {name!r}. That looks like a grid id, not a new grid's name — "
+                f"run `grid ls` to see your grids. (If it's a remote grid: `grid mode remote`, then `grid sync`.)"
+            )
+        cfg = runtime.init_grid_config(
+            name=name,
+            port=args.port,
+            host=args.host,
+            advertise_host=args.advertise_host,
+        )
     runtime.start_grid(cfg)
     print(f"grid={cfg['name']}")
     print(f"grid_url={runtime.grid_url(cfg)}")
@@ -169,6 +180,16 @@ def _overview_local(as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+# Local grid ids are minted as ``ag-<slug>-<hex8>`` (local/runtime.init_grid_config). `grid up` uses this
+# to refuse auto-creating a junk grid when the arg is an unsynced id, not a new name (ADR 0010 D-f).
+# fullmatch (anchored) so a real name like ``ag-team`` still creates.
+_GRID_ID_RE = re.compile(r"ag-.+-[0-9a-f]{8}")
+
+
+def _looks_like_grid_id(name: str) -> bool:
+    return bool(_GRID_ID_RE.fullmatch(name))
+
 
 def _grid_by_name(name: str) -> dict[str, Any] | None:
     for cfg in config.iter_grid_configs():

@@ -1166,6 +1166,36 @@ def test_engine_ls_remote_delegates_to_remote_engines(monkeypatch, tmp_path):
     assert seen.get("hit") is True
 
 
+def test_looks_like_grid_id_detector():
+    assert cli.grid._looks_like_grid_id("ag-home-deadbeef") is True
+    assert cli.grid._looks_like_grid_id("workshop") is False
+    assert cli.grid._looks_like_grid_id("ag-team") is False  # no hex8 suffix → still a creatable name
+
+
+def test_up_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["up", "ag-home-deadbeef"])
+    assert "grid ls" in str(exc.value)
+    from local import config as local_config
+    assert local_config.iter_grid_configs() == []  # nothing created, nothing spawned
+
+
+def test_up_creates_for_human_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
+    assert cli.main(["up", "workshop"]) == 0
+    from local import config as local_config
+    assert any(c["name"] == "workshop" for c in local_config.iter_grid_configs())
+
+
+def test_up_starts_existing_grid_by_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
+    assert cli.main(["up", cfg["grid_id"]]) == 0  # found by id → guard skipped
+
+
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
     {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
