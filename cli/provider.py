@@ -49,8 +49,39 @@ def _reject_remote_only_flags(args: argparse.Namespace) -> None:
         )
 
 
+def _apply_inline_aliases(args: argparse.Namespace) -> None:
+    """Desugar inline ``-m real=alias`` into the flat ``models`` / ``advertise_as`` lists both join
+    handlers already consume. Same contract as ``--advertise-as``: all-or-nothing across the -m/--model
+    values, and mutually exclusive with ``--advertise-as``. A no-op when no ``-m`` contains ``=``. Runs
+    before the record is built / ``args.models`` is read. Splits on the first ``=`` only — model names
+    can't contain ``=`` (ollama's ``:`` and media's ``comfyui:*`` are untouched)."""
+    serve = getattr(args, "serve", None)
+    if serve and "=" in serve:
+        raise SystemExit("`--serve` takes a bare model; alias it with `--advertise-as`, not `=`.")
+    models = list(getattr(args, "models", []) or [])
+    inline = [item for item in models if "=" in item]
+    if not inline:
+        return
+    if getattr(args, "advertise_as", None):
+        raise SystemExit("Use inline `-m real=alias` or `--advertise-as`, not both.")
+    if len(inline) != len(models):
+        raise SystemExit("Alias every -m/--model as `real=alias`, or none of them.")
+    reals: list[str] = []
+    aliases: list[str] = []
+    for item in models:
+        real, _, alias = item.partition("=")
+        real, alias = real.strip(), alias.strip()
+        if not real or not alias:
+            raise SystemExit(f"Inline alias {item!r} needs a non-empty model and alias (real=alias).")
+        reals.append(real)
+        aliases.append(alias)
+    args.models = reals
+    args.advertise_as = aliases
+
+
 def cmd_join(args: argparse.Namespace) -> int:
     _reject_remote_only_flags(args)
+    _apply_inline_aliases(args)
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]

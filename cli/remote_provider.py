@@ -47,9 +47,10 @@ def _reject_local_only_flags(args: argparse.Namespace) -> None:
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
-    from . import remote_grid
+    from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    provider._apply_inline_aliases(args)
     if getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None:
         print(
             "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "

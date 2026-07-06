@@ -989,6 +989,68 @@ def test_join_kind_flag_with_engine_alias():
     assert parser.parse_args(["join", "--engine", "vllm"]).kind == "vllm"  # --engine is a back-compat alias
 
 
+def _parse_join(*argv):
+    return cli.build_parser().parse_args(["join", *argv])
+
+
+def test_join_inline_alias_desugars_into_record(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.pid = 4321
+
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+    args = _parse_join("home", "--at", "http://h:11434/v1", "-m", "real-a=pub-a", "--name", "mac")
+    assert cli.cmd_join(args) == 0
+    rec = cli.provider._read_records(cfg["grid_id"])["mac"]
+    assert rec["models"] == ["real-a"]
+    assert rec["advertise_as"] == ["pub-a"]
+
+
+def test_inline_alias_rejects_mixing_with_advertise_as():
+    args = _parse_join("--at", "u", "-m", "real=pub", "--advertise-as", "x")
+    with pytest.raises(SystemExit) as exc:
+        cli.provider._apply_inline_aliases(args)
+    assert "not both" in str(exc.value)
+
+
+def test_inline_alias_all_or_nothing():
+    args = _parse_join("--at", "u", "-m", "real=pub", "-m", "plain")
+    with pytest.raises(SystemExit):
+        cli.provider._apply_inline_aliases(args)
+
+
+def test_inline_alias_rejects_empty_side():
+    for bad in ("=pub", "real="):
+        with pytest.raises(SystemExit):
+            cli.provider._apply_inline_aliases(_parse_join("--at", "u", "-m", bad))
+
+
+def test_inline_alias_no_equals_is_untouched():
+    args = _parse_join("--at", "u", "-m", "qwen3:0.6b")
+    cli.provider._apply_inline_aliases(args)
+    assert args.models == ["qwen3:0.6b"] and args.advertise_as == []
+
+
+def test_serve_rejects_inline_equals():
+    args = _parse_join("--serve", "real=pub")
+    with pytest.raises(SystemExit) as exc:
+        cli.provider._apply_inline_aliases(args)
+    assert "--advertise-as" in str(exc.value)
+
+
+def test_remote_join_inline_alias_desugars_into_record(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "real-a=pub-a"]) == 0
+    rec = cli.provider._read_records("n1")["remote"]
+    assert rec["models"] == ["real-a"]
+    assert rec["advertise_as"] == ["pub-a"]
+
+
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
     {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
