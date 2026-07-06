@@ -2519,6 +2519,284 @@ def test_probe_tools_from_live_probe_without_props_or_show(monkeypatch, tmp_path
     assert env["models"]["m"]["features"]["tools"] is True  # live probe carries LM Studio/MLX/vLLM
 
 
+def _has_image_part(body):
+    """True if a chat-completions body carries an OpenAI image_url content part (the live vision probe)."""
+    for msg in body.get("messages", []):
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "image_url" for part in content
+        ):
+            return True
+    return False
+
+
+def test_probe_vision_from_live_image_probe_when_engine_accepts(monkeypatch, tmp_path):
+    """An OpenAI engine with no /props, no /api/show, and no /v1/models capabilities (vLLM / LM Studio /
+    MLX shape) still detects vision via a live image probe: send a tiny image, and a model that ACCEPTS
+    image input answers 200 → vision True. This is the only signal for engines exposing no modality
+    metadata."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        path = request.url.path
+        if path in ("/props", "/api/show"):
+            return httpx.Response(404)  # neither llama.cpp nor Ollama metadata
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})  # no per-model capabilities
+        if path.endswith("/chat/completions"):
+            if _has_image_part(json.loads(request.content)):
+                seen["image_probe"] = True
+                return httpx.Response(200, json={"choices": [{"message": {"content": "a pixel"}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities("http://h:8000/v1", "m")["models"]["m"]
+    assert entry["features"]["vision"] is True and entry["input_modalities"] == ["text", "image"]
+    assert seen.get("image_probe") is True  # the probe actually sent an image_url part
+
+
+def test_probe_vision_live_probe_rejected_stays_text_only(monkeypatch, tmp_path):
+    """A text-only OpenAI engine rejects image content (4xx); the live vision probe must NOT falsely
+    advertise vision — over-claiming would route image jobs to a text model and hard-fail."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    def handler(request):
+        path = request.url.path
+        if path in ("/props", "/api/show"):
+            return httpx.Response(404)
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        if path.endswith("/chat/completions"):
+            if _has_image_part(json.loads(request.content)):
+                return httpx.Response(400, json={"error": {"message": "this model does not support image input"}})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities("http://h:8000/v1", "m")["models"]["m"]
+    assert entry["features"]["vision"] is False and entry["input_modalities"] == ["text"]
+
+
+def test_probe_vision_live_survives_non_dict_200_body(monkeypatch, tmp_path):
+    """A 200 whose JSON body isn't an object (list/str/number) must degrade vision to False, not crash:
+    `_bring_up_engines` probes every model and relies on `probe.capabilities` never raising."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    def handler(request):
+        path = request.url.path
+        if path in ("/props", "/api/show"):
+            return httpx.Response(404)
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        if path.endswith("/chat/completions"):
+            return httpx.Response(200, json=[])  # 200, but not a JSON object
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities("http://h:8000/v1", "m")["models"]["m"]  # must not raise
+    assert entry["features"]["vision"] is False
+
+
+def test_probe_vision_metadata_present_negative_skips_live_probe(monkeypatch, tmp_path):
+    """When /props authoritatively reports vision:false, the live image probe must NOT run (nor override
+    the metadata) — even if the engine would 200 an image. Guards the metadata-absence gate: a text-only
+    llama.cpp/Ollama model must not pay a needless probe or risk a false positive."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {"image_probe": False}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/props":
+            return httpx.Response(200, json={"chat_template_caps": {}, "modalities": {"vision": False}})
+        if path == "/api/show":
+            return httpx.Response(404)
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})  # no per-model capabilities
+        if path.endswith("/chat/completions"):
+            if _has_image_part(json.loads(request.content)):
+                seen["image_probe"] = True  # a permissive engine would answer — but we must never ask
+                return httpx.Response(200, json={"choices": [{"message": {"content": "a pixel"}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    entry = probe.capabilities("http://h:8081/v1", "m")["models"]["m"]
+    assert entry["features"]["vision"] is False and entry["input_modalities"] == ["text"]
+    assert seen["image_probe"] is False  # /props answered (vision:false) → live probe gated out
+
+
+def _lmstudio_v0_handler(entries):
+    """LM Studio's native GET /api/v0/models shape (rich per-model metadata); other paths 404."""
+    def handler(request):
+        if request.url.path == "/api/v0/models":
+            return httpx.Response(200, json={"data": entries, "object": "list"})
+        return httpx.Response(404)
+    return handler
+
+
+def test_probe_lmstudio_caps_reads_vlm_and_tool_use(monkeypatch, tmp_path):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, _lmstudio_v0_handler([
+        {"id": "google/gemma-4-e4b", "type": "vlm", "capabilities": ["tool_use"], "max_context_length": 131072},
+    ]))
+    assert probe._probe_lmstudio_caps("http://h:1234/v1", "google/gemma-4-e4b") == {"vision": True, "tools": True}
+
+
+def test_probe_lmstudio_caps_llm_without_tool_use(monkeypatch, tmp_path):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, _lmstudio_v0_handler([
+        {"id": "some-llm", "type": "llm", "capabilities": [], "max_context_length": 4096},
+    ]))
+    assert probe._probe_lmstudio_caps("http://h:1234/v1", "some-llm") == {"vision": False, "tools": False}
+
+
+def test_probe_lmstudio_caps_model_not_listed_is_empty(monkeypatch, tmp_path):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, _lmstudio_v0_handler([{"id": "other", "type": "llm"}]))
+    assert probe._probe_lmstudio_caps("http://h:1234/v1", "missing") == {}
+
+
+def test_probe_lmstudio_caps_non_lmstudio_is_empty(monkeypatch, tmp_path):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, lambda r: httpx.Response(404))  # vLLM/llama.cpp: no /api/v0/models
+    assert probe._probe_lmstudio_caps("http://h:8000/v1", "m") == {}
+
+
+def test_probe_lmstudio_caps_ignores_error_body(monkeypatch, tmp_path):
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # LM Studio 200s unknown/edge paths with a JSON error object (no `data` list) — must not be read as caps.
+    _mock_engine(monkeypatch, lambda r: httpx.Response(200, json={"error": "Unexpected endpoint"}))
+    assert probe._probe_lmstudio_caps("http://h:1234/v1", "m") == {}
+
+
+def test_probe_props_and_models_survive_non_dict_200_body(monkeypatch, tmp_path):
+    """A 200 whose JSON body is a list/null (not an object) must degrade, not raise: probe.capabilities
+    must never raise (`_bring_up_engines` has no per-model try/except around it)."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, lambda r: httpx.Response(200, json=[]))  # every path returns a JSON array
+    assert probe._probe_props("http://h:8081/v1") == {}
+    assert probe._probe_models("http://h:8081/v1", "m") == set()
+    # And end-to-end: no raise, degrades to all-False text-only.
+    entry = probe.capabilities("http://h:8081/v1", "m")["models"]["m"]
+    assert entry["features"]["vision"] is False and entry["features"]["tools"] is False
+
+
+def test_probe_props_rejects_error_body_masquerade(monkeypatch, tmp_path):
+    """LM Studio 200s /props with an error object; _probe_props must return {} (not a non-empty all-False
+    dict), else it masquerades as authoritative metadata and gates out other probes."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_engine(monkeypatch, lambda r: httpx.Response(200, json={"error": "Unexpected endpoint or method."}))
+    assert probe._probe_props("http://h:1234/v1") == {}
+
+
+def test_probe_capabilities_lmstudio_metadata_beats_silent_inference(monkeypatch, tmp_path):
+    """The real LM Studio failure→fix: /props 200s an error body, /api/show 404s, /v1/models is bare,
+    /api/v0/models declares type:vlm + tool_use, and the model is a reasoning model whose forced-tool
+    inference probe emits NO tool_call. Deterministic metadata must win → vision + tools both True."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    def handler(request):
+        path = request.url.path
+        if path == "/props":
+            return httpx.Response(200, json={"error": "Unexpected endpoint or method. (GET /props)"})
+        if path == "/api/show":
+            return httpx.Response(404)
+        if path == "/api/v0/models":
+            return httpx.Response(200, json={"data": [
+                {"id": "google/gemma-4-e4b", "type": "vlm", "capabilities": ["tool_use"], "max_context_length": 131072},
+            ]})
+        if path.endswith("/models"):  # /v1/models — bare, no per-model capabilities
+            return httpx.Response(200, json={"data": [{"id": "google/gemma-4-e4b"}]})
+        if path.endswith("/chat/completions"):  # reasoning model: empty completion, no tool_call
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": ""}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    f = probe.capabilities("http://h:1234/v1", "google/gemma-4-e4b")["models"]["google/gemma-4-e4b"]["features"]
+    assert f["vision"] is True and f["tools"] is True
+
+
+def test_probe_tools_metadata_skips_inference_probe(monkeypatch, tmp_path):
+    """When a metadata source declares tools, the forced-tool /chat/completions inference probe must not
+    be sent (it's the flaky, reasoning-fragile fallback)."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {"tool_probe": False}
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/v0/models":
+            return httpx.Response(200, json={"data": [{"id": "m", "type": "llm", "capabilities": ["tool_use"]}]})
+        if path in ("/props", "/api/show"):
+            return httpx.Response(404)
+        if path.endswith("/chat/completions"):
+            if json.loads(request.content).get("tools"):
+                seen["tool_probe"] = True
+            return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    f = probe.capabilities("http://h:1234/v1", "m")["models"]["m"]["features"]
+    assert f["tools"] is True
+    assert seen["tool_probe"] is False  # metadata answered → no inference tool-probe
+
+
+def test_probe_tools_inference_uses_high_max_tokens(monkeypatch, tmp_path):
+    """No metadata → the forced-tool inference probe runs, and must request enough tokens for a reasoning
+    model to still emit the tool_call after thinking (LM Studio gemma needed >=500)."""
+    from remote import probe
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        path = request.url.path
+        if path in ("/props", "/api/show", "/api/v0/models"):
+            return httpx.Response(404)
+        if path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        if path.endswith("/chat/completions"):
+            body = json.loads(request.content)
+            if body.get("tools"):
+                seen["tool_max_tokens"] = body.get("max_tokens")
+                return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [{"id": "1"}]}}]})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+        return httpx.Response(404)
+
+    _mock_engine(monkeypatch, handler)
+    probe.capabilities("http://h:8000/v1", "m")
+    assert seen.get("tool_max_tokens", 0) >= 500
+
+
 def test_probe_benchmark_tok_s_prefers_predicted_per_second(monkeypatch, tmp_path):
     from remote import probe
 
@@ -3315,6 +3593,33 @@ def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
         ("http://h:8000/v1", ["mistral"], ["mistral"], {"schema_version": 1, "models": {"mistral": {"f": "mistral"}}}),
     ]
     assert seen == [("http://h:11434/v1", "llama3"), ("http://h:8000/v1", "mistral")]  # each probed by real name
+
+
+def test_bring_up_engines_single_spec_multi_model_probes_every_model(monkeypatch, tmp_path):
+    """One engine spec serving several models must probe & advertise caps for EVERY model, not just the
+    first — else models B, C… register with routes but no `features`, so the relay can't route
+    capability-gated (e.g. tool_choice) requests to them. This one-spec/N-models shape is what BOTH
+    `grid join --at <url> -m A -m B -m C` AND a bare `grid join` against an auto-detected engine serving
+    several models (e.g. one Ollama with A/B/C pulled — detect returns one spec carrying all of them)
+    collapse to, so this test covers the common consumer setup, not just a hand-rolled --at."""
+    from remote import probe, serve
+
+    record = {
+        "engines": [{"endpoint_url": "http://h:9000/v1", "models": ["A", "B", "C"], "engine_label": "vllm"}],
+        "advertise_as": [],
+    }
+    seen = []
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, *, advertise_as=None, context_window=None: seen.append(model)
+                        or {"schema_version": 1, "models": {advertise_as or model: {"f": model}}})
+
+    results, launched, _ = serve._bring_up_engines(record)
+    assert launched == []
+    assert seen == ["A", "B", "C"]                          # every model probed, not just the first
+    (llm_url, advertised, upstream, caps), = results
+    assert advertised == ["A", "B", "C"] and upstream == ["A", "B", "C"]
+    assert set(caps["models"]) == {"A", "B", "C"}           # one merged envelope carries all models
+    assert caps["models"]["B"] == {"f": "B"}                # later models keep their own probed entry
 
 
 def test_bring_up_engines_external_alias_probes_real_name_keys_alias(monkeypatch, tmp_path):

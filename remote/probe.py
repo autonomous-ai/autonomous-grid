@@ -24,6 +24,20 @@ _PROPS_TIMEOUT = 5.0
 _SHOW_TIMEOUT = 5.0
 _BENCHMARK_TIMEOUT = 60.0
 
+# A minimal valid image for the live vision probe — we only test whether the engine ACCEPTS image
+# input, not the answer, so any decodable pixel works. Bump the size if a specific engine rejects
+# sub-minimum images (some vision encoders do).
+_PROBE_IMAGE_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+# Token budget for the structured inference probes (json/tools). A reasoning model that ignores
+# `enable_thinking:False` spends its budget thinking, so a small cap yields an empty completion and the
+# probe false-negatives; 512 lets the model still emit the tool_call / JSON afterward. Non-reasoning
+# models emit and stop early, so the higher cap costs them nothing.
+_STRUCTURED_PROBE_MAX_TOKENS = 512
+
 
 def capabilities(
     llm_url: str,
@@ -132,12 +146,15 @@ def _probe_has_tool_calls(payload: dict[str, Any]) -> bool:
     return isinstance(tool_calls, list) and bool(tool_calls)
 
 
+def _server_root(llm_url: str) -> str:
+    """The engine's server root — native metadata APIs (llama.cpp ``/props``, Ollama ``/api/show``, LM
+    Studio ``/api/v0/models``) live at the root, not under the OpenAI ``/v1`` prefix."""
+    return llm_url.rstrip("/").removesuffix("/v1").rstrip("/")
+
+
 def _props_url(llm_url: str) -> str:
     """llama-server's ``/props`` lives at the server root, not under ``/v1``."""
-    base = llm_url.rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
-    return f"{base}/props"
+    return f"{_server_root(llm_url)}/props"
 
 
 def _probe_props(llm_url: str, timeout: float = _PROPS_TIMEOUT) -> dict[str, bool]:
@@ -149,26 +166,25 @@ def _probe_props(llm_url: str, timeout: float = _PROPS_TIMEOUT) -> dict[str, boo
         payload = resp.json()
     except ValueError:
         return {}
+    if not isinstance(payload, dict):  # a 200 with a non-object body (list/null/str) — never .get() it
+        return {}
     template_caps = payload.get("chat_template_caps") or {}
     modalities = payload.get("modalities") or {}
     if not isinstance(template_caps, dict):
         template_caps = {}
     if not isinstance(modalities, dict):
         modalities = {}
+    if not template_caps and not modalities:
+        # Not a real llama.cpp /props response. A genuine one always carries one of these; LM Studio
+        # (and other servers) 200 an unknown path with a bare ``{"error": ...}`` body — returning a
+        # non-empty all-False dict here would masquerade as authoritative metadata downstream.
+        return {}
     return {
         "vision": bool(modalities.get("vision")),
         "tools": bool(template_caps.get("supports_tools")),
         "tool_calls": bool(template_caps.get("supports_tool_calls")),
         "parallel_tool_calls": bool(template_caps.get("supports_parallel_tool_calls")),
     }
-
-
-def _ollama_base(llm_url: str) -> str:
-    """Ollama's native API (``/api/...``) lives at the server root, not under ``/v1``."""
-    base = llm_url.rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
-    return base.rstrip("/")
 
 
 def _probe_ollama_caps(llm_url: str, model: str, timeout: float = _SHOW_TIMEOUT) -> dict[str, bool]:
@@ -179,12 +195,47 @@ def _probe_ollama_caps(llm_url: str, model: str, timeout: float = _SHOW_TIMEOUT)
     Ollama still *knows* the template supports tools. Best-effort: a non-Ollama engine (llama.cpp,
     vLLM, …) 404s here and we return ``{}``, leaving the live probe + ``/props`` to decide.
     """
-    payload = _post_json(f"{_ollama_base(llm_url)}/api/show", {"model": model}, timeout=timeout)
+    payload = _post_json(f"{_server_root(llm_url)}/api/show", {"model": model}, timeout=timeout)
     caps = (payload or {}).get("capabilities")
     if not isinstance(caps, list):
         return {}
     names = {str(c).lower() for c in caps}
     return {"vision": "vision" in names, "tools": "tools" in names}
+
+
+def _probe_lmstudio_caps(llm_url: str, llm_model: str, timeout: float = _SHOW_TIMEOUT) -> dict[str, bool]:
+    """Read LM Studio's native ``GET /api/v0/models`` — one GET, no inference, deterministic (unlike the
+    live probes). ``type == "vlm"`` → vision, ``"tool_use" in capabilities`` → tools. Returns ``{}`` for a
+    non-LM-Studio engine (404 / connection refused / a ``{"error": ...}`` 200 body with no ``data`` list)
+    or a model not in the list, so the caller falls through to /props, /api/show, and the live probes.
+    Authoritative where the inference probes false-negative — LM Studio serves GGUF *and* MLX models and
+    reports both here, and a reasoning model's forced-tool probe stays silent (it spends its token budget
+    thinking) yet LM Studio still declares ``tool_use``. (``max_context_length`` is also reported but not
+    consumed yet — the caps envelope's context still comes from ``--ctx-size``.)"""
+    resp = _get(f"{_server_root(llm_url)}/api/v0/models", timeout=timeout)
+    if resp is None or resp.status_code != 200:
+        return {}
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    entries = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    for entry in entries:
+        # Matched by exact id: the probe is called with the engine's real upstream model name (any
+        # ``--advertise-as`` alias already resolved), and LM Studio's ``/api/v0/models`` id is that name.
+        if isinstance(entry, dict) and entry.get("id") == llm_model:
+            entry_type = entry.get("type")
+            if not entry_type:
+                # Not LM Studio's shape — its /api/v0/models entries always carry a `type`
+                # (vlm/llm/embeddings). A bare `{"id": ...}` is a plain /v1/models entry; treat as no
+                # metadata so the caller falls through to the live probe rather than reading all-False.
+                return {}
+            caps = entry.get("capabilities")
+            names = {str(c).lower() for c in caps} if isinstance(caps, list) else set()
+            return {"vision": entry_type == "vlm", "tools": "tool_use" in names}
+    return {}
 
 
 def _probe_models(llm_url: str, llm_model: str, timeout: float = _PROPS_TIMEOUT) -> set[str]:
@@ -194,6 +245,8 @@ def _probe_models(llm_url: str, llm_model: str, timeout: float = _PROPS_TIMEOUT)
     try:
         payload = resp.json()
     except ValueError:
+        return set()
+    if not isinstance(payload, dict):  # non-object 200 body — the comprehension below would .get() it
         return set()
     entries = [
         entry
@@ -216,37 +269,46 @@ def _probe_models(llm_url: str, llm_model: str, timeout: float = _PROPS_TIMEOUT)
     return caps
 
 
-def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
-    """Live-test which OpenAI capabilities the engine actually honours."""
-    base = {"model": llm_model, "stream": False, "max_tokens": 32, "temperature": 0}
-    # Structured probes bypass thinking-mode so the response is the raw tool-call / JSON payload.
-    structured_base = {**base, "chat_template_kwargs": {"enable_thinking": False}}
-    probed = {
-        "vision": False,
-        "json_object": False,
-        "json_schema": False,
-        "tools": False,
-        "parallel_tool_calls": False,
-    }
+def _probe_vision_live(llm_url: str, llm_model: str, timeout: float = _PROBE_TIMEOUT) -> bool:
+    """Live-test image input for engines that expose no modality metadata (vLLM, LM Studio, MLX — no
+    ``/props``, no ``/api/show``, and a plain ``/v1/models``): send a tiny image and see if the engine
+    accepts it. A vision model returns a normal 200 completion; a text-only model rejects the image
+    content (4xx) so ``_post_chat`` returns ``None``. Conservative — any non-200, non-object 200 body, or
+    transport error → False (better to under-claim vision than route an image job to a text model). A text
+    model rejects at input validation, before any forward pass, so this stays cheap for it.
 
-    props_caps = _probe_props(llm_url)
-    ollama_caps = _probe_ollama_caps(llm_url, llm_model)
-    probed["vision"] = bool(
-        (_probe_models(llm_url, llm_model) & {"image", "multimodal", "vision"})
-        or props_caps.get("vision")
-        or ollama_caps.get("vision")
-    )
+    Limitation: this tests *acceptance* (the engine answered 200 to an image request), not *comprehension*.
+    A non-validating engine that accepts the multimodal request but silently ignores the image part — or a
+    model that replies "I can't see images" — would false-positive. vLLM and LM Studio (the engines that
+    reach this fallback) validate image support and 4xx a text model, so in practice this only bites exotic
+    shims; a stricter content check was rejected because it false-negatives real VLMs on a synthetic 1×1
+    image. This runs at all only when no modality metadata was found (see the caller's gate)."""
+    resp = _post_chat(llm_url, {
+        "model": llm_model, "stream": False, "max_tokens": 1, "temperature": 0,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "."},
+            {"type": "image_url", "image_url": {"url": _PROBE_IMAGE_DATA_URI}},
+        ]}],
+    }, timeout=timeout)
+    # ``_post_chat`` returns the raw parsed 200 body, which may not be a dict (list/str/number) — guard
+    # like every other ``_post_chat`` caller here, so a malformed body degrades to False, never raises
+    # (``_bring_up_engines`` relies on ``probe.capabilities`` never raising).
+    return bool(isinstance(resp, dict) and _probe_message(resp))
 
-    json_object_resp = _post_chat(llm_url, {
+
+def _probe_json_object_mode(llm_url: str, structured_base: dict[str, Any]) -> bool:
+    """Live-test whether the engine honours ``response_format: {"type": "json_object"}``."""
+    resp = _post_chat(llm_url, {
         **structured_base,
         "messages": [{"role": "user", "content": 'Return exactly {"ok": true}.'}],
         "response_format": {"type": "json_object"},
     })
-    probed["json_object"] = isinstance(
-        _probe_json_object(json_object_resp) if isinstance(json_object_resp, dict) else None, dict
-    )
+    return isinstance(_probe_json_object(resp) if isinstance(resp, dict) else None, dict)
 
-    json_schema_resp = _post_chat(llm_url, {
+
+def _probe_json_schema_mode(llm_url: str, structured_base: dict[str, Any]) -> bool:
+    """Live-test whether the engine honours ``response_format: {"type": "json_schema"}``."""
+    resp = _post_chat(llm_url, {
         **structured_base,
         "messages": [{"role": "user", "content": "Return a JSON object with ok=true."}],
         "response_format": {
@@ -262,12 +324,16 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
             },
         },
     })
-    js = _probe_json_object(json_schema_resp) if isinstance(json_schema_resp, dict) else None
-    probed["json_schema"] = isinstance(js, dict) and isinstance(js.get("ok"), bool)
+    js = _probe_json_object(resp) if isinstance(resp, dict) else None
+    return isinstance(js, dict) and isinstance(js.get("ok"), bool)
 
-    tools_resp = _post_chat(llm_url, {
+
+def _probe_tools_live(llm_url: str, structured_base: dict[str, Any]) -> bool:
+    """Live-test tool support by forcing a ``tool_choice`` and checking the reply for a tool_call. The
+    flaky fallback used only when no metadata source declares tools — a reasoning model can spend its
+    token budget thinking and emit no tool_call even when it supports tools (hence the large budget)."""
+    resp = _post_chat(llm_url, {
         **structured_base,
-        "max_tokens": 96,
         "messages": [{"role": "user", "content": "Call the echo tool with value ping."}],
         "tools": [{
             "type": "function",
@@ -283,11 +349,53 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
         }],
         "tool_choice": {"type": "function", "function": {"name": "echo"}},
     })
-    probed["tools"] = bool(
-        (isinstance(tools_resp, dict) and _probe_has_tool_calls(tools_resp))
-        or (props_caps.get("tools") and props_caps.get("tool_calls"))
-        or ollama_caps.get("tools")
+    return bool(isinstance(resp, dict) and _probe_has_tool_calls(resp))
+
+
+def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
+    """Live-test which OpenAI capabilities the engine actually honours."""
+    base = {"model": llm_model, "stream": False, "max_tokens": _STRUCTURED_PROBE_MAX_TOKENS, "temperature": 0}
+    # Structured probes bypass thinking-mode so the response is the raw tool-call / JSON payload. Some
+    # engines ignore this kwarg, so the budget above still has to cover a thinking pass (see the constant).
+    structured_base = {**base, "chat_template_kwargs": {"enable_thinking": False}}
+    probed = {
+        "vision": False,
+        "json_object": False,
+        "json_schema": False,
+        "tools": False,
+        "parallel_tool_calls": False,
+    }
+
+    props_caps = _probe_props(llm_url)              # llama.cpp
+    ollama_caps = _probe_ollama_caps(llm_url, llm_model)   # Ollama
+    lmstudio_caps = _probe_lmstudio_caps(llm_url, llm_model)  # LM Studio (covers GGUF + MLX served by it)
+    model_caps = _probe_models(llm_url, llm_model)  # OpenAI /v1/models `capabilities`, when present
+    # Fall back to the live image probe ONLY when NO metadata source answered (bare vLLM / direct
+    # mlx_lm.server). props / api/show / api/v0/models are per-model authoritative sources — an answer,
+    # even a negative one, is trusted over the live probe (which can false-positive). model_caps (a
+    # `/v1/models` `capabilities` list) is deliberately NOT in this gate: it's speculative — most engines
+    # omit it and _probe_models falls back to a lone entry — so it only feeds vision via the intersection
+    # below, never suppresses the fallback.
+    has_modality_metadata = bool(props_caps) or bool(ollama_caps) or bool(lmstudio_caps)
+    probed["vision"] = bool(
+        (model_caps & {"image", "multimodal", "vision"})
+        or props_caps.get("vision")
+        or ollama_caps.get("vision")
+        or lmstudio_caps.get("vision")
+        or (not has_modality_metadata and _probe_vision_live(llm_url, llm_model))
     )
+
+    probed["json_object"] = _probe_json_object_mode(llm_url, structured_base)
+    probed["json_schema"] = _probe_json_schema_mode(llm_url, structured_base)
+
+    # Tools: trust a metadata source first; the forced-tool inference probe (flaky on reasoning models)
+    # runs only when none answered — ``or`` short-circuits, so it's skipped when metadata already affirms it.
+    meta_tools = bool(
+        (props_caps.get("tools") and props_caps.get("tool_calls"))
+        or ollama_caps.get("tools")
+        or lmstudio_caps.get("tools")
+    )
+    probed["tools"] = bool(meta_tools or _probe_tools_live(llm_url, structured_base))
     probed["parallel_tool_calls"] = bool(probed["tools"] and props_caps.get("parallel_tool_calls"))
     return probed
 
