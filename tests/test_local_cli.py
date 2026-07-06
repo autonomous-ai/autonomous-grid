@@ -807,6 +807,29 @@ def test_join_all_joins_every_detected_engine(monkeypatch, tmp_path):
     assert set(records) == {"ollama", "vllm"}
 
 
+def test_join_kind_filters_to_one_engine(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda host: [
+            detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
+            detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
+        ],
+    )
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 1})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+
+    assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--kind", "vllm"])) == 0
+    assert set(cli.provider._read_records(grid_id)) == {"vllm"}  # only the vllm engine joined
+    # the --engine alias drives the same filter (and errors on no match)
+    assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--engine", "ollama"])) == 0
+    assert set(cli.provider._read_records(grid_id)) == {"vllm", "ollama"}
+    with pytest.raises(SystemExit):
+        cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--kind", "nope"]))
+
+
 def test_join_cleans_up_record_when_engine_dies(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     cfg = runtime.init_grid_config(name="home", port=8090)
@@ -1110,6 +1133,19 @@ def test_serve_rejects_inline_equals():
     assert "--advertise-as" in str(exc.value)
 
 
+def test_serve_rejects_extra_model_flag():
+    # --serve serves one built-in model; a separate -m (aliased or not) would be silently dropped.
+    for argv in (["--serve", "modelY", "-m", "real=pub"], ["--serve", "modelY", "-m", "foo"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_join(_parse_join(*argv))
+        assert "--serve" in str(exc.value)
+
+
+def test_inline_alias_rejects_multiple_equals():
+    with pytest.raises(SystemExit):
+        cli.provider._apply_inline_aliases(_parse_join("--at", "u", "-m", "a=b=c"))
+
+
 def test_remote_join_inline_alias_desugars_into_record(monkeypatch, tmp_path):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
@@ -1194,6 +1230,17 @@ def test_up_starts_existing_grid_by_id(monkeypatch, tmp_path):
     cfg = runtime.init_grid_config(name="home", port=8090)
     monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
     assert cli.main(["up", cfg["grid_id"]]) == 0  # found by id → guard skipped
+
+
+def test_up_rejects_known_remote_grid_in_local_mode(monkeypatch, tmp_path):
+    _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
+    state.set_mode("local")  # the remote grid is known via credentials, but we're in local mode
+    from local import config as local_config
+    for arg in ("team", "n1"):  # matched by name and by network_id
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["up", arg])
+        assert "remote" in str(exc.value).lower()
+    assert local_config.iter_grid_configs() == []  # nothing created
 
 
 _FAKE_ENGINES = [
@@ -4843,6 +4890,7 @@ def test_remote_ls_lists_local_without_network_call(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert "team" in out and "permissioned-public" in out
     assert "lab" in out and "permissioned-providers" in out
+    assert "n1" in out and "n2" in out  # network_id column (ADR 0010 item 9b)
 
 
 def test_remote_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):

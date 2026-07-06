@@ -23,14 +23,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     name = args.name or "home"
     cfg = _grid_by_name(name)
     if cfg is None:
-        if _looks_like_grid_id(name):
-            # An unsynced grid id, not a new grid's name — the old behaviour created a junk grid named
-            # after the id string. Point at the real grid instead (ADR 0010 D-f). Guard runs before any
-            # create/start, so nothing is written or spawned.
-            raise SystemExit(
-                f"No local grid with id {name!r}. That looks like a grid id, not a new grid's name — "
-                f"run `grid ls` to see your grids. (If it's a remote grid: `grid mode remote`, then `grid sync`.)"
-            )
+        _reject_foreign_grid(name)  # a known remote grid or an id-shaped arg → don't auto-create junk
         cfg = runtime.init_grid_config(
             name=name,
             port=args.port,
@@ -189,6 +182,25 @@ _GRID_ID_RE = re.compile(r"ag-.+-[0-9a-f]{8}")
 
 def _looks_like_grid_id(name: str) -> bool:
     return bool(_GRID_ID_RE.fullmatch(name))
+
+
+def _reject_foreign_grid(name: str) -> None:
+    """Refuse to auto-create when `name` is really an existing grid the user hasn't synced here — one of
+    their known remote grids (exact name/id match, zero false-positive), or a string shaped like a minted
+    local grid id — instead of silently making a junk local grid named after it (ADR 0010 D-f). Runs
+    before any create/start, so nothing is written or spawned."""
+    from . import remote_grid
+
+    if remote_grid._by_name(name) is not None:  # a grid from `grid login`, pasted in local mode
+        raise SystemExit(
+            f"{name!r} is one of your remote grids, not a new local grid. Switch to it with "
+            f"`grid mode remote` (or `grid --remote up {name}`)."
+        )
+    if _looks_like_grid_id(name):
+        raise SystemExit(
+            f"No local grid with id {name!r}. That looks like a grid id, not a new grid's name — run "
+            f"`grid ls` to see your grids (or `grid mode remote` + `grid sync` for a remote one)."
+        )
 
 
 def _grid_by_name(name: str) -> dict[str, Any] | None:

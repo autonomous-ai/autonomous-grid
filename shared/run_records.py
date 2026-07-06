@@ -67,6 +67,8 @@ def match_engine(
     passed in — identity is preserved for an ``id()``-based drop filter. An exact engine-*id* match is the
     caller's job BEFORE this (remote keys engines by URL/label; local by record id). ``hint`` is the
     disambiguation instruction, per mode: remote points at the endpoint URL, local at the engine id."""
+    if not selector:  # defensive: an empty selector is a substring of every URL — never "match all"
+        return []
 
     def unique(matches: list[dict[str, Any]], how: str) -> list[dict[str, Any]]:
         if len(matches) > 1:

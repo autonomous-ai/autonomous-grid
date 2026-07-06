@@ -68,14 +68,16 @@ reworded from "Set up the built-in engines" to "Set up built-in engines and list
 namespace coherently covers setup **and** listing. Chosen over a new top-level `grid ps` (which would
 cost a `dispatch.py` bucket + a `REMOTE_HANDLERS` entry + a third spelling for "list engines").
 
-**D-f (`grid up` id guard).** `grid up <arg>` no longer auto-creates when `<arg>` matches the local
-grid-id shape `ag-<slug>-<hex8>` (anchored `fullmatch`) but isn't found locally; it exits with guidance
-to `grid ls` (and, if the grid is remote, `grid mode remote` then `grid sync`). An ordinary name still
-creates as before. This is the one non-additive change. Accepted trade-off: a chosen grid *name* shaped
-exactly like an id (`ag-…-<8 hex>`) is refused — acceptable, since that collides with the reserved id
-form. No remote mirror: remote `network_id`s are opaque and indistinguishable from a chosen name, so any
-heuristic would false-positive; remote keeps create-on-unknown-name (the correct lever there would be an
-explicit `--create`, out of scope).
+**D-f (`grid up` id guard).** `grid up <arg>` no longer auto-creates a junk local grid when `<arg>` is
+really an existing grid the user hasn't synced here — instead of making a grid named after the string, it
+exits with guidance. Two signals, both run before any create/start: **(a)** an exact match against the
+user's known remote grids (`grid login`'s `credentials.toml` networks, by name or network_id) — a
+zero-false-positive signal that works for the opaque remote ids a shape check can't recognise; and **(b)**
+the local grid-id shape `ag-<slug>-<hex8>` (anchored `fullmatch`). An ordinary, unknown name still creates
+as before. This is the one non-additive change. Accepted trade-off: signal (b) also refuses a chosen grid
+*name* shaped like an id (`ag-…-<8 hex-valid chars>`, including an all-digit suffix such as
+`ag-nightly-20260706`), since that collides with the reserved local-id form. Remote `grid up` keeps
+create-on-unknown-name (an explicit `--create` would be the lever there, out of scope).
 
 **D-g (`leave --all` stays required for multi-engine).** Local bare `grid leave` on a grid with several
 engines keeps its safety guard — it errors asking for `--engine`/`--all` (`cli/provider.py:240`) rather
@@ -87,5 +89,6 @@ correcting the handoff's assumption that bare-leave already meant "all".
 
 - Back-compat: `grid join --engine ollama`, `grid engines`, and `-m x --advertise-as y` all keep working.
 - No new top-level command → the dispatch classification test is untouched by every decision here.
-- The only behavior a v0.1.6 user could notice as *removed* is `grid up <an-id-you-didn't-sync>`
-  auto-creating a junk grid — now a clean error (D-f).
+- The only behavior a v0.1.6 user could notice as *removed* is `grid up <arg>` auto-creating a junk local
+  grid when `<arg>` is a grid id, or a known remote grid's name, that isn't a local grid — now a clean
+  error (D-f).

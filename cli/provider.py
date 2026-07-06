@@ -69,6 +69,8 @@ def _apply_inline_aliases(args: argparse.Namespace) -> None:
     reals: list[str] = []
     aliases: list[str] = []
     for item in models:
+        if item.count("=") != 1:
+            raise SystemExit(f"Inline alias {item!r} must be exactly one `real=alias` pair.")
         real, _, alias = item.partition("=")
         real, alias = real.strip(), alias.strip()
         if not real or not alias:
@@ -81,6 +83,8 @@ def _apply_inline_aliases(args: argparse.Namespace) -> None:
 
 def cmd_join(args: argparse.Namespace) -> int:
     _reject_remote_only_flags(args)
+    if args.serve and args.models:
+        raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
     _apply_inline_aliases(args)
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))

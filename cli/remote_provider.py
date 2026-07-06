@@ -44,25 +44,31 @@ def _reject_local_only_flags(args: argparse.Namespace) -> None:
         )
 
 
+def _warn_deprecated(triggered: bool, message: str) -> None:
+    """Print a one-line deprecation note to stderr when a deprecated flag was used."""
+    if triggered:
+        print(message, file=sys.stderr)
+
+
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    if args.serve and args.models:
+        raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
     provider._apply_inline_aliases(args)
-    if getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None:
-        print(
-            "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
-            "Set your model price with `grid price set` after joining.",
-            file=sys.stderr,
-        )
-    if getattr(args, "engine_label", None) is not None:
-        print(
-            "Note: --engine-label is deprecated and no longer changes the grid page — the engine's kind "
-            "is derived automatically. (It still matches `grid leave --engine <label>`.)",
-            file=sys.stderr,
-        )
+    _warn_deprecated(
+        getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None,
+        "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
+        "Set your model price with `grid price set` after joining.",
+    )
+    _warn_deprecated(
+        getattr(args, "engine_label", None) is not None,
+        "Note: --engine-label is deprecated and no longer changes the grid page — the engine's kind "
+        "is derived automatically. (It still matches `grid leave --engine <label>`.)",
+    )
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 
