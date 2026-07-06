@@ -203,9 +203,10 @@ def _bring_up_engines(
     ``[(llm_url, advertised_models, upstream_models, caps_envelope), ...]`` in record order — fed to
     ``_build_routing``. ``upstream_models`` is what the *local engine answers to* (the real model name
     for an external ``--at`` engine; the ``--advertise-as`` alias for a built-in llama-server launched
-    with ``--alias``), so a job's advertised model can be rewritten to it before forwarding. Each engine
-    is probed by its upstream name (Ollama/vLLM only know that) but the caps envelope is keyed by the
-    advertised name (what consumers ask for). ``launched`` collects the built-in llama-servers to stop
+    with ``--alias``), so a job's advertised model can be rewritten to it before forwarding. Every model
+    a spec serves is probed by its upstream name (Ollama/vLLM only know that) but the caps envelope is
+    keyed by the advertised name (what consumers ask for), so a spec serving several models advertises
+    caps for all of them, not just the first. ``launched`` collects the built-in llama-servers to stop
     on teardown (empty when every engine is external). Only a built-in ``--serve`` launches, and only as
     the **sole** engine: ``grid join --all`` gathers already-running engines, so a multi-engine record
     is all external URLs.
@@ -224,9 +225,20 @@ def _bring_up_engines(
             if proc is not None:
                 launched.append(proc)
                 launcher_mod = mod
-            caps = probe.capabilities(
-                llm_url, upstream[0], advertise_as=advertised[0], context_window=record.get("ctx_size"),
-            ) if upstream else {}
+            # Probe EVERY model this spec serves, not just the first — an external `--at` with N `-m`
+            # (or an auto-detected engine serving several models) collapses to one spec whose
+            # advertised/upstream are N-length, and each model needs its own caps or the relay can't
+            # route capability-gated (e.g. tool_choice) requests to models 2..N. N sequential probes at
+            # join (one-time; N is small) keep this simple; a failed probe returns all-False caps for
+            # that one model (probe.capabilities never raises), so one bad model can't sink the node.
+            caps_models: dict[str, Any] = {}
+            for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
+                env = probe.capabilities(
+                    llm_url, upstream_model, advertise_as=advertised_model,
+                    context_window=record.get("ctx_size"),
+                )
+                caps_models.update((env or {}).get("models") or {})
+            caps = {"schema_version": 1, "models": caps_models} if caps_models else {}
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
         if launcher_mod is not None:
@@ -331,8 +343,9 @@ def _build_routing(
     - ``warnings`` — one human line per shadowed duplicate, so the operator sees why a second engine's
       copy of a model is ignored.
 
-    A failed probe degrades to ``{}`` upstream (``probe.capabilities``), so the caps merge reads
-    ``env.get("models") or {}`` and never KeyErrors the whole table on one bad engine.
+    A failed probe degrades to a full all-``False`` capability entry, not to ``{}`` — ``probe.capabilities``
+    never raises and always returns a one-model envelope; ``caps == {}`` only when a spec serves zero models.
+    The caps merge reads ``(caps or {}).get("models") or {}`` so it never KeyErrors the table on one bad engine.
     """
     routes: dict[str, str] = {}
     upstream_routes: dict[str, str] = {}
