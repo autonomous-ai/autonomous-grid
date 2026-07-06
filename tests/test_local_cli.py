@@ -2558,8 +2558,11 @@ def _mock_serve_engine(monkeypatch, handler, _real=httpx.Client):
 
 def _serve_state(monkeypatch, tmp_path, **overrides):
     from remote import serve
+    from shared.system import host
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # Pin the heartbeat's platform tag so load-shape assertions are deterministic across runner OSes.
+    monkeypatch.setattr(host, "platform_kind", lambda: "linux")
     kwargs = dict(
         signaling_url="https://relay.example", node_id="node-1", network_id="n1",
         llm_url="http://127.0.0.1:8081/v1", access_token="AT", refresh_token="RT",
@@ -2653,6 +2656,9 @@ def test_serve_loop_teardown_bounded_by_drain_timeout(monkeypatch, tmp_path, cap
 
 def test_serve_state_inflight_counter_is_thread_safe(monkeypatch, tmp_path):
     """enter/exit_inference must be atomic — the N poll workers now hit the counter concurrently."""
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})  # no-GPU box: load is just active_tasks + platform
     state = _serve_state(monkeypatch, tmp_path, max_concurrency=8)
 
     def hammer():
@@ -2666,7 +2672,7 @@ def test_serve_state_inflight_counter_is_thread_safe(monkeypatch, tmp_path):
     for thread in threads:
         thread.join()
 
-    assert state.load() == {"active_tasks": 0}
+    assert state.load() == {"active_tasks": 0, "platform": "linux"}
 
 
 def test_serve_loop_worker_death_stops_engine(monkeypatch, tmp_path):
@@ -3037,12 +3043,14 @@ def test_serve_poll_once_raises_when_refresh_unavailable(monkeypatch, tmp_path):
 
 def test_serve_heartbeat_once_ok_reports_inflight_load(monkeypatch, tmp_path):
     from remote import relay, serve
+    from shared.system import gpu
 
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})  # no-GPU box: load is just active_tasks + platform
     state = _serve_state(monkeypatch, tmp_path)
     seen = {}
     monkeypatch.setattr(relay, "heartbeat", lambda url, tok, *, load: seen.update(load=load) or "ok")
     assert serve.heartbeat_once(state) == "ok"
-    assert seen["load"] == {"active_tasks": 0}
+    assert seen["load"] == {"active_tasks": 0, "platform": "linux"}
 
 
 def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
@@ -5244,7 +5252,8 @@ def test_gpu_load_snapshot_empty_without_gpu(monkeypatch):
     from shared.system import gpu
 
     monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
-    assert gpu.load_snapshot() == {}   # no GPU → provider sends no VRAM
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 0.0)  # neutralize the macOS unified/discrete VRAM path
+    assert gpu.load_snapshot() == {}   # no GPU anywhere → provider sends no VRAM
 
 
 def test_serve_load_merges_vram_with_active_tasks(monkeypatch, tmp_path):
@@ -5264,4 +5273,4 @@ def test_serve_load_omits_vram_without_gpu(monkeypatch, tmp_path):
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
     load = _serve_state(monkeypatch, tmp_path).load()
-    assert load == {"active_tasks": 0}   # no VRAM keys when no GPU
+    assert load == {"active_tasks": 0, "platform": "linux"}   # no VRAM keys when no GPU; platform always present
