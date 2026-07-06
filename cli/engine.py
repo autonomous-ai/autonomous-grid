@@ -65,6 +65,24 @@ def cmd_engine_stop(args: argparse.Namespace) -> int:
     return comfyui.stop_running()
 
 
+def cmd_engine_list(args: argparse.Namespace) -> int:
+    """`grid engine ls` — live engines joined to the grid (mode-aware, the same view as `grid engines`).
+
+    `engine` is dispatch-AGNOSTIC, so this leaf runs its handler in both modes; branch on the mode
+    dispatch stamped on ``args`` (falling back to the persisted mode for a direct call), mirroring
+    ``cli.grid.cmd_overview``."""
+    from shared import state
+
+    mode = getattr(args, "mode", None) or state.get_mode()
+    if mode == "remote":
+        from . import remote_overview
+
+        return remote_overview.cmd_remote_engines(args)
+    from . import provider
+
+    return provider.cmd_engines(args)
+
+
 def _install_llama_cpp(args: argparse.Namespace) -> int:
     from shared.engine import installer
 

@@ -19,6 +19,7 @@ from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
 from .engine import (
     cmd_engine_install,
+    cmd_engine_list,
     cmd_engine_pull,
     cmd_engine_start,
     cmd_engine_status,
@@ -382,7 +383,7 @@ def _add_price(sub) -> None:
 
 
 def _add_engine_setup(sub) -> None:
-    engine = sub.add_parser("engine", help="Set up the built-in engines")
+    engine = sub.add_parser("engine", help="Set up built-in engines and list live ones")
     engine_sub = engine.add_subparsers(dest="subcommand", required=True)
 
     install = engine_sub.add_parser("install", help="Install an engine: llama.cpp (text) or comfyui (media)")
@@ -421,6 +422,15 @@ def _add_engine_setup(sub) -> None:
 
     stop = engine_sub.add_parser("stop", help="Stop the built-in media engine (ComfyUI)")
     stop.set_defaults(handler=cmd_engine_stop)
+
+    # `grid engine ls`/`list`: live engines joined to the grid (mode-aware, like `grid engines`).
+    for verb, help_text in (("ls", "List live engines (like `grid engines`)"),
+                            ("list", "Alias for `grid engine ls`")):
+        engine_list = engine_sub.add_parser(verb, help=help_text)
+        engine_list.add_argument("grid", nargs="?", default=None,
+                                 help="Grid name or id (ag-…). Omit for the active grid.")
+        engine_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        engine_list.set_defaults(handler=cmd_engine_list)
 
 
 def _add_media_common(parser: argparse.ArgumentParser) -> None:

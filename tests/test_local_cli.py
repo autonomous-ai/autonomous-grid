@@ -1129,6 +1129,43 @@ def test_engine_label_is_deprecated_but_still_recorded(monkeypatch, tmp_path, ca
     assert cli.provider._read_records("n1")["remote"]["engine_label"] == "rig"
 
 
+def test_engine_ls_and_list_route_to_cmd_engine_list():
+    parser = cli.build_parser()
+    assert parser.parse_args(["engine", "ls"]).handler is cli.cmd_engine_list
+    assert parser.parse_args(["engine", "list"]).handler is cli.cmd_engine_list
+
+
+def test_engine_ls_accepts_grid_and_json():
+    args = cli.build_parser().parse_args(["engine", "ls", "home", "--json"])
+    assert args.grid == "home" and args.json is True
+
+
+def test_engine_ls_local_delegates_to_cmd_engines(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def fake_engines(args):
+        seen["grid"] = args.grid
+        return 0
+
+    monkeypatch.setattr(cli.provider, "cmd_engines", fake_engines)
+    assert cli.main(["engine", "ls", "home"]) == 0  # default mode is local
+    assert seen["grid"] == "home"
+
+
+def test_engine_ls_remote_delegates_to_remote_engines(monkeypatch, tmp_path):
+    _seed_remote(monkeypatch, tmp_path)
+    seen = {}
+
+    def fake_remote_engines(args):
+        seen["hit"] = True
+        return 0
+
+    monkeypatch.setattr(cli.remote_overview, "cmd_remote_engines", fake_remote_engines)
+    assert cli.main(["engine", "ls"]) == 0
+    assert seen.get("hit") is True
+
+
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
     {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
