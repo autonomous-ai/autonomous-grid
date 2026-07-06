@@ -48,6 +48,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
         print(json.dumps([
             {
                 "grid": cfg["name"],
+                "id": cfg["grid_id"],
                 "grid_url": runtime.grid_url(cfg),
                 "local": bool(cfg.get("managed_server", True)),
             }
@@ -59,7 +60,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
         return 0
     for cfg in grids:
         where = "local" if cfg.get("managed_server", True) else "remote"
-        print(f"{cfg['name']}\t{where}\t{runtime.grid_url(cfg)}")
+        print(f"{cfg['name']}\t{cfg['grid_id']}\t{where}\t{runtime.grid_url(cfg)}")
     return 0
 
 

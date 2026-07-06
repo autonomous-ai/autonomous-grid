@@ -936,6 +936,53 @@ def test_cli_accepts_engines_and_json_and_aliases():
     assert parser.parse_args(["remove", "m.gguf"]).handler is cli.cmd_rm
 
 
+# ---------------------------------------------------------------------------
+# CLI UX overhaul (ADR 0010): help text, join flag groups, `grid ls` id column
+# ---------------------------------------------------------------------------
+
+def _subcmd_help(cmd: str) -> str:
+    """Whitespace-collapsed --help text for a subcommand. argparse re-wraps help to the terminal
+    width, so collapsing runs of whitespace lets substring asserts survive line breaks."""
+    parser = cli.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return " ".join(sub.choices[cmd].format_help().split())
+
+
+def test_leave_help_lists_all_match_kinds():
+    help_text = _subcmd_help("leave")
+    for kind in ("engine id", "endpoint URL", "served model", "URL fragment"):
+        assert kind in help_text, f"leave --engine help should mention {kind!r}"
+
+
+def test_leave_all_help_states_multi_engine_needs_all():
+    assert "multi-engine" in _subcmd_help("leave")
+
+
+def test_join_help_groups_flags():
+    help_text = _subcmd_help("join")
+    for title in ("Choose an engine", "Name & display", "Media", "Built-in", "Local only", "Remote only"):
+        assert title in help_text, f"join -h should have a {title!r} group"
+
+
+def test_join_help_marks_mode_scoped_flags():
+    help_text = _subcmd_help("join")
+    assert "(local only)" in help_text and "(remote only)" in help_text
+
+
+def test_positional_grid_help_present():
+    assert "Grid name or id" in _subcmd_help("up")
+    assert "Grid name or id" in _subcmd_help("join")
+
+
+def test_ls_shows_grid_id_local(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    assert cli.cmd_ls(cli.build_parser().parse_args(["ls"])) == 0
+    assert cfg["grid_id"] in capsys.readouterr().out  # id column present in human output
+    assert cli.cmd_ls(cli.build_parser().parse_args(["ls", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out)[0]["id"] == cfg["grid_id"]
+
+
 _FAKE_ENGINES = [
     {"name": "mac", "endpoint_url": "http://192.168.1.10:8080/v1", "models": ["gemma4-31b"]},
     {"name": "gpu", "endpoint_url": "http://192.168.1.20:8000/v1", "models": ["devstral", "gemma4-31b"]},
@@ -4589,7 +4636,8 @@ def test_remote_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
     assert cli.main(["ls", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == [{"grid": "team", "type": "permissioned-public"}]
+    assert json.loads(capsys.readouterr().out) == [
+        {"grid": "team", "type": "permissioned-public", "id": "n1"}]
 
 
 def test_remote_list_alias_lists_like_ls(monkeypatch, tmp_path, capsys):

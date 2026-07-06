@@ -73,7 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_grid_lifecycle(sub) -> None:
     up = sub.add_parser("up", help="Bring a grid online (creates it on first run; default: home)")
-    up.add_argument("name", nargs="?", default=None)
+    up.add_argument("name", nargs="?", default=None,
+                    help="Grid name or id (ag-…). Omit for 'home'.")
     up.add_argument("--port", type=int, default=runtime.DEFAULT_PORT)
     up.add_argument("--host", default=runtime.DEFAULT_HOST)
     up.add_argument("--advertise-host", default=None)
@@ -88,7 +89,8 @@ def _add_grid_lifecycle(sub) -> None:
     up.set_defaults(handler=cmd_up)
 
     down = sub.add_parser("down", help="Take a grid offline (config persists)")
-    down.add_argument("name", nargs="?", default=None)
+    down.add_argument("name", nargs="?", default=None,
+                      help="Grid name or id (ag-…). Omit for the active grid.")
     down.set_defaults(handler=cmd_down)
 
     ls = sub.add_parser("ls", help="List your grids")
@@ -100,7 +102,8 @@ def _add_grid_lifecycle(sub) -> None:
     list_alias.set_defaults(handler=cmd_ls)
 
     info = sub.add_parser("info", help="Endpoint, key, and live models for a grid")
-    info.add_argument("grid", nargs="?", default=None)
+    info.add_argument("grid", nargs="?", default=None,
+                      help="Grid name or id (ag-…). Omit for the active grid.")
     info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     info.add_argument("--env", action="store_true", help="Print OPENAI_* shell exports.")
     info.set_defaults(handler=cmd_info)
@@ -108,12 +111,16 @@ def _add_grid_lifecycle(sub) -> None:
 
 def _add_engines(sub) -> None:
     join = sub.add_parser("join", help="Join an engine to a grid")
-    join.add_argument("grid", nargs="?", default=None)
-    join.add_argument("--at", default=None, help="URL of an existing OpenAI-compatible engine.")
-    join.add_argument("-m", "--model", action="append", dest="models", default=[])
-    join.add_argument("--serve", default=None, help="Start the built-in engine for this model, then join.")
-    join.add_argument("--media", action="store_true", help="Join this box as a media (ComfyUI) engine.")
-    join.add_argument(
+    join.add_argument("grid", nargs="?", default=None,
+                      help="Grid name or id (ag-…). Omit for the active grid.")
+
+    choose = join.add_argument_group("Choose an engine")
+    choose.add_argument("-m", "--model", action="append", dest="models", default=[],
+                        help="A model an engine serves; pair with --at, or use --serve for the built-in.")
+    choose.add_argument("--at", default=None, help="URL of an existing OpenAI-compatible engine.")
+    choose.add_argument("--serve", default=None, help="Start the built-in engine for this model, then join.")
+    choose.add_argument("--media", action="store_true", help="Join this box as a media (ComfyUI) engine.")
+    choose.add_argument(
         "--bundle",
         action="append",
         dest="bundles",
@@ -121,59 +128,75 @@ def _add_engines(sub) -> None:
         default=[],
         help="Media bundle to advertise; repeat for multiple bundles.",
     )
-    join.add_argument("--name", default=None,
-                      help="Local: engine id. Remote: display name shown on the grid page.")
-    join.add_argument("--all", action="store_true", help="Join every detected engine.")
-    join.add_argument("--engine", default=None, help="Join only the detected engine of this kind.")
-    join.add_argument(
+    choose.add_argument("--all", action="store_true", help="Join every detected engine.")
+    choose.add_argument("--engine", default=None, help="Join only the detected engine of this kind.")
+
+    naming = join.add_argument_group("Name & display")
+    naming.add_argument("--name", default=None,
+                        help="Local: engine id. Remote: display name shown on the grid page.")
+    naming.add_argument(
         "--advertise-as",
         action="append",
         dest="advertise_as",
         default=[],
         help="Model name advertised to the grid. Repeat once per -m/--model.",
     )
-    join.add_argument("--endpoint-port", "--llama-port", type=int, default=8081)
-    join.add_argument("--heartbeat-interval", type=float, default=15.0)
-    join.add_argument("--ctx-size", type=int, default=None)
-    join.add_argument("--n-predict", type=int, default=None)
-    join.add_argument("--parallel", type=int, default=None)
-    join.add_argument("--flash-attn", default=None)
-    join.add_argument("--temp", type=float, default=None)
-    join.add_argument("--reasoning-budget", type=int, default=None)
-    join.add_argument("--comfyui-port", type=int, default=8188)
-    # local-only: remote has no inbound endpoint, so there is nothing to advertise (rejected in remote mode).
-    join.add_argument("--advertise-host", default=None)
-    join.add_argument("--media-port", type=int, default=8190)
+
+    tuning = join.add_argument_group("Built-in tuning (--serve)")
+    tuning.add_argument("--endpoint-port", "--llama-port", type=int, default=8081)
+    tuning.add_argument("--heartbeat-interval", type=float, default=15.0)
+    tuning.add_argument("--ctx-size", type=int, default=None)
+    tuning.add_argument("--n-predict", type=int, default=None)
+    tuning.add_argument("--parallel", type=int, default=None)
+    tuning.add_argument("--flash-attn", default=None)
+    tuning.add_argument("--temp", type=float, default=None)
+    tuning.add_argument("--reasoning-budget", type=int, default=None)
+
+    media = join.add_argument_group("Media")
+    media.add_argument("--comfyui-port", type=int, default=8188)
+    media.add_argument("--media-port", type=int, default=8190)
+
+    local_only = join.add_argument_group("Local only")
+    # A remote engine polls the relay outbound, so it has no inbound endpoint to advertise.
+    local_only.add_argument("--advertise-host", default=None,
+                            help="Host/IP to advertise this engine at (local only).")
+
+    remote_only = join.add_argument_group("Remote only")
     # Remote-only: billing + pull-based capacity + grid-page display (rejected in local). default=None
     # so a wrong-mode use is detectable.
-    join.add_argument("--engine-label", default=None,
-                      help="Remote-only: label for this engine's kind on the grid page.")
+    remote_only.add_argument("--engine-label", default=None,
+                             help="Remote-only: label for this engine's kind on the grid page.")
     # Deprecated: pricing now lives in the authoritative per-provider table — set it with
     # `grid price set` instead. Kept so old invocations don't hard-error; they no longer advertise a price.
-    join.add_argument("--pricing-input", type=float, default=None,
-                      help="Deprecated — use `grid price set`. (No longer advertises a price.)")
-    join.add_argument("--pricing-output", type=float, default=None,
-                      help="Deprecated — use `grid price set`. (No longer advertises a price.)")
-    join.add_argument("--max-concurrency", type=int, default=None,
-                      help="Remote-only: how many requests this engine serves at once.")
+    remote_only.add_argument("--pricing-input", type=float, default=None,
+                             help="Deprecated — use `grid price set`. (No longer advertises a price.)")
+    remote_only.add_argument("--pricing-output", type=float, default=None,
+                             help="Deprecated — use `grid price set`. (No longer advertises a price.)")
+    remote_only.add_argument("--max-concurrency", type=int, default=None,
+                             help="How many requests this engine serves at once (remote only).")
     join.set_defaults(handler=cmd_join)
 
     leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")
-    leave.add_argument("grid", nargs="?", default=None)
+    leave.add_argument("grid", nargs="?", default=None,
+                       help="Grid name or id (ag-…). Omit for the active grid.")
     leave.add_argument("--engine", default=None,
-                       help="Local: engine id to leave. Remote: endpoint URL (or unique label) of one "
-                            "engine to drop from the grid's identity.")
-    leave.add_argument("--all", action="store_true", help="Leave every engine on this grid.")
+                       help="Engine to leave. Matches, in order: exact engine id, endpoint URL, a "
+                            "served model, or a URL fragment (e.g. :8000).")
+    leave.add_argument("--all", action="store_true",
+                       help="Leave every engine on this grid. Without --engine: a one-engine grid "
+                            "leaves that one; a multi-engine grid requires --all.")
     leave.set_defaults(handler=cmd_leave)
 
     models = sub.add_parser("models", help="Live models the grid can run now")
-    models.add_argument("grid", nargs="?", default=None)
+    models.add_argument("grid", nargs="?", default=None,
+                        help="Grid name or id (ag-…). Omit for the active grid.")
     models.add_argument("--verbose", action="store_true", help="Show the engine serving each model.")
     models.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     models.set_defaults(handler=cmd_models)
 
     engines = sub.add_parser("engines", help="Live engines joined to a grid")
-    engines.add_argument("grid", nargs="?", default=None)
+    engines.add_argument("grid", nargs="?", default=None,
+                         help="Grid name or id (ag-…). Omit for the active grid.")
     engines.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     engines.set_defaults(handler=cmd_engines)
 
