@@ -1,4 +1,5 @@
-"""`grid catalog` / `grid pull` / `grid rm`: manage local GGUF model files."""
+"""`grid catalog` / `grid pull` / `grid rm`: manage local GGUF model files,
+plus the static API-engine whitelist (`grid catalog --api <kind>`)."""
 from __future__ import annotations
 
 import argparse
@@ -6,6 +7,11 @@ import json
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
+    # `is not None`, not truthiness: `--api ""` must reach the unknown-kind error,
+    # not silently fall through to the GGUF catalog.
+    if getattr(args, "api", None) is not None:
+        return _catalog_api(args)
+
     from shared.models import catalog, store
 
     if getattr(args, "json", False):
@@ -33,6 +39,48 @@ def cmd_catalog(args: argparse.Namespace) -> int:
         print(catalog.format_catalog_entry(entry))
     print()
     print("Also: `grid pull <hf-repo>:<file>` for any GGUF on Hugging Face.")
+    return 0
+
+
+def _catalog_api(args: argparse.Namespace) -> int:
+    from shared.models import api_catalog
+
+    kind = args.api
+    whitelist = api_catalog.WHITELISTS.get(kind)
+    if whitelist is None or not whitelist.entries:
+        supported = ", ".join(api_catalog.supported_kinds())
+        raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
+
+    if getattr(args, "json", False):
+        # Explicit keys: this is the stable machine-readable contract (ADR 0012);
+        # renaming an ApiModelEntry field must not silently rename a JSON key.
+        print(json.dumps({
+            "kind": kind,
+            "last_verified": whitelist.last_verified,
+            "models": [
+                {
+                    "advertised": api_catalog.advertised_name(kind, entry),
+                    "vendor_name": entry.vendor_name,
+                    "context_window": entry.context_window,
+                    "supports_tools": entry.supports_tools,
+                    "supports_vision": entry.supports_vision,
+                    "supports_json_mode": entry.supports_json_mode,
+                    "supports_structured_outputs": entry.supports_structured_outputs,
+                    "notes": entry.notes,
+                }
+                for entry in whitelist.entries
+            ],
+        }, indent=2))
+        return 0
+
+    print(
+        f"Models a `grid join --api {kind}` would serve "
+        f"(verified {whitelist.last_verified}):"
+    )
+    for entry in whitelist.entries:
+        print(api_catalog.format_api_entry(kind, entry))
+    print()
+    print(f"No key needed to view. Requests to {kind}:* models leave the grid for the vendor.")
     return 0
 
 

@@ -207,6 +207,11 @@ def _add_engines(sub) -> None:
 def _add_models(sub) -> None:
     catalog = sub.add_parser("catalog", help="Models Grid can pull")
     catalog.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    catalog.add_argument(
+        "--api",
+        metavar="KIND",
+        help="Show the API-engine whitelist for a service kind (e.g. openai).",
+    )
     catalog.set_defaults(handler=cmd_catalog)
 
     pull = sub.add_parser("pull", help="Download a model (catalog label or '<hf-repo>:<file>')")

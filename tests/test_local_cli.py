@@ -24,7 +24,7 @@ from shared import paths
 from shared import state
 from local import runtime
 from shared.engine import comfyui, installer, launcher
-from shared.models import catalog, download, media_bundles
+from shared.models import api_catalog, catalog, download, media_bundles
 from local import media_server
 from local.server import create_app
 from shared.system import detect
@@ -239,6 +239,10 @@ def test_cli_accepts_engine_and_model_commands():
     assert source_install.from_source is True
 
     assert parser.parse_args(["catalog"]).handler is cli.cmd_catalog
+    assert parser.parse_args(["catalog"]).api is None
+    api_args = parser.parse_args(["catalog", "--api", "openai"])
+    assert api_args.handler is cli.cmd_catalog
+    assert api_args.api == "openai"
     assert parser.parse_args(["pull", "qwen36-35b-a3b-mtp"]).model == "qwen36-35b-a3b-mtp"
     rm = parser.parse_args(["rm", "your-model.gguf", "--yes"])
     assert rm.handler is cli.cmd_rm
@@ -627,6 +631,86 @@ def test_catalog_contains_reference_readme_qwen36_models():
     assert nvidia.hf_repo == "unsloth/Qwen3.6-27B-MTP-GGUF"
     assert nvidia.quantized_file == "Qwen3.6-27B-UD-Q5_K_XL.gguf"
     assert nvidia.target == catalog.TARGET_NVIDIA
+
+
+def test_catalog_api_openai_prints_whitelist(monkeypatch, capsys):
+    # The api catalog is static data: no key, and any network attempt is a bug.
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert api_catalog.OPENAI_LAST_VERIFIED in out
+    entries = api_catalog.WHITELISTS["openai"].entries
+    assert entries
+    for entry in entries:
+        assert api_catalog.advertised_name("openai", entry) in out
+        assert f"{entry.context_window:,}" in out
+    # Requests to these models leave the grid — the disclosure must be printed.
+    assert "leave the grid" in out
+
+
+def test_catalog_api_unknown_kind_errors():
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_catalog(argparse.Namespace(api="anthropic", json=False))
+
+    msg = str(exc.value)
+    assert "anthropic" in msg  # the kind that was rejected
+    assert "openai" in msg  # ... and the supported kinds, so the fix is one edit away
+
+    # `--api ""` (e.g. an unset shell variable) must error too, not silently
+    # fall through to the GGUF catalog.
+    with pytest.raises(SystemExit):
+        cli.cmd_catalog(argparse.Namespace(api="", json=False))
+
+
+def test_catalog_without_api_unchanged(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    rc = cli.cmd_catalog(argparse.Namespace(api=None, json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Grid can pull:" in out
+    assert "openai:" not in out
+
+
+def test_api_whitelist_integrity():
+    from datetime import date
+
+    assert api_catalog.supported_kinds() == ("openai",)
+    for kind, whitelist in api_catalog.WHITELISTS.items():
+        assert whitelist.entries, f"{kind} whitelist must not be empty"
+        names = [entry.vendor_name for entry in whitelist.entries]
+        assert all(names), f"{kind} has an entry with an empty vendor name"
+        assert len(set(names)) == len(names), f"{kind} has duplicate vendor names"
+        for entry in whitelist.entries:
+            assert entry.context_window > 0
+            assert api_catalog.advertised_name(kind, entry) == f"{kind}:{entry.vendor_name}"
+        date.fromisoformat(whitelist.last_verified)  # dated, ISO format
+
+
+def test_catalog_api_json_roundtrips(capsys):
+    rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["kind"] == "openai"
+    assert payload["last_verified"] == api_catalog.OPENAI_LAST_VERIFIED
+    entries = api_catalog.WHITELISTS["openai"].entries
+    assert len(payload["models"]) == len(entries)
+    first, first_entry = payload["models"][0], entries[0]
+    assert first["advertised"] == api_catalog.advertised_name("openai", first_entry)
+    assert first["vendor_name"] == first_entry.vendor_name
+    assert first["context_window"] == first_entry.context_window
+    assert first["supports_tools"] is first_entry.supports_tools
+    assert first["supports_vision"] is first_entry.supports_vision
 
 
 def test_download_surfaces_non_2xx_as_clean_systemexit(monkeypatch, tmp_path):

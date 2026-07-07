@@ -250,6 +250,7 @@ is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
 ```
 grid models [grid] [--verbose] [--json] # live models the grid can run now
 grid catalog [--json]                   # models Grid can pull
+grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (v1: openai)
 grid pull <model>                       # pull a model for the default text engine
 grid rm <model> [--yes]                 # remove a pulled model
 ```
@@ -284,6 +285,27 @@ In `remote` mode `grid models` and `grid engines` read the grid's live overview 
 relay endpoint (no token needed, so they work even before `grid sync`). The output is the same
 shape, but `--verbose` shows the **node** serving each model instead of a local `WHERE` URL —
 remote engines sit behind the relay, not at an address you call directly.
+
+`grid catalog --api <kind>` answers the discovery question for **API engines**: which models
+would a `grid join --api <kind>` serve? It prints a curated, static whitelist with each model's
+capabilities and context window — no key needed, no network call (the same posture as the
+"Grid can pull" catalog). The table carries the date it was last verified against the vendor's
+documentation, and an unknown kind is a clear error listing the supported kinds. Models are
+advertised under namespaced names (`openai:gpt-5.5`), so it is visible in every model list that
+requests to them leave the grid for the vendor. `--json` emits the same table machine-readable.
+
+```text
+Models a `grid join --api openai` would serve (verified 2026-07-08):
+  openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured
+  openai:gpt-5.4           1,050,000 ctx   tools, vision, json, structured
+  openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured
+  openai:gpt-5.4-nano        400,000 ctx   tools, vision, json, structured
+
+No key needed to view. Requests to openai:* models leave the grid for the vendor.
+```
+
+See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
+the `openai:*` namespacing, and the key-store lifecycle.
 
 ## Use
 
