@@ -233,11 +233,24 @@ grid join research --serve qwen36-35b-a3b-mtp                    # 🌐 remote: 
 grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp   # 🏠 local: your grid_url
 ```
 
-Media serving (ComfyUI images + video) is **local-only** today:
+Media serving (ComfyUI images + video) works in **both modes** — `grid engine install` and
+`grid engine pull` set up the ComfyUI engine the same way; only the grid you join and consume
+from differs.
 
 ```bash
-grid engine install comfyui             # media engine
+grid engine install comfyui             # media engine (both modes)
 grid engine pull image_generation       # also: image_editing, i2v
+```
+
+**🌐 Remote** — serve to your grid by **name** (the engine polls the relay), then `grid image`
+routes through your active grid:
+```bash
+grid join research --media --bundle image_generation
+grid image "a compact walnut desk beside a sunlit window"
+```
+
+**🏠 local** — serve to your **`grid_url`**, and point `grid image` at it with `--grid`:
+```bash
 grid join http://192.168.1.25:8090 --media --bundle image_generation
 grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090
 ```
