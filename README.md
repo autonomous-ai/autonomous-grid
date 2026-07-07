@@ -103,7 +103,7 @@ grid up
 # grid_url=http://192.168.1.25:8090            ← the one address engines + apps use
 ```
 
-### 4 · Add a node
+### 4 · Add an engine
 
 Point Grid at an inference server you already run (here, a computer running vLLM to serve `qwen3-coder`), and name it.
 
@@ -143,7 +143,7 @@ grid chat -m qwen3-coder "write a haiku about local GPUs"
 > qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
 > gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
 > ```
-> Two computers, two frameworks — one endpoint serves both. (The same `grid models` and `grid engines` now work for remote grids too — `grid models --verbose` shows each model's engine and node.)
+> Two computers, two frameworks — one endpoint serves both. (The same `grid models` and `grid engine ls` now work for remote grids too — `grid models --verbose` shows each model's engine and where it runs.)
 
 ### 6 · Point your apps at the grid
 
