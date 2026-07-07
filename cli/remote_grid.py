@@ -213,7 +213,10 @@ def cmd_remote_ls(args: argparse.Namespace) -> int:
     nets = _networks()  # local only — `grid login` already fetched these; no network call
     active = state.get_active("remote")
     if args.json:
-        print(json.dumps([{"grid": n.get("name"), "type": n.get("network_type")} for n in nets], indent=2))
+        print(json.dumps(
+            [{"grid": n.get("name"), "type": n.get("network_type"), "id": n.get("network_id")} for n in nets],
+            indent=2,
+        ))
         return 0
     if not nets:
         print("(no grids — run `grid up <name>` to bring one online)")
@@ -221,7 +224,7 @@ def cmd_remote_ls(args: argparse.Namespace) -> int:
     for net in nets:
         is_active = active and (net.get("network_id") == active or net.get("name") == active)
         marker = "* " if is_active else "  "
-        print(f"{marker}{net.get('name') or ''}\t{net.get('network_type') or ''}")
+        print(f"{marker}{net.get('name') or ''}\t{net.get('network_id') or ''}\t{net.get('network_type') or ''}")
     return 0
 
 

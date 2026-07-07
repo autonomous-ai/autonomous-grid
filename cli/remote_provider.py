@@ -44,18 +44,31 @@ def _reject_local_only_flags(args: argparse.Namespace) -> None:
         )
 
 
+def _warn_deprecated(triggered: bool, message: str) -> None:
+    """Print a one-line deprecation note to stderr when a deprecated flag was used."""
+    if triggered:
+        print(message, file=sys.stderr)
+
+
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
-    from . import remote_grid
+    from . import provider, remote_grid
 
     _reject_local_only_flags(args)
-    if getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None:
-        print(
-            "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
-            "Set your model price with `grid price set` after joining.",
-            file=sys.stderr,
-        )
+    if args.serve and args.models:
+        raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
+    provider._apply_inline_aliases(args)
+    _warn_deprecated(
+        getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None,
+        "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
+        "Set your model price with `grid price set` after joining.",
+    )
+    _warn_deprecated(
+        getattr(args, "engine_label", None) is not None,
+        "Note: --engine-label is deprecated and no longer changes the grid page — the engine's kind "
+        "is derived automatically. (It still matches `grid leave --engine <label>`.)",
+    )
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 
@@ -364,10 +377,10 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             "No running engine detected on this box. Point at one with "
             "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
         )
-    if args.engine:
-        detected = [engine for engine in detected if engine.label == args.engine]
+    if args.kind:
+        detected = [engine for engine in detected if engine.label == args.kind]
         if not detected:
-            raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
+            raise SystemExit(f"No detected engine of kind {args.kind!r}. Run `grid join` to list them.")
 
     media_detected = any(engine.media for engine in detected)
     text = [engine for engine in detected if not engine.media]
@@ -377,7 +390,7 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             if not provider._confirm("Join all detected engines?"):
                 return [], False
         else:
-            raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
+            raise SystemExit("Multiple engines detected; pass --all, --kind <kind>, or --at <url>.")
     return [
         {"endpoint_url": engine.endpoint_url, "models": list(engine.models), "engine_label": engine.label}
         for engine in text
@@ -569,28 +582,7 @@ def _engines_summary(union: list[dict[str, object]]) -> str:
 def _drop_spec(
     union: list[dict[str, object]], selector: str, label: str
 ) -> list[dict[str, object]]:
-    """The spec(s) to remove for ``selector``, tried in order: exact ``endpoint_url``, exact
-    ``engine_label``, a served model, then a URL substring (host/port). Each non-URL match must resolve to
-    ONE engine or it errors and lists the engines — so `grid leave --engine mistral` (by model) or
-    `grid leave --engine :8000` (by port) work, not just the full URL."""
-
-    def unique(matches: list[dict[str, object]], how: str) -> list[dict[str, object]]:
-        if len(matches) > 1:
-            raise SystemExit(
-                f"{how} {selector!r} matches several engines on {label}; pass the exact endpoint URL "
-                f"instead. Engines: {_engines_summary(union)}."
-            )
-        return matches
-
-    by_url = [spec for spec in union if spec.get("endpoint_url") == selector]
-    if by_url:
-        return by_url
-    by_label = unique([spec for spec in union if spec.get("engine_label") == selector], "Label")
-    if by_label:
-        return by_label
-    by_model = unique([spec for spec in union if selector in (spec.get("models") or [])], "Model")
-    if by_model:
-        return by_model
-    return unique(
-        [spec for spec in union if selector in (spec.get("endpoint_url") or "")], "URL fragment"
-    )
+    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → served model → URL
+    substring — via the shared matcher (`shared.run_records.match_engine`). Remote engines are keyed by
+    URL/label, so no exact-id short-circuit here (that's the local caller's job)."""
+    return run_records.match_engine(union, selector, label=label, summary=_engines_summary(union))

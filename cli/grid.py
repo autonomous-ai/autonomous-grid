@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from typing import Any
 
 import httpx
@@ -20,12 +21,15 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 def cmd_up(args: argparse.Namespace) -> int:
     name = args.name or "home"
-    cfg = _grid_by_name(name) or runtime.init_grid_config(
-        name=name,
-        port=args.port,
-        host=args.host,
-        advertise_host=args.advertise_host,
-    )
+    cfg = _grid_by_name(name)
+    if cfg is None:
+        _reject_foreign_grid(name)  # a known remote grid or an id-shaped arg → don't auto-create junk
+        cfg = runtime.init_grid_config(
+            name=name,
+            port=args.port,
+            host=args.host,
+            advertise_host=args.advertise_host,
+        )
     runtime.start_grid(cfg)
     print(f"grid={cfg['name']}")
     print(f"grid_url={runtime.grid_url(cfg)}")
@@ -48,6 +52,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
         print(json.dumps([
             {
                 "grid": cfg["name"],
+                "id": cfg["grid_id"],
                 "grid_url": runtime.grid_url(cfg),
                 "local": bool(cfg.get("managed_server", True)),
             }
@@ -59,7 +64,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
         return 0
     for cfg in grids:
         where = "local" if cfg.get("managed_server", True) else "remote"
-        print(f"{cfg['name']}\t{where}\t{runtime.grid_url(cfg)}")
+        print(f"{cfg['name']}\t{cfg['grid_id']}\t{where}\t{runtime.grid_url(cfg)}")
     return 0
 
 
@@ -168,6 +173,35 @@ def _overview_local(as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+# Local grid ids are minted as ``ag-<slug>-<hex8>`` (local/runtime.init_grid_config). `grid up` uses this
+# to refuse auto-creating a junk grid when the arg is an unsynced id, not a new name (ADR 0010 D-f).
+# fullmatch (anchored) so a real name like ``ag-team`` still creates.
+_GRID_ID_RE = re.compile(r"ag-.+-[0-9a-f]{8}")
+
+
+def _looks_like_grid_id(name: str) -> bool:
+    return bool(_GRID_ID_RE.fullmatch(name))
+
+
+def _reject_foreign_grid(name: str) -> None:
+    """Refuse to auto-create when `name` is really an existing grid the user hasn't synced here — one of
+    their known remote grids (exact name/id match, zero false-positive), or a string shaped like a minted
+    local grid id — instead of silently making a junk local grid named after it (ADR 0010 D-f). Runs
+    before any create/start, so nothing is written or spawned."""
+    from . import remote_grid
+
+    if remote_grid._by_name(name) is not None:  # a grid from `grid login`, pasted in local mode
+        raise SystemExit(
+            f"{name!r} is one of your remote grids, not a new local grid. Switch to it with "
+            f"`grid mode remote` (or `grid --remote up {name}`)."
+        )
+    if _looks_like_grid_id(name):
+        raise SystemExit(
+            f"No local grid with id {name!r}. That looks like a grid id, not a new grid's name — run "
+            f"`grid ls` to see your grids (or `grid mode remote` + `grid sync` for a remote one)."
+        )
+
 
 def _grid_by_name(name: str) -> dict[str, Any] | None:
     for cfg in config.iter_grid_configs():

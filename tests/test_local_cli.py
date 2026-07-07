@@ -807,6 +807,29 @@ def test_join_all_joins_every_detected_engine(monkeypatch, tmp_path):
     assert set(records) == {"ollama", "vllm"}
 
 
+def test_join_kind_filters_to_one_engine(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    monkeypatch.setattr(
+        cli.provider,
+        "_detect",
+        lambda host: [
+            detect.DetectedEngine(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"]),
+            detect.DetectedEngine(label="vllm", endpoint_url="http://h:8000/v1", models=["mistral"]),
+        ],
+    )
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", lambda cmd, **kw: type("P", (), {"pid": 1})())
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+
+    assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--kind", "vllm"])) == 0
+    assert set(cli.provider._read_records(grid_id)) == {"vllm"}  # only the vllm engine joined
+    # the --engine alias drives the same filter (and errors on no match)
+    assert cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--engine", "ollama"])) == 0
+    assert set(cli.provider._read_records(grid_id)) == {"vllm", "ollama"}
+    with pytest.raises(SystemExit):
+        cli.cmd_join(cli.build_parser().parse_args(["join", "home", "--kind", "nope"]))
+
+
 def test_join_cleans_up_record_when_engine_dies(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     cfg = runtime.init_grid_config(name="home", port=8090)
@@ -922,6 +945,74 @@ def test_leave_all_removes_records(monkeypatch, tmp_path):
     assert cli.provider._read_records(grid_id) == {}
 
 
+def _seed_local_engine(grid_id, engine_id, *, endpoint_url=None, models=None):
+    cli.provider._write_record(grid_id, engine_id, {
+        "engine_id": engine_id, "node_id": engine_id, "grid_id": grid_id, "pid": 0,
+        "endpoint_url": endpoint_url, "models": models or [],
+    })
+
+
+def _leave(*argv):
+    return cli.cmd_leave(cli.build_parser().parse_args(["leave", *argv]))
+
+
+def test_leave_local_matches_by_endpoint_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["devstral"])
+    assert _leave("home", "--engine", "http://h:8000/v1") == 0
+    assert set(cli.provider._read_records(grid_id)) == {"gpu"}
+
+
+def test_leave_local_matches_by_served_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["devstral"])
+    assert _leave("home", "--engine", "devstral") == 0
+    assert set(cli.provider._read_records(grid_id)) == {"mac"}
+
+
+def test_leave_local_matches_by_url_fragment(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["devstral"])
+    assert _leave("home", "--engine", ":9000") == 0
+    assert set(cli.provider._read_records(grid_id)) == {"mac"}
+
+
+def test_leave_local_exact_id_wins_over_url_substring(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["m1"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://mac-host:9000/v1", models=["m2"])
+    assert _leave("home", "--engine", "mac") == 0  # exact id, not the substring of gpu's URL
+    assert set(cli.provider._read_records(grid_id)) == {"gpu"}
+
+
+def test_leave_local_ambiguous_model_lists_ids(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["shared"])
+    _seed_local_engine(grid_id, "gpu", endpoint_url="http://h:9000/v1", models=["shared"])
+    with pytest.raises(SystemExit) as exc:
+        _leave("home", "--engine", "shared")
+    msg = str(exc.value)
+    assert "several" in msg.lower() and "mac" in msg and "gpu" in msg
+
+
+def test_leave_local_unknown_selector_errors(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    grid_id = runtime.init_grid_config(name="home", port=8090)["grid_id"]
+    _seed_local_engine(grid_id, "mac", endpoint_url="http://h:8000/v1", models=["mistral"])
+    with pytest.raises(SystemExit) as exc:
+        _leave("home", "--engine", "ghost")
+    assert "ghost" in str(exc.value)
+    assert set(cli.provider._read_records(grid_id)) == {"mac"}  # nothing dropped on a miss
+
+
 def test_cli_accepts_engines_and_json_and_aliases():
     parser = cli.build_parser()
 
@@ -934,6 +1025,222 @@ def test_cli_accepts_engines_and_json_and_aliases():
     # aliases route to the same handlers as ls / rm
     assert parser.parse_args(["list"]).handler is cli.cmd_ls
     assert parser.parse_args(["remove", "m.gguf"]).handler is cli.cmd_rm
+
+
+# ---------------------------------------------------------------------------
+# CLI UX overhaul (ADR 0010): help text, join flag groups, `grid ls` id column
+# ---------------------------------------------------------------------------
+
+def _subcmd_help(cmd: str) -> str:
+    """Whitespace-collapsed --help text for a subcommand. argparse re-wraps help to the terminal
+    width, so collapsing runs of whitespace lets substring asserts survive line breaks."""
+    parser = cli.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return " ".join(sub.choices[cmd].format_help().split())
+
+
+def test_leave_help_lists_all_match_kinds():
+    help_text = _subcmd_help("leave")
+    for kind in ("engine id", "endpoint URL", "served model", "URL fragment"):
+        assert kind in help_text, f"leave --engine help should mention {kind!r}"
+
+
+def test_leave_all_help_states_multi_engine_needs_all():
+    assert "multi-engine" in _subcmd_help("leave")
+
+
+def test_join_help_groups_flags():
+    help_text = _subcmd_help("join")
+    for title in ("Choose an engine", "Name & display", "Media", "Built-in", "Local only", "Remote only"):
+        assert title in help_text, f"join -h should have a {title!r} group"
+
+
+def test_join_help_marks_mode_scoped_flags():
+    help_text = _subcmd_help("join")
+    assert "(local only)" in help_text and "(remote only)" in help_text
+
+
+def test_positional_grid_help_present():
+    assert "Grid name or id" in _subcmd_help("up")
+    assert "Grid name or id" in _subcmd_help("join")
+
+
+def test_ls_shows_grid_id_local(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    assert cli.cmd_ls(cli.build_parser().parse_args(["ls"])) == 0
+    assert cfg["grid_id"] in capsys.readouterr().out  # id column present in human output
+    assert cli.cmd_ls(cli.build_parser().parse_args(["ls", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out)[0]["id"] == cfg["grid_id"]
+
+
+def test_join_kind_flag_with_engine_alias():
+    parser = cli.build_parser()
+    assert parser.parse_args(["join", "--kind", "ollama"]).kind == "ollama"
+    assert parser.parse_args(["join", "--engine", "vllm"]).kind == "vllm"  # --engine is a back-compat alias
+
+
+def _parse_join(*argv):
+    return cli.build_parser().parse_args(["join", *argv])
+
+
+def test_join_inline_alias_desugars_into_record(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.pid = 4321
+
+    monkeypatch.setattr(cli.provider.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(cli.provider, "_await_engine_start", lambda *a, **k: "registered")
+    args = _parse_join("home", "--at", "http://h:11434/v1", "-m", "real-a=pub-a", "--name", "mac")
+    assert cli.cmd_join(args) == 0
+    rec = cli.provider._read_records(cfg["grid_id"])["mac"]
+    assert rec["models"] == ["real-a"]
+    assert rec["advertise_as"] == ["pub-a"]
+
+
+def test_inline_alias_rejects_mixing_with_advertise_as():
+    args = _parse_join("--at", "u", "-m", "real=pub", "--advertise-as", "x")
+    with pytest.raises(SystemExit) as exc:
+        cli.provider._apply_inline_aliases(args)
+    assert "not both" in str(exc.value)
+
+
+def test_inline_alias_all_or_nothing():
+    args = _parse_join("--at", "u", "-m", "real=pub", "-m", "plain")
+    with pytest.raises(SystemExit):
+        cli.provider._apply_inline_aliases(args)
+
+
+def test_inline_alias_rejects_empty_side():
+    for bad in ("=pub", "real="):
+        with pytest.raises(SystemExit):
+            cli.provider._apply_inline_aliases(_parse_join("--at", "u", "-m", bad))
+
+
+def test_inline_alias_no_equals_is_untouched():
+    args = _parse_join("--at", "u", "-m", "qwen3:0.6b")
+    cli.provider._apply_inline_aliases(args)
+    assert args.models == ["qwen3:0.6b"] and args.advertise_as == []
+
+
+def test_serve_rejects_inline_equals():
+    args = _parse_join("--serve", "real=pub")
+    with pytest.raises(SystemExit) as exc:
+        cli.provider._apply_inline_aliases(args)
+    assert "--advertise-as" in str(exc.value)
+
+
+def test_serve_rejects_extra_model_flag():
+    # --serve serves one built-in model; a separate -m (aliased or not) would be silently dropped.
+    for argv in (["--serve", "modelY", "-m", "real=pub"], ["--serve", "modelY", "-m", "foo"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_join(_parse_join(*argv))
+        assert "--serve" in str(exc.value)
+
+
+def test_inline_alias_rejects_multiple_equals():
+    with pytest.raises(SystemExit):
+        cli.provider._apply_inline_aliases(_parse_join("--at", "u", "-m", "a=b=c"))
+
+
+def test_remote_join_inline_alias_desugars_into_record(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "real-a=pub-a"]) == 0
+    rec = cli.provider._read_records("n1")["remote"]
+    assert rec["models"] == ["real-a"]
+    assert rec["advertise_as"] == ["pub-a"]
+
+
+def test_engine_label_is_deprecated_but_still_recorded(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    assert cli.main(["join", "--serve", "m", "--engine-label", "rig"]) == 0
+    err = capsys.readouterr().err
+    assert "engine-label" in err and "deprecated" in err.lower()
+    # still stored so `grid leave --engine <label>` keeps matching (ADR 0010 D-c)
+    assert cli.provider._read_records("n1")["remote"]["engine_label"] == "rig"
+
+
+def test_engine_ls_and_list_route_to_cmd_engine_list():
+    parser = cli.build_parser()
+    assert parser.parse_args(["engine", "ls"]).handler is cli.cmd_engine_list
+    assert parser.parse_args(["engine", "list"]).handler is cli.cmd_engine_list
+
+
+def test_engine_ls_accepts_grid_and_json():
+    args = cli.build_parser().parse_args(["engine", "ls", "home", "--json"])
+    assert args.grid == "home" and args.json is True
+
+
+def test_engine_ls_local_delegates_to_cmd_engines(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def fake_engines(args):
+        seen["grid"] = args.grid
+        return 0
+
+    monkeypatch.setattr(cli.provider, "cmd_engines", fake_engines)
+    assert cli.main(["engine", "ls", "home"]) == 0  # default mode is local
+    assert seen["grid"] == "home"
+
+
+def test_engine_ls_remote_delegates_to_remote_engines(monkeypatch, tmp_path):
+    _seed_remote(monkeypatch, tmp_path)
+    seen = {}
+
+    def fake_remote_engines(args):
+        seen["hit"] = True
+        return 0
+
+    monkeypatch.setattr(cli.remote_overview, "cmd_remote_engines", fake_remote_engines)
+    assert cli.main(["engine", "ls"]) == 0
+    assert seen.get("hit") is True
+
+
+def test_looks_like_grid_id_detector():
+    assert cli.grid._looks_like_grid_id("ag-home-deadbeef") is True
+    assert cli.grid._looks_like_grid_id("workshop") is False
+    assert cli.grid._looks_like_grid_id("ag-team") is False  # no hex8 suffix → still a creatable name
+
+
+def test_up_rejects_unknown_grid_id_without_creating(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["up", "ag-home-deadbeef"])
+    assert "grid ls" in str(exc.value)
+    from local import config as local_config
+    assert local_config.iter_grid_configs() == []  # nothing created, nothing spawned
+
+
+def test_up_creates_for_human_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
+    assert cli.main(["up", "workshop"]) == 0
+    from local import config as local_config
+    assert any(c["name"] == "workshop" for c in local_config.iter_grid_configs())
+
+
+def test_up_starts_existing_grid_by_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(cli.grid.runtime, "start_grid", lambda cfg: None)
+    assert cli.main(["up", cfg["grid_id"]]) == 0  # found by id → guard skipped
+
+
+def test_up_rejects_known_remote_grid_in_local_mode(monkeypatch, tmp_path):
+    _seed_remote(monkeypatch, tmp_path, networks=[{"network_id": "n1", "name": "team"}])
+    state.set_mode("local")  # the remote grid is known via credentials, but we're in local mode
+    from local import config as local_config
+    for arg in ("team", "n1"):  # matched by name and by network_id
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["up", arg])
+        assert "remote" in str(exc.value).lower()
+    assert local_config.iter_grid_configs() == []  # nothing created
 
 
 _FAKE_ENGINES = [
@@ -4583,13 +4890,15 @@ def test_remote_ls_lists_local_without_network_call(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert "team" in out and "permissioned-public" in out
     assert "lab" in out and "permissioned-providers" in out
+    assert "n1" in out and "n2" in out  # network_id column (ADR 0010 item 9b)
 
 
 def test_remote_ls_json_emits_grid_and_type(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path, networks=[
         {"network_id": "n1", "name": "team", "network_type": "permissioned-public"}])
     assert cli.main(["ls", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == [{"grid": "team", "type": "permissioned-public"}]
+    assert json.loads(capsys.readouterr().out) == [
+        {"grid": "team", "type": "permissioned-public", "id": "n1"}]
 
 
 def test_remote_list_alias_lists_like_ls(monkeypatch, tmp_path, capsys):

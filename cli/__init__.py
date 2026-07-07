@@ -29,6 +29,7 @@ from .remote_request import (
 )
 from .engine import (
     cmd_engine_install,
+    cmd_engine_list,
     cmd_engine_pull,
     cmd_engine_start,
     cmd_engine_status,
@@ -86,6 +87,7 @@ __all__ = [
     "cmd_edit",
     "cmd_video",
     "cmd_engine_install",
+    "cmd_engine_list",
     "cmd_engine_pull",
     "cmd_engine_status",
     "cmd_engine_start",
