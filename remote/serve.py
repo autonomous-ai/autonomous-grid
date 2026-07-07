@@ -15,15 +15,21 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import signal
 import sys
 import threading
 import time
 import traceback
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from remote import control_plane, credentials, probe, relay
 from shared import run_records
+
+# One engine's probe result: (normalized llm_url, advertised models, upstream models, caps envelope).
+_EngineResults = list[tuple[str, list[str], list[str], dict[str, Any]]]
 
 
 # Engine read budget when the relay doesn't advertise one (older relay); matches its default.
@@ -39,12 +45,34 @@ _DRAIN_TIMEOUT = 5.0
 # realistic single-node batch width (e.g. vLLM max_num_seqs) while keeping a mistyped flag survivable.
 _MAX_CONCURRENCY = 256
 
+# How many consecutive post-swap re-register failures a reload retries before giving up loudly (so a
+# permanent relay/validation error doesn't PUT every 2s forever; the next join/leave re-triggers it).
+_MAX_RELOAD_REGISTER_RETRIES = 5
+
 # The relay-supplied endpoint is interpolated into a local engine URL, so only forward known
 # endpoints — this stops a buggy or compromised relay from probing other local paths via `../`.
 # Text goes to the LLM engine; media goes to this box's media server, each with its own fixed
 # allowlist (the media paths are NOT under `_ALLOWED_ENDPOINTS` — they route to a different URL).
 _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
 _MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
+
+# Opt-in poll/heartbeat tracing. Off by default so a healthy engine's log stays quiet — only errors
+# and job failures are recorded (a successful long-poll and a served job are otherwise silent).
+# Set GRID_ENGINE_DEBUG=1 before `grid join` to trace every poll cycle when debugging the relay loop.
+_DEBUG = bool(os.getenv("GRID_ENGINE_DEBUG"))
+
+
+def _debug(msg: str) -> None:
+    """Emit a poll/heartbeat trace line, but only when GRID_ENGINE_DEBUG is set."""
+    if _DEBUG:
+        print(f"[engine] {msg}", file=sys.stderr, flush=True)
+
+
+def _warn(msg: str) -> None:
+    """Always log a reload problem to stderr (unlike ``_debug``, which is opt-in tracing). A refused or
+    failed hot-reload must leave a trace — the CLI has already told the operator the join/leave
+    succeeded, so a silent stale union would be invisible (ADR 0010 D4 F6)."""
+    print(f"[engine] {msg}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +104,13 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_term)
+    # Block SIGHUP for the whole startup window: its default disposition is *terminate*, and a concurrent
+    # re-join may `os.kill(pid, SIGHUP)` while we're still in engine bring-up/probe — before the handler
+    # exists. Blocked, that signal is queued (not fatal) and delivered once we unblock, after the reload
+    # watcher is up, so the first reload folds it in. The worker threads spawned below inherit this mask,
+    # so SIGHUP only ever lands on the main thread (ADR 0010 C4).
+    if hasattr(signal, "SIGHUP"):
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
 
     launched: list[Any] = []
     launcher = None
@@ -100,9 +135,9 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # reached by the poll loop on loopback (the relay forwards `media/*` jobs to us like text).
         # Its `comfyui:*` models + caps merge into the one identity we register (DECISIONS D9).
         media_url = None
+        media_models: list[str] = []
         if record.get("media"):
             from local import media_engine
-            from shared.media import media_gating
 
             media_port = int(record.get("media_port") or 8190)
             prepared = media_engine.prepare_media_engine(
@@ -117,12 +152,8 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                 # Persist ownership so `grid leave` reaps only a ComfyUI THIS engine started.
                 run_records.update_record(grid_id, engine_id, comfyui_started=True)
             media_url = f"http://127.0.0.1:{media_port}"
-            caps_models = dict((capabilities or {}).get("models") or {})
-            for model in prepared["models"]:
-                if model not in union_models:
-                    union_models.append(model)
-                caps_models[model] = media_gating.capability_entry()
-            capabilities = {"schema_version": 1, "models": caps_models} if caps_models else {}
+            media_models = list(prepared["models"])
+            union_models, capabilities = _merge_media(union_models, capabilities, media_models)
 
         state = _ServeState(
             signaling_url=signaling_url,
@@ -140,11 +171,17 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             upstream=upstream,
             media_url=media_url,
         )
-        register(state)
+        register_once(state)
         registered = True
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
         print("Send SIGTERM (grid leave) to unregister.")
-        _serve_loop(state)  # heartbeat + max_concurrency poll workers; blocks until stop/SIGTERM
+        # Make the engine reload-ready (install the SIGHUP handler + start the reload daemon) while SIGHUP
+        # is still blocked, so that daemon inherits the block too. `_serve_loop` then spawns the heartbeat +
+        # N poll workers (also inheriting the block) and unblocks SIGHUP on THIS main thread LAST, so a
+        # `grid join`/`leave` signal can only land here — its park takes EINTR (PEP 475), the handler sets
+        # the reload event, and the reload daemon services it; a worker is never interrupted (ADR 0010 C4).
+        reload_thread = _start_reload_watcher(state, engine_id, engine_results, media_models, record)
+        _serve_loop(state, reload_thread)  # heartbeat + max_concurrency poll workers; blocks until stop/SIGTERM
     except KeyboardInterrupt:
         print("\nEngine unregistered.")
     except (Exception, SystemExit) as exc:  # detached top level: report, tear down, exit non-zero
@@ -225,20 +262,9 @@ def _bring_up_engines(
             if proc is not None:
                 launched.append(proc)
                 launcher_mod = mod
-            # Probe EVERY model this spec serves, not just the first — an external `--at` with N `-m`
-            # (or an auto-detected engine serving several models) collapses to one spec whose
-            # advertised/upstream are N-length, and each model needs its own caps or the relay can't
-            # route capability-gated (e.g. tool_choice) requests to models 2..N. N sequential probes at
-            # join (one-time; N is small) keep this simple; a failed probe returns all-False caps for
-            # that one model (probe.capabilities never raises), so one bad model can't sink the node.
-            caps_models: dict[str, Any] = {}
-            for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
-                env = probe.capabilities(
-                    llm_url, upstream_model, advertise_as=advertised_model,
-                    context_window=record.get("ctx_size"),
-                )
-                caps_models.update((env or {}).get("models") or {})
-            caps = {"schema_version": 1, "models": caps_models} if caps_models else {}
+            # Probe EVERY model this spec serves (not just the first), so a multi-model `--at` advertises
+            # caps for all of them — shared with the hot-reload path (`_reload_once`) so the two can't drift.
+            caps = _probe_spec_caps(llm_url, advertised, upstream, record.get("ctx_size"))
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
         if launcher_mod is not None:
@@ -325,6 +351,26 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
     return cleaned
 
 
+def _probe_spec_caps(
+    llm_url: str, advertised: list[str], upstream: list[str], ctx_size: Any
+) -> dict[str, Any]:
+    """Probe EVERY model a spec serves into one caps envelope — keyed by the advertised name, probed by
+    the upstream name (Ollama/vLLM only know that). Shared by startup (`_bring_up_engines`) and the
+    hot-reload path (`_reload_once`) so a multi-model `--at` engine advertises caps for ALL its models on
+    BOTH paths, not just the first (main's 5078c8c fix, kept in ONE place so the two can't drift). N
+    sequential probes at join/reload (one-time; N is small). A failed probe returns an all-False entry for
+    that one model (`probe.capabilities` never raises), so one bad model can't sink the node; ``{}`` only
+    when the spec serves no models.
+    """
+    caps_models: dict[str, Any] = {}
+    for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
+        env = probe.capabilities(
+            llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
+        )
+        caps_models.update((env or {}).get("models") or {})
+    return {"schema_version": 1, "models": caps_models} if caps_models else {}
+
+
 def _build_routing(
     engine_results: list[tuple[str, list[str], list[str], dict[str, Any]]],
 ) -> tuple[dict[str, str], dict[str, str], list[str], dict[str, Any], list[str]]:
@@ -343,9 +389,8 @@ def _build_routing(
     - ``warnings`` — one human line per shadowed duplicate, so the operator sees why a second engine's
       copy of a model is ignored.
 
-    A failed probe degrades to a full all-``False`` capability entry, not to ``{}`` — ``probe.capabilities``
-    never raises and always returns a one-model envelope; ``caps == {}`` only when a spec serves zero models.
-    The caps merge reads ``(caps or {}).get("models") or {}`` so it never KeyErrors the table on one bad engine.
+    A failed probe degrades to ``{}`` upstream (``probe.capabilities``), so the caps merge reads
+    ``env.get("models") or {}`` and never KeyErrors the whole table on one bad engine.
     """
     routes: dict[str, str] = {}
     upstream_routes: dict[str, str] = {}
@@ -370,11 +415,57 @@ def _build_routing(
     return routes, upstream_routes, union_models, merged_caps, warnings
 
 
-def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
-    """How the node appears on the grid page: name (from --name/engine_id) + engine kind label.
+def _merge_media(
+    union_models: list[str], capabilities: dict[str, Any], media_models: list[str]
+) -> tuple[list[str], dict[str, Any]]:
+    """Merge this box's media (``comfyui:*``) models + caps into the text routing union (DECISIONS D9).
 
-    A multi-engine identity shows the kinds it gathered (e.g. ``ollama+vllm``) when no explicit
-    ``--engine-label`` was given, so the page reflects what is actually serving.
+    Media models come after the text ones (first-seen order), each with the static media capability
+    stub — so both startup and a hot-reload produce the same union/caps for the same media bundles.
+    A no-media identity passes ``media_models=[]`` and the union is returned unchanged.
+    """
+    if not media_models:
+        return union_models, capabilities
+    from shared.media import media_gating
+
+    models = list(union_models)
+    caps_models = dict((capabilities or {}).get("models") or {})
+    for model in media_models:
+        if model not in models:
+            models.append(model)
+        caps_models[model] = media_gating.capability_entry()
+    return models, {"schema_version": 1, "models": caps_models}
+
+
+def _assemble_snapshot(
+    engine_results: _EngineResults, media_models: list[str], record: dict[str, Any], engine_id: str,
+    max_concurrency: int,
+) -> _Snapshot:
+    """Build one reload routing snapshot from probe results + this box's media models (drives the hot-
+    reload; startup builds ``_ServeState`` directly). Reuses `_build_routing`/`_merge_media`/`_meta` so a
+    reload's routing/caps/meta never drift from startup (ADR 0010 D4), and surfaces shadowed-model
+    warnings to stderr exactly as startup does. ``max_concurrency`` is the LIVE pool size passed by the
+    caller, NOT re-read from the record: `_serve_loop` sizes the N-worker pool once at startup and a
+    reload can't resize it, so the advertised capacity must stay pinned to the real pool — changing
+    `--max-concurrency` needs a respawn to take effect (`_hot_reloadable` keeps a live value unchanged)."""
+    routes, upstream, union_models, capabilities, warnings = _build_routing(engine_results)
+    for line in warnings:
+        print(line, file=sys.stderr)
+    union_models, capabilities = _merge_media(union_models, capabilities, media_models)
+    return _Snapshot.build(
+        routes=routes, upstream=upstream, models=union_models, capabilities=capabilities,
+        meta=_meta(record, engine_id), pricing=_pricing(record),
+        max_concurrency=max_concurrency,
+    )
+
+
+def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
+    """How the node appears on the grid page: name + engine kind label.
+
+    The display name comes from the record's ``meta_name`` (the ``--name`` a remote operator gave, or
+    the box's hostname when omitted), falling back to ``engine_id`` for a record written before the
+    singleton change. A multi-engine identity shows the kinds it gathered (e.g. ``ollama+vllm``) when no
+    explicit ``--engine-label`` was given, so the page reflects what is actually serving.
     """
     label = record.get("engine_label")
     if not label:
@@ -382,15 +473,18 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
         if kinds:
             label = "+".join(dict.fromkeys(kinds))
     if not label:
-        if record.get("endpoint_url"):
-            label = "external"
-        elif record.get("models") or record.get("engines"):
-            label = "llama.cpp"
+        # An all-external union is "external"; only a built-in `--serve` spec (no endpoint_url) launches
+        # llama.cpp. Derive from the specs so a multi-engine external union isn't mislabelled llama.cpp.
+        specs = record.get("engines") or (
+            [_flat_spec(record)] if (record.get("endpoint_url") or record.get("models")) else []
+        )
+        if specs:
+            label = "llama.cpp" if any(not s.get("endpoint_url") for s in specs) else "external"
         elif record.get("media"):  # a media-only identity has no text engine to name
             label = "comfyui"
         else:
             label = "llama.cpp"
-    return {"name": engine_id, "engine": label}
+    return {"name": record.get("meta_name") or engine_id, "engine": label}
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
@@ -398,6 +492,12 @@ def _pricing(record: dict[str, Any]) -> dict[str, float]:
     # per-provider, and set explicitly with `grid price set` (relay `grid_chat_pricing`). Always {} so a
     # stale `--pricing-input/output` in an old run record can't reintroduce an advertised price.
     return {}
+
+
+def _media_signature(record: dict[str, Any]) -> tuple[bool, tuple[str, ...], int, int]:
+    """See ``shared.run_records.media_signature`` — one shared definition so the CLI's hot-reload-vs-
+    respawn choice and this reload guard can't desync (ADR 0010 D4 F6 / C3)."""
+    return run_records.media_signature(record)
 
 
 def _load_tokens(network_id: str) -> tuple[str | None, str | None]:
@@ -431,6 +531,46 @@ def _node_id_from_token(access_token: str) -> str:
 # Serve state (thread-safe token + load shared by the poll loop and heartbeat)
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _Snapshot:
+    """The identity's reload-swappable routing, as one immutable object. ``_reload_once`` builds a new
+    snapshot and ``_ServeState.apply`` rebinds it in a single atomic reference store, so readers that
+    bind it once never see a torn half-update (ADR 0010 D4 F4). ``build`` is the sole normalization
+    site: it copies every dict/list, so a published snapshot is never mutated in place.
+    """
+    routes: dict[str, str]        # advertised model -> local engine URL (normalized, no trailing /)
+    upstream: dict[str, str]      # advertised model -> the name the engine itself answers to
+    models: list[str]             # advertised union, first-seen order (text engines, then media)
+    capabilities: dict[str, Any]  # {"schema_version": 1, "models": {...}} envelope, or {}
+    meta: dict[str, Any]          # grid-page {name, engine}
+    pricing: dict[str, float]     # always {} today (advertised pricing is deprecated)
+    max_concurrency: int
+
+    @staticmethod
+    def build(
+        *,
+        routes: dict[str, str],
+        upstream: dict[str, str],
+        models: list[str],
+        capabilities: dict[str, Any],
+        meta: dict[str, Any],
+        pricing: dict[str, float],
+        max_concurrency: int,
+    ) -> "_Snapshot":
+        return _Snapshot(
+            routes={model: url.rstrip("/") for model, url in routes.items()},
+            upstream=dict(upstream or {}),
+            models=list(models),
+            capabilities=dict(capabilities or {}),
+            meta=dict(meta or {}),
+            pricing=dict(pricing or {}),
+            # Clamp to [1, _MAX_CONCURRENCY]: each slot becomes a real poll-worker thread in `_serve_loop`,
+            # so an absurd `--max-concurrency` can't exhaust threads/sockets. This is the sole clamp site,
+            # so a reload that changes max_concurrency is bounded the same way as startup.
+            max_concurrency=min(_MAX_CONCURRENCY, max(1, int(max_concurrency))),
+        )
+
+
 class _ServeState:
     def __init__(
         self,
@@ -454,30 +594,75 @@ class _ServeState:
         self.node_id = node_id
         self.network_id = network_id
         self.llm_url = llm_url.rstrip("/")
-        self.models = list(models)
         # This box's media server base (`http://127.0.0.1:<media_port>`) when the identity serves
         # media, else None. `media/*` jobs forward here instead of an LLM engine; all media models
         # share the one server, so a single URL (not a per-model route) is enough.
         self.media_url = media_url.rstrip("/") if media_url else None
-        # model → local engine URL. Several engines may serve under one identity (DECISIONS D9); for
-        # the single-engine case the map is derived so every advertised model points at the one engine.
-        if routes is not None:
-            self._routes = {model: url.rstrip("/") for model, url in routes.items()}
-        else:
-            self._routes = {model: self.llm_url for model in self.models}
-        # advertised model → the name the local engine answers to (``--advertise-as`` maps the
-        # consumer-facing alias back to the engine's real model name). Empty means identity.
-        self._upstream = dict(upstream or {})
-        self.capabilities = dict(capabilities or {})
-        self.meta = dict(meta or {})
-        self.pricing = dict(pricing or {})
-        self.max_concurrency = min(_MAX_CONCURRENCY, max(1, int(max_concurrency)))
+        # The reload-swappable routing (routes/upstream/models/caps/meta/pricing/concurrency) lives in
+        # one immutable snapshot so a hot-reload can swap it atomically (ADR 0010 D4). Several engines
+        # may serve under one identity (DECISIONS D9); for the single-engine case the route map is
+        # derived so every advertised model points at the one engine.
+        route_map = routes if routes is not None else {model: self.llm_url for model in models}
+        self._snapshot = _Snapshot.build(
+            routes=route_map, upstream=upstream or {}, models=models, capabilities=capabilities,
+            meta=meta, pricing=pricing, max_concurrency=max_concurrency,
+        )
+        # The probe results the live snapshot was built from, kept so a reload probes only newly-added
+        # engines (ADR 0010 D4 F6). Reload-owned: set at startup, thereafter only the reload loop writes.
+        self._engine_results: _EngineResults = []
+        # This box's media (comfyui:*) model names + a fingerprint of the media config the process
+        # brought up. A hot-reload can't launch/teardown media or swap bundles, so a reload whose re-read
+        # record differs here is refused — the CLI respawns instead (ADR 0010 D4 F6 / C3). Set at startup.
+        self.media_models: list[str] = []
+        self.media_signature: tuple[bool, tuple[str, ...], int, int] = _media_signature({})
+        self._reload_register_fails = 0  # consecutive post-swap re-register failures (bounded retry, C5)
         self.stop = threading.Event()
-        self._lock = threading.Lock()  # guards the token + inflight count (short critical sections)
+        self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
+        self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
+        self.reload_requested = threading.Event()  # SIGHUP sets this; the reload loop waits on it
         self._refresh_lock = threading.Lock()  # serializes refreshes WITHOUT blocking token() readers
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._inflight = 0
+
+    @property
+    def models(self) -> list[str]:
+        return self._snapshot.models
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        return self._snapshot.capabilities
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        return self._snapshot.meta
+
+    @property
+    def pricing(self) -> dict[str, float]:
+        return self._snapshot.pricing
+
+    @property
+    def max_concurrency(self) -> int:
+        return self._snapshot.max_concurrency
+
+    def snapshot(self) -> _Snapshot:
+        """The current routing snapshot — one atomic reference load (no lock). Bind it ONCE per
+        operation, then read fields off the result, so a concurrent reload swap is never seen
+        half-applied (ADR 0010 D4 F4)."""
+        return self._snapshot
+
+    def apply(self, snapshot: _Snapshot, engine_results: _EngineResults) -> None:
+        """Swap in a freshly-built routing snapshot and the probe results it was built from. Rebinds
+        under ``_lock`` then RELEASES before the caller re-registers, so the ``_register_lock → _lock``
+        order stays acyclic — never register while holding ``_lock`` (ADR 0010 D4 F5)."""
+        with self._lock:
+            self._snapshot = snapshot
+            self._engine_results = engine_results
+
+    def engine_results(self) -> _EngineResults:
+        """The probe results the live snapshot was built from — a reload reuses them so it re-probes
+        only newly-added engines (ADR 0010 D4 F6)."""
+        return self._engine_results
 
     def route(self, model: str | None) -> str | None:
         """The local engine URL serving ``model``.
@@ -488,9 +673,10 @@ class _ServeState:
         body unchanged, letting the engine answer). With several distinct engines and no match, return
         ``None`` so the caller reports "no engine serves" instead of guessing.
         """
-        if model and model in self._routes:
-            return self._routes[model]
-        distinct = set(self._routes.values())
+        snap = self._snapshot  # bind once — a concurrent reload swap is never seen half-applied
+        if model and model in snap.routes:
+            return snap.routes[model]
+        distinct = set(snap.routes.values())
         if len(distinct) == 1:
             return next(iter(distinct))
         return None
@@ -500,8 +686,9 @@ class _ServeState:
         consumer-facing alias back to the engine's real model name). ``None`` when unmapped — the caller
         then forwards the body's model unchanged (single-engine fallback / built-in, where they match).
         """
-        if model and model in self._upstream:
-            return self._upstream[model]
+        snap = self._snapshot
+        if model and model in snap.upstream:
+            return snap.upstream[model]
         return None
 
     def token(self) -> str:
@@ -580,17 +767,34 @@ class _ServeState:
 # Loop units (each independently testable against a mocked relay/engine)
 # ---------------------------------------------------------------------------
 
-def register(state: _ServeState) -> None:
-    relay.register_node(
-        state.signaling_url,
-        state.token(),
-        state.node_id,
-        models=state.models,
-        capabilities=state.capabilities or None,
-        meta=state.meta or None,
-        pricing=state.pricing or None,
-        max_concurrency=state.max_concurrency,
-    )
+def register_once(state: _ServeState, *, _allow_refresh: bool = True) -> None:
+    """Advertise the identity's current snapshot to the relay (``PUT /nodes/{node_id}``).
+
+    Binds the snapshot + token INSIDE ``_register_lock`` so whichever racing register actually PUTs
+    sends the freshest union — the reload's register and the heartbeat's 404 re-register can't interleave
+    two PUTs, and a slow racer can't land a stale snapshot last (ADR 0010 D4 F4/F5). On a 401 it refreshes
+    and retries once — like ``poll_once``/``heartbeat_once`` — so a reload landing at token expiry still
+    re-advertises instead of silently leaving the old union live.
+    """
+    token = None
+    try:
+        with state._register_lock:
+            token = state.token()      # bound inside the lock: whoever PUTs sends the current token and
+            snap = state.snapshot()    # the current snapshot, so a descheduled racer can't PUT a stale one
+            relay.register_node(
+                state.signaling_url,
+                token,
+                state.node_id,
+                models=snap.models,
+                capabilities=snap.capabilities or None,
+                meta=snap.meta or None,
+                pricing=snap.pricing or None,
+                max_concurrency=snap.max_concurrency,
+            )
+    except relay.RelayUnauthorized:
+        if _allow_refresh and token is not None and state.refresh(stale_token=token):
+            return register_once(state, _allow_refresh=False)
+        raise
 
 
 def poll_once(state: _ServeState, *, _allow_refresh: bool = True) -> dict[str, Any] | None:
@@ -614,8 +818,86 @@ def heartbeat_once(state: _ServeState, *, _allow_refresh: bool = True) -> str:
             return heartbeat_once(state, _allow_refresh=False)
         raise
     if result == "missing":
-        register(state)
+        register_once(state)
     return result
+
+
+def _reload_once(state: _ServeState, engine_id: str) -> None:
+    """Rebuild routing from the (re-read) record and re-advertise the union in place — the body of the
+    SIGHUP hot-reload (ADR 0010 D3). External-only and probe-only: reuse retained caps for engines
+    already serving, probe only newly-added ``--at`` endpoints, and build the whole new snapshot before
+    one atomic swap — so in-flight requests keep flowing on the old snapshot until the swap (D4 F6).
+    Anything needing a launch (a built-in ``--serve``) or a media bring-up/bundle change is refused
+    here; the CLI respawns those instead, so the reload thread never blocks on a heavy start.
+    """
+    record = run_records.read_record(state.network_id, engine_id)
+    if not record:  # a concurrent full `grid leave` removed the record — SIGTERM will tear us down
+        _debug("reload: record gone; keeping current routing")
+        return
+    specs = record.get("engines") or (
+        [_flat_spec(record)] if (record.get("endpoint_url") or record.get("models")) else []
+    )
+    aliases = list(record.get("advertise_as") or [])
+    # These refusals mean the CLI signalled something it should have respawned (or a manual SIGHUP) —
+    # surface them, don't hide behind GRID_ENGINE_DEBUG (the CLI already reported the join/leave).
+    if any(not spec.get("endpoint_url") for spec in specs):
+        _warn("reload: record needs a built-in launch; refusing (respawn required)")
+        return
+    if len(specs) > 1 and aliases:
+        _warn("reload: multi-engine identity with --advertise-as; refusing (respawn required)")
+        return
+    if _media_signature(record) != state.media_signature:
+        _warn("reload: media config changed; refusing (respawn required)")
+        return
+
+    retained = {r[0]: r for r in state.engine_results()}  # keyed by the normalized llm_url
+    reassembled: _EngineResults = []
+    for spec in specs:
+        url = (spec.get("endpoint_url") or "").rstrip("/")
+        models = list(spec.get("models") or [])
+        advertised = _advertised_models(models, aliases)
+        prev = retained.get(url)
+        if prev is not None and prev[1][:1] == advertised[:1]:
+            # Already serving this engine: reuse ONLY its probed caps. advertised/upstream come from the
+            # record, so a model appended to this engine is still picked up, not dropped (ADR 0010 C2).
+            reassembled.append((url, advertised, list(models), prev[3]))
+        else:  # a genuinely new engine (or a changed first model) → probe EVERY model it serves, so a
+            # newly-appended multi-model `--at` advertises caps for all of them, exactly like startup
+            # (`_probe_spec_caps` is the shared site, so startup and reload can't drift — ADR 0009 C2).
+            caps = _probe_spec_caps(url, advertised, list(models), record.get("ctx_size")) if models else {}
+            reassembled.append((url, advertised, list(models), caps))
+
+    snapshot = _assemble_snapshot(reassembled, state.media_models, record, engine_id, state.max_concurrency)
+    state.apply(snapshot, reassembled)  # atomic swap; in-flight requests were unaffected until here
+    if state.stop.is_set():
+        # A concurrent teardown (grid leave / SIGTERM) already set stop and the outer `finally` will
+        # `unregister_node`; re-advertising now would resurrect a node that is exiting (a zombie the relay
+        # only evicts on its heartbeat-TTL prune). The drain in `_serve_loop` also joins this thread, so a
+        # register already in flight completes before that unregister — this just avoids starting a new one.
+        _warn("reload: engine is stopping; skipping re-register")
+        return
+    try:
+        register_once(state)  # swap THEN register — a new model is routable before the relay sends it
+        state._reload_register_fails = 0  # a clean re-advertise resets the retry budget
+    except relay.RelayUnauthorized:
+        # Auth is exhausted (refresh failed too). The heartbeat loop stops the process on the same
+        # condition, so don't spin re-registering — surface it (the new union stays unadvertised until re-auth).
+        _warn("reload: re-register rejected the token and refresh is unavailable — new union not advertised")
+    except Exception as exc:
+        # Post-swap transient failure: the new snapshot serves locally but the relay still has the old
+        # union (a healthy node is never heartbeat-404'd). Re-arm so a later tick retries — but BOUNDED, so
+        # a permanent failure doesn't PUT every 2s forever; give up loudly and let the next join re-trigger
+        # (ADR 0010 C5). Reuse means the retry never re-probes.
+        state._reload_register_fails += 1
+        if state._reload_register_fails <= _MAX_RELOAD_REGISTER_RETRIES:
+            _warn(f"reload: re-register failed post-swap ({exc!r}); retry "
+                  f"{state._reload_register_fails}/{_MAX_RELOAD_REGISTER_RETRIES}")
+            state.stop.wait(2)
+            state.reload_requested.set()
+        else:
+            _warn(f"reload: re-register still failing after {_MAX_RELOAD_REGISTER_RETRIES} tries "
+                  f"({exc!r}); giving up until the next join/leave")
+            state._reload_register_fails = 0
 
 
 def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
@@ -741,8 +1023,24 @@ def _forward_stream(
                 engine_resp.read()
                 _try_submit_error(state, txn, f"engine error {engine_resp.status_code}: {engine_resp.text[:200]}")
                 return
-            # Pass the engine's SSE bytes straight through while its stream is open.
-            _submit_response(state, txn, content=engine_resp.iter_bytes(), stream=True)
+            # Pass the engine's SSE bytes straight through while its stream is open. A streamed 401 can't
+            # replay the iterator, so `_submit_response` re-raises it; `handle_job` then reports via
+            # `_try_submit_error` so the consumer still gets a terminal signal.
+            _submit_response(state, txn, content=_traced_stream(txn, engine_resp.iter_bytes()), stream=True)
+            _debug(f"stream txn={txn} submit_response returned (relay accepted the full stream) t={time.time():.3f}")
+
+
+def _traced_stream(txn: str, chunks: Iterable[bytes]) -> Iterator[bytes]:
+    """Pass engine SSE chunks straight through; when GRID_ENGINE_DEBUG is set, trace chunk progress with a
+    wall-clock timestamp so a mid-stream event (e.g. a node re-register) can be correlated with whether
+    bytes keep flowing to the relay. No-op overhead beyond a counter when debug is off."""
+    n = 0
+    for chunk in chunks:
+        n += 1
+        if _DEBUG and (n == 1 or n % 40 == 0):
+            _debug(f"stream txn={txn} chunk#{n} t={time.time():.3f}")
+        yield chunk
+    _debug(f"stream txn={txn} engine finished after {n} chunks t={time.time():.3f}")
 
 
 # ---------------------------------------------------------------------------
@@ -762,17 +1060,24 @@ def _poll_loop(state: _ServeState) -> None:
             state.stop.wait(2)
             continue
         if job is None:  # 204 — no work waiting; poll again
+            _debug("poll: no job (204), re-polling")
             continue
+        started = time.monotonic()
         try:
             handle_job(state, job)
         except Exception as exc:  # defence in depth: handle_job already guards, but never die here
             print(f"\nUnexpected error handling a job: {exc!r}", file=sys.stderr)
+        else:
+            if _DEBUG:
+                txn = job.get("transaction_id")
+                model = (job.get("body") or {}).get("model")
+                _debug(f"poll: job txn={txn} model={model!r} handled in {time.monotonic() - started:.2f}s")
 
 
 def _heartbeat_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
         try:
-            heartbeat_once(state)
+            result = heartbeat_once(state)
         except relay.RelayUnauthorized:
             # Auth is exhausted (refresh failed too) — stop now rather than spin re-failing until
             # the poll loop happens to notice, which can be up to a full long-poll away.
@@ -781,6 +1086,8 @@ def _heartbeat_loop(state: _ServeState) -> None:
             break
         except relay.RelayError as exc:
             print(f"\nHeartbeat error: {exc}", file=sys.stderr)
+        else:
+            _debug(f"heartbeat: ok ({result})")
         state.stop.wait(relay.HEARTBEAT_INTERVAL)
 
 
@@ -793,7 +1100,8 @@ def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
     (and if all die, a heartbeating zombie at zero capacity). So catch everything — including the
     ``SystemExit`` a corrupt ``credentials.toml`` raises on refresh — log it with the thread name, and
     set ``state.stop`` so the main waiter tears the engine down deterministically, as the pre-fix single
-    main-thread loop did when it raised.
+    main-thread loop did when it raised. The reload watcher is deliberately NOT supervised: a failed
+    *reload* leaves the old routing serving, so ``_reload_loop`` self-guards and keeps its daemon alive.
     """
     try:
         loop(state)
@@ -803,7 +1111,7 @@ def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
         state.stop.set()
 
 
-def _serve_loop(state: _ServeState) -> None:
+def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = None) -> None:
     """Heartbeat + one poll worker per concurrency slot, until stop / SIGTERM.
 
     ``max_concurrency`` independent daemon workers each long-poll the relay and forward one job, so up
@@ -815,6 +1123,14 @@ def _serve_loop(state: _ServeState) -> None:
     shared deadline, so total teardown is bounded by ``_DRAIN_TIMEOUT`` even when every worker is parked
     in a long-poll (``state.stop`` can't wake a blocking ``relay.poll``); a job that finishes within the
     budget submits, and any worker still in flight when the budget expires is logged, not dropped silently.
+
+    SIGHUP hot-reload coexists with the pool. The reload daemon (started by ``_start_reload_watcher``
+    before this call) and every thread spawned here inherit the SIGHUP block the caller set at startup;
+    this then unblocks SIGHUP on the main thread LAST — after all daemons exist — so a `grid join`/`leave`
+    signal can only land here. The park's wait takes EINTR (PEP 475 retries it), the handler sets the
+    reload event, and the reload daemon services it; a poll worker is never interrupted mid-forward
+    (ADR 0010 C4). The reload daemon is not joined on drain — it holds no in-flight consumer job and
+    exits within ≤1s of ``state.stop`` as a daemon.
     """
     heartbeat = threading.Thread(
         target=_supervise, args=(_heartbeat_loop, state), daemon=True, name="heartbeat"
@@ -824,10 +1140,15 @@ def _serve_loop(state: _ServeState) -> None:
         threading.Thread(
             target=_supervise, args=(_poll_loop, state), daemon=True, name=f"poll-worker-{i + 1}"
         )
-        for i in range(max(1, state.max_concurrency))  # state already clamps to [1, _MAX_CONCURRENCY]
+        for i in range(max(1, state.max_concurrency))  # the snapshot already clamps to [1, _MAX_CONCURRENCY]
     ]
     for worker in workers:
         worker.start()
+    # Unblock SIGHUP on THIS (main) thread last: the reload daemon + heartbeat + N workers all inherited
+    # the block, so a join/leave SIGHUP now lands here and EINTRs the park below — never on a poll worker
+    # mid-forward (ADR 0010 C4).
+    if hasattr(signal, "SIGHUP"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGHUP})
     try:
         while not state.stop.is_set():
             state.stop.wait(60)  # park; a worker/heartbeat may set stop, or SIGTERM unwinds here
@@ -837,6 +1158,11 @@ def _serve_loop(state: _ServeState) -> None:
         for worker in workers:
             worker.join(timeout=max(0.0, deadline - time.monotonic()))
         heartbeat.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Join the reload daemon too, against the SAME deadline — like the heartbeat, it can `register_once`
+        # (re-advertise), so it must finish before the caller's `unregister_node`, or a reload's PUT could
+        # land after the unregister and resurrect a node we're tearing down (ADR 0010 C5).
+        if reload_thread is not None:
+            reload_thread.join(timeout=max(0.0, deadline - time.monotonic()))
         stragglers = [worker.name for worker in workers if worker.is_alive()]
         if stragglers:
             print(
@@ -844,3 +1170,51 @@ def _serve_loop(state: _ServeState) -> None:
                 f"abandoning ({', '.join(stragglers)}); their consumers may see no terminal response.",
                 file=sys.stderr,
             )
+        if reload_thread is not None and reload_thread.is_alive():
+            # It didn't finish within the drain budget, so its re-register (if any) may still land after the
+            # caller's unregister; the relay then TTL-prunes the resurrected node. Surface it, don't hide it.
+            print(f"\nReload thread still running after {_DRAIN_TIMEOUT}s drain — a late re-register may "
+                  f"briefly resurrect the node until the relay prunes it.", file=sys.stderr)
+
+
+def _reload_loop(state: _ServeState, engine_id: str) -> None:
+    """Wait for a SIGHUP-set reload request and hot-reload the routing in place (ADR 0010 D3).
+
+    Clearing the event BEFORE the reload reads the record means a write+signal that lands during a
+    reload re-sets the event (one extra, harmless reload) instead of being lost — the CLI's contract is
+    write-record-then-signal. A failed reload logs and keeps the thread alive with the old routing
+    intact (D4 F6); the 1s wait bounds how often ``stop`` is checked.
+    """
+    while not state.stop.is_set():
+        if state.reload_requested.wait(timeout=1.0):
+            state.reload_requested.clear()
+            try:
+                _reload_once(state, engine_id)
+            except (Exception, SystemExit) as exc:  # SystemExit too — jsonio.load_json (a corrupt record)
+                # and _advertised_models raise it; catching only Exception would let it kill the watcher
+                # thread, silently disabling hot-reload for the process's life (ADR 0010 D4 F6). Mirrors
+                # run_remote_engine_from_record's own (Exception, SystemExit) handler.
+                _warn(f"reload failed (keeping current routing): {exc!r}")
+
+
+def _start_reload_watcher(
+    state: _ServeState, engine_id: str, engine_results: _EngineResults, media_models: list[str],
+    record: dict[str, Any],
+) -> threading.Thread:
+    """Make the running engine reload-ready and start the SIGHUP-driven reload daemon (ADR 0010 D3/C4).
+
+    Retains the probe results + media fingerprint the reload reuses, installs the SIGHUP handler (which
+    only sets ``reload_requested`` — it must never raise, so PEP 475 retries the interrupted long-poll),
+    and starts ``_reload_loop``. The caller keeps SIGHUP blocked while calling this — so the daemon
+    inherits the block and the signal lands on the main thread — then unblocks it on main afterwards.
+    """
+    state._engine_results = engine_results
+    state.media_models = list(media_models)
+    state.media_signature = _media_signature(record)
+    if hasattr(signal, "SIGHUP"):
+        def _on_sighup(_signum, _frame):  # noqa: ANN001 — only sets the event; never raises, so PEP 475
+            state.reload_requested.set()   # retries the interrupted long-poll
+        signal.signal(signal.SIGHUP, _on_sighup)
+    thread = threading.Thread(target=_reload_loop, args=(state, engine_id), daemon=True)
+    thread.start()
+    return thread

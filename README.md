@@ -103,14 +103,14 @@ grid up
 # grid_url=http://192.168.1.25:8090            ← the one address engines + apps use
 ```
 
-### 4 · Add a node
+### 4 · Add an engine
 
 Point Grid at an inference server you already run (here, a computer running vLLM to serve `qwen3-coder`), and name it.
 
 **🌐 Remote** — serve your local engine to the remote grid. The engine polls the relay outbound, so `--at` is its address **on this computer** (`localhost`) — no inbound port or public IP needed:
 ```bash
 grid join research --at http://localhost:8000/v1 -m qwen3-coder --name gpu-4090
-# Joining engine gpu-4090 to research (pid=12345) — serving via the relay.
+# Joining research (pid=12345) — serving the union via the relay.
 # models=qwen3-coder
 ```
 
@@ -151,7 +151,7 @@ grid chat -m qwen3-coder "write a haiku about local GPUs"
 > qwen3-coder  gpu-4090    http://192.168.1.20:8000/v1
 > gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
 > ```
-> Two computers, two frameworks — one endpoint serves both. (The same `grid models` and `grid engines` now work for remote grids too — `grid models --verbose` shows each model's engine and node.)
+> Two computers, two frameworks — one endpoint serves both. (The same `grid models` and `grid engine ls` now work for remote grids too — `grid models --verbose` shows each model's engine and where it runs.)
 
 ### 6 · Point your apps at the grid
 
@@ -221,13 +221,13 @@ client.chat.completions.create(
 
 ### No engine on a computer yet?
 
-Grid installs and joins a built-in engine for you — `llama.cpp` for text, ComfyUI for media. `grid engine install`
-and `grid pull` work the same in both modes; only the grid you join differs (a remote grid **name**, or a local
-**`grid_url`**).
+Grid ships built-in engines — `llama.cpp` for text, ComfyUI for media. Install one, pull a model, then serve it
+with `grid join --serve`. `grid engine install` and `grid pull` work the same in both modes; only the grid you join
+differs (a remote grid **name**, or a local **`grid_url`**).
 
 ```bash
-grid engine install llama.cpp           # text engine (both modes)
-grid pull qwen36-35b-a3b-mtp            # see `grid catalog`, or any HF GGUF
+grid engine install llama.cpp           # install the text engine (both modes)
+grid pull qwen36-35b-a3b-mtp            # download a text MODEL (see `grid catalog`, or any HF GGUF)
 
 grid join research --serve qwen36-35b-a3b-mtp                    # 🌐 remote: your grid name
 grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp   # 🏠 local: your grid_url
@@ -238,8 +238,8 @@ Media serving (ComfyUI images + video) works in **both modes** — `grid engine 
 from differs.
 
 ```bash
-grid engine install comfyui             # media engine (both modes)
-grid engine pull image_generation       # also: image_editing, i2v
+grid engine install comfyui             # install the media engine (both modes)
+grid engine pull image_generation       # download a media BUNDLE (also: image_editing, i2v)
 ```
 
 **🌐 Remote** — serve to your grid by **name** (the engine polls the relay), then `grid image`
@@ -252,7 +252,7 @@ grid image "a compact walnut desk beside a sunlit window"
 **🏠 local** — serve to your **`grid_url`**, and point `grid image` at it with `--grid`:
 ```bash
 grid join http://192.168.1.25:8090 --media --bundle image_generation
-grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090
+grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090   # --grid: use-commands take the grid as a flag (positional = prompt)
 ```
 
 ## How it works

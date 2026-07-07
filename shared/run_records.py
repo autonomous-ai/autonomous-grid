@@ -61,12 +61,67 @@ def update_record(grid_id: str, engine_id: str, **fields: Any) -> None:
     write_record(grid_id, engine_id, record)
 
 
+def match_engine(
+    specs: list[dict[str, Any]],
+    selector: str,
+    *,
+    label: str,
+    summary: str,
+    hint: str = "pass the exact endpoint URL instead",
+) -> list[dict[str, Any]]:
+    """Engine spec(s) a `grid leave --engine <selector>` picks out of ``specs``, tried in order: exact
+    ``endpoint_url`` → exact ``engine_label`` → a served model → an ``endpoint_url`` substring. Each match
+    must resolve to exactly ONE engine or it raises ``SystemExit`` (naming ``summary`` and ``hint``);
+    returns ``[]`` on no match so the caller raises its own not-found. Returned dicts are the SAME objects
+    passed in — identity is preserved for an ``id()``-based drop filter. An exact engine-*id* match is the
+    caller's job BEFORE this (remote keys engines by URL/label; local by record id). ``hint`` is the
+    disambiguation instruction, per mode: remote points at the endpoint URL, local at the engine id."""
+    if not selector:  # defensive: an empty selector is a substring of every URL — never "match all"
+        return []
+
+    def unique(matches: list[dict[str, Any]], how: str) -> list[dict[str, Any]]:
+        if len(matches) > 1:
+            raise SystemExit(
+                f"{how} {selector!r} matches several engines on {label}; {hint}. Engines: {summary}."
+            )
+        return matches
+
+    by_url = unique([s for s in specs if s.get("endpoint_url") == selector], "URL")
+    if by_url:
+        return by_url
+    by_label = unique([s for s in specs if s.get("engine_label") == selector], "Label")
+    if by_label:
+        return by_label
+    by_model = unique([s for s in specs if selector in (s.get("models") or [])], "Model")
+    if by_model:
+        return by_model
+    return unique([s for s in specs if selector in (s.get("endpoint_url") or "")], "URL fragment")
+
+
+def media_signature(record: dict[str, Any]) -> tuple[bool, tuple[str, ...], int, int]:
+    """A comparable fingerprint of an identity's media config (on/off, bundles, ports). A SIGHUP
+    hot-reload can't bring media up/down or swap bundles, so ``grid join``/``leave`` (CLI) and the serve
+    loop's reload both compare this to choose hot-reload vs respawn — ONE definition so the two decisions
+    can never desync (ADR 0010 C3)."""
+    return (
+        bool(record.get("media")),
+        tuple(sorted(record.get("media_bundles") or [])),
+        int(record.get("comfyui_port") or 8188),
+        int(record.get("media_port") or 8190),
+    )
+
+
 def pid_alive(pid: int) -> bool:
     if not pid:
         return False
     try:
         os.kill(pid, 0)
         return True
+    except ProcessLookupError:
+        return False  # ESRCH: no such process
+    except PermissionError:
+        return True  # EPERM: the process exists, it's just owned by another uid — reporting it dead would
+        # let a join spawn a second engine under the same token node_id and clobber it.
     except OSError:
         return False
 
@@ -81,22 +136,37 @@ def kill_group(pid: int) -> None:
         pass
 
 
+def terminate_pid(pid: int) -> bool:
+    """SIGTERM a detached engine child and wait for it to exit, escalating to SIGKILL of its process
+    group after the grace window. Does **not** touch any run record — the caller decides whether to
+    remove it (a `grid leave` teardown) or keep it (a respawn that rewrites the record in place, so the
+    engine child unregisters + stops what it launched, but the merged record survives). A ``0``/dead pid
+    is a no-op.
+
+    Returns whether the process is confirmed gone. ``False`` means it survived even SIGKILL — the caller
+    must NOT spawn a replacement, because two live children on one token-pinned relay node_id clobber
+    each other (the exact bug this whole flow exists to prevent).
+    """
+    if not (pid and pid_alive(pid)):
+        return True
+    # SIGTERM the detached engine so it unregisters and stops anything it started.
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.time() + _STOP_GRACE_SECONDS
+    while time.time() < deadline and pid_alive(pid):
+        time.sleep(0.2)
+    if pid_alive(pid):
+        kill_group(pid)
+    return not pid_alive(pid)
+
+
 def stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
     """SIGTERM the detached engine child so it unregisters + tears down, then drop its record.
 
     Escalates to SIGKILL of the process group if it does not exit within the grace window. The
     record is removed either way, so a leave never leaves a stale handle behind.
     """
-    pid = int(record.get("pid") or 0)
-    if pid and pid_alive(pid):
-        # SIGTERM the detached engine so it unregisters and stops anything it started.
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        deadline = time.time() + _STOP_GRACE_SECONDS
-        while time.time() < deadline and pid_alive(pid):
-            time.sleep(0.2)
-        if pid_alive(pid):
-            kill_group(pid)
+    terminate_pid(int(record.get("pid") or 0))
     record_path(grid_id, engine_id).unlink(missing_ok=True)

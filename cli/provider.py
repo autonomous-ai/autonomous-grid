@@ -49,8 +49,43 @@ def _reject_remote_only_flags(args: argparse.Namespace) -> None:
         )
 
 
+def _apply_inline_aliases(args: argparse.Namespace) -> None:
+    """Desugar inline ``-m real=alias`` into the flat ``models`` / ``advertise_as`` lists both join
+    handlers already consume. Same contract as ``--advertise-as``: all-or-nothing across the -m/--model
+    values, and mutually exclusive with ``--advertise-as``. A no-op when no ``-m`` contains ``=``. Runs
+    before the record is built / ``args.models`` is read. Splits on the first ``=`` only — model names
+    can't contain ``=`` (ollama's ``:`` and media's ``comfyui:*`` are untouched)."""
+    serve = getattr(args, "serve", None)
+    if serve and "=" in serve:
+        raise SystemExit("`--serve` takes a bare model; alias it with `--advertise-as`, not `=`.")
+    models = list(getattr(args, "models", []) or [])
+    inline = [item for item in models if "=" in item]
+    if not inline:
+        return
+    if getattr(args, "advertise_as", None):
+        raise SystemExit("Use inline `-m real=alias` or `--advertise-as`, not both.")
+    if len(inline) != len(models):
+        raise SystemExit("Alias every -m/--model as `real=alias`, or none of them.")
+    reals: list[str] = []
+    aliases: list[str] = []
+    for item in models:
+        if item.count("=") != 1:
+            raise SystemExit(f"Inline alias {item!r} must be exactly one `real=alias` pair.")
+        real, _, alias = item.partition("=")
+        real, alias = real.strip(), alias.strip()
+        if not real or not alias:
+            raise SystemExit(f"Inline alias {item!r} needs a non-empty model and alias (real=alias).")
+        reals.append(real)
+        aliases.append(alias)
+    args.models = reals
+    args.advertise_as = aliases
+
+
 def cmd_join(args: argparse.Namespace) -> int:
     _reject_remote_only_flags(args)
+    if args.serve and args.models:
+        raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
+    _apply_inline_aliases(args)
     advertise_host = getattr(args, "advertise_host", None)
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]
@@ -79,10 +114,10 @@ def cmd_join(args: argparse.Namespace) -> int:
             "No running engine detected on this box. Point at one with "
             "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
         )
-    if args.engine:
-        detected = [engine for engine in detected if engine.label == args.engine]
+    if args.kind:
+        detected = [engine for engine in detected if engine.label == args.kind]
         if not detected:
-            raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
+            raise SystemExit(f"No detected engine of kind {args.kind!r}. Run `grid join` to list them.")
     elif len(detected) > 1 and not args.all:
         _print_plan(detected)
         if _interactive():
@@ -90,7 +125,7 @@ def cmd_join(args: argparse.Namespace) -> int:
                 print("Nothing joined.")
                 return 0
         else:
-            raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
+            raise SystemExit("Multiple engines detected; pass --all, --kind <kind>, or --at <url>.")
 
     used: set[str] = set()
     rc = 0
@@ -229,9 +264,7 @@ def cmd_leave(args: argparse.Namespace) -> int:
     if args.all:
         targets = list(records)
     elif args.engine:
-        if args.engine not in records:
-            raise SystemExit(f"No engine {args.engine!r} joined to {cfg['name']}.")
-        targets = [args.engine]
+        targets = [_resolve_leave_target(records, args.engine, cfg["name"])]
     elif len(records) == 1:
         targets = list(records)
     elif not records:
@@ -245,6 +278,37 @@ def cmd_leave(args: argparse.Namespace) -> int:
         _stop_engine(grid_id, engine_id, records[engine_id])
         print(f"Left engine {engine_id} on {cfg['name']}.")
     return 0
+
+
+def _resolve_leave_target(records: dict[str, dict[str, Any]], selector: str, grid_name: str) -> str:
+    """The engine id to leave for ``--engine <selector>``: an exact engine id wins; otherwise match by
+    endpoint URL, a served model, or a URL fragment — the same order as remote (ADR 0011 D-d)."""
+    if selector in records:
+        return selector
+    specs = [
+        {"id": engine_id, "endpoint_url": record.get("endpoint_url"),
+         "models": record.get("models") or [], "engine_label": None}  # local records carry no label
+        for engine_id, record in records.items()
+    ]
+    matched = run_records.match_engine(
+        specs, selector, label=grid_name, summary=_leave_summary(records),
+        hint="pass the exact engine id instead",
+    )
+    if not matched:
+        raise SystemExit(
+            f"No engine {selector!r} joined to {grid_name} (match by id, endpoint URL, a served "
+            f"model, or a URL fragment). Engines: {_leave_summary(records)}."
+        )
+    return str(matched[0]["id"])
+
+
+def _leave_summary(records: dict[str, dict[str, Any]]) -> str:
+    """A short human list of joined engines for a leave error / ambiguity message."""
+    parts = []
+    for engine_id, record in records.items():
+        models = ",".join(record.get("models") or [])
+        parts.append(f"{engine_id} [{models}]" if models else engine_id)
+    return "; ".join(parts)
 
 
 def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
@@ -528,7 +592,7 @@ def _print_plan(detected: list[Any]) -> None:
     for engine in detected:
         models = ",".join(engine.models) or ("comfyui" if engine.media else "(no models listed)")
         print(f"  {engine.label:<12} {engine.endpoint_url:<34} {models}")
-    print("\nJoin them:\n  grid join --all\n  grid join --engine <kind>")
+    print("\nJoin them:\n  grid join --all\n  grid join --kind <kind>")
 
 
 def _interactive() -> bool:

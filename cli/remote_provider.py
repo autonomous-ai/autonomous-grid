@@ -15,12 +15,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
+import socket
 import subprocess
 import sys
 import time
 import uuid
 
 from shared import paths, run_records
+from shared.filelock import file_lock
+
+# Remote has exactly ONE identity per grid: the relay node_id is pinned to the per-grid access token
+# (remote/serve._node_id_from_token), so two `grid join`s on a grid would register the same node and
+# clobber each other. The run record is therefore a singleton keyed by this constant — one file
+# engines_dir(<network_id>)/remote.json — and repeated joins are additive (ADR 0010). `--name` no longer
+# keys the record (it can't mint a second identity); it is the grid-page display name (record["meta_name"]).
+_REMOTE_IDENTITY = "remote"
 
 
 def _reject_local_only_flags(args: argparse.Namespace) -> None:
@@ -34,18 +44,31 @@ def _reject_local_only_flags(args: argparse.Namespace) -> None:
         )
 
 
+def _warn_deprecated(triggered: bool, message: str) -> None:
+    """Print a one-line deprecation note to stderr when a deprecated flag was used."""
+    if triggered:
+        print(message, file=sys.stderr)
+
+
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
-    from . import remote_grid
+    from . import provider, remote_grid
 
     _reject_local_only_flags(args)
-    if getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None:
-        print(
-            "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
-            "Set your model price with `grid price set` after joining.",
-            file=sys.stderr,
-        )
+    if args.serve and args.models:
+        raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
+    provider._apply_inline_aliases(args)
+    _warn_deprecated(
+        getattr(args, "pricing_input", None) is not None or getattr(args, "pricing_output", None) is not None,
+        "Note: --pricing-input/--pricing-output are deprecated and no longer advertise a price. "
+        "Set your model price with `grid price set` after joining.",
+    )
+    _warn_deprecated(
+        getattr(args, "engine_label", None) is not None,
+        "Note: --engine-label is deprecated and no longer changes the grid page — the engine's kind "
+        "is derived automatically. (It still matches `grid leave --engine <label>`.)",
+    )
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 
@@ -67,18 +90,252 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     if not specs and not media:  # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
-    if len(specs) > 1 and (getattr(args, "advertise_as", []) or []):
-        raise SystemExit("--advertise-as serves a single engine; it can't alias the union of --all.")
-    _warn_shadowed_models(specs)  # the detached loop logs this too, but show it on the operator's terminal
+    engine_id = _REMOTE_IDENTITY
+    meta_name = getattr(args, "name", None) or socket.gethostname()
 
-    engine_id = getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
-    existing = run_records.read_record(network_id, engine_id)
-    if existing and run_records.pid_alive(int(existing.get("pid") or 0)):
-        raise SystemExit(f"Engine {engine_id!r} is already joined to {label}. Use a different --name.")
+    # Remote has ONE identity per grid (the token pins the relay node_id), so `grid join` is additive:
+    # merge this join's engines into whatever is already serving, then respawn the single detached engine.
+    # The read-merge-write is serialized so two concurrent joins can't lost-update the union (ADR 0010).
+    with file_lock(run_records.record_path(network_id, engine_id)):
+        live = _live_records(network_id)  # normally just the singleton; also legacy `engine-<uuid>` on upgrade
+        merged_specs, changed = _merge_engines(_engine_union(live), specs)
+        base_media = any(bool(rec.get("media")) for rec in live)
+        media = base_media or media
+        base_bundles = list(dict.fromkeys(b for rec in live for b in (rec.get("media_bundles") or [])))
+        bundles = list(dict.fromkeys(base_bundles + list(getattr(args, "bundles", []) or [])))
+        # An idempotent re-join (no new engine/model, and no display-name/media/bundle change) is a no-op,
+        # so it doesn't needlessly restart a live identity. A change in ANY of those does respawn to apply
+        # it — there is no other way to rename or add a bundle in Slice 1.
+        if (
+            live and not changed and media == base_media and bundles == base_bundles
+            and meta_name == _identity_field(live, "meta_name")
+        ):
+            print(f"Already serving on {label}; nothing to append.")
+            return 0
+        _reject_unserveable_union(merged_specs, args, live)
+        _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
 
-    record = _build_record(args, network_id, engine_id, signaling_url, specs, media=media)
+        record = _build_record(
+            args, network_id, engine_id, signaling_url, merged_specs,
+            media=media, meta_name=meta_name, bundles=bundles,
+        )
+        # Preserve the live identity's --max-concurrency across an additive join, like media/bundles/meta
+        # above. It sizes the running N-worker poll pool (remote/serve._serve_loop), so a re-join that
+        # doesn't re-pass --max-concurrency must NOT reset it to the default 1 — that would silently
+        # collapse an 8-worker engine to one on the next respawn (it's harmless to over-carry: the value is
+        # advertised, and the reload pins the advertised capacity to the actual live pool anyway).
+        if getattr(args, "max_concurrency", None) is None and live:
+            record["max_concurrency"] = _identity_field(live, "max_concurrency")
+        # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place. Fall back to
+        # stop-respawn for a first join, a legacy/pre-handler process, a launch, or a media change.
+        reloaded = _hot_reloadable(live, merged_specs, record)
+        if reloaded:
+            reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
+        else:
+            _respawn_identity(network_id, record, live)  # stops prior process(es) then respawns; aborts on failure
+
+    appended = bool(live)
+    verb = "Appended to" if appended else "Joining"
+    print(f"{verb} {label} (pid={record['pid']}) — {'re-serving' if appended else 'serving'} the union via the relay.")
+    if len(record["engines"]) > 1:
+        print(f"engines={len(record['engines'])} (serving the union under one identity)")
+    elif record["endpoint_url"]:
+        print(f"endpoint_url={record['endpoint_url']}")
+    if record["models"]:
+        print(f"models={','.join(record['models'])}")
+    if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
+        print("media=on (serving comfyui:* workflows via the relay)")
+    print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
+    if reloaded:  # the live process re-advertised in place — nothing restarted, nothing dropped
+        print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {label}`)")
+    else:
+        # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
+        print(f"(starting — stop with `grid leave {label}`)")
+    return 0
+
+
+def _live_records(network_id: str) -> list[dict[str, object]]:
+    """Every remote run record for this grid whose detached process is still alive. Normally that's just
+    the singleton ``remote.json``; on upgrade it also catches legacy ``engine-<uuid>`` records so the join
+    can adopt their engines and stop their processes (they share the token node_id)."""
+    return [
+        rec for rec in run_records.read_records(network_id).values()
+        if run_records.pid_alive(int(rec.get("pid") or 0))
+    ]
+
+
+def _flat_spec(record: dict[str, object]) -> dict[str, object]:
+    """One engine spec synthesised from a record written before the multi-engine ``engines`` field
+    (mirrors ``remote/serve._flat_spec``) so an old-format live record is still adopted, not dropped."""
+    return {
+        "endpoint_url": record.get("endpoint_url"),
+        "models": list(record.get("models") or []),
+        "engine_label": record.get("engine_label"),
+    }
+
+
+def _spec_key(spec: dict[str, object]) -> object:
+    """Identity of an engine for dedup/merge: its endpoint URL, or — for the built-in ``--serve`` engine,
+    which has no URL — a marker plus its model set, so re-joining the same built-in is recognised."""
+    url = spec.get("endpoint_url")
+    return url if url else ("__builtin__", tuple(spec.get("models") or []))
+
+
+def _merge_engines(
+    base: list[dict[str, object]], incoming: list[dict[str, object]]
+) -> tuple[list[dict[str, object]], bool]:
+    """Merge ``incoming`` specs into a fresh copy of ``base``. The same engine (by ``_spec_key``) unions its
+    models; a new engine is appended. Returns ``(merged, changed)`` where ``changed`` is True only when a
+    model or engine was actually added — so an idempotent re-join (including adding a model to an engine
+    already in the union) stays a no-op instead of silently dropping the request."""
+    merged = [dict(spec) for spec in base]
+    index = {_spec_key(spec): spec for spec in merged}
+    changed = False
+    for spec in incoming:
+        existing = index.get(_spec_key(spec))
+        if existing is None:
+            copy = dict(spec)
+            copy["models"] = list(copy.get("models") or [])
+            merged.append(copy)
+            index[_spec_key(copy)] = copy
+            changed = True
+            continue
+        added = [m for m in (spec.get("models") or []) if m not in (existing.get("models") or [])]
+        if added:
+            existing["models"] = list(existing.get("models") or []) + added
+            changed = True
+    return merged, changed
+
+
+def _engine_union(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The merged union of every engine across ``records`` (same engine → models unioned). A record with no
+    ``engines`` array falls back to a flat spec so a pre-multi-engine live record isn't silently lost."""
+    union: list[dict[str, object]] = []
+    for record in records:
+        specs = record.get("engines")
+        if not specs and (record.get("endpoint_url") or record.get("models")):
+            specs = [_flat_spec(record)]
+        union, _ = _merge_engines(union, specs or [])
+    return union
+
+
+def _identity_field(live: list[dict[str, object]], key: str) -> object:
+    """One field of the live identity — the singleton's if present, else the first live record's."""
+    for record in live:
+        if record.get("engine_id") == _REMOTE_IDENTITY:
+            return record.get(key)
+    return live[0].get(key) if live else None
+
+
+def _reject_unserveable_union(
+    merged_specs: list[dict[str, object]], args: argparse.Namespace, live: list[dict[str, object]]
+) -> None:
+    """Guard the merged union: the built-in engine can't join a multi-engine identity (external-only,
+    ADR 0007 D4), and ``--advertise-as`` aliases only a single engine (so appending onto an already-aliased
+    identity is rejected rather than silently dropping the alias)."""
+    if len(merged_specs) > 1 and any(not spec.get("endpoint_url") for spec in merged_specs):
+        raise SystemExit(
+            "The built-in engine (`--serve`) serves a single model and can't join a multi-engine "
+            "identity. Run `grid leave`, then re-join every engine as external `--at <url> -m <model>`."
+        )
+    # --advertise-as aliases don't merge across joins (the record's `advertise_as` is a flat, positionally
+    # keyed list), so appending onto — or with — an alias would drop an alias or mismatch the alias/model
+    # counts (which crashes the reload's _advertised_models). Reject any changing append touching aliases;
+    # the no-op case already returned earlier, so `live` here means a real change (ADR 0010).
+    aliased = bool(getattr(args, "advertise_as", []) or []) or any(rec.get("advertise_as") for rec in live)
+    if aliased and (len(merged_specs) > 1 or live):
+        raise SystemExit(
+            "--advertise-as aliases are single-engine and don't merge across joins. Run `grid leave`, "
+            "then re-join every engine in one command with its -m/--advertise-as pairs."
+        )
+
+
+def _media_key(record: dict[str, object]) -> tuple[bool, tuple[str, ...], int, int]:
+    """See ``shared.run_records.media_signature`` — one shared definition so this hot-reload-vs-respawn
+    decision and the serve loop's reload guard can't desync (ADR 0010 C3)."""
+    return run_records.media_signature(record)
+
+
+def _hot_reloadable(
+    live: list[dict[str, object]], merged_specs: list[dict[str, object]], record: dict[str, object]
+) -> bool:
+    """Whether this update can be SIGHUP-hot-reloaded into the live singleton (zero-drop) instead of a
+    stop-respawn. True only when the SOLE live process is the singleton, it was started by a build that
+    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, and the
+    media config is unchanged. Everything else — a first join, a legacy/pre-handler sibling, a built-in
+    ``--serve`` launch, or any media/bundle change — still respawns (ADR 0010 D3 / C1 / C3).
+    """
+    if len(live) != 1:
+        return False
+    singleton = live[0]
+    if singleton.get("engine_id") != _REMOTE_IDENTITY:
+        return False
+    if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
+        return False
+    if any(not spec.get("endpoint_url") for spec in merged_specs):  # a built-in --serve needs a launch
+        return False
+    return _media_key(record) == _media_key(singleton)  # a media/bundle change needs a bring-up (C3)
+
+
+def _signal_reload(pid: int) -> None:
+    """SIGHUP the live singleton so it hot-reloads the merged record in place — no restart, no dropped
+    in-flight requests (ADR 0010 D3)."""
+    os.kill(pid, signal.SIGHUP)
+
+
+def _hot_reload_identity(
+    network_id: str, record: dict[str, object], live: list[dict[str, object]]
+) -> bool:
+    """Write the merged record then SIGHUP the live singleton so it re-advertises the union in place. The
+    process keeps its pid; write BEFORE signalling so the reload reads the new record (ADR 0010 D3).
+
+    Returns ``True`` if it hot-reloaded in place, ``False`` if it had to fall back to a respawn — so the
+    caller reports honestly instead of claiming zero-drop. The fallback fires when the singleton vanished
+    between the liveness check and the signal (``os.kill`` raises ``ProcessLookupError``); the residual
+    PID-reuse TOCTOU (same window, pid recycled to an unrelated process) is shared with
+    ``run_records.terminate_pid`` and not fully fixable without pidfd.
+    """
+    pid = int(live[0].get("pid") or 0)
+    if pid <= 0:  # defensive: a live singleton always has a real pid, and os.kill(0) hits our own group
+        _respawn_identity(network_id, record, live)
+        return False
+    record["pid"] = pid
+    run_records.write_record(network_id, _REMOTE_IDENTITY, record)
+    try:
+        _signal_reload(pid)
+        return True
+    except ProcessLookupError:  # the process died between the liveness check and the signal — respawn
+        _respawn_identity(network_id, record, [])
+        return False
+
+
+def _respawn_identity(
+    network_id: str, record: dict[str, object], priors: list[dict[str, object]]
+) -> None:
+    """Stop the prior process(es), then write ``record`` and (re)spawn the one detached engine, setting
+    ``record["pid"]``. Shared by join-append and leave-shrink (respawn is Slice 1's update mechanism).
+
+    Aborts (SystemExit) BEFORE spawning if any prior can't be confirmed stopped — a second live child on
+    the same token-pinned node_id would clobber it (the original bug). Raises if the fresh process dies
+    during start-up: the grid is left not serving either way, so the operator must know.
+    """
+    engine_id = _REMOTE_IDENTITY
+    undead: list[str] = []
+    for prior in priors:
+        if not run_records.terminate_pid(int(prior.get("pid") or 0)):
+            undead.append(str(prior.get("pid")))
+            continue
+        prior_id = str(prior.get("engine_id") or "")
+        if prior_id and prior_id != engine_id:  # drop a legacy record's file so only the singleton remains
+            run_records.record_path(network_id, prior_id).unlink(missing_ok=True)
+    if undead:
+        raise SystemExit(
+            f"Could not stop the engine(s) already serving this grid (pid(s) {', '.join(undead)}); they may "
+            "still be registered on the relay. Investigate before re-joining — starting another would clobber them."
+        )
+
+    record["pid"] = 0
     run_records.write_record(network_id, engine_id, record)
-
     proc = _spawn_remote_engine(network_id, engine_id)
     record["pid"] = proc.pid
     run_records.write_record(network_id, engine_id, record)
@@ -89,22 +346,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         from . import provider
 
         raise SystemExit(
-            f"Engine {engine_id} exited before it started. See {log_path}:\n{provider._log_tail(log_path)}"
+            f"Engine exited before it started — the grid is not serving now. See {log_path}:\n"
+            f"{provider._log_tail(log_path)}"
         )
-
-    print(f"Joining engine {engine_id} to {label} (pid={proc.pid}) — serving via the relay.")
-    if len(specs) > 1:
-        print(f"engines={len(specs)} (serving the union under one identity)")
-    elif record["endpoint_url"]:
-        print(f"endpoint_url={record['endpoint_url']}")
-    if record["models"]:
-        print(f"models={','.join(record['models'])}")
-    if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
-        print("media=on (serving comfyui:* workflows via the relay)")
-    print(f"log={log_path}")
-    # The relay isn't locally pollable, so we can't confirm "registered" here — report starting.
-    print(f"(starting — stop with `grid leave {label} --engine {engine_id}`)")
-    return 0
 
 
 def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
@@ -140,10 +384,10 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             "No running engine detected on this box. Point at one with "
             "`grid join --at <url> -m <model>`, or start the built-in engine with `grid join --serve <model>`."
         )
-    if args.engine:
-        detected = [engine for engine in detected if engine.label == args.engine]
+    if args.kind:
+        detected = [engine for engine in detected if engine.label == args.kind]
         if not detected:
-            raise SystemExit(f"No detected engine named {args.engine!r}. Run `grid join` to list them.")
+            raise SystemExit(f"No detected engine of kind {args.kind!r}. Run `grid join` to list them.")
 
     media_detected = any(engine.media for engine in detected)
     text = [engine for engine in detected if not engine.media]
@@ -156,7 +400,7 @@ def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, obj
             if not provider._confirm("Join all detected engines?"):
                 return [], False
         else:
-            raise SystemExit("Multiple engines detected; pass --all, --engine <kind>, or --at <url>.")
+            raise SystemExit("Multiple engines detected; pass --all, --kind <kind>, or --at <url>.")
     return [
         {"endpoint_url": engine.endpoint_url, "models": list(engine.models), "engine_label": engine.label}
         for engine in text
@@ -186,6 +430,8 @@ def _build_record(
     signaling_url: str,
     specs: list[dict[str, object]],
     media: bool = False,
+    meta_name: str | None = None,
+    bundles: list[str] | None = None,
 ) -> dict[str, object]:
     """The remote engine's run record — non-secret routing only; the token stays in credentials.toml.
 
@@ -202,15 +448,19 @@ def _build_record(
 
     return {
         "engine_id": engine_id,
+        # Written by a build whose serve loop installs the SIGHUP reload handler, so a later `grid
+        # join`/`leave` can hot-reload this identity in place instead of stop-respawning it (ADR 0010 C1).
+        "reload_signal": "sighup",
         "node_id": f"node-{uuid.uuid4().hex[:12]}",
         "grid_id": network_id,  # the remote network_id doubles as the run record's grid_id
+        "meta_name": meta_name,  # grid-page display name (--name, or hostname); NOT the record key
         "pid": 0,
         "signaling_url": signaling_url,
         "endpoint_url": single_endpoint,
         "models": union,
         "engines": specs,
         "media": bool(media),
-        "media_bundles": list(getattr(args, "bundles", []) or []),
+        "media_bundles": list(bundles if bundles is not None else (getattr(args, "bundles", []) or [])),
         "comfyui_port": getattr(args, "comfyui_port", 8188),
         "media_port": getattr(args, "media_port", 8190),
         "advertise_as": list(getattr(args, "advertise_as", []) or []),
@@ -267,26 +517,86 @@ def cmd_remote_leave(args: argparse.Namespace) -> int:
     rec = remote_grid._select(getattr(args, "grid", None))
     network_id = remote_grid._network_id(rec)
     label = rec.get("name") or network_id
-    records = run_records.read_records(network_id)
 
-    if args.all:
-        targets = list(records)
-    elif args.engine:
-        if args.engine not in records:
-            raise SystemExit(f"No engine {args.engine!r} joined to {label}.")
-        targets = [args.engine]
-    elif len(records) == 1:
-        targets = list(records)
-    elif not records:
-        print(f"No engines joined to {label}.")
+    with file_lock(run_records.record_path(network_id, _REMOTE_IDENTITY)):
+        records = run_records.read_records(network_id)
+        if not records:
+            print(f"No engines joined to {label}.")
+            return 0
+        # `--engine <endpoint_url|label>` drops one engine from the union; anything else (bare / `--all`)
+        # tears down the whole identity — remote has one identity per grid, so both mean the same here.
+        if args.engine and not args.all:
+            return _leave_one_engine(args, network_id, label, records)
+        from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
+
+        for engine_id, record in records.items():
+            provider._stop_engine(network_id, engine_id, record)
+        print(f"Left {label}.")
         return 0
+
+
+def _leave_one_engine(
+    args: argparse.Namespace, network_id: str, label: str, records: dict[str, dict[str, object]]
+) -> int:
+    """Drop the engine matching ``--engine`` (endpoint URL, or a unique label) from the identity's union.
+
+    Removing the last text engine (with no media) tears the whole identity down; otherwise the singleton
+    is respawned serving the reduced union. Operates on the live record(s), adopting any legacy sibling.
+    """
+    survivors = [rec for rec in records.values() if run_records.pid_alive(int(rec.get("pid") or 0))]
+    survivors = survivors or list(records.values())
+    union = _engine_union(survivors)
+    to_drop = _drop_spec(union, args.engine, label)
+    if not to_drop:
+        raise SystemExit(
+            f"No engine {args.engine!r} on {label} (match by endpoint URL, a served model, or a URL "
+            f"fragment). Engines: {_engines_summary(union)}."
+        )
+    drop_ids = {id(spec) for spec in to_drop}  # filter by identity — value-equal specs must not both drop
+    remaining = [spec for spec in union if id(spec) not in drop_ids]
+    media = any(bool(rec.get("media")) for rec in survivors)
+
+    if not remaining and not media:  # nothing left to serve → tear the whole identity down
+        from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
+
+        for engine_id, record in records.items():
+            provider._stop_engine(network_id, engine_id, record)
+        print(f"Left {label} (removed the last engine).")
+        return 0
+
+    # Rebuild the singleton from the identity's own record, minus the dropped engine, and respawn it.
+    # (When one engine remains, `remote/serve._ServeState.route()` falls back to it for an unknown model —
+    # a job for the just-dropped model now forwards to the survivor instead of erroring; existing semantics.)
+    record = dict(next(iter(survivors)))
+    record["engine_id"] = _REMOTE_IDENTITY
+    record["reload_signal"] = "sighup"  # stamp it so a pre-handler identity self-heals on leave (like join)
+    record["engines"] = remaining
+    record["models"] = list(dict.fromkeys(m for spec in remaining for m in spec.get("models") or []))
+    record["endpoint_url"] = remaining[0]["endpoint_url"] if len(remaining) == 1 else None
+    record["media"] = media  # recompute from the survivors, don't inherit the arbitrary template's flag
+    record["media_bundles"] = list(dict.fromkeys(b for rec in survivors for b in (rec.get("media_bundles") or [])))
+    if _hot_reloadable(survivors, remaining, record):
+        _hot_reload_identity(network_id, record, survivors)  # SIGHUP the survivor — zero-drop shrink
     else:
-        names = ", ".join(sorted(records))
-        raise SystemExit(f"Several engines joined ({names}); pass --engine <id> or --all.")
-
-    from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
-
-    for engine_id in targets:
-        provider._stop_engine(network_id, engine_id, records[engine_id])
-        print(f"Left engine {engine_id} on {label}.")
+        _respawn_identity(network_id, record, survivors)  # aborts on a stuck prior / raises on a dead respawn
+    print(f"Dropped {args.engine!r} from {label}; re-serving {len(remaining)} engine(s).")
     return 0
+
+
+def _engines_summary(union: list[dict[str, object]]) -> str:
+    """A short human list of an identity's engines for a leave error / ambiguity message."""
+    parts = []
+    for spec in union:
+        url = spec.get("endpoint_url") or "(built-in)"
+        models = ",".join(spec.get("models") or [])
+        parts.append(f"{url} [{models}]" if models else str(url))
+    return "; ".join(parts)
+
+
+def _drop_spec(
+    union: list[dict[str, object]], selector: str, label: str
+) -> list[dict[str, object]]:
+    """The spec(s) to remove for ``selector`` — exact endpoint_url → engine_label → served model → URL
+    substring — via the shared matcher (`shared.run_records.match_engine`). Remote engines are keyed by
+    URL/label, so no exact-id short-circuit here (that's the local caller's job)."""
+    return run_records.match_engine(union, selector, label=label, summary=_engines_summary(union))
