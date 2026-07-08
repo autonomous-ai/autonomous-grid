@@ -141,10 +141,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     with file_lock(run_records.record_path(network_id, engine_id)):
         live = _live_records(network_id)  # normally just the singleton; also legacy `engine-<uuid>` on upgrade
         merged_specs, changed = _merge_engines(_engine_union(live), specs)
-        # A rotated key only matters when this kind's API spec is already LIVE: its bearer map is
-        # fixed at spawn (remote/serve._ServeState.bearer_by_url), so the new key can only be
-        # delivered by a respawn — never a no-op, never SIGHUP. Kept at the call sites (not inside
-        # `_hot_reloadable`) because leave-shrink shares that gate and rotation never applies there.
+        # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
+        # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
+        # operator has certainty the new key is live — never a no-op, never SIGHUP. Kept at the call sites
+        # (not inside `_hot_reloadable`) because leave-shrink shares that gate and rotation never applies there.
         rotated_live = key_rotated and any(
             spec.get("api_kind") == args.api for spec in _engine_union(live)
         )
@@ -160,6 +160,15 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             and meta_name == _identity_field(live, "meta_name") and not rotated_live
         ):
             print(f"Already serving on {label}; nothing to append.")
+            # The serve process records a hot-reload that failed AFTER the CLI reported success (the
+            # SIGHUP is fire-and-forget) — surface it here, or the no-op compounds the false success.
+            stale = _identity_field(live, "last_reload_error")
+            if stale:
+                print(
+                    f"Warning: the engine's last hot-reload failed and it kept its previous engines: "
+                    f"{stale}\n(see log={paths.engines_dir(network_id) / f'{engine_id}.log'})",
+                    file=sys.stderr,
+                )
             return 0
         _reject_unserveable_union(merged_specs, args, live)
         _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
@@ -175,9 +184,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # advertised, and the reload pins the advertised capacity to the actual live pool anyway).
         if getattr(args, "max_concurrency", None) is None and live:
             record["max_concurrency"] = _identity_field(live, "max_concurrency")
-        # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place. Fall back to
-        # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, or a
-        # rotated key (the live process's bearer can't be swapped in place).
+        # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place — an appended
+        # API engine reloads too now that its bearer is re-read from the key store (issue 05). Fall back to
+        # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, a
+        # concurrency-default flip, or a rotated key (respawned by policy so the operator knows it's live).
         if rotated_live:
             print(f"Rotated the stored {args.api} key — restarting the engine to apply it.")
         reloaded = (not rotated_live) and _hot_reloadable(live, merged_specs, record)
@@ -440,14 +450,10 @@ def _hot_reloadable(
     # explicit --max-concurrency pinning both sides — only a respawn applies the new size.
     if run_records.effective_max_concurrency(record) != run_records.effective_max_concurrency(singleton):
         return False
-    # A NEW API engine needs a vendor bearer, and the live process's bearer map is fixed at
-    # startup (remote/serve._ServeState.bearer_by_url — deliberately not on the reload-swappable
-    # snapshot) — respawn so the fresh process reads the just-stored key from the key store. A
-    # ROTATED key for an already-live api spec is handled by the caller (`rotated_live` in
-    # cmd_remote_join), not here: leave-shrink shares this gate and rotation never applies there.
-    live_api = {_spec_key(spec) for spec in _engine_union(live) if spec.get("api_kind")}
-    if any(spec.get("api_kind") and _spec_key(spec) not in live_api for spec in merged_specs):
-        return False
+    # A NEW API engine is hot-reloadable now that the reload re-reads the key store and swaps the vendor
+    # bearer atomically with routing (issue 05 — remote/serve._assemble_snapshot → _api_bearers), so it
+    # is NOT gated here. A ROTATED key for an already-live api spec is still a respawn, forced by the
+    # caller (`rotated_live` in cmd_remote_join) for operator certainty — a policy choice, not a limit.
     return _media_key(record) == _media_key(singleton)  # a media/bundle change needs a bring-up (C3)
 
 
@@ -749,11 +755,16 @@ def _leave_one_engine(
     record["endpoint_url"] = remaining[0]["endpoint_url"] if len(remaining) == 1 else None
     record["media"] = media  # recompute from the survivors, don't inherit the arbitrary template's flag
     record["media_bundles"] = list(dict.fromkeys(b for rec in survivors for b in (rec.get("media_bundles") or [])))
+    record.pop("last_reload_error", None)  # a fresh lifecycle attempt shouldn't inherit a stale failure
     if _hot_reloadable(survivors, remaining, record):
-        _hot_reload_identity(network_id, record, survivors)  # SIGHUP the survivor — zero-drop shrink
+        reloaded = _hot_reload_identity(network_id, record, survivors)  # SIGHUP the survivor — zero-drop shrink
     else:
         _respawn_identity(network_id, record, survivors)  # aborts on a stuck prior / raises on a dead respawn
-    print(f"Dropped {args.engine!r} from {label}; re-serving {len(remaining)} engine(s).")
+        reloaded = False
+    # Report honestly, like cmd_remote_join: _hot_reload_identity returns False when it fell back to a
+    # respawn (the pid vanished in the TOCTOU window), and a respawn is not a zero-drop shrink.
+    how = "hot-reloaded — no in-flight requests dropped" if reloaded else "restarted the engine to apply it"
+    print(f"Dropped {args.engine!r} from {label}; re-serving {len(remaining)} engine(s) ({how}).")
     return 0
 
 

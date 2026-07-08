@@ -76,3 +76,9 @@ storage (the key belongs to the machine's operator, not to any one grid).
 - A revoked/rotated upstream key is invisible to the grid until serve-time job errors
   surface it (upstream 401 is a job error + stderr warning, never a relay-token refresh,
   never an auto-eject in v1) — accepted; auto-eject is a deferred observability slice.
+- Because the key lives in a durable store the serve process re-reads on **reload** (not
+  only at startup), appending an API engine to a live identity **hot-reloads in place**
+  (issue 05): the vendor bearer joins the reload-swappable routing snapshot, so `grid join
+  --api openai` onto a running identity — and `grid leave --engine openai` — re-advertise
+  the union with no respawn and no dropped in-flight requests, reusing static caps (never a
+  probe). A *rotated* key still respawns, by CLI policy (operator certainty), not mechanism.

@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from remote import api_keys, control_plane, credentials, probe, relay
 from shared import run_records
+from shared.filelock import file_lock
 from shared.models import api_catalog
 
 # One engine's probe result: (normalized llm_url, advertised models, upstream models, caps envelope).
@@ -557,6 +558,7 @@ def _assemble_snapshot(
         meta=_meta(record, engine_id), pricing=_pricing(record),
         max_concurrency=max_concurrency,
         api_kind_by_url=_api_kinds_by_url(record),
+        bearer_by_url=_api_bearers(record),  # re-read the key store so an appended api engine forwards with auth
     )
 
 
@@ -647,6 +649,7 @@ class _Snapshot:
     pricing: dict[str, float]     # always {} today (advertised pricing is deprecated)
     max_concurrency: int
     api_kind_by_url: dict[str, str]  # vendor base URL -> service kind (endpoint gating); {} = none
+    bearer_by_url: dict[str, str]    # vendor base URL -> API key (forward auth); {} = none
 
     @staticmethod
     def build(
@@ -659,6 +662,7 @@ class _Snapshot:
         pricing: dict[str, float],
         max_concurrency: int,
         api_kind_by_url: dict[str, str] | None = None,
+        bearer_by_url: dict[str, str] | None = None,
     ) -> "_Snapshot":
         return _Snapshot(
             routes={model: url.rstrip("/") for model, url in routes.items()},
@@ -668,6 +672,7 @@ class _Snapshot:
             meta=dict(meta or {}),
             pricing=dict(pricing or {}),
             api_kind_by_url={url.rstrip("/"): kind for url, kind in (api_kind_by_url or {}).items()},
+            bearer_by_url={url.rstrip("/"): key for url, key in (bearer_by_url or {}).items()},
             # Clamp to [1, _MAX_CONCURRENCY]: each slot becomes a real poll-worker thread in `_serve_loop`,
             # so an absurd `--max-concurrency` can't exhaust threads/sockets. This is the sole clamp site,
             # so a reload that changes max_concurrency is bounded the same way as startup.
@@ -700,11 +705,10 @@ class _ServeState:
         self.node_id = node_id
         self.network_id = network_id
         self.llm_url = llm_url.rstrip("/")
-        # {vendor base URL: API key} for the API engines this identity serves — read from the key
-        # store (env fallback) at startup, never from the run record. Fixed for the process
-        # lifetime (like media_url), so it lives here and not on the reload-swappable snapshot —
-        # a rotated key reaches jobs via the respawn `grid join` forces, never via SIGHUP.
-        self.bearer_by_url = {url.rstrip("/"): key for url, key in (bearer_by_url or {}).items()}
+        # `bearer_by_url` and `api_kind_by_url` are resolved from the key store / record and live on the
+        # reload-swappable snapshot built below (NOT as fixed attributes — see the `bearer_by_url`
+        # property), so a SIGHUP hot-reload re-reads the key store and swaps them atomically WITH routing
+        # (issue 05). A rotated key still respawns, by CLI policy, not because the mechanism can't swap it.
         # This box's media server base (`http://127.0.0.1:<media_port>`) when the identity serves
         # media, else None. `media/*` jobs forward here instead of an LLM engine; all media models
         # share the one server, so a single URL (not a per-model route) is enough.
@@ -717,7 +721,7 @@ class _ServeState:
         self._snapshot = _Snapshot.build(
             routes=route_map, upstream=upstream or {}, models=models, capabilities=capabilities,
             meta=meta, pricing=pricing, max_concurrency=max_concurrency,
-            api_kind_by_url=api_kind_by_url,
+            api_kind_by_url=api_kind_by_url, bearer_by_url=bearer_by_url,
         )
         # The probe results the live snapshot was built from, kept so a reload probes only newly-added
         # engines (ADR 0010 D4 F6). Reload-owned: set at startup, thereafter only the reload loop writes.
@@ -757,6 +761,12 @@ class _ServeState:
     def max_concurrency(self) -> int:
         return self._snapshot.max_concurrency
 
+    @property
+    def bearer_by_url(self) -> dict[str, str]:
+        """The vendor bearers for the live snapshot — a hot-reload swaps these WITH routing (issue 05),
+        so a forward binding one snapshot never pairs a route with another union's bearer (D4 F4)."""
+        return self._snapshot.bearer_by_url
+
     def snapshot(self) -> _Snapshot:
         """The current routing snapshot — one atomic reference load (no lock). Bind it ONCE per
         operation, then read fields off the result, so a concurrent reload swap is never seen
@@ -776,7 +786,7 @@ class _ServeState:
         only newly-added engines (ADR 0010 D4 F6)."""
         return self._engine_results
 
-    def route_and_kind(self, model: str | None) -> tuple[str | None, str | None]:
+    def route_and_kind(self, model: str | None, snap: _Snapshot | None = None) -> tuple[str | None, str | None]:
         """The local engine URL serving ``model``, plus its API service kind (None = hardware/media).
 
         Exact match wins. Otherwise, when every model points at the **same single engine** (one
@@ -788,7 +798,7 @@ class _ServeState:
         One method for both lookups so they read the SAME snapshot: a separate kind read could bind
         a torn pair across a concurrent reload swap (ADR 0010 D4 F4 — bind once).
         """
-        snap = self._snapshot  # bind once — a concurrent reload swap is never seen half-applied
+        snap = snap if snap is not None else self._snapshot  # bind once — a concurrent reload swap is never seen half-applied
         target = None
         if model and model in snap.routes:
             target = snap.routes[model]
@@ -804,12 +814,13 @@ class _ServeState:
         """The local engine URL serving ``model`` (see ``route_and_kind``)."""
         return self.route_and_kind(model)[0]
 
-    def upstream_model(self, model: str | None) -> str | None:
+    def upstream_model(self, model: str | None, snap: _Snapshot | None = None) -> str | None:
         """The name the local engine answers to for an advertised ``model`` (``--advertise-as`` maps the
         consumer-facing alias back to the engine's real model name). ``None`` when unmapped — the caller
         then forwards the body's model unchanged (single-engine fallback / built-in, where they match).
+        ``snap`` lets one job bind a single union for route + upstream + bearer (D4 F4 — bind once).
         """
-        snap = self._snapshot
+        snap = snap if snap is not None else self._snapshot
         if model and model in snap.upstream:
             return snap.upstream[model]
         return None
@@ -945,6 +956,26 @@ def heartbeat_once(state: _ServeState, *, _allow_refresh: bool = True) -> str:
     return result
 
 
+def _set_last_reload_error(state: _ServeState, engine_id: str, message: str | None) -> None:
+    """Persist (``str``) or clear (``None``) a reload failure on the run record so the NEXT CLI command
+    can surface it: the CLI prints success as soon as the SIGHUP is delivered, so a failure inside this
+    process would otherwise be visible only in this log. Locked read-modify-write — the CLI merges
+    joins under the same lock, so an unlocked write here could lose a concurrent join's union (ADR
+    0010 F3). Best-effort bookkeeping that never raises: a raise inside ``_reload_loop``'s except
+    would kill the watcher, and one after a successful swap would mislabel the reload as failed."""
+    try:
+        with file_lock(run_records.record_path(state.network_id, engine_id)):
+            record = run_records.read_record(state.network_id, engine_id)
+            if not record or (message is None and "last_reload_error" not in record):
+                return
+            updated = {k: v for k, v in record.items() if k != "last_reload_error"}
+            if message is not None:
+                updated["last_reload_error"] = message[:300]  # a trace, not a transcript (never the key)
+            run_records.write_record(state.network_id, engine_id, updated)
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not update last_reload_error on the run record (ignoring): {exc!r}")
+
+
 def _reload_once(state: _ServeState, engine_id: str) -> None:
     """Rebuild routing from the (re-read) record and re-advertise the union in place — the body of the
     SIGHUP hot-reload (ADR 0010 D3). External-only and probe-only: reuse retained caps for engines
@@ -999,6 +1030,8 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
 
     snapshot = _assemble_snapshot(reassembled, state.media_models, record, engine_id, state.max_concurrency)
     state.apply(snapshot, reassembled)  # atomic swap; in-flight requests were unaffected until here
+    if record.get("last_reload_error"):
+        _set_last_reload_error(state, engine_id, None)  # the union applied — a previous failure healed
     if state.stop.is_set():
         # A concurrent teardown (grid leave / SIGTERM) already set stop and the outer `finally` will
         # `unregister_node`; re-advertising now would resurrect a node that is exiting (a zombie the relay
@@ -1066,8 +1099,12 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")
         return
 
+    # Bind ONE routing snapshot for this whole job: route + kind + upstream + bearer all come from the
+    # same union, so a concurrent leave/append hot-reload swap is all-or-nothing per job — never a route
+    # from one union paired with a bearer from another (ADR 0010 D4 F4 — bind once; issue 05).
+    snap = state.snapshot()
     model = body.get("model")  # body is already `job.get("body") or {}`, so it is a dict
-    target, api_kind = state.route_and_kind(model)  # which local engine serves this model (DECISIONS D9)
+    target, api_kind = state.route_and_kind(model, snap)  # which local engine serves this model (DECISIONS D9)
     if target is None:
         _try_submit_error(state, txn, f"no engine serves model {model!r}")
         return
@@ -1084,12 +1121,12 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
     # only knows its real name, so rewrite the body's model before forwarding (a new dict — never
     # mutate the job). No mapping / already-equal → forward unchanged (built-in + single-engine paths).
-    upstream_model = state.upstream_model(model)
+    upstream_model = state.upstream_model(model, snap)
     forward_body = {**body, "model": upstream_model} if upstream_model and upstream_model != model else body
 
     state.enter_inference()
     try:
-        headers = _forward_headers(state, target)
+        headers = _forward_headers(state, target, snap)
         if is_stream:
             _forward_stream(state, txn, endpoint, forward_body, read_timeout, target, headers=headers,
                             api_kind=api_kind)
@@ -1153,12 +1190,15 @@ def _warn_api_auth_failure(api_kind: str | None, status: int) -> None:
               f"(jobs will keep erroring until it is fixed; the engine stays registered)")
 
 
-def _forward_headers(state: _ServeState, target_url: str) -> dict[str, str]:
+def _forward_headers(state: _ServeState, target_url: str, snap: _Snapshot | None = None) -> dict[str, str]:
     """Forward headers for one target: the API key rides ONLY on an API engine's own vendor URL —
     hardware-engine (and media) forwards stay bearer-free, and an upstream 401 is a job error in a
-    different auth domain from the relay token (it can never trigger the relay-token refresh)."""
+    different auth domain from the relay token (it can never trigger the relay-token refresh). ``snap``
+    binds the SAME union the route came from, so a hot-reload swap can't leave an in-flight vendor job
+    bearer-less mid-forward (issue 05 / D4 F4)."""
     headers = {"Content-Type": "application/json"}
-    key = state.bearer_by_url.get(target_url.rstrip("/"))
+    bearers = (snap if snap is not None else state.snapshot()).bearer_by_url
+    key = bearers.get(target_url.rstrip("/"))
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
@@ -1368,6 +1408,9 @@ def _reload_loop(state: _ServeState, engine_id: str) -> None:
                 # thread, silently disabling hot-reload for the process's life (ADR 0010 D4 F6). Mirrors
                 # run_remote_engine_from_record's own (Exception, SystemExit) handler.
                 _warn(f"reload failed (keeping current routing): {exc!r}")
+                # Leave a trace the CLI can surface: it printed success on SIGHUP delivery, so this log
+                # line alone would leave the operator believing the new union is advertised (issue 05).
+                _set_last_reload_error(state, engine_id, str(exc) or repr(exc))
 
 
 def _start_reload_watcher(

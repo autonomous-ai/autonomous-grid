@@ -4,7 +4,11 @@ Status: accepted (2026-07-02) — supersedes **ADR 0007 Decision 1 for remote mo
 (singleton + additive append via **stop-respawn** + leave + migration), then **Slice 2** (SIGHUP hot-reload
 for zero-drop append/shrink/rename, Decisions 3 & 4). Slice 2's gate — a live append-during-stream test —
 was **CLEARED 2026-07-03** on the hosted relay (see "On the zero-drop claim" below); it is now implemented,
-with the concurrency/correctness fixes recorded in **"Slice 2 as built"**.
+with the concurrency/correctness fixes recorded in **"Slice 2 as built"**. An **API engine** appended to a
+live identity became hot-reload-eligible in **issue 05** ([ADR 0012](./0012-api-engines.md)): its vendor
+bearer moved onto the reload-swappable snapshot and is re-read from the durable key store on reload, so
+`grid join --api openai` onto a running identity re-advertises the union with no respawn (a rotated key
+still respawns, by CLI policy). The concurrency-flip and media-change respawn gates are unchanged.
 
 ## Context
 

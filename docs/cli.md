@@ -254,6 +254,14 @@ grid for the vendor**, under your key and your own OpenAI account's terms. `--ap
 exclusive with `--at`/`--serve`/`--advertise-as`/`--media`/`--bundle` in one invocation — join
 other engines with a separate (additive) `grid join`.
 
+An API engine merges into your grid's **one serving identity** exactly like a hardware engine.
+`grid join --api openai` onto an identity already serving other engines appends to the union and
+**hot-reloads in place** — no restart, no dropped in-flight requests (the vendor key is re-read from
+the key store on reload, so the appended engine forwards with auth immediately). `grid leave
+--engine openai` drops just the API engine and re-advertises the survivors; removing the last engine
+tears the identity down. To **narrow** an already-served set, `grid leave --engine openai` then
+re-join with the `-m` subset you want — a join only ever adds models to the union, never removes them.
+
 The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
