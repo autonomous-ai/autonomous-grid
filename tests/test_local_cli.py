@@ -694,6 +694,33 @@ def test_api_whitelist_integrity():
             assert entry.context_window > 0
             assert api_catalog.advertised_name(kind, entry) == f"{kind}:{entry.vendor_name}"
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
+        assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
+        assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
+        assert whitelist.env_var, f"{kind} needs the env var its key is read from"
+
+
+def test_api_whitelist_carries_base_url_and_env_var():
+    openai = api_catalog.WHITELISTS["openai"]
+    assert openai.base_url == "https://api.openai.com/v1"
+    assert openai.env_var == "OPENAI_API_KEY"
+
+
+def test_api_catalog_find_advertised_and_probed_features():
+    entry = api_catalog.find_advertised("openai", "openai:gpt-5.5")
+    assert entry is not None and entry.vendor_name == "gpt-5.5"
+    # Only the advertised (namespaced) form resolves — a bare vendor name does not.
+    assert api_catalog.find_advertised("openai", "gpt-5.5") is None
+    assert api_catalog.find_advertised("openai", "openai:nope") is None
+    assert api_catalog.find_advertised("anthropic", "anthropic:claude") is None
+
+    features = api_catalog.probed_features(entry)
+    # Exactly the probed-dict shape remote/probe.capability_entry consumes.
+    assert set(features) == {"vision", "tools", "parallel_tool_calls", "json_object", "json_schema"}
+    assert features["tools"] is entry.supports_tools
+    assert features["parallel_tool_calls"] is entry.supports_tools
+    assert features["vision"] is entry.supports_vision
+    assert features["json_object"] is entry.supports_json_mode
+    assert features["json_schema"] is entry.supports_structured_outputs
 
 
 def test_catalog_api_json_roundtrips(capsys):
@@ -1207,6 +1234,22 @@ def test_join_local_rejects_remote_only_flags(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.cmd_join(args)  # local handler rejects a remote-only flag before doing any work
     assert "--max-concurrency" in str(exc.value) and "remote" in str(exc.value).lower()
+
+
+def test_join_parser_accepts_api_kind(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    args = cli.build_parser().parse_args(["join", "--api", "openai", "-m", "openai:gpt-5.5"])
+    assert args.api == "openai"
+    assert cli.build_parser().parse_args(["join"]).api is None
+
+
+def test_join_local_rejects_api_flag(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    args = cli.build_parser().parse_args(["join", "home", "--api", "openai", "-m", "openai:gpt-5.5"])
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_join(args)  # API engines live in remote mode; local points the user there
+    assert "--api" in str(exc.value) and "remote" in str(exc.value).lower()
 
 
 def test_await_engine_start_distinguishes_died_registered_starting(monkeypatch):
@@ -2102,6 +2145,194 @@ def test_remote_join_at_serves_external_engine(monkeypatch, tmp_path):
     assert record["meta_name"] == "ext"  # --name in remote is the grid-page display name, not the record key
 
 
+def test_remote_join_api_unknown_kind_lists_supported(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "anthropic", "-m", "anthropic:claude"])
+    assert "anthropic" in str(exc.value)  # the kind that was rejected
+    assert "openai" in str(exc.value)  # ... and the supported kinds, so the fix is one edit away
+
+    # `--api ""` (e.g. an unset shell variable) must error too, not silently join hardware.
+    with pytest.raises(SystemExit):
+        cli.main(["join", "--api", "", "-m", "openai:gpt-5.5"])
+    assert cli.provider._read_records("n1") == {}
+
+
+def test_remote_join_api_mutually_exclusive_flags(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    conflicts = [
+        (["--at", "http://h:11434/v1"], "--at"),
+        (["--serve", "m"], "--serve"),
+        (["--advertise-as", "alias"], "--advertise-as"),
+        (["--media"], "--media"),
+        (["--bundle", "image_generation"], "--bundle"),
+    ]
+    for extra, flag in conflicts:
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5", *extra])
+        assert flag in str(exc.value), f"{flag} must be named in the error"
+        assert "--api" in str(exc.value)
+    assert cli.provider._read_records("n1") == {}
+
+
+def test_remote_join_api_requires_model_flag(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "openai"])
+    msg = str(exc.value)
+    assert "-m" in msg and "grid catalog --api openai" in msg
+    assert cli.provider._read_records("n1") == {}
+
+
+def test_remote_join_api_rejects_inline_alias(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5=alias"])
+    assert "advertise" in str(exc.value).lower() or "alias" in str(exc.value).lower()
+    assert cli.provider._read_records("n1") == {}
+
+
+def test_remote_join_api_model_outside_whitelist_lists_valid_names(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    # No env key on purpose: the whitelist is static data, checked before the key or any network.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("whitelist check must precede any vendor call"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "openai", "-m", "openai:nope"])
+    msg = str(exc.value)
+    assert "openai:nope" in msg
+    for entry in api_catalog.WHITELISTS["openai"].entries:  # every valid name, so the fix is one edit away
+        assert api_catalog.advertised_name("openai", entry) in msg
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_requires_env_key(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("no key, no vendor call"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"])
+    assert "OPENAI_API_KEY" in str(exc.value)
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def _mock_vendor(monkeypatch, handler, _real=httpx.Client):
+    """Serve the vendor's model-listing endpoint the `join --api` key validation calls, via
+    httpx.MockTransport (the `_mock_serve_engine` pattern). Returns what the vendor saw."""
+    seen = {}
+
+    def wrapped(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        return handler(request)
+
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda *a, **k: _real(*a, **{**k, "transport": httpx.MockTransport(wrapped)}),
+    )
+    return seen
+
+
+def test_remote_join_api_invalid_key_is_terminal_no_spawn(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    seen = _mock_vendor(monkeypatch, lambda request: httpx.Response(401, text="invalid key"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"])
+    msg = str(exc.value)
+    assert "401" in msg
+    assert "sk-test-123" not in msg  # the key never appears in terminal output
+    assert seen["url"] == "https://api.openai.com/v1/models"
+    assert seen["auth"] == "Bearer sk-test-123"
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_writes_kind_generic_record_and_spawns(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"data": [{"id": "gpt-5.5"}, {"id": "gpt-5.4-mini"}]}
+    ))
+
+    assert cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    # Kind-generic spec: service kind + vendor base URL + advertised names — never the key.
+    assert record["engines"] == [{
+        "endpoint_url": "https://api.openai.com/v1",
+        "models": ["openai:gpt-5.5"],
+        "engine_label": "openai",
+        "api_kind": "openai",
+    }]
+    assert record["models"] == ["openai:gpt-5.5"]
+    assert record["endpoint_url"] == "https://api.openai.com/v1"
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    # Secret hygiene: the key appears in no record, no terminal output.
+    from shared import run_records
+    record_text = run_records.record_path("n1", "remote").read_text()
+    assert "sk-test-123" not in record_text
+    out_err = capsys.readouterr()
+    assert "sk-test-123" not in out_err.out + out_err.err
+
+
+def test_remote_join_api_excludes_models_key_cannot_see(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    # The key sees gpt-5.5 but not gpt-5.4-mini: the whitelisted-but-unavailable model is excluded.
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={"data": [{"id": "gpt-5.5"}]}))
+
+    assert cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5", "-m", "openai:gpt-5.4-mini"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["openai:gpt-5.5"]
+    assert "openai:gpt-5.4-mini" in capsys.readouterr().err  # the exclusion is reported, not silent
+
+
+def test_remote_join_api_all_models_unavailable_errors(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={"data": []}))
+
+    with pytest.raises(SystemExit) as exc:  # error rather than joining nothing
+        cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"])
+    assert "openai:gpt-5.5" in str(exc.value)
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_unexpected_listing_shape_is_diagnostic(monkeypatch, tmp_path):
+    """A 200 whose body isn't the documented {"data": [...]} shape must be its own diagnostic
+    error, not masquerade as 'your key can't see these models' (which points the operator at
+    permissions instead of the vendor/proxy)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json=[{"id": "gpt-5.5"}]))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"])
+    msg = str(exc.value)
+    assert "shape" in msg.lower() or "unexpected" in msg.lower()
+    assert "available to this" not in msg  # not the key-permissions message
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
 def test_remote_join_member_falls_back_to_bundle_url_when_status_forbidden(monkeypatch, tmp_path):
     """A provider MEMBER (not the grid creator) gets 403 from the creator-only status endpoint; join
     must fall back to the lan_signaling_url the login bundle carries instead of failing."""
@@ -2314,6 +2545,30 @@ def test_remote_join_appends_via_hot_reload(monkeypatch, tmp_path):
     assert rec["models"] == ["llama3", "mistral"] and rec["endpoint_url"] is None
     assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # hot-reloaded the live singleton in place
     assert terminated == []                             # never stopped the live process (zero-drop)
+
+
+def test_remote_join_api_append_onto_live_hardware_respawns_not_reloads(monkeypatch, tmp_path):
+    """Appending an API engine must RESPAWN, not SIGHUP: the live process's environment has no
+    vendor key, so a hot-reload would advertise openai:* models whose every job 401s upstream.
+    The respawned process inherits the joining CLI's env — where the key was just validated."""
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={"data": [{"id": "gpt-5.5"}]}))
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3"]) == 0  # first join spawns
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"]) == 0
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:11434/v1", "https://api.openai.com/v1"]
+    assert rec["models"] == ["llama3", "openai:gpt-5.5"]
+    assert terminated == [4242]  # stopped the keyless live process...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
 
 
 def test_remote_join_additive_preserves_max_concurrency(monkeypatch, tmp_path):
@@ -4101,6 +4356,61 @@ def test_serve_reload_appended_model_kept_no_reprobe(monkeypatch, tmp_path):
     assert state.route("b") == "http://e1/v1"
 
 
+def test_serve_reload_new_api_spec_static_caps_and_vendor_upstream(monkeypatch, tmp_path):
+    """A hot-reload that gains an API spec must take its caps from the static whitelist (no probe
+    ever targets the vendor) and derive vendor upstream names — the same `_probe_spec_caps` seam as
+    startup, so the two can't drift. (Reachable via leave-shrink; a NEW api join respawns instead,
+    for the env key.)"""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+         "engine_label": "openai", "api_kind": "openai"},
+    ])
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda *a, **k: pytest.fail("api engines are never probed, reload included"))
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert seen["models"] == ["a", "openai:gpt-5.5"]
+    assert seen["capabilities"]["models"]["openai:gpt-5.5"]["context_window"] == 1_050_000
+    assert state.upstream_model("openai:gpt-5.5") == "gpt-5.5"  # vendor name, not the advertised name
+    assert state.route("openai:gpt-5.5") == "https://api.openai.com/v1"
+
+
+def test_serve_reload_retained_api_spec_keeps_vendor_upstream(monkeypatch, tmp_path):
+    """A reload triggered by an unrelated append must not break a LIVE api engine's rewrite: the
+    retained branch rebuilds upstream from the record's advertised names, which for an api spec must
+    re-derive the vendor names — and still never probe the vendor."""
+    from remote import probe, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("https://api.openai.com/v1", ["openai:gpt-5.5"], ["gpt-5.5"],
+         {"schema_version": 1, "models": {"openai:gpt-5.5": {"context_window": 1_050_000}}}),
+    ], engines=[
+        {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+         "engine_label": "openai", "api_kind": "openai"},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ])
+    probed = []
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, **kw: probed.append((url, model))
+                        or {"schema_version": 1, "models": {model: {}}})
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")
+
+    assert probed == [("http://e2/v1", "b")]                    # only the new hardware engine probed
+    assert state.upstream_model("openai:gpt-5.5") == "gpt-5.5"  # the live api rewrite survives the reload
+    assert seen["models"] == ["openai:gpt-5.5", "b"]
+
+
 def test_serve_reload_drops_removed_engine(monkeypatch, tmp_path):
     """Leave-shrink: dropping an engine from the record removes it from the union on the next reload."""
     from remote import probe, relay, serve
@@ -4411,6 +4721,61 @@ def test_serve_start_reload_watcher_installs_handler_and_thread(monkeypatch, tmp
             _sig.signal(_sig.SIGHUP, orig)
 
 
+def test_remote_engine_startup_missing_api_env_key_exits_naming_var(monkeypatch, tmp_path):
+    """A respawned serve process whose record carries an API spec but whose environment lost the
+    key must exit naming the env var — not come up advertising models whose every job would 401."""
+    from remote import serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+                           "engine_label": "openai", "api_kind": "openai"}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        serve.run_remote_engine_from_record("n1", "remote")
+    assert "OPENAI_API_KEY" in str(exc.value)
+
+
+def test_remote_engine_api_record_registers_static_caps_and_kind(monkeypatch, tmp_path):
+    """Startup-seam proof for the API-engine tracer bullet: a record with one api spec comes up with
+    whitelist caps (no probe), advertises the namespaced models, reports kind `openai` on the grid
+    page, and holds the env key ready for forwards — while the record itself stays key-free."""
+    from remote import probe, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+                           "engine_label": "openai", "api_kind": "openai"}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(probe, "capabilities", lambda *a, **k: pytest.fail("api engines are never probed"))
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw, node=node))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    state_seen = {}
+
+    def fake_poll(s):
+        state_seen["bearer_by_url"] = dict(s.bearer_by_url)
+        s.stop.set()
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+
+    assert seen["node"] == "node-1" and seen["models"] == ["openai:gpt-5.5"]
+    entry = seen["capabilities"]["models"]["openai:gpt-5.5"]
+    assert entry["context_window"] == 1_050_000 and entry["features"]["tools"] is True
+    assert seen["meta"]["engine"] == "openai"  # the grid page shows the API engine's kind
+    assert state_seen["bearer_by_url"] == {"https://api.openai.com/v1": "sk-test-123"}
+
+
 def test_run_remote_engine_starts_reload_thread_with_sighup_blocked(monkeypatch, tmp_path):
     """C4: every daemon — the reload watcher, the heartbeat, AND the N poll workers — starts while SIGHUP
     is blocked (so they inherit the block), then `_serve_loop` unblocks SIGHUP on the MAIN thread last.
@@ -4521,6 +4886,102 @@ def test_serve_handle_job_engine_error_submits_error(monkeypatch, tmp_path):
 
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions", "body": {}, "is_stream": False})
     assert "500" in captured["error"] and "submitted" not in captured
+
+
+def _api_serve_state(monkeypatch, tmp_path, **overrides):
+    """A `_ServeState` serving one API-engine model: advertised `openai:gpt-5.5` routed to the vendor
+    base URL, vendor-name rewrite, and the key attached per target URL."""
+    kwargs = dict(
+        models=["openai:gpt-5.5"],
+        routes={"openai:gpt-5.5": "https://api.openai.com/v1"},
+        upstream={"openai:gpt-5.5": "gpt-5.5"},
+        bearer_by_url={"https://api.openai.com/v1": "sk-test-123"},
+    )
+    kwargs.update(overrides)
+    return _serve_state(monkeypatch, tmp_path, **kwargs)
+
+
+def test_serve_handle_job_api_forward_carries_bearer_and_vendor_model(monkeypatch, tmp_path):
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(content=content, stream=stream))
+    monkeypatch.setattr(relay, "submit_error", lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def vendor(request):
+        assert str(request.url) == "https://api.openai.com/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer sk-test-123"
+        assert json.loads(request.content)["model"] == "gpt-5.5"  # vendor name, not openai:gpt-5.5
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": False})
+    assert captured["stream"] is False and b'"hi"' in captured["content"] and "error" not in captured
+
+
+def test_serve_handle_job_api_stream_passes_sse_with_bearer(monkeypatch, tmp_path):
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, body=b"".join(content))  # materialise the generator while open
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+
+    def vendor(request):
+        assert request.headers["authorization"] == "Bearer sk-test-123"
+        return httpx.Response(200, content=b"data: a\n\ndata: [DONE]\n\n")
+
+    _mock_serve_engine(monkeypatch, vendor)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": True})
+    assert captured["stream"] is True and captured["body"] == b"data: a\n\ndata: [DONE]\n\n"
+
+
+def test_serve_handle_job_hardware_forward_has_no_bearer(monkeypatch, tmp_path):
+    """A hardware engine in the same identity as an API engine must never see the vendor key."""
+    from remote import relay, serve
+
+    state = _api_serve_state(
+        monkeypatch, tmp_path,
+        models=["llama3", "openai:gpt-5.5"],
+        routes={"llama3": "http://127.0.0.1:8081/v1", "openai:gpt-5.5": "https://api.openai.com/v1"},
+    )
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: captured.update(ok=True))
+
+    def engine(request):
+        assert request.url.host == "127.0.0.1"
+        assert "authorization" not in request.headers  # the key rides only to the vendor URL
+        return httpx.Response(200, json={})
+
+    _mock_serve_engine(monkeypatch, engine)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "llama3"}, "is_stream": False})
+    assert captured.get("ok") is True
+
+
+def test_serve_handle_job_api_upstream_401_is_job_error_not_token_refresh(monkeypatch, tmp_path):
+    """A vendor 401 is a JOB error in the vendor's auth domain: it must reach the consumer with the
+    upstream status and must never enter the relay-token refresh path (distinct auth domains)."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    monkeypatch.setattr(state, "refresh",
+                        lambda stale_token=None: pytest.fail("vendor 401 must not touch relay-token refresh"))
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: captured.update(submitted=True))
+    monkeypatch.setattr(relay, "submit_error", lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(401, text="invalid api key"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": False})
+    assert "401" in captured["error"] and "submitted" not in captured
 
 
 def test_serve_handle_job_media_without_media_url_submits_error(monkeypatch, tmp_path):
@@ -5092,6 +5553,85 @@ def test_bring_up_engines_single_spec_multi_model_probes_every_model(monkeypatch
     assert advertised == ["A", "B", "C"] and upstream == ["A", "B", "C"]
     assert set(caps["models"]) == {"A", "B", "C"}           # one merged envelope carries all models
     assert caps["models"]["B"] == {"f": "B"}                # later models keep their own probed entry
+
+
+def test_bring_up_engines_api_spec_static_caps_never_probes(monkeypatch, tmp_path):
+    """An API engine's caps come from the static whitelist — no probe or benchmark call may ever
+    target the vendor (ADR 0012). Upstream names are the vendor names derived from the advertised
+    `openai:*` form, so the forward rewrite sends what the vendor understands."""
+    from remote import probe, serve
+
+    record = {
+        "engines": [{
+            "endpoint_url": "https://api.openai.com/v1",
+            "models": ["openai:gpt-5.5", "openai:gpt-5.4-mini"],
+            "engine_label": "openai",
+            "api_kind": "openai",
+        }],
+        "advertise_as": [],
+    }
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda *a, **k: pytest.fail("api engines are never probed"))
+
+    results, launched, launcher = serve._bring_up_engines(record)
+    assert launched == [] and launcher is None
+    (llm_url, advertised, upstream, caps), = results
+    assert llm_url == "https://api.openai.com/v1"
+    assert advertised == ["openai:gpt-5.5", "openai:gpt-5.4-mini"]
+    assert upstream == ["gpt-5.5", "gpt-5.4-mini"]          # vendor names, derived from the whitelist
+    assert caps["schema_version"] == 1
+    flagship = caps["models"]["openai:gpt-5.5"]
+    assert flagship["features"]["tools"] is True and flagship["features"]["vision"] is True
+    assert flagship["context_window"] == 1_050_000          # static caps straight from the whitelist
+
+
+def test_bring_up_engines_api_model_gone_from_whitelist_warns_and_degrades(monkeypatch, tmp_path, capsys):
+    """A model that left the whitelist between join and respawn degrades like a failed probe
+    (all-False caps, prefix-strip rewrite) — but the degrade must leave a stderr trace, like every
+    other serve-side degrade, so quietly broken tool/vision consumers are diagnosable."""
+    from remote import probe, serve
+
+    record = {
+        "engines": [{
+            "endpoint_url": "https://api.openai.com/v1",
+            "models": ["openai:gpt-5.5", "openai:gpt-legacy"],
+            "engine_label": "openai",
+            "api_kind": "openai",
+        }],
+        "advertise_as": [],
+    }
+    monkeypatch.setattr(probe, "capabilities", lambda *a, **k: pytest.fail("api engines are never probed"))
+
+    results, _launched, _launcher = serve._bring_up_engines(record)
+
+    (_url, _advertised, upstream, caps), = results
+    assert upstream == ["gpt-5.5", "gpt-legacy"]  # prefix-strip fallback still rewrites sanely
+    legacy = caps["models"]["openai:gpt-legacy"]
+    assert all(v is False for v in legacy["features"].values())  # degraded, not crashed
+    err = capsys.readouterr().err
+    assert "openai:gpt-legacy" in err and "whitelist" in err  # ...and the degrade is observable
+
+
+def test_bring_up_engines_mixed_union_probes_only_hardware(monkeypatch, tmp_path):
+    from remote import probe, serve
+
+    record = {
+        "engines": [
+            {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+            {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+             "engine_label": "openai", "api_kind": "openai"},
+        ],
+        "advertise_as": [],
+    }
+    probed = []
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, *, advertise_as=None, context_window=None: probed.append((url, model))
+                        or {"schema_version": 1, "models": {advertise_as or model: {}}})
+
+    results, launched, _ = serve._bring_up_engines(record)
+    assert launched == []
+    assert probed == [("http://h:11434/v1", "llama3")]      # only the hardware engine is probed
+    assert results[1][1] == ["openai:gpt-5.5"] and results[1][2] == ["gpt-5.5"]
 
 
 def test_bring_up_engines_external_alias_probes_real_name_keys_alias(monkeypatch, tmp_path):

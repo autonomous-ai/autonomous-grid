@@ -175,6 +175,7 @@ grid join [grid] --all                                # join every detected engi
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
+grid join [grid] --api <kind> -m <model>...           # remote only: join a third-party API engine (v1: openai)
 grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
 grid engine ls [grid] [--json]                        # live engines joined to a grid (legacy alias: grid engines)
 ```
@@ -225,6 +226,21 @@ up ComfyUI + the media server, registers the `comfyui:*` workflows the host's VR
 relay forwards `media/*` jobs to the media server on loopback; the SSE (progress + base64 result
 files) streams back exactly as in local mode.
 
+`grid join --api <kind> -m <model>...` (v1: `openai`) joins an **API engine** — a third-party LLM
+API service served through your own key ([ADR 0012](./adr/0012-api-engines.md)). The key is read
+from `OPENAI_API_KEY` (there is deliberately no `--api-key` flag) and validated at join time
+against the vendor's model listing — an invalid key is a terminal error and nothing is spawned.
+`-m` names whitelisted `openai:*` models (`grid catalog --api openai` shows them); a whitelisted
+model your key can't see is skipped with a note, and a name outside the whitelist errors listing
+the valid names. The serve loop registers the models with their **static** whitelist capabilities —
+the vendor is never probed or benchmarked — and forwards each `chat/completions` job to the vendor
+with your key, rewriting the advertised `openai:<name>` to the vendor's `<name>`; SSE streams pass
+through unchanged, and a vendor error (401/429/5xx) surfaces as that job's error, never touching
+your grid sign-in. **Requests to `openai:*` models leave the grid for the vendor**, under your key
+and your own OpenAI account's terms. `--api` is mutually exclusive with
+`--at`/`--serve`/`--advertise-as`/`--media`/`--bundle` in one invocation — join other engines with
+a separate (additive) `grid join`.
+
 The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
@@ -233,7 +249,8 @@ The `grid join` flag set is the union of both modes, gated by mode:
   and the media flags `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
 - **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
-- **Remote-only:** `--max-concurrency` (how many requests this engine serves at once; default 1 —
+- **Remote-only:** `--api <kind>` (join a third-party API engine; requires `-m` with whitelisted
+  models), and `--max-concurrency` (how many requests this engine serves at once; default 1 —
   the provider runs one poll worker per slot).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /

@@ -24,6 +24,7 @@ import uuid
 
 from shared import paths, run_records
 from shared.filelock import file_lock
+from shared.models import api_catalog
 
 # Remote has exactly ONE identity per grid: the relay node_id is pinned to the per-grid access token
 # (remote/serve._node_id_from_token), so two `grid join`s on a grid would register the same node and
@@ -31,6 +32,9 @@ from shared.filelock import file_lock
 # engines_dir(<network_id>)/remote.json — and repeated joins are additive (ADR 0010). `--name` no longer
 # keys the record (it can't mint a second identity); it is the grid-page display name (record["meta_name"]).
 _REMOTE_IDENTITY = "remote"
+
+# One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
+_VENDOR_LIST_TIMEOUT = 15.0
 
 
 def _reject_local_only_flags(args: argparse.Namespace) -> None:
@@ -50,12 +54,48 @@ def _warn_deprecated(triggered: bool, message: str) -> None:
         print(message, file=sys.stderr)
 
 
+def _reject_api_conflicts(args: argparse.Namespace) -> None:
+    """Grammar for ``grid join --api <kind>`` (ADR 0012): one API engine per invocation. The
+    hardware/media selectors don't combine with it (additive joins cover serving both), and
+    aliasing never applies — the namespaced whitelist names ARE the advertised names."""
+    kind = args.api
+    if kind not in api_catalog.WHITELISTS:
+        supported = ", ".join(api_catalog.supported_kinds())
+        raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
+    conflicts = (
+        ("at", "--at"),
+        ("serve", "--serve"),
+        ("advertise_as", "--advertise-as"),
+        ("media", "--media"),
+        ("bundles", "--bundle"),
+    )
+    used = [flag for attr, flag in conflicts if getattr(args, attr, None)]
+    if used:
+        raise SystemExit(
+            f"--api joins one API engine and can't combine with {', '.join(used)} in the same "
+            "invocation. Join other engines with a separate `grid join`."
+        )
+    models = list(getattr(args, "models", []) or [])
+    if not models:
+        raise SystemExit(
+            f"--api {kind} requires -m with the whitelisted models to serve "
+            f"(see `grid catalog --api {kind}`)."
+        )
+    if any("=" in model for model in models):
+        raise SystemExit(
+            "API-engine models are advertised under their whitelist names — inline `-m real=alias` "
+            "aliasing doesn't apply with --api."
+        )
+
+
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    if getattr(args, "api", None) is not None:  # `--api ""` must error, not fall through to hardware
+        _reject_api_conflicts(args)
     if args.serve and args.models:
         raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
     provider._apply_inline_aliases(args)
@@ -85,7 +125,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # member can't pre-check fails later at register). See remote_grid.resolve_relay_base.
     signaling_url, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
 
-    specs, media_detected = _resolve_serve_targets(args)
+    if getattr(args, "api", None) is not None:
+        specs, media_detected = _resolve_api_targets(args), False
+    else:
+        specs, media_detected = _resolve_serve_targets(args)
     media = bool(getattr(args, "media", False)) or media_detected
     if not specs and not media:  # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
@@ -154,6 +197,81 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_api_targets(args: argparse.Namespace) -> list[dict[str, object]]:
+    """The single API-engine spec for ``join --api <kind>``: ``-m`` validated against the static
+    whitelist first (no key, no network), then the key from the kind's env var, then the vendor's
+    model listing — the ONLY place the CLI itself calls the vendor (ADR 0012) — which doubles as
+    key validation and as the whitelist ∩ visible-models filter. The spec is kind-generic and
+    never carries the key; the vendor model names are derived from the advertised names at serve
+    time (a stored map would go stale on an additive re-join, which unions models only)."""
+    kind = args.api
+    whitelist = api_catalog.WHITELISTS[kind]  # kind already validated by _reject_api_conflicts
+    if getattr(args, "advertise_as", None):
+        # Defence in depth: inline `-m real=alias` desugars into advertise_as after the early guard.
+        raise SystemExit("--advertise-as aliasing doesn't apply with --api.")
+    valid = {api_catalog.advertised_name(kind, entry): entry for entry in whitelist.entries}
+    chosen = list(dict.fromkeys(args.models))  # dedupe up front so errors don't repeat a model
+    unknown = [model for model in chosen if model not in valid]
+    if unknown:
+        raise SystemExit(
+            f"Not in the {kind} whitelist: {', '.join(unknown)}. "
+            f"Valid models: {', '.join(valid)}."
+        )
+    key = os.environ.get(whitelist.env_var)
+    if not key:
+        raise SystemExit(
+            f"--api {kind} needs your API key in {whitelist.env_var}. "
+            f"Export it and re-run: export {whitelist.env_var}=..."
+        )
+    visible = _list_vendor_models(kind, whitelist.base_url, key)
+    served = [model for model in chosen if valid[model].vendor_name in visible]
+    skipped = [model for model in chosen if model not in served]
+    if not served:
+        raise SystemExit(
+            f"None of the requested models are available to this {kind} key: {', '.join(skipped)}."
+        )
+    if skipped:
+        print(f"Skipping (not available to this {kind} key): {', '.join(skipped)}", file=sys.stderr)
+    return [{
+        "endpoint_url": whitelist.base_url,
+        "models": served,
+        "engine_label": kind,
+        "api_kind": kind,
+    }]
+
+
+def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:
+    """The vendor model ids this key can see (``GET {base_url}/models``). A rejected key or an
+    unreachable/malformed vendor is a terminal error — nothing is spawned. Never echoes the key."""
+    import httpx  # lazy: only stdlib + shared.* at module top (see module docstring)
+
+    try:
+        with httpx.Client(timeout=_VENDOR_LIST_TIMEOUT) as client:
+            resp = client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {key}"})
+    except httpx.HTTPError as exc:
+        raise SystemExit(f"Could not reach {kind} at {base_url}: {exc}") from None
+    if resp.status_code in (401, 403):
+        raise SystemExit(
+            f"{kind} rejected the API key (HTTP {resp.status_code}): {resp.text[:200]}"
+        )
+    if resp.status_code != 200:  # an outage/redirect is not a key problem — don't blame the key
+        raise SystemExit(f"{kind} returned HTTP {resp.status_code}: {resp.text[:200]}")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise SystemExit(f"{kind} returned a malformed model listing (not JSON).") from None
+    # A 200 that isn't the documented {"data": [...]} shape must be its own diagnostic error —
+    # returning an empty set here would masquerade as "your key can't see these models".
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise SystemExit(f"{kind} returned an unexpected model listing shape: {resp.text[:200]}")
+    return {
+        str(item["id"])
+        for item in items
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
 def _live_records(network_id: str) -> list[dict[str, object]]:
     """Every remote run record for this grid whose detached process is still alive. Normally that's just
     the singleton ``remote.json``; on upgrade it also catches legacy ``engine-<uuid>`` records so the join
@@ -166,7 +284,9 @@ def _live_records(network_id: str) -> list[dict[str, object]]:
 
 def _flat_spec(record: dict[str, object]) -> dict[str, object]:
     """One engine spec synthesised from a record written before the multi-engine ``engines`` field
-    (mirrors ``remote/serve._flat_spec``) so an old-format live record is still adopted, not dropped."""
+    (mirrors ``remote/serve._flat_spec``) so an old-format live record is still adopted, not dropped.
+    Never carries ``api_kind``: api specs postdate the ``engines`` array, so a flat record can't
+    hold one — if that invariant ever breaks, the spec would silently degrade to a hardware engine."""
     return {
         "endpoint_url": record.get("endpoint_url"),
         "models": list(record.get("models") or []),
@@ -273,6 +393,15 @@ def _hot_reloadable(
     if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
         return False
     if any(not spec.get("endpoint_url") for spec in merged_specs):  # a built-in --serve needs a launch
+        return False
+    # A NEW API engine needs the vendor key from this CLI's environment, which a SIGHUP can't
+    # inject into the live process — respawn so the child inherits the just-validated key.
+    # Known gap until issue 03's key store: a re-join of an ALREADY-live api spec (idempotent
+    # no-op, or a model append that hot-reloads below) can't deliver a ROTATED env key to the
+    # live process — its bearer is fixed at spawn. Rotation is issue 03's acceptance; `grid
+    # leave` + re-join is the interim path.
+    live_api = {_spec_key(spec) for spec in _engine_union(live) if spec.get("api_kind")}
+    if any(spec.get("api_kind") and _spec_key(spec) not in live_api for spec in merged_specs):
         return False
     return _media_key(record) == _media_key(singleton)  # a media/bundle change needs a bring-up (C3)
 

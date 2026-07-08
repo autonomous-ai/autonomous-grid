@@ -25,6 +25,8 @@ class ApiModelEntry:
 @dataclass(frozen=True)
 class ApiWhitelist:
     last_verified: str  # ISO date the table was last checked against the vendor's docs
+    base_url: str  # the vendor endpoint jobs forward to, no trailing slash
+    env_var: str  # the environment variable the provider's key is read from
     entries: tuple[ApiModelEntry, ...]
 
 
@@ -79,7 +81,12 @@ OPENAI_WHITELIST: tuple[ApiModelEntry, ...] = (
 
 # One structure per kind: the verified-date and the entries can't drift apart.
 WHITELISTS: dict[str, ApiWhitelist] = {
-    "openai": ApiWhitelist(last_verified=OPENAI_LAST_VERIFIED, entries=OPENAI_WHITELIST),
+    "openai": ApiWhitelist(
+        last_verified=OPENAI_LAST_VERIFIED,
+        base_url="https://api.openai.com/v1",
+        env_var="OPENAI_API_KEY",
+        entries=OPENAI_WHITELIST,
+    ),
 }
 
 
@@ -89,6 +96,33 @@ def supported_kinds() -> tuple[str, ...]:
 
 def advertised_name(kind: str, entry: ApiModelEntry) -> str:
     return f"{kind}:{entry.vendor_name}"
+
+
+def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
+    """The whitelist entry advertised under ``advertised`` (e.g. ``openai:gpt-5.5``), or None.
+
+    Only the namespaced form resolves — a bare vendor name is not an advertised name.
+    """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return None
+    for entry in whitelist.entries:
+        if advertised_name(kind, entry) == advertised:
+            return entry
+    return None
+
+
+def probed_features(entry: ApiModelEntry) -> dict[str, bool]:
+    """The entry's capabilities in the probed-dict shape ``remote.probe.capability_entry``
+    consumes — API engines register these statically, never via a live probe."""
+    return {
+        "vision": entry.supports_vision,
+        "tools": entry.supports_tools,
+        # OpenAI models that support tools support parallel tool calls.
+        "parallel_tool_calls": entry.supports_tools,
+        "json_object": entry.supports_json_mode,
+        "json_schema": entry.supports_structured_outputs,
+    }
 
 
 def format_api_entry(kind: str, entry: ApiModelEntry) -> str:

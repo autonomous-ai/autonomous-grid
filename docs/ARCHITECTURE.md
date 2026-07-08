@@ -203,7 +203,15 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
    workflows the host's VRAM gates in, and forwards `media/*` jobs to the media server on loopback
    (always streamed SSE) — media-only or alongside a text engine. See
    [ADR 0008](adr/0008-remote-media-serve.md).
-6. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
+6. `grid join --api <kind>` serves an **API engine** (v1: `openai`): the join validates the key
+   from the kind's env var against the vendor's model listing, the record's spec carries kind +
+   vendor base URL + advertised `openai:*` names (never the key), and the loop registers those
+   models with **static** whitelist capabilities (`shared/models/api_catalog.py` — the vendor is
+   never probed) and forwards their `chat/completions` jobs to the vendor with a
+   `Authorization: Bearer` header and the advertised→vendor model rewrite. A vendor 401 is a job
+   error in a separate auth domain — it never triggers the relay-token refresh in step 3. See
+   [ADR 0012](adr/0012-api-engines.md).
+7. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
    drains queued work, and stops anything it launched. See
    [ADR 0004](adr/0004-remote-provider-serve.md).
 
