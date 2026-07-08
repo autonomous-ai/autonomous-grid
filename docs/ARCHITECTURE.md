@@ -203,7 +203,21 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
    workflows the host's VRAM gates in, and forwards `media/*` jobs to the media server on loopback
    (always streamed SSE) — media-only or alongside a text engine. See
    [ADR 0008](adr/0008-remote-media-serve.md).
-6. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
+6. `grid join --api <kind>` serves an **API engine** (v1: `openai`): the join resolves the key
+   (env var → machine-local key store → hidden prompt), validates it against the vendor's model
+   listing, and stores it in `~/.grid/api_keys.toml` (`0o600`, survives `grid logout`; a new env
+   value overwrites it — rotation restarts the engine). With no `-m` it serves the whole whitelist
+   ∩ key-visible models. The record's spec carries kind + vendor base URL + advertised `openai:*`
+   names (never the key — the detached loop reads the key store at startup), and the loop registers
+   those models with **static** whitelist capabilities (`shared/models/api_catalog.py` — the vendor
+   is never probed, and only `chat/completions` is advertised/served: a legacy `completions` job
+   gets a structured error, never a forward) and forwards their `chat/completions` jobs to the
+   vendor with a `Authorization: Bearer` header and the advertised→vendor model rewrite. A vendor
+   401 is a job error in a separate auth domain — it never triggers the relay-token refresh in
+   step 3, never unregisters the engine, and (like 403/429) warns on the engine log. An API-only
+   identity defaults to 8 poll workers (`--max-concurrency` still wins); any hardware engine in the
+   union keeps the default of 1. See [ADR 0012](adr/0012-api-engines.md).
+7. `grid leave` SIGTERMs the subprocess, which flips the node back to `consumer` so the relay
    drains queued work, and stops anything it launched. See
    [ADR 0004](adr/0004-remote-provider-serve.md).
 

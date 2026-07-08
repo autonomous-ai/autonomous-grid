@@ -22,6 +22,12 @@ def device_file() -> Path:
     return grid_home() / "device.toml"
 
 
+def api_keys_file() -> Path:
+    """Machine-local API-engine key store (TOML, 0o600), keyed by service kind. Survives logout —
+    deliberately separate from the sign-in credential store (like device.toml)."""
+    return grid_home() / "api_keys.toml"
+
+
 def grids_dir() -> Path:
     return grid_home() / "grids"
 

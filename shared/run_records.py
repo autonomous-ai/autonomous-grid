@@ -111,6 +111,29 @@ def media_signature(record: dict[str, Any]) -> tuple[bool, tuple[str, ...], int,
     )
 
 
+# Poll-worker default for an identity that serves ONLY API engines: the upstream is a hosted API,
+# so several consumers must not queue behind one worker while it sits idle (ADR 0012). Any hardware
+# engine (or media) in the union keeps the conservative default of 1.
+API_ONLY_DEFAULT_CONCURRENCY = 8
+
+
+def effective_max_concurrency(record: dict[str, Any]) -> int:
+    """The poll-worker count a record's identity runs and advertises.
+
+    An explicit ``--max-concurrency`` (stored truthy on the record) always wins; otherwise the
+    default is derived from the union: 8 when every engine spec is an API engine and the identity
+    serves no media, else 1. Like ``media_signature``, this is the ONE definition shared by the
+    CLI's hot-reload-vs-respawn choice and the serve loop's startup, so the two can never desync
+    (ADR 0010 C3). A legacy flat record (no ``engines`` field) keeps the default of 1.
+    """
+    explicit = record.get("max_concurrency")
+    if explicit:
+        return int(explicit)
+    engines = record.get("engines") or []
+    api_only = bool(engines) and all(spec.get("api_kind") for spec in engines)
+    return API_ONLY_DEFAULT_CONCURRENCY if api_only and not record.get("media") else 1
+
+
 def pid_alive(pid: int) -> bool:
     if not pid:
         return False

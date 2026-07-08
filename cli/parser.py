@@ -132,6 +132,13 @@ def _add_engines(sub) -> None:
     choose.add_argument("--all", action="store_true", help="Join every detected engine.")
     choose.add_argument("--kind", "--engine", dest="kind", default=None,
                         help="Join only the detected engine of this kind (e.g. ollama, vllm).")
+    choose.add_argument(
+        "--api",
+        metavar="KIND",
+        default=None,
+        help="Join a third-party API engine of this service kind (e.g. openai). "
+             "Remote only; requires -m with whitelisted models (see `grid catalog --api`).",
+    )
 
     naming = join.add_argument_group("Name & display")
     naming.add_argument("--name", default=None,
@@ -207,6 +214,11 @@ def _add_engines(sub) -> None:
 def _add_models(sub) -> None:
     catalog = sub.add_parser("catalog", help="Models Grid can pull")
     catalog.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    catalog.add_argument(
+        "--api",
+        metavar="KIND",
+        help="Show the API-engine whitelist for a service kind (e.g. openai).",
+    )
     catalog.set_defaults(handler=cmd_catalog)
 
     pull = sub.add_parser("pull", help="Download a model (catalog label or '<hf-repo>:<file>')")

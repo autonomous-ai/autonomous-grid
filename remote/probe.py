@@ -403,14 +403,18 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
 DEFAULT_CONTEXT_WINDOW = 128000
 
 
-def capability_entry(probed: dict[str, bool], context_window: int | None = None) -> dict[str, Any]:
+def capability_entry(
+    probed: dict[str, bool], context_window: int | None = None,
+    endpoints: list[str] | None = None,
+) -> dict[str, Any]:
     """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` reflects
     the engine's ``--ctx-size`` when known (the master reads it into the model catalog); it falls back to
-    the default when unknown."""
+    the default when unknown. ``endpoints`` defaults to the hardware-engine pair; an API engine passes
+    ``["chat/completions"]`` — it never serves legacy completions (ADR 0012)."""
     input_modalities = ["text", "image"] if probed["vision"] else ["text"]
     ctx = int(context_window) if context_window else DEFAULT_CONTEXT_WINDOW
     return {
-        "endpoints": ["chat/completions", "completions"],
+        "endpoints": list(endpoints) if endpoints is not None else ["chat/completions", "completions"],
         "input_modalities": input_modalities,
         "output_modalities": ["text"],
         "context_window": ctx,
@@ -435,9 +439,15 @@ def capability_entry(probed: dict[str, bool], context_window: int | None = None)
     }
 
 
-def envelope(model_name: str, probed: dict[str, bool], context_window: int | None = None) -> dict[str, Any]:
+def envelope(
+    model_name: str, probed: dict[str, bool], context_window: int | None = None,
+    endpoints: list[str] | None = None,
+) -> dict[str, Any]:
     """Wrap a probed-features dict in the ``{schema_version, models}`` envelope the relay requires."""
-    return {"schema_version": 1, "models": {model_name: capability_entry(probed, context_window)}}
+    return {
+        "schema_version": 1,
+        "models": {model_name: capability_entry(probed, context_window, endpoints=endpoints)},
+    }
 
 
 # --- throughput benchmark ---

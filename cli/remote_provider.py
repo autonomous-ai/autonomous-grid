@@ -14,6 +14,7 @@ while the `cli` package is still initialising.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import signal
 import socket
@@ -24,6 +25,7 @@ import uuid
 
 from shared import paths, run_records
 from shared.filelock import file_lock
+from shared.models import api_catalog
 
 # Remote has exactly ONE identity per grid: the relay node_id is pinned to the per-grid access token
 # (remote/serve._node_id_from_token), so two `grid join`s on a grid would register the same node and
@@ -31,6 +33,9 @@ from shared.filelock import file_lock
 # engines_dir(<network_id>)/remote.json — and repeated joins are additive (ADR 0010). `--name` no longer
 # keys the record (it can't mint a second identity); it is the grid-page display name (record["meta_name"]).
 _REMOTE_IDENTITY = "remote"
+
+# One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
+_VENDOR_LIST_TIMEOUT = 15.0
 
 
 def _reject_local_only_flags(args: argparse.Namespace) -> None:
@@ -50,12 +55,44 @@ def _warn_deprecated(triggered: bool, message: str) -> None:
         print(message, file=sys.stderr)
 
 
+def _reject_api_conflicts(args: argparse.Namespace) -> None:
+    """Grammar for ``grid join --api <kind>`` (ADR 0012): one API engine per invocation. The
+    hardware/media selectors don't combine with it (additive joins cover serving both), and
+    aliasing never applies — the namespaced whitelist names ARE the advertised names. ``-m`` is
+    optional: omitted, the join serves the whole whitelist the key can see (zero-config default)."""
+    kind = args.api
+    if kind not in api_catalog.WHITELISTS:
+        supported = ", ".join(api_catalog.supported_kinds())
+        raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
+    conflicts = (
+        ("at", "--at"),
+        ("serve", "--serve"),
+        ("advertise_as", "--advertise-as"),
+        ("media", "--media"),
+        ("bundles", "--bundle"),
+    )
+    used = [flag for attr, flag in conflicts if getattr(args, attr, None)]
+    if used:
+        raise SystemExit(
+            f"--api joins one API engine and can't combine with {', '.join(used)} in the same "
+            "invocation. Join other engines with a separate `grid join`."
+        )
+    models = list(getattr(args, "models", []) or [])
+    if any("=" in model for model in models):
+        raise SystemExit(
+            "API-engine models are advertised under their whitelist names — inline `-m real=alias` "
+            "aliasing doesn't apply with --api."
+        )
+
+
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
     from . import provider, remote_grid
 
     _reject_local_only_flags(args)
+    if getattr(args, "api", None) is not None:  # `--api ""` must error, not fall through to hardware
+        _reject_api_conflicts(args)
     if args.serve and args.models:
         raise SystemExit("--serve serves one built-in model; drop -m/--model (alias a built-in with --advertise-as).")
     provider._apply_inline_aliases(args)
@@ -85,7 +122,12 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # member can't pre-check fails later at register). See remote_grid.resolve_relay_base.
     signaling_url, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
 
-    specs, media_detected = _resolve_serve_targets(args)
+    key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
+    if getattr(args, "api", None) is not None:
+        specs, key_rotated = _resolve_api_targets(args)
+        media_detected = False
+    else:
+        specs, media_detected = _resolve_serve_targets(args)
     media = bool(getattr(args, "media", False)) or media_detected
     if not specs and not media:  # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
@@ -99,6 +141,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     with file_lock(run_records.record_path(network_id, engine_id)):
         live = _live_records(network_id)  # normally just the singleton; also legacy `engine-<uuid>` on upgrade
         merged_specs, changed = _merge_engines(_engine_union(live), specs)
+        # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
+        # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
+        # operator has certainty the new key is live — never a no-op, never SIGHUP. Kept at the call sites
+        # (not inside `_hot_reloadable`) because leave-shrink shares that gate and rotation never applies there.
+        rotated_live = key_rotated and any(
+            spec.get("api_kind") == args.api for spec in _engine_union(live)
+        )
         base_media = any(bool(rec.get("media")) for rec in live)
         media = base_media or media
         base_bundles = list(dict.fromkeys(b for rec in live for b in (rec.get("media_bundles") or [])))
@@ -108,9 +157,18 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # it — there is no other way to rename or add a bundle in Slice 1.
         if (
             live and not changed and media == base_media and bundles == base_bundles
-            and meta_name == _identity_field(live, "meta_name")
+            and meta_name == _identity_field(live, "meta_name") and not rotated_live
         ):
             print(f"Already serving on {label}; nothing to append.")
+            # The serve process records a hot-reload that failed AFTER the CLI reported success (the
+            # SIGHUP is fire-and-forget) — surface it here, or the no-op compounds the false success.
+            stale = _identity_field(live, "last_reload_error")
+            if stale:
+                print(
+                    f"Warning: the engine's last hot-reload failed and it kept its previous engines: "
+                    f"{stale}\n(see log={paths.engines_dir(network_id) / f'{engine_id}.log'})",
+                    file=sys.stderr,
+                )
             return 0
         _reject_unserveable_union(merged_specs, args, live)
         _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
@@ -126,9 +184,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # advertised, and the reload pins the advertised capacity to the actual live pool anyway).
         if getattr(args, "max_concurrency", None) is None and live:
             record["max_concurrency"] = _identity_field(live, "max_concurrency")
-        # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place. Fall back to
-        # stop-respawn for a first join, a legacy/pre-handler process, a launch, or a media change.
-        reloaded = _hot_reloadable(live, merged_specs, record)
+        # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place — an appended
+        # API engine reloads too now that its bearer is re-read from the key store (issue 05). Fall back to
+        # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, a
+        # concurrency-default flip, or a rotated key (respawned by policy so the operator knows it's live).
+        if rotated_live:
+            print(f"Rotated the stored {args.api} key — restarting the engine to apply it.")
+        reloaded = (not rotated_live) and _hot_reloadable(live, merged_specs, record)
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
         else:
@@ -154,6 +216,111 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
+    """The single API-engine spec for ``join --api <kind>``, plus whether the stored key rotated:
+    ``-m`` validated against the static whitelist first (no key, no network), then the key resolved
+    (env var, else key store, else hidden prompt), then the vendor's model listing — the ONLY place
+    the CLI itself calls the vendor (ADR 0012) — which doubles as key validation and as the
+    whitelist ∩ visible-models filter. The spec is kind-generic and never carries the key; the
+    vendor model names are derived from the advertised names at serve time (a stored map would go
+    stale on an additive re-join, which unions models only)."""
+    kind = args.api
+    whitelist = api_catalog.WHITELISTS[kind]  # kind already validated by _reject_api_conflicts
+    if getattr(args, "advertise_as", None):
+        # Defence in depth: inline `-m real=alias` desugars into advertise_as after the early guard.
+        raise SystemExit("--advertise-as aliasing doesn't apply with --api.")
+    valid = {api_catalog.advertised_name(kind, entry): entry for entry in whitelist.entries}
+    # No -m = the whole whitelist (zero-config default); `valid` preserves whitelist order.
+    chosen = list(dict.fromkeys(args.models or [])) or list(valid)  # dedupe so errors don't repeat
+    unknown = [model for model in chosen if model not in valid]
+    if unknown:
+        raise SystemExit(
+            f"Not in the {kind} whitelist: {', '.join(unknown)}. "
+            f"Valid models: {', '.join(valid)}."
+        )
+    from remote import api_keys  # lazy: only stdlib + shared.* at module top (see module docstring)
+
+    from . import provider
+
+    # Key precedence (ADR 0012): env var, else the machine-local key store, else a hidden
+    # interactive prompt. Never a flag — a key on the command line leaks into shell history.
+    # The env value is stripped like the prompt's, so accidental whitespace can't make an
+    # identical key look rotated on the `key != stored` check below.
+    stored = api_keys.load_key(kind)
+    key = (os.environ.get(whitelist.env_var) or "").strip() or stored
+    if not key and provider._interactive():
+        key = _prompt_api_key(kind, whitelist.env_var)
+        if not key:
+            raise SystemExit(f"No {kind} API key entered.")
+    if not key:
+        raise SystemExit(
+            f"--api {kind} needs your API key in {whitelist.env_var} "
+            f"(export {whitelist.env_var}=... and re-run), or run interactively to be prompted."
+        )
+    visible = _list_vendor_models(kind, whitelist.base_url, key)
+    # The listing call above proved the key valid — only now persist it to the machine-local key
+    # store, so a mistyped/revoked key is never stored for later joins (and the detached serve
+    # process) to reuse silently. A reused stored key skips the no-op rewrite; any NEW key (env or
+    # prompted) counts as a rotation the caller must deliver to a live identity via respawn.
+    key_rotated = key != stored
+    if key_rotated:
+        api_keys.store_key(kind, key)
+    served = [model for model in chosen if valid[model].vendor_name in visible]
+    skipped = [model for model in chosen if model not in served]
+    if not served:
+        # Wording must fit both the -m subset and the no--m default (nothing was "requested" then),
+        # and must keep the model names — they are the actionable part of the diagnostic.
+        raise SystemExit(
+            f"None of these {kind} whitelist models are available to this key: {', '.join(skipped)}."
+        )
+    if skipped:
+        print(f"Skipping (not available to this {kind} key): {', '.join(skipped)}", file=sys.stderr)
+    return [{
+        "endpoint_url": whitelist.base_url,
+        "models": served,
+        "engine_label": kind,
+        "api_kind": kind,
+    }], key_rotated
+
+
+def _prompt_api_key(kind: str, env_var: str) -> str:
+    """Hidden interactive prompt for one kind's API key — input is never echoed (getpass). Split
+    out so the CLI-seam tests can monkeypatch it (getpass reads the controlling tty)."""
+    return getpass.getpass(f"Enter your {kind} API key (input hidden; or export {env_var}): ").strip()
+
+
+def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:
+    """The vendor model ids this key can see (``GET {base_url}/models``). A rejected key or an
+    unreachable/malformed vendor is a terminal error — nothing is spawned. Never echoes the key."""
+    import httpx  # lazy: only stdlib + shared.* at module top (see module docstring)
+
+    try:
+        with httpx.Client(timeout=_VENDOR_LIST_TIMEOUT) as client:
+            resp = client.get(f"{base_url}/models", headers={"Authorization": f"Bearer {key}"})
+    except httpx.HTTPError as exc:
+        raise SystemExit(f"Could not reach {kind} at {base_url}: {exc}") from None
+    if resp.status_code in (401, 403):
+        raise SystemExit(
+            f"{kind} rejected the API key (HTTP {resp.status_code}): {resp.text[:200]}"
+        )
+    if resp.status_code != 200:  # an outage/redirect is not a key problem — don't blame the key
+        raise SystemExit(f"{kind} returned HTTP {resp.status_code}: {resp.text[:200]}")
+    try:
+        data = resp.json()
+    except ValueError:
+        raise SystemExit(f"{kind} returned a malformed model listing (not JSON).") from None
+    # A 200 that isn't the documented {"data": [...]} shape must be its own diagnostic error —
+    # returning an empty set here would masquerade as "your key can't see these models".
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise SystemExit(f"{kind} returned an unexpected model listing shape: {resp.text[:200]}")
+    return {
+        str(item["id"])
+        for item in items
+        if isinstance(item, dict) and item.get("id")
+    }
+
+
 def _live_records(network_id: str) -> list[dict[str, object]]:
     """Every remote run record for this grid whose detached process is still alive. Normally that's just
     the singleton ``remote.json``; on upgrade it also catches legacy ``engine-<uuid>`` records so the join
@@ -166,7 +333,9 @@ def _live_records(network_id: str) -> list[dict[str, object]]:
 
 def _flat_spec(record: dict[str, object]) -> dict[str, object]:
     """One engine spec synthesised from a record written before the multi-engine ``engines`` field
-    (mirrors ``remote/serve._flat_spec``) so an old-format live record is still adopted, not dropped."""
+    (mirrors ``remote/serve._flat_spec``) so an old-format live record is still adopted, not dropped.
+    Never carries ``api_kind``: api specs postdate the ``engines`` array, so a flat record can't
+    hold one — if that invariant ever breaks, the spec would silently degrade to a hardware engine."""
     return {
         "endpoint_url": record.get("endpoint_url"),
         "models": list(record.get("models") or []),
@@ -261,9 +430,10 @@ def _hot_reloadable(
 ) -> bool:
     """Whether this update can be SIGHUP-hot-reloaded into the live singleton (zero-drop) instead of a
     stop-respawn. True only when the SOLE live process is the singleton, it was started by a build that
-    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, and the
-    media config is unchanged. Everything else — a first join, a legacy/pre-handler sibling, a built-in
-    ``--serve`` launch, or any media/bundle change — still respawns (ADR 0010 D3 / C1 / C3).
+    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, the
+    media config is unchanged, and the effective poll-worker count doesn't flip. Everything else — a
+    first join, a legacy/pre-handler sibling, a built-in ``--serve`` launch, any media/bundle change,
+    or a concurrency-default flip — still respawns (ADR 0010 D3 / C1 / C3).
     """
     if len(live) != 1:
         return False
@@ -274,6 +444,16 @@ def _hot_reloadable(
         return False
     if any(not spec.get("endpoint_url") for spec in merged_specs):  # a built-in --serve needs a launch
         return False
+    # The poll-worker pool is sized once at spawn and a reload can't resize it (remote/serve
+    # `_assemble_snapshot` pins the advertised capacity to the live pool). When this update flips
+    # the EFFECTIVE concurrency — the api-only default 8 vs the hardware default 1, with no
+    # explicit --max-concurrency pinning both sides — only a respawn applies the new size.
+    if run_records.effective_max_concurrency(record) != run_records.effective_max_concurrency(singleton):
+        return False
+    # A NEW API engine is hot-reloadable now that the reload re-reads the key store and swaps the vendor
+    # bearer atomically with routing (issue 05 — remote/serve._assemble_snapshot → _api_bearers), so it
+    # is NOT gated here. A ROTATED key for an already-live api spec is still a respawn, forced by the
+    # caller (`rotated_live` in cmd_remote_join) for operator certainty — a policy choice, not a limit.
     return _media_key(record) == _media_key(singleton)  # a media/bundle change needs a bring-up (C3)
 
 
@@ -575,11 +755,16 @@ def _leave_one_engine(
     record["endpoint_url"] = remaining[0]["endpoint_url"] if len(remaining) == 1 else None
     record["media"] = media  # recompute from the survivors, don't inherit the arbitrary template's flag
     record["media_bundles"] = list(dict.fromkeys(b for rec in survivors for b in (rec.get("media_bundles") or [])))
+    record.pop("last_reload_error", None)  # a fresh lifecycle attempt shouldn't inherit a stale failure
     if _hot_reloadable(survivors, remaining, record):
-        _hot_reload_identity(network_id, record, survivors)  # SIGHUP the survivor — zero-drop shrink
+        reloaded = _hot_reload_identity(network_id, record, survivors)  # SIGHUP the survivor — zero-drop shrink
     else:
         _respawn_identity(network_id, record, survivors)  # aborts on a stuck prior / raises on a dead respawn
-    print(f"Dropped {args.engine!r} from {label}; re-serving {len(remaining)} engine(s).")
+        reloaded = False
+    # Report honestly, like cmd_remote_join: _hot_reload_identity returns False when it fell back to a
+    # respawn (the pid vanished in the TOCTOU window), and a respawn is not a zero-drop shrink.
+    how = "hot-reloaded — no in-flight requests dropped" if reloaded else "restarted the engine to apply it"
+    print(f"Dropped {args.engine!r} from {label}; re-serving {len(remaining)} engine(s) ({how}).")
     return 0
 
 

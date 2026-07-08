@@ -175,6 +175,7 @@ grid join [grid] --all                                # join every detected engi
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
+grid join [grid] --api <kind> [-m <model>...]         # remote only: join a third-party API engine (v1: openai)
 grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
 grid engine ls [grid] [--json]                        # live engines joined to a grid (legacy alias: grid engines)
 ```
@@ -225,6 +226,42 @@ up ComfyUI + the media server, registers the `comfyui:*` workflows the host's VR
 relay forwards `media/*` jobs to the media server on loopback; the SSE (progress + base64 result
 files) streams back exactly as in local mode.
 
+`grid join --api <kind> [-m <model>...]` (v1: `openai`) joins an **API engine** — a third-party LLM
+API service served through your own key ([ADR 0012](./adr/0012-api-engines.md)). The key is
+resolved in order: the `OPENAI_API_KEY` env var, else the machine-local key store, else a hidden
+interactive prompt (there is deliberately no `--api-key` flag; non-interactive with no key anywhere
+is a clear error). It is validated at join time against the vendor's model listing — an invalid key
+is a terminal error and nothing is spawned or stored. A validated key is saved to
+`~/.grid/api_keys.toml` (`0o600`, keyed by service kind): later joins and the detached serve
+process read it from there, and `grid logout` leaves it intact (it belongs to your vendor account,
+not your grid sign-in). Re-joining with a new env value overwrites the stored key and restarts the
+engine — **rotation is one command**. A bare `grid join` (auto-detect) never joins an API engine
+just because a key file exists; `--api` is always explicit.
+
+With no `-m` the join serves the **whole whitelist ∩ the models your key can see** (skipped
+whitelist models are reported; an empty intersection errors). `-m` narrows to whitelisted
+`openai:*` models (`grid catalog --api openai` shows them); a whitelisted model your key can't see
+is skipped with a note, and a name outside the whitelist errors listing the valid names. The serve
+loop registers the models with their **static** whitelist capabilities — the vendor is never probed
+or benchmarked — and forwards each `chat/completions` job to the vendor with your key, rewriting
+the advertised `openai:<name>` to the vendor's `<name>`; SSE streams pass through unchanged. An API
+engine serves `chat/completions` **only** — a legacy `completions` job gets a structured "not
+served" error and is never forwarded. A vendor error (401/429/5xx) surfaces as that job's error
+with the upstream status, never touching your grid sign-in and never unregistering the engine; an
+auth/quota failure (401/403/429) additionally warns in the engine's log so a revoked key or
+exhausted quota is visible to you, not just to consumers. **Requests to `openai:*` models leave the
+grid for the vendor**, under your key and your own OpenAI account's terms. `--api` is mutually
+exclusive with `--at`/`--serve`/`--advertise-as`/`--media`/`--bundle` in one invocation — join
+other engines with a separate (additive) `grid join`.
+
+An API engine merges into your grid's **one serving identity** exactly like a hardware engine.
+`grid join --api openai` onto an identity already serving other engines appends to the union and
+**hot-reloads in place** — no restart, no dropped in-flight requests (the vendor key is re-read from
+the key store on reload, so the appended engine forwards with auth immediately). `grid leave
+--engine openai` drops just the API engine and re-advertises the survivors; removing the last engine
+tears the identity down. To **narrow** an already-served set, `grid leave --engine openai` then
+re-join with the `-m` subset you want — a join only ever adds models to the union, never removes them.
+
 The `grid join` flag set is the union of both modes, gated by mode:
 
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
@@ -233,8 +270,10 @@ The `grid join` flag set is the union of both modes, gated by mode:
   and the media flags `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
 - **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
-- **Remote-only:** `--max-concurrency` (how many requests this engine serves at once; default 1 —
-  the provider runs one poll worker per slot).
+- **Remote-only:** `--api <kind>` (join a third-party API engine; `-m` optionally narrows the
+  whitelist, omitted = every whitelisted model the key can see), and `--max-concurrency` (how many
+  requests this engine serves at once; the provider runs one poll worker per slot — default 1, or
+  8 when the identity serves only API engines).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
   `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.
@@ -250,6 +289,7 @@ is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
 ```
 grid models [grid] [--verbose] [--json] # live models the grid can run now
 grid catalog [--json]                   # models Grid can pull
+grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (v1: openai)
 grid pull <model>                       # pull a model for the default text engine
 grid rm <model> [--yes]                 # remove a pulled model
 ```
@@ -284,6 +324,27 @@ In `remote` mode `grid models` and `grid engines` read the grid's live overview 
 relay endpoint (no token needed, so they work even before `grid sync`). The output is the same
 shape, but `--verbose` shows the **node** serving each model instead of a local `WHERE` URL —
 remote engines sit behind the relay, not at an address you call directly.
+
+`grid catalog --api <kind>` answers the discovery question for **API engines**: which models
+would a `grid join --api <kind>` serve? It prints a curated, static whitelist with each model's
+capabilities and context window — no key needed, no network call (the same posture as the
+"Grid can pull" catalog). The table carries the date it was last verified against the vendor's
+documentation, and an unknown kind is a clear error listing the supported kinds. Models are
+advertised under namespaced names (`openai:gpt-5.5`), so it is visible in every model list that
+requests to them leave the grid for the vendor. `--json` emits the same table machine-readable.
+
+```text
+Models a `grid join --api openai` would serve (verified 2026-07-08):
+  openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured
+  openai:gpt-5.4           1,050,000 ctx   tools, vision, json, structured
+  openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured
+  openai:gpt-5.4-nano        400,000 ctx   tools, vision, json, structured
+
+No key needed to view. Requests to openai:* models leave the grid for the vendor.
+```
+
+See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
+the `openai:*` namespacing, and the key-store lifecycle.
 
 ## Use
 

@@ -33,6 +33,7 @@ from local import runtime
 # Remote-only `grid join` flags (DECISIONS D6/D8): rejected in local mode, where the concept
 # doesn't exist. (attr on args, surface flag) — kept here next to the local handler that guards them.
 _REMOTE_ONLY_JOIN_FLAGS = (
+    ("api", "--api"),
     ("engine_label", "--engine-label"),
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
