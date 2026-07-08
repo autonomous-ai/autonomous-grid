@@ -255,6 +255,35 @@ grid join http://192.168.1.25:8090 --media --bundle image_generation
 grid image "a compact walnut desk beside a sunlit window" --grid http://192.168.1.25:8090   # --grid: use-commands take the grid as a flag (positional = prompt)
 ```
 
+### No GPU at all? Join with an API key
+
+No capable hardware anywhere? A provider can still contribute capacity with just a paid **OpenAI**
+account. `grid join --api openai` serves OpenAI's models to your grid under your own key — an **API
+engine**, **remote only**. See what a join would serve first (no key, no network call):
+
+```bash
+grid catalog --api openai
+# Models a `grid join --api openai` would serve (verified 2026-07-08):
+#   openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured
+#   openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured
+#   …
+```
+
+Then join. The key comes from `OPENAI_API_KEY` (or a hidden prompt) — never a command-line flag — and
+is stored `0o600` for later joins; it survives `grid logout` (it's your vendor credential, not your
+grid sign-in). With no `-m` you serve every whitelisted model your key can see:
+
+```bash
+export OPENAI_API_KEY=sk-…
+grid join research --api openai                       # or -m openai:gpt-5.4-mini to narrow
+grid chat -m openai:gpt-5.4-mini "hello from the grid"
+```
+
+Requests to `openai:*` models **leave the grid for OpenAI**, under your key and your own account's
+terms — the `openai:` prefix keeps that visible in every model list. There's no grid-side spend cap;
+put a budget limit on the key's OpenAI project if you want one. Full contract, key store, and rotation
+in [docs/cli.md](docs/cli.md#engines).
+
 ## How it works
 
 Grid sits **above** your computers — like an API gateway above your services, or Tailscale above
