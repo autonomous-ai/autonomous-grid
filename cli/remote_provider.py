@@ -14,6 +14,7 @@ while the `cli` package is still initialising.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import signal
 import socket
@@ -57,7 +58,8 @@ def _warn_deprecated(triggered: bool, message: str) -> None:
 def _reject_api_conflicts(args: argparse.Namespace) -> None:
     """Grammar for ``grid join --api <kind>`` (ADR 0012): one API engine per invocation. The
     hardware/media selectors don't combine with it (additive joins cover serving both), and
-    aliasing never applies — the namespaced whitelist names ARE the advertised names."""
+    aliasing never applies — the namespaced whitelist names ARE the advertised names. ``-m`` is
+    optional: omitted, the join serves the whole whitelist the key can see (zero-config default)."""
     kind = args.api
     if kind not in api_catalog.WHITELISTS:
         supported = ", ".join(api_catalog.supported_kinds())
@@ -76,11 +78,6 @@ def _reject_api_conflicts(args: argparse.Namespace) -> None:
             "invocation. Join other engines with a separate `grid join`."
         )
     models = list(getattr(args, "models", []) or [])
-    if not models:
-        raise SystemExit(
-            f"--api {kind} requires -m with the whitelisted models to serve "
-            f"(see `grid catalog --api {kind}`)."
-        )
     if any("=" in model for model in models):
         raise SystemExit(
             "API-engine models are advertised under their whitelist names — inline `-m real=alias` "
@@ -125,8 +122,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # member can't pre-check fails later at register). See remote_grid.resolve_relay_base.
     signaling_url, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
 
+    key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
     if getattr(args, "api", None) is not None:
-        specs, media_detected = _resolve_api_targets(args), False
+        specs, key_rotated = _resolve_api_targets(args)
+        media_detected = False
     else:
         specs, media_detected = _resolve_serve_targets(args)
     media = bool(getattr(args, "media", False)) or media_detected
@@ -142,6 +141,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     with file_lock(run_records.record_path(network_id, engine_id)):
         live = _live_records(network_id)  # normally just the singleton; also legacy `engine-<uuid>` on upgrade
         merged_specs, changed = _merge_engines(_engine_union(live), specs)
+        # A rotated key only matters when this kind's API spec is already LIVE: its bearer map is
+        # fixed at spawn (remote/serve._ServeState.bearer_by_url), so the new key can only be
+        # delivered by a respawn — never a no-op, never SIGHUP. Kept at the call sites (not inside
+        # `_hot_reloadable`) because leave-shrink shares that gate and rotation never applies there.
+        rotated_live = key_rotated and any(
+            spec.get("api_kind") == args.api for spec in _engine_union(live)
+        )
         base_media = any(bool(rec.get("media")) for rec in live)
         media = base_media or media
         base_bundles = list(dict.fromkeys(b for rec in live for b in (rec.get("media_bundles") or [])))
@@ -151,7 +157,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # it — there is no other way to rename or add a bundle in Slice 1.
         if (
             live and not changed and media == base_media and bundles == base_bundles
-            and meta_name == _identity_field(live, "meta_name")
+            and meta_name == _identity_field(live, "meta_name") and not rotated_live
         ):
             print(f"Already serving on {label}; nothing to append.")
             return 0
@@ -170,8 +176,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if getattr(args, "max_concurrency", None) is None and live:
             record["max_concurrency"] = _identity_field(live, "max_concurrency")
         # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place. Fall back to
-        # stop-respawn for a first join, a legacy/pre-handler process, a launch, or a media change.
-        reloaded = _hot_reloadable(live, merged_specs, record)
+        # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, or a
+        # rotated key (the live process's bearer can't be swapped in place).
+        if rotated_live:
+            print(f"Rotated the stored {args.api} key — restarting the engine to apply it.")
+        reloaded = (not rotated_live) and _hot_reloadable(live, merged_specs, record)
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
         else:
@@ -197,38 +206,62 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_api_targets(args: argparse.Namespace) -> list[dict[str, object]]:
-    """The single API-engine spec for ``join --api <kind>``: ``-m`` validated against the static
-    whitelist first (no key, no network), then the key from the kind's env var, then the vendor's
-    model listing — the ONLY place the CLI itself calls the vendor (ADR 0012) — which doubles as
-    key validation and as the whitelist ∩ visible-models filter. The spec is kind-generic and
-    never carries the key; the vendor model names are derived from the advertised names at serve
-    time (a stored map would go stale on an additive re-join, which unions models only)."""
+def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
+    """The single API-engine spec for ``join --api <kind>``, plus whether the stored key rotated:
+    ``-m`` validated against the static whitelist first (no key, no network), then the key resolved
+    (env var, else key store, else hidden prompt), then the vendor's model listing — the ONLY place
+    the CLI itself calls the vendor (ADR 0012) — which doubles as key validation and as the
+    whitelist ∩ visible-models filter. The spec is kind-generic and never carries the key; the
+    vendor model names are derived from the advertised names at serve time (a stored map would go
+    stale on an additive re-join, which unions models only)."""
     kind = args.api
     whitelist = api_catalog.WHITELISTS[kind]  # kind already validated by _reject_api_conflicts
     if getattr(args, "advertise_as", None):
         # Defence in depth: inline `-m real=alias` desugars into advertise_as after the early guard.
         raise SystemExit("--advertise-as aliasing doesn't apply with --api.")
     valid = {api_catalog.advertised_name(kind, entry): entry for entry in whitelist.entries}
-    chosen = list(dict.fromkeys(args.models))  # dedupe up front so errors don't repeat a model
+    # No -m = the whole whitelist (zero-config default); `valid` preserves whitelist order.
+    chosen = list(dict.fromkeys(args.models or [])) or list(valid)  # dedupe so errors don't repeat
     unknown = [model for model in chosen if model not in valid]
     if unknown:
         raise SystemExit(
             f"Not in the {kind} whitelist: {', '.join(unknown)}. "
             f"Valid models: {', '.join(valid)}."
         )
-    key = os.environ.get(whitelist.env_var)
+    from remote import api_keys  # lazy: only stdlib + shared.* at module top (see module docstring)
+
+    from . import provider
+
+    # Key precedence (ADR 0012): env var, else the machine-local key store, else a hidden
+    # interactive prompt. Never a flag — a key on the command line leaks into shell history.
+    # The env value is stripped like the prompt's, so accidental whitespace can't make an
+    # identical key look rotated on the `key != stored` check below.
+    stored = api_keys.load_key(kind)
+    key = (os.environ.get(whitelist.env_var) or "").strip() or stored
+    if not key and provider._interactive():
+        key = _prompt_api_key(kind, whitelist.env_var)
+        if not key:
+            raise SystemExit(f"No {kind} API key entered.")
     if not key:
         raise SystemExit(
-            f"--api {kind} needs your API key in {whitelist.env_var}. "
-            f"Export it and re-run: export {whitelist.env_var}=..."
+            f"--api {kind} needs your API key in {whitelist.env_var} "
+            f"(export {whitelist.env_var}=... and re-run), or run interactively to be prompted."
         )
     visible = _list_vendor_models(kind, whitelist.base_url, key)
+    # The listing call above proved the key valid — only now persist it to the machine-local key
+    # store, so a mistyped/revoked key is never stored for later joins (and the detached serve
+    # process) to reuse silently. A reused stored key skips the no-op rewrite; any NEW key (env or
+    # prompted) counts as a rotation the caller must deliver to a live identity via respawn.
+    key_rotated = key != stored
+    if key_rotated:
+        api_keys.store_key(kind, key)
     served = [model for model in chosen if valid[model].vendor_name in visible]
     skipped = [model for model in chosen if model not in served]
     if not served:
+        # Wording must fit both the -m subset and the no--m default (nothing was "requested" then),
+        # and must keep the model names — they are the actionable part of the diagnostic.
         raise SystemExit(
-            f"None of the requested models are available to this {kind} key: {', '.join(skipped)}."
+            f"None of these {kind} whitelist models are available to this key: {', '.join(skipped)}."
         )
     if skipped:
         print(f"Skipping (not available to this {kind} key): {', '.join(skipped)}", file=sys.stderr)
@@ -237,7 +270,13 @@ def _resolve_api_targets(args: argparse.Namespace) -> list[dict[str, object]]:
         "models": served,
         "engine_label": kind,
         "api_kind": kind,
-    }]
+    }], key_rotated
+
+
+def _prompt_api_key(kind: str, env_var: str) -> str:
+    """Hidden interactive prompt for one kind's API key — input is never echoed (getpass). Split
+    out so the CLI-seam tests can monkeypatch it (getpass reads the controlling tty)."""
+    return getpass.getpass(f"Enter your {kind} API key (input hidden; or export {env_var}): ").strip()
 
 
 def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:
@@ -381,9 +420,10 @@ def _hot_reloadable(
 ) -> bool:
     """Whether this update can be SIGHUP-hot-reloaded into the live singleton (zero-drop) instead of a
     stop-respawn. True only when the SOLE live process is the singleton, it was started by a build that
-    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, and the
-    media config is unchanged. Everything else — a first join, a legacy/pre-handler sibling, a built-in
-    ``--serve`` launch, or any media/bundle change — still respawns (ADR 0010 D3 / C1 / C3).
+    installs the SIGHUP reload handler (``reload_signal``), the merged union is external-only, the
+    media config is unchanged, and the effective poll-worker count doesn't flip. Everything else — a
+    first join, a legacy/pre-handler sibling, a built-in ``--serve`` launch, any media/bundle change,
+    or a concurrency-default flip — still respawns (ADR 0010 D3 / C1 / C3).
     """
     if len(live) != 1:
         return False
@@ -394,12 +434,17 @@ def _hot_reloadable(
         return False
     if any(not spec.get("endpoint_url") for spec in merged_specs):  # a built-in --serve needs a launch
         return False
-    # A NEW API engine needs the vendor key from this CLI's environment, which a SIGHUP can't
-    # inject into the live process — respawn so the child inherits the just-validated key.
-    # Known gap until issue 03's key store: a re-join of an ALREADY-live api spec (idempotent
-    # no-op, or a model append that hot-reloads below) can't deliver a ROTATED env key to the
-    # live process — its bearer is fixed at spawn. Rotation is issue 03's acceptance; `grid
-    # leave` + re-join is the interim path.
+    # The poll-worker pool is sized once at spawn and a reload can't resize it (remote/serve
+    # `_assemble_snapshot` pins the advertised capacity to the live pool). When this update flips
+    # the EFFECTIVE concurrency — the api-only default 8 vs the hardware default 1, with no
+    # explicit --max-concurrency pinning both sides — only a respawn applies the new size.
+    if run_records.effective_max_concurrency(record) != run_records.effective_max_concurrency(singleton):
+        return False
+    # A NEW API engine needs a vendor bearer, and the live process's bearer map is fixed at
+    # startup (remote/serve._ServeState.bearer_by_url — deliberately not on the reload-swappable
+    # snapshot) — respawn so the fresh process reads the just-stored key from the key store. A
+    # ROTATED key for an already-live api spec is handled by the caller (`rotated_live` in
+    # cmd_remote_join), not here: leave-shrink shares this gate and rotation never applies there.
     live_api = {_spec_key(spec) for spec in _engine_union(live) if spec.get("api_kind")}
     if any(spec.get("api_kind") and _spec_key(spec) not in live_api for spec in merged_specs):
         return False

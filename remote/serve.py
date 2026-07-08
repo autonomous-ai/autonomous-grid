@@ -25,7 +25,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from remote import control_plane, credentials, probe, relay
+from remote import api_keys, control_plane, credentials, probe, relay
 from shared import run_records
 from shared.models import api_catalog
 
@@ -100,11 +100,6 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             "This grid's access token carries no node identity; run `grid login` to refresh your "
             "tokens, then re-join."
         )
-    # API-engine keys come from the environment (issue 03 moves them to a key store) — resolve them
-    # up front so a keyless respawn dies naming the env var instead of advertising models whose
-    # every job would 401 upstream. Never read from the record; the record never carries a key.
-    bearer_by_url = _api_bearers(record)
-
     def _on_term(_signum, _frame):  # noqa: ANN001
         raise KeyboardInterrupt
 
@@ -125,6 +120,12 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     registered = False
     rc = 0
     try:
+        # API-engine keys come from the machine-local key store (env var as fallback) — resolve
+        # them up front so a keyless respawn dies naming the fix instead of advertising models
+        # whose every job would 401 upstream. Never read from the record; the record never carries
+        # a key. Inside the try so this death reaps the record like any died-before-registering
+        # engine (the `finally` below).
+        bearer_by_url = _api_bearers(record)
         # Bring up text engines only when the record names some — a media-only join (`grid join
         # --media`) has no text spec, and `_bring_up_engines` would otherwise error on the empty spec.
         has_text = bool(record.get("engines")) or bool(record.get("models")) or bool(record.get("endpoint_url"))
@@ -171,11 +172,14 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             capabilities=capabilities,
             meta=_meta(record, engine_id),
             pricing=_pricing(record),
-            max_concurrency=int(record.get("max_concurrency") or 1),
+            # Explicit --max-concurrency wins; else 8 for an API-only union, 1 otherwise — one
+            # shared rule with the CLI's hot-reload gate (run_records.effective_max_concurrency).
+            max_concurrency=run_records.effective_max_concurrency(record),
             routes=routes,
             upstream=upstream,
             media_url=media_url,
             bearer_by_url=bearer_by_url,
+            api_kind_by_url=_api_kinds_by_url(record),
         )
         register_once(state)
         registered = True
@@ -368,11 +372,12 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
-    """{vendor base URL: API key} for every API spec in the record, from each kind's env var.
+    """{vendor base URL: API key} for every API spec in the record — the machine-local key store
+    first (the join validated and stored the key pre-spawn, so the store is the resolved truth),
+    each kind's env var as fallback (a pre-store record respawned in a key-bearing environment).
 
-    A missing key is terminal: the join validated the key pre-spawn, so a keyless start is a
-    respawn in an environment that lost it — better to die naming the variable than to serve
-    models whose every job errors upstream. The key never appears in the message.
+    A key missing from BOTH is terminal: better to die naming the fix than to serve models whose
+    every job errors upstream. The key never appears in the message.
     """
     bearers: dict[str, str] = {}
     for spec in record.get("engines") or []:
@@ -381,14 +386,28 @@ def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
             continue
         whitelist = api_catalog.WHITELISTS.get(kind)
         env_var = whitelist.env_var if whitelist else f"{kind.upper()}_API_KEY"
-        key = os.environ.get(env_var)
+        key = api_keys.load_key(kind) or os.environ.get(env_var)
         if not key:
             raise SystemExit(
-                f"This engine serves --api {kind} models but {env_var} is not set. "
-                f"Export {env_var} and re-run `grid join --api {kind}`."
+                f"This engine serves --api {kind} models but no key is stored and {env_var} is "
+                f"not set. Re-run `grid join --api {kind}` to store a key (or export {env_var})."
             )
         bearers[(spec.get("endpoint_url") or "").rstrip("/")] = key
     return bearers
+
+
+def _api_kinds_by_url(record: dict[str, Any]) -> dict[str, str]:
+    """{vendor base URL: service kind} for every API spec in the record — the endpoint-gating map.
+
+    Derived from the record (not the probe results) at startup AND on every reload, so it follows
+    `grid leave --engine <kind>` hot-reloads. Unlike the bearers it lives on the reload-swappable
+    snapshot: it must never mark a URL an engine no longer serves.
+    """
+    return {
+        (spec.get("endpoint_url") or "").rstrip("/"): str(spec.get("api_kind"))
+        for spec in record.get("engines") or []
+        if spec.get("api_kind")
+    }
 
 
 def _api_upstream_name(api_kind: str, advertised: str) -> str:
@@ -421,7 +440,9 @@ def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
             )
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
-        env = probe.envelope(advertised_model, probed, ctx)
+        # chat/completions only: the gate in handle_job refuses legacy completions, so the relay
+        # must not be told this model serves it (honest advertisement, ADR 0012).
+        env = probe.envelope(advertised_model, probed, ctx, endpoints=["chat/completions"])
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
 
@@ -535,6 +556,7 @@ def _assemble_snapshot(
         routes=routes, upstream=upstream, models=union_models, capabilities=capabilities,
         meta=_meta(record, engine_id), pricing=_pricing(record),
         max_concurrency=max_concurrency,
+        api_kind_by_url=_api_kinds_by_url(record),
     )
 
 
@@ -624,6 +646,7 @@ class _Snapshot:
     meta: dict[str, Any]          # grid-page {name, engine}
     pricing: dict[str, float]     # always {} today (advertised pricing is deprecated)
     max_concurrency: int
+    api_kind_by_url: dict[str, str]  # vendor base URL -> service kind (endpoint gating); {} = none
 
     @staticmethod
     def build(
@@ -635,6 +658,7 @@ class _Snapshot:
         meta: dict[str, Any],
         pricing: dict[str, float],
         max_concurrency: int,
+        api_kind_by_url: dict[str, str] | None = None,
     ) -> "_Snapshot":
         return _Snapshot(
             routes={model: url.rstrip("/") for model, url in routes.items()},
@@ -643,6 +667,7 @@ class _Snapshot:
             capabilities=dict(capabilities or {}),
             meta=dict(meta or {}),
             pricing=dict(pricing or {}),
+            api_kind_by_url={url.rstrip("/"): kind for url, kind in (api_kind_by_url or {}).items()},
             # Clamp to [1, _MAX_CONCURRENCY]: each slot becomes a real poll-worker thread in `_serve_loop`,
             # so an absurd `--max-concurrency` can't exhaust threads/sockets. This is the sole clamp site,
             # so a reload that changes max_concurrency is bounded the same way as startup.
@@ -669,14 +694,16 @@ class _ServeState:
         upstream: dict[str, str] | None = None,
         media_url: str | None = None,
         bearer_by_url: dict[str, str] | None = None,
+        api_kind_by_url: dict[str, str] | None = None,
     ) -> None:
         self.signaling_url = signaling_url
         self.node_id = node_id
         self.network_id = network_id
         self.llm_url = llm_url.rstrip("/")
-        # {vendor base URL: API key} for the API engines this identity serves — read from the
-        # environment at startup, never from the run record. Env-fixed for the process lifetime
-        # (like media_url), so it lives here and not on the reload-swappable snapshot.
+        # {vendor base URL: API key} for the API engines this identity serves — read from the key
+        # store (env fallback) at startup, never from the run record. Fixed for the process
+        # lifetime (like media_url), so it lives here and not on the reload-swappable snapshot —
+        # a rotated key reaches jobs via the respawn `grid join` forces, never via SIGHUP.
         self.bearer_by_url = {url.rstrip("/"): key for url, key in (bearer_by_url or {}).items()}
         # This box's media server base (`http://127.0.0.1:<media_port>`) when the identity serves
         # media, else None. `media/*` jobs forward here instead of an LLM engine; all media models
@@ -690,6 +717,7 @@ class _ServeState:
         self._snapshot = _Snapshot.build(
             routes=route_map, upstream=upstream or {}, models=models, capabilities=capabilities,
             meta=meta, pricing=pricing, max_concurrency=max_concurrency,
+            api_kind_by_url=api_kind_by_url,
         )
         # The probe results the live snapshot was built from, kept so a reload probes only newly-added
         # engines (ADR 0010 D4 F6). Reload-owned: set at startup, thereafter only the reload loop writes.
@@ -748,22 +776,33 @@ class _ServeState:
         only newly-added engines (ADR 0010 D4 F6)."""
         return self._engine_results
 
-    def route(self, model: str | None) -> str | None:
-        """The local engine URL serving ``model``.
+    def route_and_kind(self, model: str | None) -> tuple[str | None, str | None]:
+        """The local engine URL serving ``model``, plus its API service kind (None = hardware/media).
 
         Exact match wins. Otherwise, when every model points at the **same single engine** (one
         distinct URL — even if that one engine serves several models), fall back to it: a job with a
         missing/unknown ``model`` still forwards as it did before multi-engine (the proxy forwarded the
         body unchanged, letting the engine answer). With several distinct engines and no match, return
         ``None`` so the caller reports "no engine serves" instead of guessing.
+
+        One method for both lookups so they read the SAME snapshot: a separate kind read could bind
+        a torn pair across a concurrent reload swap (ADR 0010 D4 F4 — bind once).
         """
         snap = self._snapshot  # bind once — a concurrent reload swap is never seen half-applied
+        target = None
         if model and model in snap.routes:
-            return snap.routes[model]
-        distinct = set(snap.routes.values())
-        if len(distinct) == 1:
-            return next(iter(distinct))
-        return None
+            target = snap.routes[model]
+        else:
+            distinct = set(snap.routes.values())
+            if len(distinct) == 1:
+                target = next(iter(distinct))
+        if target is None:
+            return None, None
+        return target, snap.api_kind_by_url.get(target)  # both maps are URL-normalized by `build`
+
+    def route(self, model: str | None) -> str | None:
+        """The local engine URL serving ``model`` (see ``route_and_kind``)."""
+        return self.route_and_kind(model)[0]
 
     def upstream_model(self, model: str | None) -> str | None:
         """The name the local engine answers to for an advertised ``model`` (``--advertise-as`` maps the
@@ -1028,9 +1067,18 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         return
 
     model = body.get("model")  # body is already `job.get("body") or {}`, so it is a dict
-    target = state.route(model)  # which local engine serves this model (DECISIONS D9)
+    target, api_kind = state.route_and_kind(model)  # which local engine serves this model (DECISIONS D9)
     if target is None:
         _try_submit_error(state, txn, f"no engine serves model {model!r}")
+        return
+    # Endpoint gating per kind (ADR 0012): an API engine serves chat/completions ONLY. A legacy
+    # `completions` job routed to it — including via the single-URL fallback above — is refused
+    # with a structured error BEFORE any upstream call, never blind-forwarded to the vendor.
+    if api_kind and endpoint != "chat/completions":
+        _try_submit_error(
+            state, txn,
+            f"API engine {api_kind!r} serves chat/completions only (endpoint {endpoint!r} not served)",
+        )
         return
 
     # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
@@ -1043,9 +1091,11 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     try:
         headers = _forward_headers(state, target)
         if is_stream:
-            _forward_stream(state, txn, endpoint, forward_body, read_timeout, target, headers=headers)
+            _forward_stream(state, txn, endpoint, forward_body, read_timeout, target, headers=headers,
+                            api_kind=api_kind)
         else:
-            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target, headers=headers)
+            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target, headers=headers,
+                           api_kind=api_kind)
     except Exception as exc:  # one bad job must not kill the loop
         print(f"\nJob {txn} failed: {exc!r}", file=sys.stderr)
         _try_submit_error(state, txn, str(exc))
@@ -1086,6 +1136,23 @@ def _submit_response(state: _ServeState, txn: str, *, content: Any, stream: bool
         relay.submit_response(state.signaling_url, state.token(), txn, content=content, stream=stream)
 
 
+# Upstream statuses that point at the provider's key or quota (401/403 auth, 429 rate/quota) —
+# these earn a stderr warn on top of the per-job error; a 5xx says nothing about the key.
+_API_AUTH_QUOTA_STATUSES = frozenset({401, 403, 429})
+
+
+def _warn_api_auth_failure(api_kind: str | None, status: int) -> None:
+    """Warn the engine's stderr log when an API engine's upstream rejects for auth/quota reasons.
+
+    The per-job error reaches only the consumer; without this line the operator whose key was
+    revoked or quota exhausted has no signal in the engine log. Never includes the key. The loop
+    stays alive and the engine stays registered — each job errors, nothing auto-ejects (ADR 0012).
+    """
+    if api_kind and status in _API_AUTH_QUOTA_STATUSES:
+        _warn(f"{api_kind} upstream returned {status} — check your API key / quota "
+              f"(jobs will keep erroring until it is fixed; the engine stays registered)")
+
+
 def _forward_headers(state: _ServeState, target_url: str) -> dict[str, str]:
     """Forward headers for one target: the API key rides ONLY on an API engine's own vendor URL —
     hardware-engine (and media) forwards stay bearer-free, and an upstream 401 is a job error in a
@@ -1099,7 +1166,7 @@ def _forward_headers(state: _ServeState, target_url: str) -> dict[str, str]:
 
 def _forward_whole(
     state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float, target_url: str,
-    headers: dict[str, str],
+    headers: dict[str, str], api_kind: str | None = None,
 ) -> None:
     import httpx
 
@@ -1107,6 +1174,7 @@ def _forward_whole(
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{target_url}/{endpoint}", json=body, headers=headers)
     if resp.status_code != 200:
+        _warn_api_auth_failure(api_kind, resp.status_code)
         _try_submit_error(state, txn, f"engine error {resp.status_code}: {resp.text[:200]}")
         return
     _submit_response(state, txn, content=resp.content, stream=False)
@@ -1114,7 +1182,7 @@ def _forward_whole(
 
 def _forward_stream(
     state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float, target_url: str,
-    headers: dict[str, str],
+    headers: dict[str, str], api_kind: str | None = None,
 ) -> None:
     import httpx
 
@@ -1125,6 +1193,7 @@ def _forward_stream(
         ) as engine_resp:
             if engine_resp.status_code != 200:
                 engine_resp.read()
+                _warn_api_auth_failure(api_kind, engine_resp.status_code)
                 _try_submit_error(state, txn, f"engine error {engine_resp.status_code}: {engine_resp.text[:200]}")
                 return
             # Pass the engine's SSE bytes straight through while its stream is open. A streamed 401 can't
