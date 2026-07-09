@@ -25,9 +25,10 @@ class ApiModelEntry:
 @dataclass(frozen=True)
 class ApiWhitelist:
     last_verified: str  # ISO date the table was last checked against the vendor's docs
-    base_url: str  # the vendor endpoint jobs forward to, no trailing slash
+    base_url: str | None  # default vendor endpoint (no trailing slash); None means user must supply --at
     env_var: str  # the environment variable the provider's key is read from
     entries: tuple[ApiModelEntry, ...]
+    supports_model_listing: bool = True  # whether the vendor exposes GET /models (media APIs like Doggi don't)
 
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
@@ -79,6 +80,41 @@ OPENAI_WHITELIST: tuple[ApiModelEntry, ...] = (
     ),
 )
 
+DOGGI_LAST_VERIFIED = "2026-07-09"
+
+DOGGI_WHITELIST: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="hunyuan-image-3-t2i",
+        context_window=0,
+        supports_tools=False,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Text-to-image. Aspect ratios: square_hd, square, portrait_4_3, "
+              "portrait_16_9, landscape_4_3, landscape_16_9.",
+    ),
+    ApiModelEntry(
+        vendor_name="hunyuan-image-3-i2i",
+        context_window=0,
+        supports_tools=False,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Image-to-image. Aspect ratios: auto, 21:9, 16:9, 3:2, 4:3, 5:4, "
+              "1:1, 4:5, 3:4, 2:3, 9:16, 4:1, 1:4, 8:1, 1:8.",
+    ),
+    ApiModelEntry(
+        vendor_name="Wan-AI/Wan2.2-I2V-A14B-Lightning",
+        context_window=0,
+        supports_tools=False,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Image-to-video. Resolutions: 480p, 580p, 720p. "
+              "Aspect ratios: auto, 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.",
+    ),
+)
+
 # One structure per kind: the verified-date and the entries can't drift apart.
 WHITELISTS: dict[str, ApiWhitelist] = {
     "openai": ApiWhitelist(
@@ -86,6 +122,13 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         base_url="https://api.openai.com/v1",
         env_var="OPENAI_API_KEY",
         entries=OPENAI_WHITELIST,
+    ),
+    "doggi": ApiWhitelist(
+        last_verified=DOGGI_LAST_VERIFIED,
+        base_url=None,  # user supplies endpoint via --at
+        env_var="DOGGI_API_KEY",
+        entries=DOGGI_WHITELIST,
+        supports_model_listing=False,  # Doggi has no /models endpoint
     ),
 }
 

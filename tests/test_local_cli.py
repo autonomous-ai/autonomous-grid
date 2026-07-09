@@ -272,9 +272,10 @@ def test_cli_accepts_engine_pull_and_media_use_commands():
     assert pull.handler is cli.cmd_engine_pull
     assert pull.bundle == "image_generation"
 
-    gen = parser.parse_args(["image", "a small house"])
+    gen = parser.parse_args(["image", "a small house", "-m", "comfyui:image_generation"])
     assert gen.handler is cli.cmd_image
     assert gen.prompt == "a small house"
+    assert gen.model == "comfyui:image_generation"
     assert gen.width == 720
 
     serve = parser.parse_args(["join", "home", "--serve", "Qwen3.5-2B-UD-IQ2_M.gguf"])
@@ -684,18 +685,24 @@ def test_catalog_without_api_unchanged(monkeypatch, tmp_path, capsys):
 def test_api_whitelist_integrity():
     from datetime import date
 
-    assert api_catalog.supported_kinds() == ("openai",)
+    kinds = api_catalog.supported_kinds()
+    assert "openai" in kinds
+    assert "doggi" in kinds
     for kind, whitelist in api_catalog.WHITELISTS.items():
         assert whitelist.entries, f"{kind} whitelist must not be empty"
         names = [entry.vendor_name for entry in whitelist.entries]
         assert all(names), f"{kind} has an entry with an empty vendor name"
         assert len(set(names)) == len(names), f"{kind} has duplicate vendor names"
         for entry in whitelist.entries:
-            assert entry.context_window > 0
+            # Media APIs (e.g. Doggi) have context_window=0; text APIs must have > 0.
+            if whitelist.supports_model_listing:
+                assert entry.context_window > 0
             assert api_catalog.advertised_name(kind, entry) == f"{kind}:{entry.vendor_name}"
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
-        assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
-        assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
+        # APIs with base_url=None require --at (e.g. Doggi); others must have a valid HTTPS URL.
+        if whitelist.base_url is not None:
+            assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
+            assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
         assert whitelist.env_var, f"{kind} needs the env var its key is read from"
 
 
@@ -2165,7 +2172,6 @@ def test_remote_join_api_mutually_exclusive_flags(monkeypatch, tmp_path):
     _mock_remote_spawn(monkeypatch)
 
     conflicts = [
-        (["--at", "http://h:11434/v1"], "--at"),
         (["--serve", "m"], "--serve"),
         (["--advertise-as", "alias"], "--advertise-as"),
         (["--media"], "--media"),
@@ -2176,6 +2182,7 @@ def test_remote_join_api_mutually_exclusive_flags(monkeypatch, tmp_path):
             cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5", *extra])
         assert flag in str(exc.value), f"{flag} must be named in the error"
         assert "--api" in str(exc.value)
+    # --at is now allowed with --api (overrides whitelist base_url)
     assert cli.provider._read_records("n1") == {}
 
 
@@ -2307,6 +2314,34 @@ def test_remote_join_api_invalid_key_is_terminal_no_spawn(monkeypatch, tmp_path)
     # A key the vendor rejected is never persisted — later joins must not reuse it silently.
     from remote import api_keys
     assert api_keys.load_key("openai") is None
+
+
+def test_remote_join_api_invalid_key_media_api_is_terminal_no_spawn(monkeypatch, tmp_path):
+    """Media APIs (e.g. Doggi) also validate the key at join time via a probe request."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("DOGGI_API_KEY", "invalid-key-123")
+
+    def mock_probe(request):
+        # Doggi probe hits /media/generations (the actual Doggi API endpoint)
+        assert "/media/generations" in str(request.url)
+        assert request.headers.get("authorization") == "Bearer invalid-key-123"
+        return httpx.Response(401, text="invalid api key")
+
+    seen = _mock_vendor(monkeypatch, mock_probe)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "join", "--api", "doggi", "--at", "https://doggi.example.com",
+            "-m", "doggi:hunyuan-image-3-t2i",
+        ])
+    msg = str(exc.value)
+    assert "401" in msg
+    assert "invalid-key-123" not in msg  # the key never appears in terminal output
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+    # A key the vendor rejected is never persisted.
+    from remote import api_keys
+    assert api_keys.load_key("doggi") is None
 
 
 def test_remote_join_api_writes_kind_generic_record_and_spawns(monkeypatch, tmp_path, capsys):
@@ -7684,7 +7719,7 @@ def test_remote_image_streams_and_saves_output(monkeypatch, tmp_path, capsys):
 
     _mock_relay(monkeypatch, handler)
     outdir = tmp_path / "out"
-    assert cli.main(["image", "a cat", "-o", str(outdir)]) == 0
+    assert cli.main(["image", "a cat", "-m", "comfyui:image_generation", "-o", str(outdir)]) == 0
     assert seen["path"] == "/relay/v1/media/image/generate"
     saved = list(outdir.glob("*.png"))
     assert saved and saved[0].read_bytes() == b"PNGDATA"
@@ -7707,7 +7742,7 @@ def test_remote_edit_posts_to_image_edit_with_routing_headers(monkeypatch, tmp_p
 
     _mock_relay(monkeypatch, handler)
     outdir = tmp_path / "out"
-    assert cli.main(["edit", "fix it", "-i", str(img), "-o", str(outdir),
+    assert cli.main(["edit", "fix it", "-m", "comfyui:image_editing", "-i", str(img), "-o", str(outdir),
                      "--target-provider", "engine-3", "--allow-self-provider"]) == 0
     assert seen["path"] == "/relay/v1/media/image/edit"
     assert seen["tp"] == "engine-3" and seen["asp"] == "true"
@@ -7722,7 +7757,7 @@ def test_remote_image_result_without_files_is_an_error(monkeypatch, tmp_path, ca
         return httpx.Response(200, content=f"data: {result}\n\ndata: [DONE]\n\n".encode())
 
     _mock_relay(monkeypatch, handler)
-    assert cli.main(["image", "a cat", "-o", str(tmp_path / "out")]) == 1
+    assert cli.main(["image", "a cat", "-m", "comfyui:image_generation", "-o", str(tmp_path / "out")]) == 1
     assert "no files" in capsys.readouterr().err.lower()
 
 
@@ -7734,7 +7769,7 @@ def test_remote_edit_rejects_more_than_three_images(monkeypatch, tmp_path):
         path.write_bytes(b"x")
         images += ["-i", str(path)]
     with pytest.raises(SystemExit) as exc:
-        cli.main(["edit", "make it pop", *images])
+        cli.main(["edit", "make it pop", "-m", "comfyui:image_editing", *images])
     assert "three" in str(exc.value).lower()
 
 
@@ -7753,7 +7788,8 @@ def test_remote_video_posts_to_i2v(monkeypatch, tmp_path):
 
     _mock_relay(monkeypatch, handler)
     outdir = tmp_path / "out"
-    assert cli.main(["video", "make it move", "-i", str(image), "-o", str(outdir)]) == 0
+    assert cli.main(["video", "make it move", "-m", "doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning",
+                     "-i", str(image), "-o", str(outdir)]) == 0
     assert seen["path"] == "/relay/v1/media/video/i2v"
     assert list(outdir.glob("*.mp4"))[0].read_bytes() == b"MP4DATA"
 
@@ -7786,7 +7822,7 @@ def test_local_chat_rejects_remote_only_flags(monkeypatch, tmp_path):
 def test_local_image_rejects_allow_self_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default local mode
     with pytest.raises(SystemExit) as exc:
-        cli.main(["image", "a cat", "--allow-self-provider"])
+        cli.main(["image", "a cat", "-m", "comfyui:image_generation", "--allow-self-provider"])
     assert "remote mode" in str(exc.value).lower()
 
 
@@ -7795,10 +7831,11 @@ def test_local_edit_and_video_reject_remote_only_flags(monkeypatch, tmp_path):
     img = tmp_path / "a.png"
     img.write_bytes(b"x")
     with pytest.raises(SystemExit) as exc:  # reject runs before the >3-image check / file reads
-        cli.main(["edit", "p", "-i", str(img), "--target-provider", "e1"])
+        cli.main(["edit", "p", "-m", "comfyui:image_editing", "-i", str(img), "--target-provider", "e1"])
     assert "remote mode" in str(exc.value).lower()
     with pytest.raises(SystemExit) as exc:
-        cli.main(["video", "p", "-i", str(img), "--allow-self-provider"])
+        cli.main(["video", "p", "-m", "doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning",
+                  "-i", str(img), "--allow-self-provider"])
     assert "remote mode" in str(exc.value).lower()
 
 

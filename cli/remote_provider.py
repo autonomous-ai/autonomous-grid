@@ -65,7 +65,6 @@ def _reject_api_conflicts(args: argparse.Namespace) -> None:
         supported = ", ".join(api_catalog.supported_kinds())
         raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
     conflicts = (
-        ("at", "--at"),
         ("serve", "--serve"),
         ("advertise_as", "--advertise-as"),
         ("media", "--media"),
@@ -242,30 +241,50 @@ def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, objec
 
     from . import provider
 
-    # Key precedence (ADR 0012): env var, else the machine-local key store, else a hidden
-    # interactive prompt. Never a flag — a key on the command line leaks into shell history.
+    # Key precedence: --api-key flag (explicit, but warn about shell history), else env var,
+    # else the machine-local key store, else a hidden interactive prompt.
     # The env value is stripped like the prompt's, so accidental whitespace can't make an
     # identical key look rotated on the `key != stored` check below.
     stored = api_keys.load_key(kind)
-    key = (os.environ.get(whitelist.env_var) or "").strip() or stored
+    flag_key = getattr(args, "api_key", None)
+    if flag_key:
+        print(
+            f"Warning: --api-key is visible in shell history. "
+            f"Consider exporting {whitelist.env_var} instead.",
+            file=sys.stderr,
+        )
+    key = (flag_key or os.environ.get(whitelist.env_var) or "").strip() or stored
     if not key and provider._interactive():
         key = _prompt_api_key(kind, whitelist.env_var)
         if not key:
             raise SystemExit(f"No {kind} API key entered.")
     if not key:
         raise SystemExit(
-            f"--api {kind} needs your API key in {whitelist.env_var} "
-            f"(export {whitelist.env_var}=... and re-run), or run interactively to be prompted."
+            f"--api {kind} needs your API key. Pass --api-key <key>, "
+            f"export {whitelist.env_var}=..., or run interactively to be prompted."
         )
-    visible = _list_vendor_models(kind, whitelist.base_url, key)
-    # The listing call above proved the key valid — only now persist it to the machine-local key
+    # Resolve the endpoint URL: --at overrides the whitelist default (required when whitelist has no base_url).
+    endpoint_url = getattr(args, "at", None) or whitelist.base_url
+    if not endpoint_url:
+        raise SystemExit(
+            f"--api {kind} needs an endpoint URL. Pass --at <url> (e.g. --at https://your-doggi-endpoint)."
+        )
+    # Validate the key: text APIs via /models, media APIs via a lightweight probe.
+    if whitelist.supports_model_listing:
+        visible = _list_vendor_models(kind, endpoint_url, key)
+        served = [model for model in chosen if valid[model].vendor_name in visible]
+    else:
+        # Media APIs (e.g. Doggi) don't expose GET /models — probe the endpoint to validate the key.
+        _probe_media_api(kind, endpoint_url, key)
+        visible = {entry.vendor_name for entry in whitelist.entries}
+        served = list(chosen)
+    # The validation call above proved the key valid — only now persist it to the machine-local key
     # store, so a mistyped/revoked key is never stored for later joins (and the detached serve
     # process) to reuse silently. A reused stored key skips the no-op rewrite; any NEW key (env or
     # prompted) counts as a rotation the caller must deliver to a live identity via respawn.
     key_rotated = key != stored
     if key_rotated:
         api_keys.store_key(kind, key)
-    served = [model for model in chosen if valid[model].vendor_name in visible]
     skipped = [model for model in chosen if model not in served]
     if not served:
         # Wording must fit both the -m subset and the no--m default (nothing was "requested" then),
@@ -276,7 +295,7 @@ def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, objec
     if skipped:
         print(f"Skipping (not available to this {kind} key): {', '.join(skipped)}", file=sys.stderr)
     return [{
-        "endpoint_url": whitelist.base_url,
+        "endpoint_url": endpoint_url,
         "models": served,
         "engine_label": kind,
         "api_kind": kind,
@@ -287,6 +306,41 @@ def _prompt_api_key(kind: str, env_var: str) -> str:
     """Hidden interactive prompt for one kind's API key — input is never echoed (getpass). Split
     out so the CLI-seam tests can monkeypatch it (getpass reads the controlling tty)."""
     return getpass.getpass(f"Enter your {kind} API key (input hidden; or export {env_var}): ").strip()
+
+
+def _probe_media_api(kind: str, base_url: str, key: str) -> None:
+    """Lightweight probe for media APIs that lack GET /models. Sends a minimal request to validate
+    the key without actually generating media. A rejected key (401/403) is a terminal error —
+    nothing is spawned. Never echoes the key."""
+    import httpx  # lazy: only stdlib + shared.* at module top (see module docstring)
+
+    # Try a minimal t2i request with a tiny prompt — Doggi will validate the key before processing.
+    # Doggi's API endpoint is /media/generations (not /media/image/generate which is the grid's internal route).
+    probe_body = {
+        "model": "hunyuan-image-3-t2i",  # smallest/cheapest model
+        "type": "text-to-image",
+        "prompt": "test",
+        "image_size": "square_hd",
+        "num_inference_steps": 1,
+    }
+    try:
+        with httpx.Client(timeout=_VENDOR_LIST_TIMEOUT) as client:
+            resp = client.post(
+                f"{base_url}/media/generations",
+                json=probe_body,
+                headers={"Authorization": f"Bearer {key}"},
+            )
+    except httpx.HTTPError as exc:
+        raise SystemExit(f"Could not reach {kind} at {base_url}: {exc}") from None
+    if resp.status_code in (401, 403):
+        raise SystemExit(
+            f"{kind} rejected the API key (HTTP {resp.status_code}): {resp.text[:200]}"
+        )
+    # 400/422 means the key is valid but the request was malformed (expected for a probe).
+    # 500+ means the endpoint is up but had an internal error (not a key problem).
+    # 200 means the probe actually succeeded (unlikely for a 64x64 test, but handle it).
+    if resp.status_code not in (200, 400, 422, 500, 502, 503):
+        raise SystemExit(f"{kind} returned HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:

@@ -139,6 +139,12 @@ def _add_engines(sub) -> None:
         help="Join a third-party API engine of this service kind (e.g. openai). "
              "Remote only; requires -m with whitelisted models (see `grid catalog --api`).",
     )
+    choose.add_argument(
+        "--api-key",
+        default=None,
+        help="API key for the --api engine. Overrides env var and key store. "
+             "Warning: visible in shell history; prefer exporting the env var.",
+    )
 
     naming = join.add_argument_group("Name & display")
     naming.add_argument("--name", default=None,
@@ -250,6 +256,11 @@ def _add_use(sub) -> None:
     image = sub.add_parser("image", help="Generate an image")
     _add_media_common(image)
     image.add_argument("prompt")
+    image.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Model to use (e.g. doggi:hunyuan-image-3-t2i).",
+    )
     image.add_argument("--width", type=int, default=720)
     image.add_argument("--height", type=int, default=720)
     image.add_argument("--steps", type=int, default=4)
@@ -259,6 +270,11 @@ def _add_use(sub) -> None:
     edit = sub.add_parser("edit", help="Edit one to three images")
     _add_media_common(edit)
     edit.add_argument("prompt")
+    edit.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Model to use (e.g. doggi:hunyuan-image-3-i2i).",
+    )
     edit.add_argument(
         "-i",
         "--image",
@@ -274,6 +290,11 @@ def _add_use(sub) -> None:
     video = sub.add_parser("video", help="Generate a short video from an image")
     _add_media_common(video)
     video.add_argument("prompt")
+    video.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Model to use (e.g. doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning).",
+    )
     video.add_argument("-i", "--image", required=True, help="Input image path.")
     video.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
     video.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")

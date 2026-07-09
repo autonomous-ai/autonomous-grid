@@ -59,6 +59,7 @@ def cmd_image(args: argparse.Namespace) -> int:
         args,
         "media/image/generate",
         {
+            "model": args.model,
             "prompt": args.prompt,
             "width": args.width,
             "height": args.height,
@@ -75,6 +76,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
         args,
         "media/image/edit",
         {
+            "model": args.model,
             "prompt": args.prompt,
             "steps": args.steps,
             "input_images": [media_io.load_media_file(path) for path in args.input_images],
@@ -85,6 +87,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
 def cmd_video(args: argparse.Namespace) -> int:
     _reject_remote_only_flags(args)
     payload = {
+        "model": args.model,
         "prompt": args.prompt,
         "duration": args.duration,
         "aspect_ratio": args.aspect_ratio,

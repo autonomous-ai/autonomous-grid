@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doggi"
+version = "0.1.0"
+description = "Convenient Python client for the doggi media-generation gateway (text-to-image, image-to-image, image-to-video, image-to-3D, background removal)."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = ["requests>=2.25"]
+
+[project.optional-dependencies]
+async = ["httpx>=0.24"]
+dev = ["pytest>=7", "pytest-asyncio>=0.21", "responses>=0.23", "httpx>=0.24"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["doggi*"]

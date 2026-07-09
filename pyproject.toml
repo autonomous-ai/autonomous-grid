@@ -13,6 +13,8 @@ dependencies = [
     "tomli-w>=1.0",
     "uvicorn>=0.34",
     "websocket-client>=1.7",
+    "requests>=2.25",
+    "doggi @ file:libs/doggi"
 ]
 
 [project.optional-dependencies]
@@ -25,8 +27,11 @@ dev = [
 grid = "cli:main"
 agrid = "cli:main"
 
-[tool.setuptools.packages.find]
-include = ["cli*", "shared*", "local*", "remote*"]
+[tool.setuptools.package-dir]
+"cli" = "cli"
+"shared" = "shared"
+"local" = "local"
+"remote" = "remote"
 
 [tool.setuptools.package-data]
 "shared.engine" = ["*.txt"]
