@@ -17,6 +17,7 @@ from ._constants import (
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
+from .remote_router import RANKER_KEY_ENV, cmd_remote_router
 from .engine import (
     cmd_engine_install,
     cmd_engine_list,
@@ -67,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth(sub)
     _add_members(sub)
     _add_price(sub)
+    _add_router(sub)
     _add_engine_setup(sub)
 
     return parser
@@ -392,6 +394,52 @@ def _add_price(sub) -> None:
     show.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     show.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     show.set_defaults(handler=cmd_remote_price)
+
+
+def _add_router(sub) -> None:
+    """Remote-only auto-routing config for a grid you own (model `auto`, ADR 0013):
+    `grid router status|enable|disable`, `grid router set-ranker <1|2|3> --base-url <url> --model
+    <name>`, and `grid router remove-ranker <1|2|3>`. Gated in local mode by dispatch (`router` is in
+    `REMOTE_ONLY`). `[grid]` is declared first (before the required `position`) so a lone positional
+    binds to `position`; omitting `[grid]` falls back to the active grid. The Ranker key for
+    `set-ranker` is NOT a flag — it comes from the GRID_RANKER_API_KEY env var or a hidden prompt, so
+    it never lands in argv, shell history, or process listings."""
+    router = sub.add_parser("router", help="Configure auto-routing (model `auto`) for a grid you own")
+    router_sub = router.add_subparsers(dest="subcommand", required=True)
+
+    # status / enable / disable share the same shape (an optional `[grid]` + `--json`); build them in
+    # a loop, mirroring `_add_price`'s rm/delete idiom.
+    for name, help_text in (
+        ("status", "Show routing state and configured rankers (no keys)"),
+        ("enable", "Enable auto-routing on the grid"),
+        ("disable", "Disable auto-routing on the grid"),
+    ):
+        simple = router_sub.add_parser(name, help=help_text)
+        simple.add_argument("grid", nargs="?", default=None)
+        simple.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        simple.set_defaults(handler=cmd_remote_router)
+
+    set_ranker = router_sub.add_parser(
+        "set-ranker",
+        help=f"Set the ranker at position 1-3 (key from {RANKER_KEY_ENV} env or a hidden prompt)",
+        description=(
+            f"Set the ranker at a priority position (1-3). The Ranker API key is read from the "
+            f"{RANKER_KEY_ENV} environment variable, else a hidden interactive prompt — never a "
+            f"command-line flag, so it stays out of shell history and process listings."
+        ),
+    )
+    set_ranker.add_argument("grid", nargs="?", default=None)
+    set_ranker.add_argument("position", type=int, choices=(1, 2, 3), help="Ranker priority position (1-3).")
+    set_ranker.add_argument("--base-url", required=True, help="Ranker OpenAI-compatible base URL.")
+    set_ranker.add_argument("--model", required=True, help="Ranker model name.")
+    set_ranker.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    set_ranker.set_defaults(handler=cmd_remote_router)
+
+    remove_ranker = router_sub.add_parser("remove-ranker", help="Remove the ranker at position 1-3")
+    remove_ranker.add_argument("grid", nargs="?", default=None)
+    remove_ranker.add_argument("position", type=int, choices=(1, 2, 3), help="Ranker position to remove (1-3).")
+    remove_ranker.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    remove_ranker.set_defaults(handler=cmd_remote_router)
 
 
 def _add_engine_setup(sub) -> None:

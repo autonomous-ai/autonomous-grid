@@ -119,6 +119,56 @@ def list_members(
     return list(members or [])
 
 
+# --- Auto-router owner config (ADR 0013) ----------------------------------------------------------
+# Account-level, session-token authorised, owner/admin-checked on the control plane. NOTE the
+# ``/networks/`` path prefix (NOT ``/managed-networks/`` like the calls above): the router routes are
+# registered only under ``/networks/{id}/router`` in grid-apis. Reads/writes return the *masked*
+# config (``{"enabled", "rankers": [{"position", "base_url", "model"}]}``, never a key); mutations add
+# ``"synced": bool``. Ranker keys ride only this owner channel, in the ``set_ranker`` request body.
+
+
+def get_router_config(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
+    """The grid's masked router config (enabled state + each ranker's position/base_url/model). Never
+    carries key material — the control plane strips it on every read."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "GET", f"/v1/grid/networks/{network_id}/router"))
+
+
+def enable_router(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
+    """Turn auto-routing on. The control plane rejects enabling with zero rankers (clear 400)."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "POST", f"/v1/grid/networks/{network_id}/router/enable"))
+
+
+def disable_router(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
+    """Turn auto-routing off."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "POST", f"/v1/grid/networks/{network_id}/router/disable"))
+
+
+def set_ranker(
+    session_token: str, network_id: str, position: int, base_url: str, model: str, api_key: str,
+    api_url: str | None = None,
+) -> dict[str, Any]:
+    """Set the ranker at ``position`` (1-3). ``api_key`` rides the body (sourced by the CLI from the
+    ``GRID_RANKER_API_KEY`` env var or a hidden prompt — never a flag). The control plane validates
+    scheme / non-empty model / key presence / contiguity and returns clear 400s."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(
+            client, "PUT", f"/v1/grid/networks/{network_id}/router/rankers/{position}",
+            json={"base_url": base_url, "model": model, "api_key": api_key},
+        ))
+
+
+def remove_ranker(
+    session_token: str, network_id: str, position: int, api_url: str | None = None
+) -> dict[str, Any]:
+    """Remove the ranker at ``position`` (1-3). Removing the last ranker while enabled is a clear 400."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(
+            client, "DELETE", f"/v1/grid/networks/{network_id}/router/rankers/{position}"))
+
+
 def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
     """One request with both failure modes surfaced as a clean SystemExit (never a traceback):
     a transport/connection error before a response, and a >=400 status after one."""
