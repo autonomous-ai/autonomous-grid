@@ -371,6 +371,12 @@ Check engines:
   grid engines
 ```
 
+**`-m auto`** lets the grid pick the model, when its owner has enabled auto-routing (`grid router`).
+`grid chat -m auto "…"` sends the reserved name `auto`; the reply comes back from whichever capable
+model the grid ranked and had free, and the `X-Grid-Routed-Model` response header (and the reply's
+`model` field) name it. On a grid without routing enabled, `auto` is a clear "not enabled" error. See
+[Router](#router).
+
 ## Members
 
 ```
@@ -434,6 +440,46 @@ The Ranker **API key** for `set-ranker` comes from the `GRID_RANKER_API_KEY` env
 hidden interactive prompt — **never a command-line flag** (so it stays out of shell history and process
 listings), and it is never printed or logged. A change that couldn't be pushed to the running grid yet is
 reported as saved and will apply shortly.
+
+**Chain + fallback.** The Rankers are tried strictly in position order (1 → 2 → 3, never reordered),
+advancing on failure. Each has a circuit breaker — 3 consecutive failures skip it for 60 s, then one
+half-open probe re-tries it — so a dead vendor doesn't tax every request. If every Ranker is down the
+grid still serves from a deterministic local pick (most free capacity → cheapest → name), stamped
+`X-Grid-Router: fallback`. The ranking call runs on **your** Ranker key; the served request bills the
+consumer as the chosen model.
+
+**Consuming `auto`.** An app requests the reserved model `auto` on `chat/completions` (streaming or
+not); the response `model` and the `X-Grid-Routed-Model` header carry the real model, and
+`X-Grid-Router` is `ranked` or `fallback`. `auto` appears in `/v1/models` (as `owned_by:
+"grid-router"`) only while routing is enabled; disabled → a clear "auto routing is not enabled" error.
+`auto` is chat-only — the legacy `completions` endpoint and a `--target-provider` header each reject
+it, and media models are never candidates.
+
+### Auto-routing transparency
+
+When routing is enabled, an `auto` request sends a **bounded excerpt** — and nothing else — to each
+Ranker in turn. This table is the complete set of what leaves the grid; the full conversation never
+does.
+
+| Field | What it is | Bound |
+|---|---|---|
+| system head | head of the first `system` message, truncated | ≤ 500 chars |
+| last-user tail | tail of the last `user` message, truncated | ≤ 2000 chars |
+| message count | number of messages in the request | integer |
+| approx input size | total characters across all message content | integer |
+| tool names | declared function **names** only — never arguments or JSON schemas | list of names |
+| images present | whether any image/binary part exists (each becomes a `[image]` marker) | yes / no |
+| requested output size | the request's `max_tokens`, if set | integer or unset |
+
+- **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Ranker call.
+- **To whom** — the Rankers you configured, in priority order (position 1, then 2, 3 on failure).
+- **On whose account** — the ranking call runs on **your** Ranker key; the served request is billed
+  to the consumer as the chosen model.
+- **Never sent** — the full conversation, mid-conversation turns, tool-call arguments or schemas, raw
+  image/audio bytes or URLs, or any API key.
+
+See [ADR 0013](./adr/0013-auto-routing.md) for the reserved-name, excerpt-not-conversation, and
+fixed-priority-chain decisions.
 
 ## Engine Setup
 

@@ -60,6 +60,7 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── remote_grid.py     Remote `up` / `down` / `ls` / `info` + `members`.
 │   ├── remote_provider.py Remote `join` / `leave` (serve a remote grid).
 │   ├── remote_request.py  Remote `chat` / `image` / `edit` / `video` (consume via relay).
+│   ├── remote_router.py   Remote `grid router` — owner config for auto-routing (model `auto`).
 │   └── media_io.py          Shared media SSE/file IO used by local + remote request handlers.
 ├── shared/             Used by both modes.
 │   ├── state.py             Persisted mode pointer + per-mode active grid (~/.grid/state.json).
@@ -180,6 +181,12 @@ engine ──GET /relay/v1/poll (long-poll)──▶ claims job ◀────�
 3. The relay queues the job for a serving engine and returns the engine's result to the app
    (whole for chat, streamed SSE for media). A 401 is a clean "run `grid login`" — the one-shot
    consume path does not refresh the token. See [ADR 0005](adr/0005-remote-consume.md).
+4. When the app sends the reserved model `model: "auto"` (and the owner enabled routing with
+   `grid router`), the **relay** picks the real model *before* engine selection — its **Auto-router**
+   ranks the grid's live candidate models via an external Ranker and rewrites the body to the chosen
+   name, then the normal engine selection above runs unchanged. This client only sends `auto` and
+   reads the pick back from the `X-Grid-Routed-Model` / `X-Grid-Router` response headers; the routing
+   logic itself lives server-side (see below). See [ADR 0013](adr/0013-auto-routing.md).
 
 ### Engine lifecycle (`grid join` in remote mode)
 
@@ -245,6 +252,12 @@ record and teardown are shared (`shared/run_records.py`).
   and makes off-local calls to the relay, but the hosted backend — the relay service, its Postgres,
   billing — and heavy server dependencies stay out of this repo (DECISIONS D1, D14). Remote admin
   here is allowlist-only (`grid members`); richer management lives on the website (D13).
+- **Auto-routing (`auto`) decides server-side.** This repo ships only the owner CLI (`grid router`,
+  which writes per-network config through the control plane) and the consumer's `auto` request. The
+  Auto-router itself — candidate ranking, the Ranker chain, circuit breakers, free-first pick, and the
+  bounded excerpt that is the only request data leaving the grid — lives in the relay/master (grid-src),
+  consistent with "the backend stays out of this repo". Don't reimplement routing here. See
+  [ADR 0013](adr/0013-auto-routing.md).
 - **Vendored media stack.** Parts of `shared/media/` and `shared/engine/` are vendored from an
   upstream desktop app and annotated as such in their docstrings; keep vendored edits bracketed
   and minimal so they're easy to re-sync.

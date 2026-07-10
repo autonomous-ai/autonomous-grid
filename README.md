@@ -284,6 +284,27 @@ terms — the `openai:` prefix keeps that visible in every model list. There's n
 put a budget limit on the key's OpenAI project if you want one. Full contract, key store, and rotation
 in [docs/cli.md](docs/cli.md#engines).
 
+### Don't know which model to ask for? Send `auto`
+
+A grid's catalog is heterogeneous and shifts as engines join and leave. Instead of hardcoding a model
+name, an app can send the reserved name **`auto`** and the grid picks a capable model that's free — so
+requests don't queue behind a busy model while idle ones sit unused. The owner turns it on for a grid
+they own and points it at a **Ranker** (any OpenAI-compatible endpoint — start with OpenAI, move to
+OpenRouter or your own later):
+
+```bash
+export GRID_RANKER_API_KEY=sk-…
+grid router set-ranker research 1 --base-url https://api.openai.com/v1 --model gpt-5.4-mini
+grid router enable research
+grid chat -m auto "summarize this file in one line"   # the grid ranks its models and picks one
+```
+
+Only a **bounded excerpt** of each request — never the full conversation — goes to the Ranker (on the
+owner's key); a dead Ranker falls back to a deterministic pick, so `auto`'s availability equals the
+grid's, not a vendor's. The `model` field and `X-Grid-Routed-Model` header name whichever model
+actually answered. Full contract and the transparency table in
+[docs/cli.md](docs/cli.md#router); rationale in [ADR 0013](docs/adr/0013-auto-routing.md).
+
 ## How it works
 
 Grid sits **above** your computers — like an API gateway above your services, or Tailscale above

@@ -16,3 +16,7 @@ dist/
 .codegraph/
 .scratch/
 docs/agents/
+
+CONTEXT-MAP.md
+remote/CONTEXT.md
+local/CONTEXT.md
