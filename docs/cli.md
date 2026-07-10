@@ -411,6 +411,30 @@ model you aren't currently serving (`grid join` first). `rm` does not (you can c
 `grid leave`). `show` lists the grid's models and prices. In `local` mode the command exits with
 guidance to switch.
 
+## Router
+
+```
+grid router status  [grid] [--json]
+grid router enable  [grid] [--json]
+grid router disable [grid] [--json]
+grid router set-ranker    [grid] <1|2|3> --base-url <url> --model <name> [--json]
+grid router remove-ranker [grid] <1|2|3> [--json]
+```
+
+**Remote-only.** Configure **auto-routing** for a grid you own: an app that requests the reserved model
+`auto` has the grid pick a model for the request, ranked by an external **Ranker** you configure (see
+[ADR 0013](./adr/0013-auto-routing.md)). `enable`/`disable` turn routing on and off; `set-ranker` sets one
+of up to three Rankers in priority order (each an OpenAI-compatible endpoint — `--base-url` + `--model`);
+`remove-ranker` drops one; `status` shows the enabled state and each position's base URL and model —
+**never a key**, in either human or `--json` output. `[grid]` follows the usual selection (active grid when
+omitted). Like membership, these authenticate with your account sign-in (not a per-grid token) and don't
+need the grid running; in `local` mode the command exits with guidance to switch.
+
+The Ranker **API key** for `set-ranker` comes from the `GRID_RANKER_API_KEY` environment variable, else a
+hidden interactive prompt — **never a command-line flag** (so it stays out of shell history and process
+listings), and it is never printed or logged. A change that couldn't be pushed to the running grid yet is
+reported as saved and will apply shortly.
+
 ## Engine Setup
 
 ```
