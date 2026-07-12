@@ -8112,218 +8112,361 @@ def test_control_plane_list_members_handles_no_content(monkeypatch, tmp_path):
 # Remote router — `grid router` command group (cli/remote_router.py, ADR 0013)
 # ---------------------------------------------------------------------------
 
-def _mock_router(monkeypatch, *, config=None, enable=None, disable=None, set_ranker=None, remove=None):
-    """Stub the five control-plane router calls; record what each was invoked with."""
+def _mock_router(monkeypatch, *, config=None, enable=None, disable=None,
+                 set_advisors=None, remove_advisor=None, catalog=None):
+    """Stub the six control-plane router calls; record what each was invoked with. Replies use the v2
+    ``advisors`` shape (``{provider, model}`` pairs) — never a key or base URL."""
     from remote import control_plane
 
     calls = {}
 
     def _get(session_token, network_id, api_url=None):
         calls["status"] = {"session": session_token, "network_id": network_id}
-        return config if config is not None else {"enabled": False, "rankers": []}
+        return config if config is not None else {"enabled": False, "advisors": []}
 
     def _enable(session_token, network_id, api_url=None):
         calls["enable"] = {"session": session_token, "network_id": network_id}
-        return enable if enable is not None else {"enabled": True, "rankers": [], "synced": True}
+        return enable if enable is not None else {"enabled": True, "advisors": [], "synced": True}
 
     def _disable(session_token, network_id, api_url=None):
         calls["disable"] = {"session": session_token, "network_id": network_id}
-        return disable if disable is not None else {"enabled": False, "rankers": [], "synced": True}
+        return disable if disable is not None else {"enabled": False, "advisors": [], "synced": True}
 
-    def _set(session_token, network_id, position, base_url, model, api_key, api_url=None):
-        calls["set_ranker"] = {
-            "session": session_token, "network_id": network_id, "position": position,
-            "base_url": base_url, "model": model, "api_key": api_key,
-        }
-        return set_ranker if set_ranker is not None else {
+    def _set(session_token, network_id, advisors, api_url=None):
+        calls["set_advisors"] = {
+            "session": session_token, "network_id": network_id, "advisors": advisors}
+        return set_advisors if set_advisors is not None else {
             "enabled": False,
-            "rankers": [{"position": position, "base_url": base_url, "model": model}],
+            "advisors": [{"provider": p, "model": m} for p, m in advisors],
             "synced": True,
         }
 
-    def _remove(session_token, network_id, position, api_url=None):
-        calls["remove_ranker"] = {"session": session_token, "network_id": network_id, "position": position}
-        return remove if remove is not None else {"enabled": False, "rankers": [], "synced": True}
+    def _remove(session_token, network_id, provider, model=None, api_url=None):
+        calls["remove_advisor"] = {
+            "session": session_token, "network_id": network_id, "provider": provider, "model": model}
+        return remove_advisor if remove_advisor is not None else {
+            "enabled": False, "advisors": [], "synced": True}
+
+    def _catalog(session_token, api_url=None):
+        calls["catalog"] = {"session": session_token}
+        return catalog if catalog is not None else {"providers": []}
 
     monkeypatch.setattr(control_plane, "get_router_config", _get)
     monkeypatch.setattr(control_plane, "enable_router", _enable)
     monkeypatch.setattr(control_plane, "disable_router", _disable)
-    monkeypatch.setattr(control_plane, "set_ranker", _set)
-    monkeypatch.setattr(control_plane, "remove_ranker", _remove)
+    monkeypatch.setattr(control_plane, "set_advisors", _set)
+    monkeypatch.setattr(control_plane, "remove_advisor", _remove)
+    monkeypatch.setattr(control_plane, "get_router_catalog", _catalog)
     return calls
 
+
+# -- enable / disable / status ----------------------------------------------
 
 def test_router_enable_calls_control_plane_and_confirms(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    calls = _mock_router(monkeypatch, enable={"enabled": True, "rankers": [], "synced": True})
+    calls = _mock_router(monkeypatch, enable={"enabled": True, "advisors": [], "synced": True})
     assert cli.main(["router", "enable"]) == 0
     out = capsys.readouterr().out
     assert calls["enable"] == {"session": "sess-tok", "network_id": "n1"}
     assert "enabled" in out.lower()
 
 
-def test_router_status_shows_state_and_rankers_without_keys(monkeypatch, tmp_path, capsys):
-    _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    config = {"enabled": True, "rankers": [
-        {"position": 1, "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"}]}
-    calls = _mock_router(monkeypatch, config=config)
-    assert cli.main(["router", "status"]) == 0
-    out = capsys.readouterr().out
-    assert calls["status"] == {"session": "sess-tok", "network_id": "n1"}
-    assert "enabled" in out.lower()
-    assert "gpt-4o-mini" in out and "https://api.openai.com/v1" in out
-
-
-def test_router_status_empty_reports_no_rankers(monkeypatch, tmp_path, capsys):
-    _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    _mock_router(monkeypatch, config={"enabled": False, "rankers": []})
-    assert cli.main(["router", "status"]) == 0
-    out = capsys.readouterr().out
-    assert "disabled" in out.lower()
-    assert "no rankers" in out.lower()
-
-
-def test_router_status_json_echoes_masked_config(monkeypatch, tmp_path, capsys):
-    _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    config = {"enabled": True, "rankers": [
-        {"position": 1, "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"}]}
-    _mock_router(monkeypatch, config=config)
-    assert cli.main(["router", "status", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == config
-
-
 def test_router_disable_calls_control_plane_and_confirms(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    calls = _mock_router(monkeypatch, disable={"enabled": False, "rankers": [], "synced": True})
+    calls = _mock_router(monkeypatch, disable={"enabled": False, "advisors": [], "synced": True})
     assert cli.main(["router", "disable"]) == 0
     out = capsys.readouterr().out
     assert calls["disable"] == {"session": "sess-tok", "network_id": "n1"}
     assert "disabled" in out.lower()
 
 
-def test_router_remove_ranker_calls_control_plane_and_confirms(monkeypatch, tmp_path, capsys):
+def test_router_status_shows_state_and_advisors_as_tokens(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    calls = _mock_router(monkeypatch, remove={"enabled": True, "rankers": [], "synced": True})
-    assert cli.main(["router", "remove-ranker", "2"]) == 0
+    config = {"enabled": True, "advisors": [
+        {"provider": "openai", "model": "gpt-5-mini"},
+        {"provider": "openai", "model": "gpt-4o-mini"}]}
+    calls = _mock_router(monkeypatch, config=config)
+    assert cli.main(["router", "status"]) == 0
     out = capsys.readouterr().out
-    assert calls["remove_ranker"] == {"session": "sess-tok", "network_id": "n1", "position": 2}
-    assert "2" in out
+    assert calls["status"] == {"session": "sess-tok", "network_id": "n1"}
+    assert "enabled" in out.lower()
+    assert "openai:gpt-5-mini" in out and "openai:gpt-4o-mini" in out
+    # order = priority: position 1 (gpt-5-mini) prints before position 2 (gpt-4o-mini)
+    assert out.index("gpt-5-mini") < out.index("gpt-4o-mini")
+    # no base_url / position leakage from the old shape
+    assert "https://" not in out
 
 
-def test_router_set_ranker_uses_env_key_and_never_prints_it(monkeypatch, tmp_path, capsys):
+def test_router_status_empty_reports_no_advisors(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    monkeypatch.setenv("GRID_RANKER_API_KEY", "sk-secret-123")
-    calls = _mock_router(monkeypatch)
-    assert cli.main(["router", "set-ranker", "1",
-                     "--base-url", "https://api.openai.com/v1", "--model", "gpt-4o-mini"]) == 0
+    _mock_router(monkeypatch, config={"enabled": False, "advisors": []})
+    assert cli.main(["router", "status"]) == 0
     out = capsys.readouterr().out
-    assert calls["set_ranker"] == {
-        "session": "sess-tok", "network_id": "n1", "position": 1,
-        "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "api_key": "sk-secret-123",
-    }
-    assert "sk-secret-123" not in out  # the key is never echoed
+    assert "disabled" in out.lower()
+    assert "no advisors" in out.lower()
 
 
-def test_router_set_ranker_prompts_when_no_env_key(monkeypatch, tmp_path):
+def test_router_status_json_echoes_masked_config(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    monkeypatch.delenv("GRID_RANKER_API_KEY", raising=False)
-    calls = _mock_router(monkeypatch)
-    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
-    monkeypatch.setattr(cli.remote_router, "_prompt_ranker_key", lambda: "sk-prompted")
-    assert cli.main(["router", "set-ranker", "1",
-                     "--base-url", "https://api.openai.com/v1", "--model", "gpt-4o-mini"]) == 0
-    assert calls["set_ranker"]["api_key"] == "sk-prompted"
+    config = {"enabled": True, "advisors": [{"provider": "openai", "model": "gpt-5-mini"}]}
+    _mock_router(monkeypatch, config=config)
+    assert cli.main(["router", "status", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == config
 
 
-def test_router_set_ranker_errors_without_key_non_interactive(monkeypatch, tmp_path):
+def test_router_status_selects_grid_with_flag(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    monkeypatch.delenv("GRID_RANKER_API_KEY", raising=False)
-    _mock_router(monkeypatch)
-    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["router", "set-ranker", "1",
-                  "--base-url", "https://api.openai.com/v1", "--model", "gpt-4o-mini"])
-    assert "GRID_RANKER_API_KEY" in str(exc.value)
+                 networks=[{"network_id": "n1", "name": "team"},
+                           {"network_id": "n2", "name": "other"}], active="team")
+    calls = _mock_router(monkeypatch, config={"enabled": False, "advisors": []})
+    assert cli.main(["router", "status", "--grid", "other"]) == 0
+    assert calls["status"]["network_id"] == "n2"  # --grid overrides the active grid
 
 
-def test_router_set_ranker_has_no_key_flag():
+def test_router_status_rejects_positional_grid():
+    # Uniform selection: after the v2 reshape a grid is named ONLY via --grid; a positional grid name is no
+    # longer accepted (guards the whole group from a mixed-idiom regression).
     parser = cli.build_parser()
-    with pytest.raises(SystemExit):  # a key flag does not exist — argparse rejects it
-        parser.parse_args(["router", "set-ranker", "1", "--base-url", "https://x/v1",
-                           "--model", "m", "--api-key", "sk-x"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["router", "status", "team"])
 
 
-def test_router_set_ranker_json_never_shows_key(monkeypatch, tmp_path, capsys):
+# -- set-advisors -----------------------------------------------------------
+
+def test_router_set_advisors_replaces_chain_and_confirms(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    monkeypatch.setenv("GRID_RANKER_API_KEY", "sk-secret-123")
-    _mock_router(monkeypatch)
-    assert cli.main(["router", "set-ranker", "1", "--base-url", "https://api.openai.com/v1",
-                     "--model", "gpt-4o-mini", "--json"]) == 0
-    assert "sk-secret-123" not in capsys.readouterr().out
+    calls = _mock_router(monkeypatch)
+    assert cli.main(["router", "set-advisors", "openai:gpt-5-mini", "openai:gpt-4o-mini"]) == 0
+    out = capsys.readouterr().out
+    assert calls["set_advisors"] == {
+        "session": "sess-tok", "network_id": "n1",
+        "advisors": [("openai", "gpt-5-mini"), ("openai", "gpt-4o-mini")],  # order = priority, forwarded
+    }
+    assert "openai:gpt-5-mini" in out and "openai:gpt-4o-mini" in out
 
+
+def test_router_set_advisors_single_token(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    calls = _mock_router(monkeypatch)
+    assert cli.main(["router", "set-advisors", "openai:gpt-5-mini"]) == 0
+    assert calls["set_advisors"]["advisors"] == [("openai", "gpt-5-mini")]
+
+
+def test_router_set_advisors_bare_provider_forwards_none(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    calls = _mock_router(monkeypatch)
+    assert cli.main(["router", "set-advisors", "openai"]) == 0
+    # bare provider → model None; the control-plane client sends it provider-only (server resolves default)
+    assert calls["set_advisors"]["advisors"] == [("openai", None)]
+
+
+def test_router_set_advisors_uses_grid_flag_not_active(monkeypatch, tmp_path):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"},
+                           {"network_id": "n2", "name": "other"}], active="team")
+    calls = _mock_router(monkeypatch)
+    assert cli.main(["router", "set-advisors", "openai:gpt-5-mini", "--grid", "other"]) == 0
+    assert calls["set_advisors"]["network_id"] == "n2"  # --grid overrides the active grid
+
+
+def test_router_set_advisors_rejects_fourth_token():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):  # a 4th token is a clean parser rejection (AdvisorsAction cap)
+        parser.parse_args(["router", "set-advisors",
+                           "openai", "openai:gpt-5-nano", "openai:gpt-4o-mini", "openai:gpt-4.1-mini"])
+
+
+def test_router_set_advisors_accepts_exactly_three_max():
+    # The boundary: exactly MAX_ADVISORS (3) tokens must PARSE — guards a `>`→`>=` off-by-one regression in
+    # AdvisorsAction that the over-limit test alone wouldn't catch.
+    parser = cli.build_parser()
+    ns = parser.parse_args(["router", "set-advisors",
+                            "openai:gpt-5-mini", "openai:gpt-5-nano", "openai:gpt-4o-mini"])
+    assert len(ns.advisors) == 3
+
+
+@pytest.mark.parametrize("bad", [":m", "openai:", "a:b:c", ""])
+def test_router_set_advisors_rejects_malformed_token(bad):
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):  # malformed provider[:model] → parse_advisor_token ArgumentTypeError
+        parser.parse_args(["router", "set-advisors", bad])
+
+
+def test_router_set_advisors_json_scrubs_any_key(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    _mock_router(monkeypatch, set_advisors={"enabled": False, "synced": True, "advisors": [
+        {"provider": "openai", "model": "gpt-5-mini", "api_key": "sk-should-not-appear"}]})
+    assert cli.main(["router", "set-advisors", "openai:gpt-5-mini", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert "sk-should-not-appear" not in out and "api_key" not in out
+
+
+def test_router_set_advisors_surfaces_off_whitelist_400(monkeypatch, tmp_path):
+    # A real control-plane call (transport stubbed): an off-whitelist model is a 400 whose detail lists the
+    # valid names — the CLI surfaces that message verbatim, never a traceback.
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(400, json={
+        "detail": "Invalid model 'gpt-9' for advisor 'openai'. Valid models: gpt-5-mini, gpt-5-nano"}))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["router", "set-advisors", "openai:gpt-9"])
+    msg = str(exc.value)
+    assert "400" in msg and "Valid models" in msg
+
+
+# -- remove-advisor ---------------------------------------------------------
+
+def test_router_remove_advisor_exact_pair(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    calls = _mock_router(monkeypatch, remove_advisor={"enabled": True, "advisors": [], "synced": True})
+    assert cli.main(["router", "remove-advisor", "openai:gpt-4o-mini"]) == 0
+    out = capsys.readouterr().out
+    assert calls["remove_advisor"] == {
+        "session": "sess-tok", "network_id": "n1", "provider": "openai", "model": "gpt-4o-mini"}
+    assert "openai:gpt-4o-mini" in out
+
+
+def test_router_remove_advisor_bare_provider_removes_all(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    calls = _mock_router(monkeypatch)
+    assert cli.main(["router", "remove-advisor", "openai"]) == 0
+    assert calls["remove_advisor"] == {
+        "session": "sess-tok", "network_id": "n1", "provider": "openai", "model": None}
+
+
+def test_router_remove_advisor_empty_reply_is_clean(monkeypatch, tmp_path, capsys):
+    # Defensive: the real DELETE returns a full 200 body, but `_json_or_empty` coerces a 204/empty body to
+    # `{}`. That path must still print a clean confirmation and exit 0 — never crash on `.get()`.
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    _mock_router(monkeypatch, remove_advisor={})  # 204-equivalent empty reply
+    assert cli.main(["router", "remove-advisor", "openai"]) == 0
+    assert "openai" in capsys.readouterr().out  # a confirmation still prints, no traceback
+
+
+# -- models (catalog) -------------------------------------------------------
+
+def test_router_models_renders_catalog_with_default_marked(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    catalog = {"providers": [{"provider": "openai",
+                              "models": ["gpt-5-mini", "gpt-5-nano", "gpt-4o-mini"],
+                              "default_model": "gpt-5-mini"}]}
+    calls = _mock_router(monkeypatch, catalog=catalog)
+    assert cli.main(["router", "models"]) == 0
+    out = capsys.readouterr().out
+    assert calls["catalog"] == {"session": "sess-tok"}
+    assert "openai:gpt-5-mini" in out and "openai:gpt-5-nano" in out and "openai:gpt-4o-mini" in out
+    default_line = next(ln for ln in out.splitlines() if "gpt-5-mini" in ln)
+    assert "default" in default_line.lower()  # the default model is marked
+    nano_line = next(ln for ln in out.splitlines() if "gpt-5-nano" in ln)
+    assert "default" not in nano_line.lower()  # a non-default is not marked
+
+
+def test_router_models_json_echoes_reply(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    catalog = {"providers": [
+        {"provider": "openai", "models": ["gpt-5-mini"], "default_model": "gpt-5-mini"}]}
+    _mock_router(monkeypatch, catalog=catalog)
+    assert cli.main(["router", "models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == catalog
+
+
+def test_router_models_works_without_grid_resolved(monkeypatch, tmp_path, capsys):
+    # No grids at all: `status` would error ("name a grid"), but `models` reads the account-level catalog
+    # and must still work — it never resolves a grid.
+    _seed_remote(monkeypatch, tmp_path, networks=[], active=None)
+    calls = _mock_router(monkeypatch, catalog={"providers": [
+        {"provider": "openai", "models": ["gpt-5-mini"], "default_model": "gpt-5-mini"}]})
+    assert cli.main(["router", "models"]) == 0
+    assert calls["catalog"] == {"session": "sess-tok"}
+    assert "openai:gpt-5-mini" in capsys.readouterr().out
+
+
+# -- no key path anywhere ---------------------------------------------------
+
+def test_router_module_has_no_key_path():
+    # The v2 reshape deletes every key path — env var, hidden prompt, and the resolver helpers.
+    import cli.remote_router as rr
+    for gone in ("RANKER_KEY_ENV", "_resolve_ranker_key", "_prompt_ranker_key"):
+        assert not hasattr(rr, gone)
+
+
+def test_router_set_advisors_has_no_key_or_url_flags():
+    parser = cli.build_parser()
+    for flag in (["--api-key", "sk-x"], ["--base-url", "https://x/v1"], ["--model", "m"]):
+        with pytest.raises(SystemExit):  # none of these flags exist on the v2 surface
+            parser.parse_args(["router", "set-advisors", "openai:gpt-5-mini", *flag])
+
+
+# -- secret scrub (belt-and-suspenders) -------------------------------------
 
 def test_router_status_json_scrubs_leaked_key(monkeypatch, tmp_path, capsys):
-    # Defence in depth: even if grid-apis ever regressed its masking and returned a key, the CLI must
-    # not echo it. The control plane is the source of truth for masking; this pins the client scrub.
+    # Defence in depth: even if grid-apis ever regressed its masking and returned a key, the CLI must not
+    # echo it. The control plane is the source of truth for masking; this pins the client scrub.
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    leaked = {"enabled": True, "rankers": [
-        {"position": 1, "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini",
-         "api_key": "sk-leaked-999"}]}
+    leaked = {"enabled": True, "advisors": [
+        {"provider": "openai", "model": "gpt-5-mini", "api_key": "sk-leaked-999"}]}
     _mock_router(monkeypatch, config=leaked)
     assert cli.main(["router", "status", "--json"]) == 0
     out = capsys.readouterr().out
     assert "sk-leaked-999" not in out and "api_key" not in out
-    assert "gpt-4o-mini" in out  # the non-secret fields still print
+    assert "gpt-5-mini" in out  # the non-secret fields still print
 
+
+def test_router_status_json_scrubs_leaked_base_url(monkeypatch, tmp_path, capsys):
+    # The invariant is "never a key OR URL" (ADR 0013). The master-facing snapshot already materializes
+    # `{base_url, api_key, model}` triples; if a server regression ever leaked that shape onto the owner REST
+    # reply, the client scrub must drop the base_url too — not just the key.
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    leaked = {"enabled": True, "advisors": [
+        {"provider": "openai", "model": "gpt-5-mini", "base_url": "https://internal-proxy.example/v1"}]}
+    _mock_router(monkeypatch, config=leaked)
+    assert cli.main(["router", "status", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert "internal-proxy" not in out and "base_url" not in out
+    assert "gpt-5-mini" in out  # the non-secret fields still print
+
+
+def test_router_status_never_shows_key_material(monkeypatch, tmp_path, capsys):
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    config = {"enabled": True, "advisors": [{"provider": "openai", "model": "gpt-5-mini"}]}
+    _mock_router(monkeypatch, config=config)
+    for argv in (["router", "status"], ["router", "status", "--json"]):
+        assert cli.main(argv) == 0
+        out = capsys.readouterr().out
+        assert "api_key" not in out and "sk-" not in out
+
+
+# -- mutation sync caveat ---------------------------------------------------
 
 def test_router_mutation_no_caveat_when_synced_absent(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    _mock_router(monkeypatch, enable={"enabled": True, "rankers": []})  # reply omits `synced`
+    _mock_router(monkeypatch, enable={"enabled": True, "advisors": []})  # reply omits `synced`
     assert cli.main(["router", "enable"]) == 0
     assert "shortly" not in capsys.readouterr().out.lower()
-
-
-def test_router_set_ranker_whitespace_env_key_falls_through(monkeypatch, tmp_path):
-    _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    monkeypatch.setenv("GRID_RANKER_API_KEY", "   ")  # whitespace only → treated as absent
-    _mock_router(monkeypatch)
-    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["router", "set-ranker", "1", "--base-url", "https://api.openai.com/v1",
-                  "--model", "gpt-4o-mini"])
-    assert "GRID_RANKER_API_KEY" in str(exc.value)
-
-
-def test_router_set_ranker_empty_prompt_is_terminal(monkeypatch, tmp_path):
-    _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    monkeypatch.delenv("GRID_RANKER_API_KEY", raising=False)
-    _mock_router(monkeypatch)
-    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
-    monkeypatch.setattr(cli.remote_router, "_prompt_ranker_key", lambda: "")  # user pressed Enter
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["router", "set-ranker", "1", "--base-url", "https://api.openai.com/v1",
-                  "--model", "gpt-4o-mini"])
-    assert "entered" in str(exc.value).lower()
 
 
 def test_router_mutation_warns_when_not_synced(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    _mock_router(monkeypatch, enable={"enabled": True, "rankers": [], "synced": False})
+    _mock_router(monkeypatch, enable={"enabled": True, "advisors": [], "synced": False})
     assert cli.main(["router", "enable"]) == 0
     out = capsys.readouterr().out.lower()
     assert "enabled" in out and "shortly" in out  # not-yet-synced caveat surfaced on the human line
@@ -8332,7 +8475,7 @@ def test_router_mutation_warns_when_not_synced(monkeypatch, tmp_path, capsys):
 def test_router_mutation_no_caveat_when_synced(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    _mock_router(monkeypatch, enable={"enabled": True, "rankers": [], "synced": True})
+    _mock_router(monkeypatch, enable={"enabled": True, "advisors": [], "synced": True})
     assert cli.main(["router", "enable"]) == 0
     assert "shortly" not in capsys.readouterr().out.lower()
 
@@ -8340,22 +8483,10 @@ def test_router_mutation_no_caveat_when_synced(monkeypatch, tmp_path, capsys):
 def test_router_mutation_json_keeps_synced_verbatim(monkeypatch, tmp_path, capsys):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
-    reply = {"enabled": True, "rankers": [], "synced": False}
+    reply = {"enabled": True, "advisors": [], "synced": False}
     _mock_router(monkeypatch, enable=reply)
     assert cli.main(["router", "enable", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == reply
-
-
-def test_router_status_never_shows_key_material(monkeypatch, tmp_path, capsys):
-    _seed_remote(monkeypatch, tmp_path,
-                 networks=[{"network_id": "n1", "name": "team"}], active="team")
-    config = {"enabled": True, "rankers": [
-        {"position": 1, "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"}]}
-    _mock_router(monkeypatch, config=config)
-    for argv in (["router", "status"], ["router", "status", "--json"]):
-        assert cli.main(argv) == 0
-        out = capsys.readouterr().out
-        assert "api_key" not in out and "sk-" not in out
 
 
 # -- gating / wiring --------------------------------------------------------
@@ -8376,9 +8507,9 @@ def test_router_gated_in_local_mode(monkeypatch, tmp_path):
 def test_router_parser_wires_subcommands_to_handler():
     parser = cli.build_parser()
     argvs = (
-        ["router", "status"], ["router", "enable"], ["router", "disable"],
-        ["router", "set-ranker", "1", "--base-url", "https://x/v1", "--model", "m"],
-        ["router", "remove-ranker", "1"],
+        ["router", "status"], ["router", "enable"], ["router", "disable"], ["router", "models"],
+        ["router", "set-advisors", "openai:gpt-5-mini"],
+        ["router", "remove-advisor", "openai"],
     )
     for argv in argvs:
         assert parser.parse_args(argv).handler is cli.cmd_remote_router
@@ -8394,7 +8525,7 @@ def test_router_requires_sign_in(monkeypatch, tmp_path):
     assert "signed in" in str(exc.value).lower()
 
 
-def test_router_requires_grid_resolution(monkeypatch, tmp_path):
+def test_router_status_requires_grid_resolution(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path, networks=[], active=None)  # signed in, no grids
     with pytest.raises(SystemExit) as exc:
         cli.main(["router", "status"])
@@ -8405,7 +8536,9 @@ def test_router_unknown_subcommand_errors(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_router(monkeypatch)
-    with pytest.raises(SystemExit) as exc:  # parser blocks this via the CLI; the guard catches misuse
+    # `grid=None` must be present: a bogus subcommand falls through the models short-circuit, resolves the
+    # active grid, then hits the final guard. The parser blocks this path; the guard catches direct misuse.
+    with pytest.raises(SystemExit) as exc:
         cli.cmd_remote_router(SimpleNamespace(subcommand="bogus", grid=None, json=False))
     assert "subcommand" in str(exc.value).lower()
 
@@ -8424,7 +8557,7 @@ def test_router_surfaces_validation_error(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team"}], active="team")
     _mock_control_plane(monkeypatch,
-                        lambda r: httpx.Response(400, json={"detail": "configure a ranker first"}))
+                        lambda r: httpx.Response(400, json={"detail": "configure an advisor first"}))
     with pytest.raises(SystemExit) as exc:
         cli.main(["router", "enable"])
     assert "400" in str(exc.value)
@@ -8441,10 +8574,10 @@ def test_control_plane_get_router_config_gets_with_bearer(monkeypatch, tmp_path)
     def handler(request):
         seen["method"], seen["path"] = request.method, request.url.path
         seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(200, json={"enabled": False, "rankers": []})
+        return httpx.Response(200, json={"enabled": False, "advisors": []})
 
     _mock_control_plane(monkeypatch, handler)
-    assert control_plane.get_router_config("sess-tok", "n1") == {"enabled": False, "rankers": []}
+    assert control_plane.get_router_config("sess-tok", "n1") == {"enabled": False, "advisors": []}
     assert (seen["method"], seen["path"]) == ("GET", "/v1/grid/networks/n1/router")
     assert seen["auth"] == "Bearer sess-tok"
 
@@ -8458,7 +8591,7 @@ def test_control_plane_enable_router_posts(monkeypatch, tmp_path):
     def handler(request):
         seen["method"], seen["path"] = request.method, request.url.path
         seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(200, json={"enabled": True, "rankers": [], "synced": True})
+        return httpx.Response(200, json={"enabled": True, "advisors": [], "synced": True})
 
     _mock_control_plane(monkeypatch, handler)
     control_plane.enable_router("sess-tok", "n1")
@@ -8474,14 +8607,14 @@ def test_control_plane_disable_router_posts(monkeypatch, tmp_path):
 
     def handler(request):
         seen["method"], seen["path"] = request.method, request.url.path
-        return httpx.Response(200, json={"enabled": False, "rankers": [], "synced": True})
+        return httpx.Response(200, json={"enabled": False, "advisors": [], "synced": True})
 
     _mock_control_plane(monkeypatch, handler)
     control_plane.disable_router("sess-tok", "n1")
     assert (seen["method"], seen["path"]) == ("POST", "/v1/grid/networks/n1/router/disable")
 
 
-def test_control_plane_set_ranker_puts_with_body_and_bearer(monkeypatch, tmp_path):
+def test_control_plane_set_advisors_puts_with_body_and_bearer(monkeypatch, tmp_path):
     from remote import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -8491,17 +8624,20 @@ def test_control_plane_set_ranker_puts_with_body_and_bearer(monkeypatch, tmp_pat
         seen["method"], seen["path"] = request.method, request.url.path
         seen["auth"] = request.headers.get("authorization")
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"enabled": False, "rankers": [], "synced": True})
+        return httpx.Response(200, json={"enabled": False, "advisors": [], "synced": True})
 
     _mock_control_plane(monkeypatch, handler)
-    control_plane.set_ranker("sess-tok", "n1", 2, "https://api.openai.com/v1", "gpt-4o-mini", "sk-key")
-    assert (seen["method"], seen["path"]) == ("PUT", "/v1/grid/networks/n1/router/rankers/2")
+    # A full pair AND a bare provider in one replace-all chain (order = priority).
+    control_plane.set_advisors("sess-tok", "n1", [("openai", "gpt-5-mini"), ("openai", None)])
+    assert (seen["method"], seen["path"]) == ("PUT", "/v1/grid/networks/n1/router/advisors")
     assert seen["auth"] == "Bearer sess-tok"
-    assert seen["body"] == {
-        "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "api_key": "sk-key"}
+    assert seen["body"] == {"advisors": [
+        {"provider": "openai", "model": "gpt-5-mini"},
+        {"provider": "openai"},  # bare provider → model omitted; the server resolves the catalog default
+    ]}
 
 
-def test_control_plane_remove_ranker_deletes(monkeypatch, tmp_path):
+def test_control_plane_remove_advisor_deletes_with_query(monkeypatch, tmp_path):
     from remote import control_plane
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -8509,11 +8645,50 @@ def test_control_plane_remove_ranker_deletes(monkeypatch, tmp_path):
 
     def handler(request):
         seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"enabled": False, "advisors": [], "synced": True})
+
+    _mock_control_plane(monkeypatch, handler)
+    # Exact pair → both query params; the path stays clean (no position segment).
+    control_plane.remove_advisor("sess-tok", "n1", "openai", "gpt-5-mini")
+    assert (seen["method"], seen["path"]) == ("DELETE", "/v1/grid/networks/n1/router/advisors")
+    assert seen["params"] == {"provider": "openai", "model": "gpt-5-mini"}
+
+
+def test_control_plane_remove_advisor_bare_provider_omits_model_param(monkeypatch, tmp_path):
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["params"] = dict(request.url.params)
         return httpx.Response(204)  # a successful DELETE may answer 204
 
     _mock_control_plane(monkeypatch, handler)
-    assert control_plane.remove_ranker("sess-tok", "n1", 2) == {}  # no JSON-decode crash on empty body
-    assert (seen["method"], seen["path"]) == ("DELETE", "/v1/grid/networks/n1/router/rankers/2")
+    # Bare provider → only `provider`; 204 must not crash `.json()`.
+    assert control_plane.remove_advisor("sess-tok", "n1", "openai") == {}
+    assert seen["params"] == {"provider": "openai"}
+
+
+def test_control_plane_get_router_catalog_gets_with_bearer(monkeypatch, tmp_path):
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+    catalog = {"providers": [
+        {"provider": "openai", "models": ["gpt-5-mini", "gpt-5-nano"], "default_model": "gpt-5-mini"}]}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=catalog)
+
+    _mock_control_plane(monkeypatch, handler)
+    # No network id in the path — the catalog is account-level (session token only).
+    assert control_plane.get_router_catalog("sess-tok") == catalog
+    assert (seen["method"], seen["path"]) == ("GET", "/v1/grid/router/catalog")
+    assert seen["auth"] == "Bearer sess-tok"
 
 
 def _build_gguf(kvs: list[tuple[str, int, object]]) -> bytes:
