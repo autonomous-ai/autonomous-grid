@@ -431,11 +431,13 @@ grid router remove-advisor <provider[:model]> [--grid <grid>] [--json]
 **Remote-only.** Configure **auto-routing** for a grid you own: an app that requests the reserved model
 `auto` has the grid pick a model for the request, ranked by an external **Advisor** (see
 [ADR 0013](./adr/0013-auto-routing.md)). An Advisor is a `provider[:model]` pair you pick **by name** from
-the platform catalog — `grid router models` lists the providers and their whitelisted models (the default
-marked), and a bare `provider` uses that default. You supply neither a URL nor a key: the platform carries
-both. `enable`/`disable` turn routing on and off; `set-advisors` **replaces the whole chain** with up to
-three advisors in priority order; `remove-advisor` drops one by name (an exact `provider:model`, or a bare
-`provider` to remove all of its entries); `status` shows the enabled state and the chain as ordered
+the platform catalog. **Start with `grid router models`** — it lists the providers and their whitelisted
+models (the default marked) — then name advisors from that list; a bare `provider` uses its default model.
+You supply neither a URL nor a key: the platform carries both. `enable`/`disable` turn routing on and off;
+`set-advisors` **replaces the whole chain** with up to three advisors in priority order (the same provider
+may repeat with a different model — with a one-provider catalog, the only route to a real failover chain —
+but a duplicated exact `provider:model` pair is rejected); `remove-advisor` drops one by name (an exact
+`provider:model`, or a bare `provider` to remove all of its entries); `status` shows the enabled state and the chain as ordered
 `provider:model` tokens — **never a key or URL**, in either human or `--json` output.
 
 Every subcommand that acts on a grid selects it with `--grid` (active grid when omitted); `set-advisors` and
@@ -475,7 +477,8 @@ does.
 | requested output size | the request's `max_tokens`, if set | integer or unset |
 
 - **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Advisor call.
-- **To whom** — the Advisors you configured, in priority order (advisor 1, then 2, 3 on failure).
+- **To whom** — the Advisors you configured, in priority order (advisor 1, then 2, 3 on failure), each
+  reached **through the platform's LLM proxy** — you never hold, store, or hand out an advisor key or URL.
 - **On whose account** — the ranking call runs on the platform's advisor-proxy key (not your key, and
   not the consumer's); the served request is billed to the consumer as the chosen model.
 - **Never sent** — the full conversation, mid-conversation turns, tool-call arguments or schemas, raw

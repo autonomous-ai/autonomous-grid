@@ -183,7 +183,7 @@ engine ──GET /relay/v1/poll (long-poll)──▶ claims job ◀────�
    consume path does not refresh the token. See [ADR 0005](adr/0005-remote-consume.md).
 4. When the app sends the reserved model `model: "auto"` (and the owner enabled routing with
    `grid router`), the **relay** picks the real model *before* engine selection — its **Auto-router**
-   ranks the grid's live candidate models via an external Ranker and rewrites the body to the chosen
+   ranks the grid's live candidate models via an external Advisor and rewrites the body to the chosen
    name, then the normal engine selection above runs unchanged. This client only sends `auto` and
    reads the pick back from the `X-Grid-Routed-Model` / `X-Grid-Router` response headers; the routing
    logic itself lives server-side (see below). See [ADR 0013](adr/0013-auto-routing.md).
@@ -254,7 +254,7 @@ record and teardown are shared (`shared/run_records.py`).
   here is allowlist-only (`grid members`); richer management lives on the website (D13).
 - **Auto-routing (`auto`) decides server-side.** This repo ships only the owner CLI (`grid router`,
   which writes per-network config through the control plane) and the consumer's `auto` request. The
-  Auto-router itself — candidate ranking, the Ranker chain, circuit breakers, free-first pick, and the
+  Auto-router itself — candidate ranking, the Advisor chain, circuit breakers, free-first pick, and the
   bounded excerpt that is the only request data leaving the grid — lives in the relay/master (grid-src),
   consistent with "the backend stays out of this repo". Don't reimplement routing here. See
   [ADR 0013](adr/0013-auto-routing.md).
