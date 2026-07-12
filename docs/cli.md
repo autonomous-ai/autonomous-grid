@@ -420,45 +420,48 @@ guidance to switch.
 ## Router
 
 ```
-grid router status  [grid] [--json]
-grid router enable  [grid] [--json]
-grid router disable [grid] [--json]
-grid router set-ranker    [grid] <1|2|3> --base-url <url> --model <name> [--json]
-grid router remove-ranker [grid] <1|2|3> [--json]
+grid router status  [--grid <grid>] [--json]
+grid router enable  [--grid <grid>] [--json]
+grid router disable [--grid <grid>] [--json]
+grid router models  [--json]
+grid router set-advisors   <provider[:model]> [<provider[:model]> …] [--grid <grid>] [--json]
+grid router remove-advisor <provider[:model]> [--grid <grid>] [--json]
 ```
 
 **Remote-only.** Configure **auto-routing** for a grid you own: an app that requests the reserved model
-`auto` has the grid pick a model for the request, ranked by an external **Ranker** you configure (see
-[ADR 0013](./adr/0013-auto-routing.md)). `enable`/`disable` turn routing on and off; `set-ranker` sets one
-of up to three Rankers in priority order (each an OpenAI-compatible endpoint — `--base-url` + `--model`);
-`remove-ranker` drops one; `status` shows the enabled state and each position's base URL and model —
-**never a key**, in either human or `--json` output. `[grid]` follows the usual selection (active grid when
-omitted). Like membership, these authenticate with your account sign-in (not a per-grid token) and don't
-need the grid running; in `local` mode the command exits with guidance to switch.
+`auto` has the grid pick a model for the request, ranked by an external **Advisor** (see
+[ADR 0013](./adr/0013-auto-routing.md)). An Advisor is a `provider[:model]` pair you pick **by name** from
+the platform catalog — `grid router models` lists the providers and their whitelisted models (the default
+marked), and a bare `provider` uses that default. You supply neither a URL nor a key: the platform carries
+both. `enable`/`disable` turn routing on and off; `set-advisors` **replaces the whole chain** with up to
+three advisors in priority order; `remove-advisor` drops one by name (an exact `provider:model`, or a bare
+`provider` to remove all of its entries); `status` shows the enabled state and the chain as ordered
+`provider:model` tokens — **never a key or URL**, in either human or `--json` output.
 
-The Ranker **API key** for `set-ranker` comes from the `GRID_RANKER_API_KEY` environment variable, else a
-hidden interactive prompt — **never a command-line flag** (so it stays out of shell history and process
-listings), and it is never printed or logged. A change that couldn't be pushed to the running grid yet is
-reported as saved and will apply shortly.
+Every subcommand that acts on a grid selects it with `--grid` (active grid when omitted); `set-advisors` and
+`remove-advisor` take their advisor tokens positionally, and `models` needs no grid at all. Like membership,
+these authenticate with your account sign-in (not a per-grid token) and don't need the grid running; in
+`local` mode the command exits with guidance to switch. A change that couldn't be pushed to the running grid
+yet is reported as saved and will apply shortly.
 
-**Chain + fallback.** The Rankers are tried strictly in position order (1 → 2 → 3, never reordered),
+**Chain + fallback.** The Advisors are tried strictly in priority order (1 → 2 → 3, never reordered),
 advancing on failure. Each has a circuit breaker — 3 consecutive failures skip it for 60 s, then one
-half-open probe re-tries it — so a dead vendor doesn't tax every request. If every Ranker is down the
+half-open probe re-tries it — so a dead vendor doesn't tax every request. If every Advisor is down the
 grid still serves from a deterministic local pick (most free capacity → cheapest → name), stamped
-`X-Grid-Router: fallback`. The ranking call runs on **your** Ranker key; the served request bills the
-consumer as the chosen model.
+`X-Grid-Router: fallback`. The ranking call runs on the platform's advisor-proxy key (not your key, and not
+the consumer's); the served request bills the consumer as the chosen model.
 
 **Consuming `auto`.** An app requests the reserved model `auto` on `chat/completions` (streaming or
 not); the response `model` and the `X-Grid-Routed-Model` header carry the real model, and
 `X-Grid-Router` is `ranked` or `fallback`. `auto` appears in `/v1/models` (as `owned_by:
 "grid-router"`) only while routing is enabled; disabled → a clear "auto routing is not enabled" error.
-`auto` is chat-only — the legacy `completions` endpoint and a `--target-provider` header each reject
+`auto` is chat-only — the legacy `completions` endpoint and an `X-Target-Provider` header each reject
 it, and media models are never candidates.
 
 ### Auto-routing transparency
 
 When routing is enabled, an `auto` request sends a **bounded excerpt** — and nothing else — to each
-Ranker in turn. This table is the complete set of what leaves the grid; the full conversation never
+Advisor in turn. This table is the complete set of what leaves the grid; the full conversation never
 does.
 
 | Field | What it is | Bound |
@@ -471,10 +474,10 @@ does.
 | images present | whether any image/binary part exists (each becomes a `[image]` marker) | yes / no |
 | requested output size | the request's `max_tokens`, if set | integer or unset |
 
-- **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Ranker call.
-- **To whom** — the Rankers you configured, in priority order (position 1, then 2, 3 on failure).
-- **On whose account** — the ranking call runs on **your** Ranker key; the served request is billed
-  to the consumer as the chosen model.
+- **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Advisor call.
+- **To whom** — the Advisors you configured, in priority order (advisor 1, then 2, 3 on failure).
+- **On whose account** — the ranking call runs on the platform's advisor-proxy key (not your key, and
+  not the consumer's); the served request is billed to the consumer as the chosen model.
 - **Never sent** — the full conversation, mid-conversation turns, tool-call arguments or schemas, raw
   image/audio bytes or URLs, or any API key.
 

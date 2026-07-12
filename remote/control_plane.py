@@ -119,23 +119,25 @@ def list_members(
     return list(members or [])
 
 
-# --- Auto-router owner config (ADR 0013) ----------------------------------------------------------
+# --- Auto-router owner config (ADR 0013, revised) -------------------------------------------------
 # Account-level, session-token authorised, owner/admin-checked on the control plane. NOTE the
-# ``/networks/`` path prefix (NOT ``/managed-networks/`` like the calls above): the router routes are
-# registered only under ``/networks/{id}/router`` in grid-apis. Reads/writes return the *masked*
-# config (``{"enabled", "rankers": [{"position", "base_url", "model"}]}``, never a key); mutations add
-# ``"synced": bool``. Ranker keys ride only this owner channel, in the ``set_ranker`` request body.
+# ``/networks/`` path prefix (NOT ``/managed-networks/`` like the calls above): the per-grid router
+# routes are registered only under ``/networks/{id}/router`` in grid-apis (the catalog GET is
+# account-level under ``/router/catalog`` — no network). Reads/writes return the *masked* config
+# (``{"enabled", "advisors": [{"provider", "model"}]}``, never a key or URL); mutations add
+# ``"synced": bool``. Advisors are picked BY NAME from the platform catalog — the owner supplies
+# neither a base URL nor a key (the platform carries both), so nothing secret rides these requests.
 
 
 def get_router_config(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
-    """The grid's masked router config (enabled state + each ranker's position/base_url/model). Never
-    carries key material — the control plane strips it on every read."""
+    """The grid's masked router config: ``{"enabled", "advisors": [{"provider", "model"}]}`` in priority
+    order. Never a key or base URL — the control plane masks both on every read."""
     with _client(api_url, session_token) as client:
         return _json_or_empty(_send(client, "GET", f"/v1/grid/networks/{network_id}/router"))
 
 
 def enable_router(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
-    """Turn auto-routing on. The control plane rejects enabling with zero rankers (clear 400)."""
+    """Turn auto-routing on. The control plane rejects enabling with zero advisors (clear 400)."""
     with _client(api_url, session_token) as client:
         return _json_or_empty(_send(client, "POST", f"/v1/grid/networks/{network_id}/router/enable"))
 
@@ -146,27 +148,46 @@ def disable_router(session_token: str, network_id: str, api_url: str | None = No
         return _json_or_empty(_send(client, "POST", f"/v1/grid/networks/{network_id}/router/disable"))
 
 
-def set_ranker(
-    session_token: str, network_id: str, position: int, base_url: str, model: str, api_key: str,
+def set_advisors(
+    session_token: str, network_id: str, advisors: list[tuple[str, str | None]],
     api_url: str | None = None,
 ) -> dict[str, Any]:
-    """Set the ranker at ``position`` (1-3). ``api_key`` rides the body (sourced by the CLI from the
-    ``GRID_RANKER_API_KEY`` env var or a hidden prompt — never a flag). The control plane validates
-    scheme / non-empty model / key presence / contiguity and returns clear 400s."""
+    """Replace the whole advisor chain (1-3 ``{provider, model}`` pairs, order = priority). Each item is a
+    ``(provider, model | None)`` tuple; a bare provider (``model is None``) is sent provider-only so the
+    control plane resolves the catalog default. Replace-all — the posted list IS the chain. No key and no
+    URL ride this request (the platform carries both). Server 400s (unknown provider, off-whitelist model
+    listing the valid names, duplicate pair, >3) surface as a clean ``SystemExit`` via ``_send``."""
+    body = {"advisors": [
+        ({"provider": provider, "model": model} if model else {"provider": provider})
+        for provider, model in advisors
+    ]}
     with _client(api_url, session_token) as client:
         return _json_or_empty(_send(
-            client, "PUT", f"/v1/grid/networks/{network_id}/router/rankers/{position}",
-            json={"base_url": base_url, "model": model, "api_key": api_key},
-        ))
+            client, "PUT", f"/v1/grid/networks/{network_id}/router/advisors", json=body))
 
 
-def remove_ranker(
-    session_token: str, network_id: str, position: int, api_url: str | None = None
+def remove_advisor(
+    session_token: str, network_id: str, provider: str, model: str | None = None,
+    api_url: str | None = None,
 ) -> dict[str, Any]:
-    """Remove the ranker at ``position`` (1-3). Removing the last ranker while enabled is a clear 400."""
+    """Remove advisors by name: an exact ``provider`` + ``model`` removes one entry; a bare ``provider``
+    (``model is None``) removes all of that provider's entries. Name(s) ride the query string (httpx
+    percent-encodes them; there is no path segment to inject). A remove that matches nothing is a clear
+    400 from the control plane."""
+    params: dict[str, str] = {"provider": provider}
+    if model:
+        params["model"] = model
     with _client(api_url, session_token) as client:
         return _json_or_empty(_send(
-            client, "DELETE", f"/v1/grid/networks/{network_id}/router/rankers/{position}"))
+            client, "DELETE", f"/v1/grid/networks/{network_id}/router/advisors", params=params))
+
+
+def get_router_catalog(session_token: str, api_url: str | None = None) -> dict[str, Any]:
+    """The advisor catalog backing ``grid router models`` — each provider, its whitelisted models, and the
+    default. Account-level (any session token); no network, no admin, no grid running. Never a base URL or
+    key. Shape: ``{"providers": [{"provider", "models": [...], "default_model"}]}``."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "GET", "/v1/grid/router/catalog"))
 
 
 def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
