@@ -10,6 +10,7 @@ is reached in local mode (dispatch gates the remote commands to remote mode).
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 from urllib.parse import quote
 
@@ -18,11 +19,18 @@ import httpx
 from . import credentials
 
 
+# Control-plane HTTP timeout (seconds). The default suits every fast call; managed-network *create* is
+# synchronous and can exceed it while the backend boots the master, so it is overridable via
+# ``GRID_CONTROL_PLANE_TIMEOUT`` (a too-short timeout aborts the client mid-create, leaving the backend
+# to finish on its own — a half-registered network).
+_TIMEOUT = float(os.getenv("GRID_CONTROL_PLANE_TIMEOUT", "30"))
+
+
 def _client(api_url: str | None = None, token: str | None = None) -> httpx.Client:
     headers = {"User-Agent": "grid-cli"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    return httpx.Client(base_url=credentials.api_url(api_url), headers=headers, timeout=30.0)
+    return httpx.Client(base_url=credentials.api_url(api_url), headers=headers, timeout=_TIMEOUT)
 
 
 def start_device_login(api_url: str | None = None) -> dict[str, Any]:
