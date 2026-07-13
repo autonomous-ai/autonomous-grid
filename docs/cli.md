@@ -462,9 +462,9 @@ it, and media models are never candidates.
 
 ### Auto-routing transparency
 
-When routing is enabled, an `auto` request sends a **bounded excerpt** — and nothing else — to each
-Advisor in turn. This table is the complete set of what leaves the grid; the full conversation never
-does.
+When routing is enabled, an `auto` request sends a **bounded excerpt of the request** plus a
+**short list of your grid's own candidate models** to each Advisor in turn. This table is the complete
+set of request data that leaves the grid; the full conversation never does.
 
 | Field | What it is | Bound |
 |---|---|---|
@@ -476,13 +476,20 @@ does.
 | images present | whether any image/binary part exists (each becomes a `[image]` marker) | yes / no |
 | requested output size | the request's `max_tokens`, if set | integer or unset |
 
+- **Candidate metadata (grid-side, not request data)** — alongside the excerpt, the Advisor is given
+  one line per candidate model: the model **name**, its **capability names** (`tools`, `vision`, …,
+  bounded to a known vocabulary so a provider can't inject arbitrary text), and its **context window**
+  (included only when known). This is information about the **engines your grid's providers serve**,
+  not about the consumer's request, so it does not widen the request privacy surface above. It is
+  capped at **50 candidates**, and per-engine **pricing, free capacity, and throughput are never
+  included** — those stay on the grid and are used only for the local pick.
 - **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Advisor call.
 - **To whom** — the Advisors you configured, in priority order (advisor 1, then 2, 3 on failure), each
   reached **through the platform's LLM proxy** — you never hold, store, or hand out an advisor key or URL.
 - **On whose account** — the ranking call runs on the platform's advisor-proxy key (not your key, and
   not the consumer's); the served request is billed to the consumer as the chosen model.
 - **Never sent** — the full conversation, mid-conversation turns, tool-call arguments or schemas, raw
-  image/audio bytes or URLs, or any API key.
+  image/audio bytes or URLs, per-engine pricing/capacity/throughput, or any API key.
 
 See [ADR 0013](./adr/0013-auto-routing.md) for the reserved-name, excerpt-not-conversation, and
 fixed-priority-chain decisions.

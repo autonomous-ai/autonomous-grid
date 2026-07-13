@@ -400,24 +400,23 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
     return probed
 
 
-DEFAULT_CONTEXT_WINDOW = 128000
-
-
 def capability_entry(
     probed: dict[str, bool], context_window: int | None = None,
     endpoints: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` reflects
-    the engine's ``--ctx-size`` when known (the master reads it into the model catalog); it falls back to
-    the default when unknown. ``endpoints`` defaults to the hardware-engine pair; an API engine passes
-    ``["chat/completions"]`` — it never serves legacy completions (ADR 0012)."""
+    """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` is
+    included ONLY when actually known (the engine's ``--ctx-size`` or an API whitelist entry) — an
+    unknown window is omitted, never defaulted, so the master (and the auto-router Advisor) treats
+    absence as "unknown" rather than trusting a fabricated 128000. ``endpoints`` defaults to the
+    hardware-engine pair; an API engine passes ``["chat/completions"]`` — it never serves legacy
+    completions (ADR 0012)."""
     input_modalities = ["text", "image"] if probed["vision"] else ["text"]
-    ctx = int(context_window) if context_window else DEFAULT_CONTEXT_WINDOW
+    ctx = int(context_window) if context_window else None
     return {
         "endpoints": list(endpoints) if endpoints is not None else ["chat/completions", "completions"],
         "input_modalities": input_modalities,
         "output_modalities": ["text"],
-        "context_window": ctx,
+        **({"context_window": ctx} if ctx is not None else {}),
         "max_output_tokens": 64000,
         "features": {
             "vision": probed["vision"],
@@ -430,7 +429,7 @@ def capability_entry(
             "top_logprobs": False,
         },
         "limits": {
-            "max_context_tokens": ctx,
+            **({"max_context_tokens": ctx} if ctx is not None else {}),
             "max_output_tokens": 64000,
             "max_images": 8,
             "max_image_bytes": 4_000_000,

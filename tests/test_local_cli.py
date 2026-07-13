@@ -8945,7 +8945,7 @@ def test_price_is_gated_in_local_mode_through_cli_main(monkeypatch, tmp_path):
         cli.main(["price", "show"])
 
 
-def test_capability_entry_uses_ctx_size_when_given():
+def test_capability_entry_uses_ctx_size_and_omits_when_unknown():
     from remote import probe
 
     probed = {"vision": False, "tools": False, "parallel_tool_calls": False,
@@ -8953,9 +8953,12 @@ def test_capability_entry_uses_ctx_size_when_given():
     entry = probe.capability_entry(probed, 200000)
     assert entry["context_window"] == 200000
     assert entry["limits"]["max_context_tokens"] == 200000
-    # falls back to the default when unknown
+    # An unknown window is OMITTED, never defaulted — the master treats absence as "unknown" rather
+    # than being handed a fabricated 128000 that would mislead the auto-router's Advisor.
     default = probe.capability_entry(probed)
-    assert default["context_window"] == probe.DEFAULT_CONTEXT_WINDOW
+    assert "context_window" not in default
+    assert "max_context_tokens" not in default["limits"]
+    assert default["limits"]["max_output_tokens"] == 64000  # the other limits still present
 
 
 def test_capabilities_threads_ctx_size_into_envelope(monkeypatch):
@@ -8966,6 +8969,16 @@ def test_capabilities_threads_ctx_size_into_envelope(monkeypatch):
         "json_object": False, "json_schema": False})
     env = probe.capabilities("http://h:8081/v1", "qwen3.5:0.8b", context_window=200000)
     assert env["models"]["qwen3.5:0.8b"]["context_window"] == 200000
+
+
+def test_capabilities_envelope_omits_ctx_when_unknown(monkeypatch):
+    from remote import probe
+
+    monkeypatch.setattr(probe, "probe_llama_capabilities", lambda url, model: {
+        "vision": False, "tools": False, "parallel_tool_calls": False,
+        "json_object": False, "json_schema": False})
+    env = probe.capabilities("http://h:8081/v1", "qwen3.5:0.8b")  # no context_window known
+    assert "context_window" not in env["models"]["qwen3.5:0.8b"]
 
 
 # -- provider heartbeat VRAM (grid provider VRAM roll-up on the grid page) --

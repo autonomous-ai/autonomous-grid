@@ -28,8 +28,26 @@ Choices a future reader will otherwise re-litigate:
   ship the whole conversation to a third party, against the "models stay on your machines"
   promise, with cost/latency growing with history. Metadata-only was rejected: the advisor
   can't classify the task, and ranking degrades to capability matching.
-- **The Advisor sees capabilities only — no pricing, no live load.** Fitness is its one job;
-  cost and availability are decided locally at pick time, where the data is fresh.
+- **The Advisor ranks on model facts, not names — but never on pricing or live load.** Each
+  candidate is rendered as its own line carrying the model name, its **context window**, and its
+  **capability names** (`tools`, `vision`, …) — owner-side facts about the grid's own engines, so the
+  Advisor ranks on data rather than guessing a model's strengths from its name. The system prompt
+  carries a **leanest-adequate rubric**: the grid owner pays for the compute, so the Advisor prefers
+  the smallest/cheapest candidate that still fits and escalates only when the request genuinely
+  demands it (fixing the observed over-ranking of big, well-known-named models on trivial requests).
+  Still never sent: per-engine **pricing**, **free capacity**, and **throughput** — cost and
+  availability are decided locally at pick time, where the data is fresh. The Advisor sees at most
+  **50 candidates** (a bounded, deterministically-ordered slice) so the prompt can't grow without
+  limit on a large grid. This is grid-side engine metadata (from whichever nodes registered as
+  providers), not consumer request data, so the **consumer privacy surface is unchanged** — the
+  excerpt (what leaves the grid *about the request*) is exactly as before; provider-supplied
+  capability names are additionally bounded to a known vocabulary so a node can't inject arbitrary
+  strings into the ranking prompt. A context window is included only when actually known: the probe
+  omits an unknown window rather than baking a default, and the master additionally treats a reported
+  `128000` as unknown — because that is both the CLI's own default `--ctx-size` and the old bake
+  value, so it is indistinguishable from "the operator never specified one." A real ctx signal thus
+  requires an explicit non-default `--ctx-size` (or a future probe of the engine's true window); it is
+  a standing rule, not a transitional one.
 - **A model-level layer in front of the untouched engine-level selection.** After the
   auto-router picks a model it rewrites the body to the real name and hands off; engine
   choice, queueing, claiming, streaming, and billing are unchanged (an `auto` request bills
@@ -38,7 +56,7 @@ Choices a future reader will otherwise re-litigate:
 - **Advisors come from a platform catalog, not from owner-supplied endpoints** *(revision)*.
   An advisor is a `{provider, model}` pair validated against a control-plane catalog
   (per-provider model whitelist + default model; v1: `openai` with bare model names —
-  `gpt-5-mini` default, `gpt-5-nano`, `gpt-4.1-mini`, `gpt-4o-mini`); the catalog maps the
+  `gpt-4o-mini` default, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1-mini`); the catalog maps the
   provider to the platform LLM proxy's URL (control-plane env). BYO `--base-url` was
   **dropped, not hidden**: no user-supplied advisor URLs means no owner key custody, no SSRF
   surface at the write path, and vendors/models are added server-side with no CLI release.
