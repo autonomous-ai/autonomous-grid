@@ -469,7 +469,7 @@ set of request data that leaves the grid; the full conversation never does.
 | Field | What it is | Bound |
 |---|---|---|
 | system head | head of the first `system` message, truncated | ≤ 500 chars |
-| last-user tail | tail of the last `user` message, truncated | ≤ 2000 chars |
+| recent user tails | tails of the **last 3 `user` messages** (oldest→newest), each truncated — so a terse final message still carries the task context set in the turns leading up to it | ≤ 2000 chars each |
 | message count | number of messages in the request | integer |
 | approx input size | total characters across all message content | integer |
 | tool names | declared function **names** only — never arguments or JSON schemas | list of names |
@@ -488,8 +488,9 @@ set of request data that leaves the grid; the full conversation never does.
   reached **through the platform's LLM proxy** — you never hold, store, or hand out an advisor key or URL.
 - **On whose account** — the ranking call runs on the platform's advisor-proxy key (not your key, and
   not the consumer's); the served request is billed to the consumer as the chosen model.
-- **Never sent** — the full conversation, mid-conversation turns, tool-call arguments or schemas, raw
-  image/audio bytes or URLs, per-engine pricing/capacity/throughput, or any API key.
+- **Never sent** — the full conversation, `assistant`/`tool` turns, `user` turns older than the last
+  three, tool-call arguments or schemas, raw image/audio bytes or URLs, per-engine
+  pricing/capacity/throughput, or any API key.
 
 See [ADR 0013](./adr/0013-auto-routing.md) for the reserved-name, excerpt-not-conversation, and
 fixed-priority-chain decisions.

@@ -23,11 +23,14 @@ Choices a future reader will otherwise re-litigate:
 
 - **Bare `auto`, reserved, shadows any engine-advertised `auto` at dispatch.** Rejected
   `grid:auto`: namespaces mean engine kind (`openai:`, `comfyui:`), not master features.
-- **Excerpt, not conversation** (~500-char system head + ~2000-char last-user tail + derived
-  features; images become markers). Full `messages` was rejected: every `auto` request would
-  ship the whole conversation to a third party, against the "models stay on your machines"
-  promise, with cost/latency growing with history. Metadata-only was rejected: the advisor
-  can't classify the task, and ranking degrades to capability matching.
+- **Excerpt, not conversation** (~500-char system head + the ~2000-char tails of the **last 3
+  user turns**, oldest→newest + derived features; images become markers). The last-3-user-turns
+  window (not just the final message) means a terse final turn ("continue", "fix that") still
+  carries the task/domain set in the turns leading up to it, without ever shipping assistant/tool
+  turns or older user turns. Full `messages` was rejected: every `auto` request would ship the whole
+  conversation to a third party, against the "models stay on your machines" promise, with cost/latency
+  growing with history. Metadata-only was rejected: the advisor can't classify the task, and ranking
+  degrades to capability matching.
 - **The Advisor ranks on model facts, not names — but never on pricing or live load.** Each
   candidate is rendered as its own line carrying the model name, its **context window**, and its
   **capability names** (`tools`, `vision`, …) — owner-side facts about the grid's own engines, so the
