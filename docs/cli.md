@@ -371,6 +371,12 @@ Check engines:
   grid engines
 ```
 
+**`-m auto`** lets the grid pick the model, when its owner has enabled auto-routing (`grid router`).
+`grid chat -m auto "…"` sends the reserved name `auto`; the reply comes back from whichever capable
+model the grid ranked and had free, and the `X-Grid-Routed-Model` response header (and the reply's
+`model` field) name it. On a grid without routing enabled, `auto` is a clear "not enabled" error. See
+[Router](#router).
+
 ## Members
 
 ```
@@ -410,6 +416,84 @@ sent only when given, so a rates-only `set` stays minimal and doesn't clobber me
 model you aren't currently serving (`grid join` first). `rm` does not (you can clean up a price after
 `grid leave`). `show` lists the grid's models and prices. In `local` mode the command exits with
 guidance to switch.
+
+## Router
+
+```
+grid router status  [--grid <grid>] [--json]
+grid router enable  [--grid <grid>] [--json]
+grid router disable [--grid <grid>] [--json]
+grid router models  [--json]
+grid router set-advisors   <provider[:model]> [<provider[:model]> …] [--grid <grid>] [--json]
+grid router remove-advisor <provider[:model]> [--grid <grid>] [--json]
+```
+
+**Remote-only.** Configure **auto-routing** for a grid you own: an app that requests the reserved model
+`auto` has the grid pick a model for the request, ranked by an external **Advisor** (see
+[ADR 0013](./adr/0013-auto-routing.md)). An Advisor is a `provider[:model]` pair you pick **by name** from
+the platform catalog. **Start with `grid router models`** — it lists the providers and their whitelisted
+models (the default marked) — then name advisors from that list; a bare `provider` uses its default model.
+You supply neither a URL nor a key: the platform carries both. `enable`/`disable` turn routing on and off;
+`set-advisors` **replaces the whole chain** with up to three advisors in priority order (the same provider
+may repeat with a different model — with a one-provider catalog, the only route to a real failover chain —
+but a duplicated exact `provider:model` pair is rejected); `remove-advisor` drops one by name (an exact
+`provider:model`, or a bare `provider` to remove all of its entries); `status` shows the enabled state and the chain as ordered
+`provider:model` tokens — **never a key or URL**, in either human or `--json` output.
+
+Every subcommand that acts on a grid selects it with `--grid` (active grid when omitted); `set-advisors` and
+`remove-advisor` take their advisor tokens positionally, and `models` needs no grid at all. Like membership,
+these authenticate with your account sign-in (not a per-grid token) and don't need the grid running; in
+`local` mode the command exits with guidance to switch. A change that couldn't be pushed to the running grid
+yet is reported as saved and will apply shortly.
+
+**Chain + fallback.** The Advisors are tried strictly in priority order (1 → 2 → 3, never reordered),
+advancing on failure. Each has a circuit breaker — 3 consecutive failures skip it for 60 s, then one
+half-open probe re-tries it — so a dead vendor doesn't tax every request. If every Advisor is down the
+grid still serves from a deterministic local pick (most free capacity → cheapest → name), stamped
+`X-Grid-Router: fallback`. The ranking call runs on the platform's advisor-proxy key (not your key, and not
+the consumer's); the served request bills the consumer as the chosen model.
+
+**Consuming `auto`.** An app requests the reserved model `auto` on `chat/completions` (streaming or
+not); the response `model` and the `X-Grid-Routed-Model` header carry the real model, and
+`X-Grid-Router` is `ranked` or `fallback`. `auto` appears in `/v1/models` (as `owned_by:
+"grid-router"`) only while routing is enabled; disabled → a clear "auto routing is not enabled" error.
+`auto` is chat-only — the legacy `completions` endpoint and an `X-Target-Provider` header each reject
+it, and media models are never candidates.
+
+### Auto-routing transparency
+
+When routing is enabled, an `auto` request sends a **bounded excerpt of the request** plus a
+**short list of your grid's own candidate models** to each Advisor in turn. This table is the complete
+set of request data that leaves the grid; the full conversation never does.
+
+| Field | What it is | Bound |
+|---|---|---|
+| system head | head of the first `system` message, truncated | ≤ 500 chars |
+| recent user tails | tails of the **last 3 `user` messages** (oldest→newest), each truncated — so a terse final message still carries the task context set in the turns leading up to it | ≤ 2000 chars each |
+| message count | number of messages in the request | integer |
+| approx input size | total characters across all message content | integer |
+| tool names | declared function **names** only — never arguments or JSON schemas | list of names |
+| images present | whether any image/binary part exists (each becomes a `[image]` marker) | yes / no |
+| requested output size | the request's `max_tokens`, if set | integer or unset |
+
+- **Candidate metadata (grid-side, not request data)** — alongside the excerpt, the Advisor is given
+  one line per candidate model: the model **name**, its **capability names** (`tools`, `vision`, …,
+  bounded to a known vocabulary so a provider can't inject arbitrary text), and its **context window**
+  (included only when known). This is information about the **engines your grid's providers serve**,
+  not about the consumer's request, so it does not widen the request privacy surface above. It is
+  capped at **50 candidates**, and per-engine **pricing, free capacity, and throughput are never
+  included** — those stay on the grid and are used only for the local pick.
+- **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Advisor call.
+- **To whom** — the Advisors you configured, in priority order (advisor 1, then 2, 3 on failure), each
+  reached **through the platform's LLM proxy** — you never hold, store, or hand out an advisor key or URL.
+- **On whose account** — the ranking call runs on the platform's advisor-proxy key (not your key, and
+  not the consumer's); the served request is billed to the consumer as the chosen model.
+- **Never sent** — the full conversation, `assistant`/`tool` turns, `user` turns older than the last
+  three, tool-call arguments or schemas, raw image/audio bytes or URLs, per-engine
+  pricing/capacity/throughput, or any API key.
+
+See [ADR 0013](./adr/0013-auto-routing.md) for the reserved-name, excerpt-not-conversation, and
+fixed-priority-chain decisions.
 
 ## Engine Setup
 

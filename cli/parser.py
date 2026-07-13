@@ -17,6 +17,7 @@ from ._constants import (
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
+from .remote_router import AdvisorsAction, MAX_ADVISORS, cmd_remote_router, parse_advisor_token
 from .engine import (
     cmd_engine_install,
     cmd_engine_list,
@@ -67,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth(sub)
     _add_members(sub)
     _add_price(sub)
+    _add_router(sub)
     _add_engine_setup(sub)
 
     return parser
@@ -392,6 +394,67 @@ def _add_price(sub) -> None:
     show.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     show.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     show.set_defaults(handler=cmd_remote_price)
+
+
+def _add_router(sub) -> None:
+    """Remote-only auto-routing config for a grid you own (model `auto`, ADR 0013, revised):
+    `grid router status|enable|disable [--grid <grid>]`, `grid router models`, `grid router set-advisors
+    <provider[:model]> …`, and `grid router remove-advisor <provider[:model]>`. Gated in local mode by
+    dispatch (`router` is in `REMOTE_ONLY`).
+
+    An Advisor is picked BY NAME from the platform catalog — there is NO key or URL input anywhere in this
+    group. Grid selection is a uniform `--grid` FLAG on every subcommand that acts on a grid (omit for the
+    active grid), matching `grid price`. The flag (not a positional `[grid]`) is forced by `set-advisors`,
+    whose `nargs="+"` advisor tokens make a leading positional `[grid]` ambiguous — is the first token a
+    grid or an advisor?; the other subcommands adopt it too so the whole group reads one way and a
+    positional-grid habit can't silently become an advisor token. `models` takes no grid at all (it reads
+    the account-level catalog)."""
+    router = sub.add_parser("router", help="Configure auto-routing (model `auto`) for a grid you own")
+    router_sub = router.add_subparsers(dest="subcommand", required=True)
+
+    # status / enable / disable share the same shape (`--grid` + `--json`); build them in a loop, mirroring
+    # `_add_price`'s rm/delete idiom. `--grid` (not a positional) keeps the whole group's selection uniform.
+    for name, help_text in (
+        ("status", "Show routing state and the advisor chain (no keys)"),
+        ("enable", "Enable auto-routing on the grid"),
+        ("disable", "Disable auto-routing on the grid"),
+    ):
+        simple = router_sub.add_parser(name, help=help_text)
+        simple.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+        simple.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        simple.set_defaults(handler=cmd_remote_router)
+
+    # `models` lists the platform advisor catalog — account-level, needs no grid (and no grid running).
+    models = router_sub.add_parser(
+        "models", help="List the advisor catalog (providers + whitelisted models; no grid needed)")
+    models.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    models.set_defaults(handler=cmd_remote_router)
+
+    set_advisors = router_sub.add_parser(
+        "set-advisors",
+        help=f"Replace the advisor chain (up to {MAX_ADVISORS} `provider[:model]`, order = priority)",
+        description=(
+            f"Replace the whole advisor chain with 1-{MAX_ADVISORS} `provider[:model]` tokens, in priority "
+            "order. A bare `provider` uses the catalog's default model. Advisors are picked by name from the "
+            "platform catalog (`grid router models`) — there is no URL or key to supply."
+        ),
+    )
+    set_advisors.add_argument(
+        "advisors", nargs="+", metavar="provider[:model]", type=parse_advisor_token, action=AdvisorsAction,
+        help=f"1-{MAX_ADVISORS} advisors in priority order, e.g. `openai:gpt-5-mini openai:gpt-4o-mini`.")
+    set_advisors.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    set_advisors.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    set_advisors.set_defaults(handler=cmd_remote_router)
+
+    remove_advisor = router_sub.add_parser(
+        "remove-advisor",
+        help="Remove an advisor by name (exact `provider:model`, or bare `provider` for all its entries)")
+    remove_advisor.add_argument(
+        "advisor", metavar="provider[:model]", type=parse_advisor_token,
+        help="Exact `provider:model` removes one entry; bare `provider` removes all of its entries.")
+    remove_advisor.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    remove_advisor.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    remove_advisor.set_defaults(handler=cmd_remote_router)
 
 
 def _add_engine_setup(sub) -> None:

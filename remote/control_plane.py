@@ -10,6 +10,7 @@ is reached in local mode (dispatch gates the remote commands to remote mode).
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 from urllib.parse import quote
 
@@ -18,11 +19,18 @@ import httpx
 from . import credentials
 
 
+# Control-plane HTTP timeout (seconds). The default suits every fast call; managed-network *create* is
+# synchronous and can exceed it while the backend boots the master, so it is overridable via
+# ``GRID_CONTROL_PLANE_TIMEOUT`` (a too-short timeout aborts the client mid-create, leaving the backend
+# to finish on its own — a half-registered network).
+_TIMEOUT = float(os.getenv("GRID_CONTROL_PLANE_TIMEOUT", "30"))
+
+
 def _client(api_url: str | None = None, token: str | None = None) -> httpx.Client:
     headers = {"User-Agent": "grid-cli"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    return httpx.Client(base_url=credentials.api_url(api_url), headers=headers, timeout=30.0)
+    return httpx.Client(base_url=credentials.api_url(api_url), headers=headers, timeout=_TIMEOUT)
 
 
 def start_device_login(api_url: str | None = None) -> dict[str, Any]:
@@ -117,6 +125,77 @@ def list_members(
         data = _json_or_empty(_send(client, "GET", f"/v1/grid/managed-networks/{network_id}/members"))
     members = data.get("members") if isinstance(data, dict) else data
     return list(members or [])
+
+
+# --- Auto-router owner config (ADR 0013, revised) -------------------------------------------------
+# Account-level, session-token authorised, owner/admin-checked on the control plane. NOTE the
+# ``/networks/`` path prefix (NOT ``/managed-networks/`` like the calls above): the per-grid router
+# routes are registered only under ``/networks/{id}/router`` in grid-apis (the catalog GET is
+# account-level under ``/router/catalog`` — no network). Reads/writes return the *masked* config
+# (``{"enabled", "advisors": [{"provider", "model"}]}``, never a key or URL); mutations add
+# ``"synced": bool``. Advisors are picked BY NAME from the platform catalog — the owner supplies
+# neither a base URL nor a key (the platform carries both), so nothing secret rides these requests.
+
+
+def get_router_config(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
+    """The grid's masked router config: ``{"enabled", "advisors": [{"provider", "model"}]}`` in priority
+    order. Never a key or base URL — the control plane masks both on every read."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "GET", f"/v1/grid/networks/{network_id}/router"))
+
+
+def enable_router(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
+    """Turn auto-routing on. The control plane rejects enabling with zero advisors (clear 400)."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "POST", f"/v1/grid/networks/{network_id}/router/enable"))
+
+
+def disable_router(session_token: str, network_id: str, api_url: str | None = None) -> dict[str, Any]:
+    """Turn auto-routing off."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "POST", f"/v1/grid/networks/{network_id}/router/disable"))
+
+
+def set_advisors(
+    session_token: str, network_id: str, advisors: list[tuple[str, str | None]],
+    api_url: str | None = None,
+) -> dict[str, Any]:
+    """Replace the whole advisor chain (1-3 ``{provider, model}`` pairs, order = priority). Each item is a
+    ``(provider, model | None)`` tuple; a bare provider (``model is None``) is sent provider-only so the
+    control plane resolves the catalog default. Replace-all — the posted list IS the chain. No key and no
+    URL ride this request (the platform carries both). Server 400s (unknown provider, off-whitelist model
+    listing the valid names, duplicate pair, >3) surface as a clean ``SystemExit`` via ``_send``."""
+    body = {"advisors": [
+        ({"provider": provider, "model": model} if model else {"provider": provider})
+        for provider, model in advisors
+    ]}
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(
+            client, "PUT", f"/v1/grid/networks/{network_id}/router/advisors", json=body))
+
+
+def remove_advisor(
+    session_token: str, network_id: str, provider: str, model: str | None = None,
+    api_url: str | None = None,
+) -> dict[str, Any]:
+    """Remove advisors by name: an exact ``provider`` + ``model`` removes one entry; a bare ``provider``
+    (``model is None``) removes all of that provider's entries. Name(s) ride the query string (httpx
+    percent-encodes them; there is no path segment to inject). A remove that matches nothing is a clear
+    400 from the control plane."""
+    params: dict[str, str] = {"provider": provider}
+    if model:
+        params["model"] = model
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(
+            client, "DELETE", f"/v1/grid/networks/{network_id}/router/advisors", params=params))
+
+
+def get_router_catalog(session_token: str, api_url: str | None = None) -> dict[str, Any]:
+    """The advisor catalog backing ``grid router models`` — each provider, its whitelisted models, and the
+    default. Account-level (any session token); no network, no admin, no grid running. Never a base URL or
+    key. Shape: ``{"providers": [{"provider", "models": [...], "default_model"}]}``."""
+    with _client(api_url, session_token) as client:
+        return _json_or_empty(_send(client, "GET", "/v1/grid/router/catalog"))
 
 
 def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
