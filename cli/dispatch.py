@@ -33,6 +33,7 @@ AGNOSTIC = frozenset({
     "remove",
     "ctx",
     "engine",
+    "agent",
     "mode",
     "use",
 })

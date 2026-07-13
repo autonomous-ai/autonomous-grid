@@ -48,6 +48,24 @@ def llama_server_bin() -> Path:
     return bin_dir() / "llama-server"
 
 
+def llama_prefix_dir() -> Path:
+    """Where a prebuilt llama.cpp is unpacked. The macOS binaries link their shared libraries
+    through `@loader_path`, so `llama-server` only runs with its `.dylib`s beside it — they get a
+    directory of their own, and `bin/llama-server` is a symlink into it."""
+    return grid_home() / "engines" / "llama.cpp"
+
+
+def tools_dir() -> Path:
+    """Where `uv` keeps the agent tools it installs for Grid (one venv per tool)."""
+    return grid_home() / "tools"
+
+
+def python_dir() -> Path:
+    """Where `uv` downloads the private CPython those tools run on. It lives under ~/.grid so Grid
+    owns what Grid installed — and removing ~/.grid removes it too."""
+    return grid_home() / "python"
+
+
 def models_dir() -> Path:
     return grid_home() / "models"
 

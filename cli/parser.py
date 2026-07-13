@@ -14,6 +14,7 @@ from ._constants import (
     VALID_I2V_DURATIONS,
     VALID_MEDIA_BUNDLES,
 )
+from .agent import cmd_agent_install, cmd_agent_status
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
@@ -467,8 +468,8 @@ def _add_engine_setup(sub) -> None:
         "--from-source",
         action="store_true",
         help=(
-            "llama.cpp only: on Apple Silicon build with Metal from source instead of Homebrew; "
-            "on Linux NVIDIA build from source instead of a pinned tarball."
+            "llama.cpp only: build from source instead of downloading a pinned release "
+            "(Metal on macOS, CUDA on Linux NVIDIA)."
         ),
     )
     install.add_argument(
@@ -506,6 +507,21 @@ def _add_engine_setup(sub) -> None:
                                  help="Grid name or id (ag-…). Omit for the active grid.")
         engine_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
         engine_list.set_defaults(handler=cmd_engine_list)
+
+    agent = sub.add_parser("agent", help="Set up the agent that runs tools in chat (hermes)")
+    agent_sub = agent.add_subparsers(dest="subcommand", required=True)
+
+    agent_install = agent_sub.add_parser("install", help="Install the agent (no Homebrew, no admin rights)")
+    agent_install.add_argument("name", choices=("hermes",))
+    agent_install.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall (or upgrade) even when the agent is already present.",
+    )
+    agent_install.set_defaults(handler=cmd_agent_install)
+
+    agent_status = agent_sub.add_parser("status", help="Show whether the agent is installed")
+    agent_status.set_defaults(handler=cmd_agent_status)
 
 
 def _add_media_common(parser: argparse.ArgumentParser) -> None:
