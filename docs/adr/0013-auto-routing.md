@@ -35,12 +35,17 @@ Choices a future reader will otherwise re-litigate:
   candidate is rendered as its own line carrying the model name, its **context window**, and its
   **capability names** (`tools`, `vision`, …) — owner-side facts about the grid's own engines, so the
   Advisor ranks on data rather than guessing a model's strengths from its name. The system prompt
-  carries an **adequacy-first, efficiency-second rubric** *(revision — a leanest-first wording
-  under-provisioned hard requests onto tiny models in live testing)*: the top pick must be able to
-  answer the request WELL — a parameter size in the name (135m, 0.5b, 7b) is treated as a fact, and
-  doubt breaks toward the more capable candidate — then, among clearly-adequate candidates, prefer
-  the smallest/cheapest because the grid owner pays for the compute (still fixing the original
-  over-ranking of big, well-known-named models on trivial requests).
+  carries a **classification-first rubric** *(revision, converged via live A/B against the real
+  advisor proxy: a "prefer smallest" wording under-provisioned hard requests onto tiny models, and
+  an "adequacy first" wording over-provisioned trivial ones onto the API model)*: the Advisor first
+  classifies the request as SIMPLE (greetings, short factual questions — anything a small model
+  answers correctly) or DEMANDING (math/proofs, non-trivial code, multi-step reasoning, long or
+  specialized content), then maps the class to the candidate spectrum — SIMPLE → the
+  smallest/cheapest adequate candidate (the grid owner pays for every token), DEMANDING → the most
+  capable candidates, never a sub-billion model (a parameter size in the name is treated as a
+  fact). Candidate-list order is declared arbitrary (the free-capacity sort put the API engine
+  first, which biased rankings) and uncertainty breaks toward DEMANDING. Held stable across both
+  non-reasoning advisors (gpt-4.1-mini, gpt-4o-mini).
   Still never sent: per-engine **pricing**, **free capacity**, and **throughput** — cost and
   availability are decided locally at pick time, where the data is fresh. The Advisor sees at most
   **50 candidates** (a bounded, deterministically-ordered slice) so the prompt can't grow without
