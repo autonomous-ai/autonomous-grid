@@ -35,9 +35,12 @@ Choices a future reader will otherwise re-litigate:
   candidate is rendered as its own line carrying the model name, its **context window**, and its
   **capability names** (`tools`, `vision`, …) — owner-side facts about the grid's own engines, so the
   Advisor ranks on data rather than guessing a model's strengths from its name. The system prompt
-  carries a **leanest-adequate rubric**: the grid owner pays for the compute, so the Advisor prefers
-  the smallest/cheapest candidate that still fits and escalates only when the request genuinely
-  demands it (fixing the observed over-ranking of big, well-known-named models on trivial requests).
+  carries an **adequacy-first, efficiency-second rubric** *(revision — a leanest-first wording
+  under-provisioned hard requests onto tiny models in live testing)*: the top pick must be able to
+  answer the request WELL — a parameter size in the name (135m, 0.5b, 7b) is treated as a fact, and
+  doubt breaks toward the more capable candidate — then, among clearly-adequate candidates, prefer
+  the smallest/cheapest because the grid owner pays for the compute (still fixing the original
+  over-ranking of big, well-known-named models on trivial requests).
   Still never sent: per-engine **pricing**, **free capacity**, and **throughput** — cost and
   availability are decided locally at pick time, where the data is fresh. The Advisor sees at most
   **50 candidates** (a bounded, deterministically-ordered slice) so the prompt can't grow without
@@ -59,7 +62,7 @@ Choices a future reader will otherwise re-litigate:
 - **Advisors come from a platform catalog, not from owner-supplied endpoints** *(revision)*.
   An advisor is a `{provider, model}` pair validated against a control-plane catalog
   (per-provider model whitelist + default model; v1: `openai` with bare model names —
-  `gpt-4o-mini` default, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1-mini`); the catalog maps the
+  `gpt-4.1-mini` default, `gpt-5-mini`, `gpt-5-nano`, `gpt-4o-mini`); the catalog maps the
   provider to the platform LLM proxy's URL (control-plane env). BYO `--base-url` was
   **dropped, not hidden**: no user-supplied advisor URLs means no owner key custody, no SSRF
   surface at the write path, and vendors/models are added server-side with no CLI release.
