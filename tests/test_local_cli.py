@@ -5729,6 +5729,75 @@ def test_serve_handle_job_api_max_tokens_wins_over_stale_completion_tokens(monke
     assert "max_tokens" not in seen
 
 
+def test_serve_handle_job_api_refuses_unsupported_param_before_vendor_call(monkeypatch, tmp_path):
+    """The whole OpenAI whitelist (GPT-5.x) rejects `stop` — verified against the live API on
+    2026-07-14, all four models. Forwarding it burns a vendor round-trip to learn a static fact
+    the catalog already knows, so the provider refuses up front, wearing the vendor's own error
+    shape ("engine error 400: {openai-style json}") — the same bytes the vendor would have sent,
+    and the same format the relay's terminal-error mapper parses."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the vendor"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5", "max_tokens": 24,
+                                      "stop": ["\n"]}, "is_stream": False})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == "stop"
+    assert inner["code"] == "unsupported_parameter"
+
+
+def test_serve_handle_job_api_null_unsupported_param_still_forwards(monkeypatch, tmp_path):
+    """`"stop": null` is accepted by the vendor (verified live) — only a real value is refused."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: None)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: pytest.fail(message))
+
+    def vendor(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5", "max_tokens": 24,
+                                      "stop": None}, "is_stream": False})
+
+    assert seen["model"] == "gpt-5.5"  # reached the vendor
+
+
+def test_serve_handle_job_hardware_keeps_stop(monkeypatch, tmp_path):
+    """The refusal is per API kind: hardware engines support `stop` and must keep receiving it."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: None)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: pytest.fail(message))
+
+    def engine(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _mock_serve_engine(monkeypatch, engine)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "m", "max_tokens": 24, "stop": ["\n"]},
+                             "is_stream": False})
+
+    assert seen["stop"] == ["\n"]
+
+
 def test_serve_handle_job_hardware_keeps_max_tokens(monkeypatch, tmp_path):
     """The translation is per API kind, not a blanket rename: a hardware engine (llama.cpp/ollama)
     only understands `max_tokens` and must keep receiving it."""

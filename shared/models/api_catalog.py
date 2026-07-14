@@ -32,6 +32,11 @@ class ApiWhitelist:
     # name hardware engines know — so a vendor that renamed it needs the value translated on the way
     # out, or every job 400s. See `_adapt_output_token_param` in remote/serve.py.
     max_output_param: str = "max_tokens"
+    # Request parameters the vendor rejects outright (no translation exists). A job carrying one is
+    # refused by the provider before any upstream call, wearing the vendor's own error shape — same
+    # outcome as forwarding, minus the round-trip. Null values are NOT refused (the vendor accepts
+    # them). See `_api_unsupported_params` in remote/serve.py.
+    unsupported_params: tuple[str, ...] = ()
 
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
@@ -93,6 +98,9 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # The whole GPT-5.x family rejects `max_tokens`: "Unsupported parameter: 'max_tokens' is not
         # supported with this model. Use 'max_completion_tokens' instead."
         max_output_param="max_completion_tokens",
+        # All four whitelist models reject `stop` ("Unsupported parameter: 'stop' is not supported
+        # with this model.") — verified against the live API on 2026-07-14. `stop: null` is accepted.
+        unsupported_params=("stop",),
     ),
 }
 

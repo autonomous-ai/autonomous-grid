@@ -421,6 +421,29 @@ def _api_upstream_name(api_kind: str, advertised: str) -> str:
     return advertised.partition(":")[2] or advertised
 
 
+def _api_unsupported_params(api_kind: str, body: dict[str, Any]) -> list[str]:
+    """Params in ``body`` the vendor is known to reject (catalog fact), null values excluded —
+    the vendors accept an explicit null, so only a real value earns a refusal."""
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    if whitelist is None:
+        return []
+    return [p for p in whitelist.unsupported_params if body.get(p) is not None]
+
+
+def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, params: list[str]) -> None:
+    """Refuse the job wearing the vendor's own error shape — byte-for-byte what forwarding would
+    have earned ("engine error 400: {openai-style json}"), so consumers and the relay's
+    terminal-error mapper see no difference, minus the vendor round-trip."""
+    param = params[0]
+    payload = json.dumps({"error": {
+        "message": f"Unsupported parameter: '{param}' is not supported with this model.",
+        "type": "invalid_request_error",
+        "param": param,
+        "code": "unsupported_parameter",
+    }})
+    _try_submit_error(state, txn, f"engine error 400: {payload}")
+
+
 def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dict[str, Any]:
     """Rename the output-token cap to the vendor's parameter when forwarding to an API engine.
 
@@ -1139,6 +1162,13 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             f"API engine {api_kind!r} serves chat/completions only (endpoint {endpoint!r} not served)",
         )
         return
+    # Same gate for params the vendor is known to reject (e.g. GPT-5.x and `stop`): refuse now,
+    # with the vendor's own error shape, instead of forwarding to learn a static catalog fact.
+    if api_kind:
+        unsupported = _api_unsupported_params(api_kind, body)
+        if unsupported:
+            _refuse_unsupported_api_params(state, txn, api_kind, unsupported)
+            return
 
     # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
     # only knows its real name, so rewrite the body's model before forwarding (a new dict — never
