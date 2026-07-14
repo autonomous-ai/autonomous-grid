@@ -64,13 +64,18 @@ def _fetch_overview(args: argparse.Namespace) -> dict[str, Any]:
     return data
 
 
-def _nodes(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """The grid's live engine nodes — only well-formed object entries, so a malformed ``nodes``
-    field (non-list, or a list with scalar junk) renders as empty instead of crashing a handler."""
-    nodes = _fetch_overview(args).get("nodes")
+def _nodes_from(overview: dict[str, Any]) -> list[dict[str, Any]]:
+    """The live engine nodes in an already-fetched overview — only well-formed object entries, so a
+    malformed ``nodes`` field (non-list, or a list with scalar junk) renders as empty, never crashes."""
+    nodes = overview.get("nodes")
     if not isinstance(nodes, list):
         return []
     return [node for node in nodes if isinstance(node, dict)]
+
+
+def _nodes(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """The active remote grid's live engine nodes (fetches the overview)."""
+    return _nodes_from(_fetch_overview(args))
 
 
 def _node_models(node: dict[str, Any]) -> list[str]:
@@ -115,13 +120,20 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
 
 
 def cmd_remote_models(args: argparse.Namespace) -> int:
-    """`grid models` (remote): the models served across the active grid's live engines."""
-    nodes = _nodes(args)
+    """`grid models` (remote): the models served across the active grid's live engines, plus the
+    reserved ``auto`` model when the grid has auto-routing enabled (mirrors ``GET /relay/v1/models``)."""
+    overview = _fetch_overview(args)
+    nodes = _nodes_from(overview)
     rows = [
         (model, str(node.get("engine") or ""), str(node.get("name") or ""))
         for node in nodes
         for model in _node_models(node)
     ]
+    # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's
+    # /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines are joined.
+    # An older master whose overview lacks the field reports falsy → no auto row (graceful degradation).
+    if overview.get("router_enabled"):
+        rows.insert(0, ("auto", "grid-router", ""))
 
     if getattr(args, "json", False):
         # Derived view (not a raw passthrough like engines): new API fields on a model entry

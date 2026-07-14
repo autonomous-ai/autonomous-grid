@@ -7591,6 +7591,56 @@ def test_remote_models_empty_when_no_nodes(monkeypatch, tmp_path, capsys):
     assert "no live models" in capsys.readouterr().out
 
 
+def test_remote_models_prepends_auto_when_router_enabled(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == ["auto", "glm-5.2", "qwen-3"]  # auto first (mirrors /relay/v1/models), then engine models
+
+
+def test_remote_models_omits_auto_when_router_disabled(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": False})
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == ["glm-5.2", "qwen-3"] and "auto" not in lines
+
+
+def test_remote_models_omits_auto_when_field_absent(monkeypatch, tmp_path, capsys):
+    # An older master's overview lacks router_enabled → no auto row (graceful degradation).
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert "auto" not in lines
+
+
+def test_remote_models_verbose_shows_auto_row_when_router_enabled(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
+    assert cli.main(["models", "--verbose"]) == 0
+    out = capsys.readouterr().out
+    assert "auto" in out and "grid-router" in out  # the reserved row, owner grid-router
+
+
+def test_remote_models_json_includes_auto_first_when_router_enabled(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0] == {"model": "auto", "engine": "grid-router", "node": ""}
+
+
+def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch, tmp_path, capsys):
+    # Mirrors /relay/v1/models: auto is advertised whenever routing is on, independent of engines.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, {"nodes": [], "router_enabled": True})
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == ["auto"]
+
+
 def test_remote_engines_requires_grid_up(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path,
                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT", "refresh_token": "RT"}],
