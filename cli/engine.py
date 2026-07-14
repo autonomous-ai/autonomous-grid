@@ -86,15 +86,15 @@ def cmd_engine_list(args: argparse.Namespace) -> int:
 def _install_llama_cpp(args: argparse.Namespace) -> int:
     from shared.engine import installer
 
-    if installer.is_apple_silicon():
+    if installer.is_macos():
         if args.target_sm:
-            raise SystemExit("Apple Silicon installs do not use --target-sm; omit it for Homebrew or Metal builds.")
+            raise SystemExit("macOS installs do not use --target-sm; omit it for prebuilt or Metal builds.")
         if args.from_source:
             path = installer.install_metal_from_source()
             print(f"Installed llama-server with Metal -> {path}")
             return 0
-        path = installer.install_macos_homebrew()
-        print(f"Installed Homebrew llama-server -> {path}")
+        path = installer.install_macos_prebuilt()
+        print(f"Installed llama-server -> {path}")
         return 0
 
     from shared.system import gpu

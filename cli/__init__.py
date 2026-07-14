@@ -28,6 +28,10 @@ from .remote_request import (
     cmd_remote_video,
 )
 from .remote_router import cmd_remote_router
+from .agent import (
+    cmd_agent_install,
+    cmd_agent_status,
+)
 from .engine import (
     cmd_engine_install,
     cmd_engine_list,
@@ -88,6 +92,8 @@ __all__ = [
     "cmd_image",
     "cmd_edit",
     "cmd_video",
+    "cmd_agent_install",
+    "cmd_agent_status",
     "cmd_engine_install",
     "cmd_engine_list",
     "cmd_engine_pull",

@@ -4,8 +4,10 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import stat
 import subprocess
+import tarfile
 import threading
 import time
 import tomllib
@@ -23,7 +25,9 @@ from local import config
 from shared import paths
 from shared import state
 from local import runtime
+from shared.agent import installer as agent_installer
 from shared.engine import comfyui, installer, launcher
+from shared.system import arch
 from shared.models import api_catalog, catalog, download, media_bundles
 from local import media_server
 from local.server import create_app
@@ -806,64 +810,165 @@ def test_rm_yes_deletes_local_model(monkeypatch, tmp_path, capsys):
     assert "Removed" in capsys.readouterr().out
 
 
-def test_install_macos_homebrew_installs_and_links(monkeypatch, tmp_path):
+def _fake_llama_release(tmp_path: Path) -> tuple[Path, str]:
+    """Build a stand-in for the official macOS tarball: llama-server, a real .dylib, and the
+    versioned symlink alias the release ships. Returns the archive and its SHA-256."""
+    stage = tmp_path / "stage" / f"llama-{installer.LLAMA_RELEASE}"
+    stage.mkdir(parents=True)
+    (stage / "llama-server").write_text("#!/bin/sh\n", encoding="utf-8")
+    (stage / "libggml.0.dylib").write_bytes(b"lib")
+    (stage / "libggml.dylib").symlink_to("libggml.0.dylib")
+
+    archive = tmp_path / f"llama-{installer.LLAMA_RELEASE}-bin-macos-arm64.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(stage, arcname=stage.name)
+    return archive, installer._sha256(archive)
+
+
+def _pin_fake_release(monkeypatch, archive: Path, sha256: str) -> None:
+    """Point the arm64 build at [archive] and serve it from disk instead of the network."""
+    build = installer.MacosBuild(label="macos-arm64", url=f"https://example.invalid/{archive.name}", sha256=sha256)
+    monkeypatch.setitem(installer.MACOS_BUILDS, "arm64", build)
+    monkeypatch.setattr(installer.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(installer, "_download", lambda url, dest: shutil.copy2(archive, dest))
+
+
+def test_install_macos_prebuilt_unpacks_beside_its_libraries_and_links(monkeypatch, tmp_path):
     grid_home = tmp_path / "grid-home"
-    brew_root = tmp_path / "homebrew"
-    brew = brew_root / "bin" / "brew"
-    formula_prefix = brew_root / "opt" / "llama.cpp"
-    llama_server = formula_prefix / "bin" / "llama-server"
-    llama_server.parent.mkdir(parents=True)
-    llama_server.write_text("#!/bin/sh\n", encoding="utf-8")
-    llama_server.chmod(0o755)
-    calls = []
-
     monkeypatch.setenv("GRID_HOME", str(grid_home))
+    archive, sha256 = _fake_llama_release(tmp_path)
+    _pin_fake_release(monkeypatch, archive, sha256)
 
-    def fake_which(name):
-        if name == "brew":
-            return str(brew)
-        return None
+    target = installer.install_macos_prebuilt()
 
-    def fake_run(args, stdout=None, stderr=None, check=False):
-        calls.append(tuple(args))
-        return subprocess.CompletedProcess(args, 1)
-
-    def fake_check_call(args):
-        calls.append(tuple(args))
-
-    def fake_check_output(args, text=False):
-        calls.append(tuple(args))
-        if args == [str(brew), "--prefix", "llama.cpp"]:
-            return f"{formula_prefix}\n"
-        if args == [str(brew), "--prefix"]:
-            return f"{brew_root}\n"
-        raise AssertionError(f"unexpected command: {args}")
-
-    monkeypatch.setattr(installer.shutil, "which", fake_which)
-    monkeypatch.setattr(installer.subprocess, "run", fake_run)
-    monkeypatch.setattr(installer.subprocess, "check_call", fake_check_call)
-    monkeypatch.setattr(installer.subprocess, "check_output", fake_check_output)
-
-    target = installer.install_macos_homebrew()
+    prefix = grid_home / "engines" / "llama.cpp"
+    # The binary resolves its libraries via @loader_path, so they must land beside it.
+    assert (prefix / "llama-server").is_file()
+    assert (prefix / "libggml.0.dylib").is_file()
+    # The release's versioned alias stays a link rather than a second copy of the library.
+    assert (prefix / "libggml.dylib").is_symlink()
 
     assert target == grid_home / "bin" / "llama-server"
     assert target.is_symlink()
-    assert target.readlink() == llama_server
-    assert (str(brew), "install", "llama.cpp") in calls
+    assert target.resolve() == (prefix / "llama-server").resolve()
 
 
-def test_engine_install_apple_silicon_uses_homebrew_by_default(monkeypatch):
+def test_install_macos_prebuilt_replaces_an_existing_install(monkeypatch, tmp_path):
+    grid_home = tmp_path / "grid-home"
+    monkeypatch.setenv("GRID_HOME", str(grid_home))
+    archive, sha256 = _fake_llama_release(tmp_path)
+    _pin_fake_release(monkeypatch, archive, sha256)
+    # A Homebrew-era install left bin/llama-server as a symlink to a path that is now gone.
+    bin_dir = grid_home / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "llama-server").symlink_to(tmp_path / "gone" / "llama-server")
+
+    target = installer.install_macos_prebuilt()
+
+    assert target.resolve() == (grid_home / "engines" / "llama.cpp" / "llama-server").resolve()
+
+
+def test_install_macos_prebuilt_aborts_on_sha_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "grid-home"))
+    archive, _ = _fake_llama_release(tmp_path)
+    _pin_fake_release(monkeypatch, archive, "0" * 64)
+
+    # The hash is the only check on a binary we downloaded and are about to run.
+    with pytest.raises(SystemExit, match="SHA-256 mismatch"):
+        installer.install_macos_prebuilt()
+
+
+@pytest.mark.parametrize(
+    ("machine", "label"),
+    [("arm64", "macos-arm64"), ("aarch64", "macos-arm64"), ("x86_64", "macos-x64")],
+)
+def test_pick_macos_build_covers_both_architectures(machine, label):
+    assert installer.pick_macos_build(machine).label == label
+
+
+def test_pick_macos_build_rejects_an_unknown_architecture():
+    with pytest.raises(SystemExit, match="--from-source"):
+        installer.pick_macos_build("ppc64")
+
+
+def test_native_machine_sees_apple_silicon_through_rosetta(monkeypatch):
+    # A Grid running under Rosetta reports x86_64 for itself; the hardware is still arm64, and the
+    # installers must follow the hardware or they fetch Intel binaries for an M-series Mac.
+    monkeypatch.setattr(arch.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        arch.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="1\n", stderr=""),
+    )
+
+    assert arch.native_machine() == "arm64"
+
+
+def test_native_machine_reports_a_real_intel_mac_as_intel(monkeypatch):
+    monkeypatch.setattr(arch.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        arch.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(a, 1, stdout="", stderr=""),
+    )
+
+    assert arch.native_machine() == "x86_64"
+
+
+@pytest.mark.parametrize(
+    ("machine", "label"),
+    [("arm64", "aarch64-apple-darwin"), ("x86_64", "x86_64-apple-darwin")],
+)
+def test_pick_uv_build_follows_the_architecture(machine, label):
+    assert agent_installer.pick_uv_build(machine).label == label
+
+
+def test_agent_install_is_a_no_op_when_hermes_is_already_there(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    hermes = tmp_path / "bin" / "hermes"
+    hermes.parent.mkdir(parents=True)
+    hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("must not reinstall when hermes is present")
+
+    monkeypatch.setattr(agent_installer, "install_hermes", fail)
+
+    rc = cli.cmd_agent_install(argparse.Namespace(name="hermes", force=False))
+
+    assert rc == 0
+    assert "already installed" in capsys.readouterr().out
+
+
+def test_agent_install_forces_a_reinstall_when_asked(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    hermes = tmp_path / "bin" / "hermes"
+    hermes.parent.mkdir(parents=True)
+    hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(agent_installer, "install_hermes", lambda: calls.append("install") or hermes)
+
+    rc = cli.cmd_agent_install(argparse.Namespace(name="hermes", force=True))
+
+    assert rc == 0
+    assert calls == ["install"]
+
+
+def test_engine_install_on_macos_uses_the_prebuilt_by_default(monkeypatch):
     calls = []
     target = Path("/tmp/grid/bin/llama-server")
 
-    monkeypatch.setattr(installer, "is_apple_silicon", lambda: True)
-    monkeypatch.setattr(installer, "install_macos_homebrew", lambda: calls.append("brew") or target)
+    monkeypatch.setattr(installer, "is_macos", lambda: True)
+    monkeypatch.setattr(installer, "install_macos_prebuilt", lambda: calls.append("prebuilt") or target)
     monkeypatch.setattr(installer, "install_metal_from_source", lambda: calls.append("source") or target)
 
     rc = cli.cmd_engine_install(argparse.Namespace(name="llama.cpp", target_sm=None, from_source=False))
 
     assert rc == 0
-    assert calls == ["brew"]
+    assert calls == ["prebuilt"]
 
 
 class FakeProc:
