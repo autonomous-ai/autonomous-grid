@@ -28,6 +28,10 @@ class ApiWhitelist:
     base_url: str  # the vendor endpoint jobs forward to, no trailing slash
     env_var: str  # the environment variable the provider's key is read from
     entries: tuple[ApiModelEntry, ...]
+    # The vendor's name for the output-token cap. The grid speaks `max_tokens` internally — the only
+    # name hardware engines know — so a vendor that renamed it needs the value translated on the way
+    # out, or every job 400s. See `_adapt_output_token_param` in remote/serve.py.
+    max_output_param: str = "max_tokens"
 
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
@@ -86,6 +90,9 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         base_url="https://api.openai.com/v1",
         env_var="OPENAI_API_KEY",
         entries=OPENAI_WHITELIST,
+        # The whole GPT-5.x family rejects `max_tokens`: "Unsupported parameter: 'max_tokens' is not
+        # supported with this model. Use 'max_completion_tokens' instead."
+        max_output_param="max_completion_tokens",
     ),
 }
 

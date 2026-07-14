@@ -5677,6 +5677,81 @@ def test_serve_handle_job_api_completions_gated_on_single_url_fallback_too(monke
     assert "chat/completions" in captured["error"]
 
 
+def test_serve_handle_job_api_translates_max_tokens_to_vendor_param(monkeypatch, tmp_path):
+    """The whole OpenAI whitelist is GPT-5.x, which refuses `max_tokens` ("Use
+    'max_completion_tokens' instead"). The master normalises every request the other way — to
+    `max_tokens`, the only name hardware engines know — so forwarding to an API engine must
+    translate to the vendor's name AND drop `max_tokens`, the name the vendor rejects."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: None)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: pytest.fail(message))
+
+    def vendor(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5", "max_tokens": 24}, "is_stream": False})
+
+    assert seen["max_completion_tokens"] == 24
+    assert "max_tokens" not in seen        # the exact name the vendor 400s on
+    assert seen["model"] == "gpt-5.5"      # vendor-name rewrite still applies
+
+
+def test_serve_handle_job_api_max_tokens_wins_over_stale_completion_tokens(monkeypatch, tmp_path):
+    """A consumer that sent `max_completion_tokens` reaches the provider carrying BOTH names: the
+    master copies it into `max_tokens` without removing the original. `max_tokens` is the value the
+    master validated against its cap, so it is the authoritative one — and only one name may go
+    upstream."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: None)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: pytest.fail(message))
+
+    def vendor(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5", "max_tokens": 24,
+                                      "max_completion_tokens": 999}, "is_stream": False})
+
+    assert seen["max_completion_tokens"] == 24
+    assert "max_tokens" not in seen
+
+
+def test_serve_handle_job_hardware_keeps_max_tokens(monkeypatch, tmp_path):
+    """The translation is per API kind, not a blanket rename: a hardware engine (llama.cpp/ollama)
+    only understands `max_tokens` and must keep receiving it."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: None)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: pytest.fail(message))
+
+    def engine(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _mock_serve_engine(monkeypatch, engine)
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "m", "max_tokens": 24}, "is_stream": False})
+
+    assert seen["max_tokens"] == 24
+    assert "max_completion_tokens" not in seen
+
+
 def test_serve_handle_job_hardware_completions_still_forwards(monkeypatch, tmp_path):
     """The legacy `completions` endpoint stays served by hardware engines — the gate is per API
     kind, not a blanket endpoint removal."""

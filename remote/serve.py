@@ -421,6 +421,28 @@ def _api_upstream_name(api_kind: str, advertised: str) -> str:
     return advertised.partition(":")[2] or advertised
 
 
+def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dict[str, Any]:
+    """Rename the output-token cap to the vendor's parameter when forwarding to an API engine.
+
+    The relay's contract layer normalises every request to ``max_tokens`` — the only name hardware
+    engines understand — including rewriting a consumer's ``max_completion_tokens`` into it. A vendor
+    that renamed the parameter (OpenAI's GPT-5.x) then 400s on every job, so translate on the way
+    out. ``max_tokens`` holds the value the relay validated against its cap, so it wins over any
+    ``max_completion_tokens`` left beside it by that rewrite; only one name may go upstream.
+
+    Returns ``body`` unchanged for hardware engines and for vendors that still take ``max_tokens``.
+    """
+    if not api_kind:
+        return body
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    param = whitelist.max_output_param if whitelist else "max_tokens"
+    if param == "max_tokens" or "max_tokens" not in body:
+        return body
+    adapted = {k: v for k, v in body.items() if k not in ("max_tokens", param)}
+    adapted[param] = body["max_tokens"]
+    return adapted
+
+
 def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
     """An API engine's caps envelope from the static whitelist — API engines are never live-probed
     or benchmarked (ADR 0012); the vendor sees no traffic until a real job forwards. A model missing
@@ -1123,6 +1145,8 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     # mutate the job). No mapping / already-equal → forward unchanged (built-in + single-engine paths).
     upstream_model = state.upstream_model(model, snap)
     forward_body = {**body, "model": upstream_model} if upstream_model and upstream_model != model else body
+    # ... and an API vendor may spell the output-token cap differently from the grid's internal name.
+    forward_body = _adapt_output_token_param(forward_body, api_kind)
 
     state.enter_inference()
     try:
