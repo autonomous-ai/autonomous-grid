@@ -478,11 +478,13 @@ set of request data that leaves the grid; the full conversation never does.
 
 - **Candidate metadata (grid-side, not request data)** — alongside the excerpt, the Advisor is given
   one line per candidate model: the model **name**, its **capability names** (`tools`, `vision`, …,
-  bounded to a known vocabulary so a provider can't inject arbitrary text), and its **context window**
-  (included only when known). This is information about the **engines your grid's providers serve**,
-  not about the consumer's request, so it does not widen the request privacy surface above. It is
-  capped at **50 candidates**, and per-engine **pricing, free capacity, and throughput are never
-  included** — those stay on the grid and are used only for the local pick.
+  bounded to a known vocabulary so a provider can't inject arbitrary text), its **context window**
+  (included only when known), and its **price** — the cheapest serving engine's rates, rendered
+  `price: $<in> in / $<out> out per 1M`, or `$0 in / $0 out` for a model nobody priced (which is
+  what it bills). This is information about the **engines your grid's providers serve**, not about
+  the consumer's request, so it does not widen the request privacy surface above. It is capped at
+  **50 candidates**. Per-engine **free capacity and throughput are never included** — those change
+  by the second, so they stay on the grid and decide the local pick.
 - **When** — only while `grid router` is **enabled**; a disabled grid makes no outbound Advisor call.
 - **To whom** — the Advisors you configured, in priority order (advisor 1, then 2, 3 on failure), each
   reached **through the platform's LLM proxy** — you never hold, store, or hand out an advisor key or URL.

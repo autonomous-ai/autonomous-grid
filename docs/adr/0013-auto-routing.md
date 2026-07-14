@@ -31,7 +31,9 @@ Choices a future reader will otherwise re-litigate:
   conversation to a third party, against the "models stay on your machines" promise, with cost/latency
   growing with history. Metadata-only was rejected: the advisor can't classify the task, and ranking
   degrades to capability matching.
-- **The Advisor ranks on model facts, not names — but never on pricing or live load.** Each
+- **The Advisor ranks on model facts, not names — but never on pricing or live load.**
+  *(Pricing clause superseded by [0014](./0014-advisor-price-visibility.md), 2026-07-14: the
+  Advisor now sees each candidate's price; free capacity and throughput remain never-sent.)* Each
   candidate is rendered as its own line carrying the model name, its **context window**, and its
   **capability names** (`tools`, `vision`, …) — owner-side facts about the grid's own engines, so the
   Advisor ranks on data rather than guessing a model's strengths from its name. The system prompt
@@ -46,8 +48,9 @@ Choices a future reader will otherwise re-litigate:
   fact). Candidate-list order is declared arbitrary (the free-capacity sort put the API engine
   first, which biased rankings) and uncertainty breaks toward DEMANDING. Held stable across both
   non-reasoning advisors (gpt-4.1-mini, gpt-4o-mini).
-  Still never sent: per-engine **pricing**, **free capacity**, and **throughput** — cost and
-  availability are decided locally at pick time, where the data is fresh. The Advisor sees at most
+  Still never sent: per-engine **pricing** *(reversed by [0014](./0014-advisor-price-visibility.md))*,
+  **free capacity**, and **throughput** — cost and availability are decided locally at pick
+  time, where the data is fresh. The Advisor sees at most
   **50 candidates** (a bounded, deterministically-ordered slice) so the prompt can't grow without
   limit on a large grid. This is grid-side engine metadata (from whichever nodes registered as
   providers), not consumer request data, so the **consumer privacy surface is unchanged** — the
