@@ -744,6 +744,349 @@ def test_catalog_api_json_roundtrips(capsys):
     assert first["supports_vision"] is first_entry.supports_vision
 
 
+# ---------------------------------------------------------------------------
+# codex seat claims (ADR 0015) — the OAuth access token is a JWT carrying the seat's identity
+# ---------------------------------------------------------------------------
+
+
+def _codex_jwt(auth_claim=None, /, **top_level):
+    """A synthetic codex access token. Never a real one: these tests must never carry a secret.
+
+    Mirrors the real shape — three segments, base64url payload with the '=' padding stripped, and
+    the seat facts nested under the vendor's namespaced claim.
+    """
+    import base64
+    import json as _json
+
+    claims = dict(top_level)
+    if auth_claim is not None:
+        claims["https://api.openai.com/auth"] = auth_claim
+    body = base64.urlsafe_b64encode(_json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{body}.signature"
+
+
+def test_codex_seat_decodes_a_synthetic_seat_token():
+    """The claim SHAPE is real (verified against a live seat 2026-07-15, spike 01); the values are
+    synthetic. Decoding yields the account id the forward header needs, plus the seat's tier."""
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt(
+            {
+                "chatgpt_account_id": "acct-synthetic-0001",
+                "chatgpt_plan_type": "free",
+                "chatgpt_account_user_id": "user-synthetic-0002",
+                "chatgpt_user_id": "user-synthetic-0003",
+                "chatgpt_compute_residency": "no_constraint",
+                "user_id": "user-synthetic-0004",
+                "amr": [],
+                "localhost": False,
+            },
+            exp=2_000_000_000,
+            iss="https://auth.openai.com",
+        )
+    )
+
+    assert seat.account_id == "acct-synthetic-0001"
+    assert seat.plan_type == "free"
+    assert seat.expires_at == 2_000_000_000
+
+
+def test_codex_seat_reads_the_namespaced_claim_not_the_top_level():
+    """The seat facts live INSIDE the namespaced claim. An implementation that reads the top level
+    passes the happy-path test by accident, so pin it with decoys under the identical names."""
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt(
+            {"chatgpt_account_id": "acct-real", "chatgpt_plan_type": "pro"},
+            chatgpt_account_id="acct-DECOY",
+            chatgpt_plan_type="DECOY",
+        )
+    )
+
+    assert seat.account_id == "acct-real"
+    assert seat.plan_type == "pro"
+
+
+def test_codex_seat_plan_type_is_none_when_absent_or_not_a_string():
+    """Tier only chooses which models we advertise, and ADR 0015 D-f already has a safe default for
+    not knowing it (the minimal whitelist). Degrade to None — never fail a working seat's join."""
+    from remote import codex_auth
+
+    assert (
+        codex_auth.decode_seat(_codex_jwt({"chatgpt_account_id": "a"})).plan_type
+        is None
+    )
+    assert (
+        codex_auth.decode_seat(
+            _codex_jwt(
+                {"chatgpt_account_id": "a", "chatgpt_plan_type": {"nested": "junk"}}
+            )
+        ).plan_type
+        is None
+    )
+
+
+def test_codex_seat_expires_at_is_none_when_exp_is_missing_or_not_an_int():
+    """`exp` only triggers ADR 0015 D-d's proactive refresh, which has its own fallback, so a bad
+    one degrades to None. `exp: true` is the trap: bool IS an int in Python, so an unguarded
+    implementation yields expires_at=1 → epoch 1970 → refreshing eagerly forever."""
+    from remote import codex_auth
+
+    base = {"chatgpt_account_id": "a"}
+    assert codex_auth.decode_seat(_codex_jwt(base)).expires_at is None
+    assert codex_auth.decode_seat(_codex_jwt(base, exp="soon")).expires_at is None
+    assert codex_auth.decode_seat(_codex_jwt(base, exp=True)).expires_at is None
+    assert (
+        codex_auth.decode_seat(_codex_jwt(base, exp=2_000_000_000)).expires_at
+        == 2_000_000_000
+    )
+
+
+def test_codex_seat_requires_a_header_safe_account_id():
+    """Account id is the one field with no safe default: it is the Chatgpt-Account-Id header on
+    every forward, so a token without one identifies no seat and cannot serve.
+
+    It is checked for header-SAFETY, not just truthiness, because it is spent as a header value and
+    the forward path uses httpx — which (unlike urllib) will send a header containing CRLF. Reaching
+    this needs a forged token, so it is defence in depth, not a live hole.
+    """
+    from remote import codex_auth
+
+    for claim in (
+        {},
+        {"chatgpt_account_id": ""},
+        {"chatgpt_account_id": None},
+        {"chatgpt_account_id": 12345},
+        {"chatgpt_account_id": "   "},  # blank: would send an empty header
+        {"chatgpt_account_id": "acct-a\r\nX-Injected: pwned"},  # CRLF header injection
+        {"chatgpt_account_id": "acct-a\tb"},
+    ):
+        with pytest.raises(codex_auth.CodexTokenError):
+            codex_auth.decode_seat(_codex_jwt(claim))
+
+    # A legitimate non-ASCII id is NOT collateral damage — printable is the bar, not ASCII.
+    assert codex_auth.decode_seat(
+        _codex_jwt({"chatgpt_account_id": "acct-日本語"})
+    ).account_id == ("acct-日本語")
+
+
+def test_codex_seat_rejects_a_token_that_is_not_a_string():
+    """The store's loader is `str | None`-shaped (remote/api_keys.load_key), and ADR 0015 D-d
+    accepts a crash mid-rotation as a residual risk — so a half-written bundle really can hand this
+    a None. Without a guard that is an AttributeError escaping the module's whole error contract,
+    and a caller that catches CodexTokenError (as the design invites) would not catch it."""
+    from remote import codex_auth
+
+    for value in (None, 12345, b"header.payload.sig", ["header", "payload", "sig"]):
+        with pytest.raises(codex_auth.CodexTokenError) as caught:
+            codex_auth.decode_seat(value)
+        assert caught.value.reason == "not-a-string"
+
+
+def test_codex_seat_error_reasons_come_from_the_closed_vocabulary():
+    """`.reason` exists so a vendor claim-rename is distinguishable from a corrupt store — both say
+    'sign in again' to the operator, and signing in again fixes neither. It is drawn from a closed
+    set precisely so it can never smuggle a token value into a log, and it stays out of `args` so
+    `repr()` keeps leaking nothing."""
+    from remote import codex_auth
+
+    import base64
+    import json as _json
+
+    def _raw(payload):
+        body = (
+            base64.urlsafe_b64encode(_json.dumps(payload).encode()).decode().rstrip("=")
+        )
+        return f"header.{body}.signature"
+
+    # One specimen per reason — every constant in REASONS must be reachable, and each case must
+    # report its OWN reason (a single collapsed code would be no better than the message).
+    specimens = {
+        "not-a-string": None,
+        "bad-segment-count": "header.payload",
+        "undecodable-payload": "header.!!!not-base64!!!.sig",
+        "payload-not-an-object": _raw([1, 2]),
+        "claim-missing": _codex_jwt(None, sub="u1"),
+        "account-id-unusable": _codex_jwt({"chatgpt_plan_type": "free"}),
+    }
+    assert set(specimens) == codex_auth.REASONS, (
+        "every reason needs a specimen (and vice versa)"
+    )
+
+    constant_text = str(codex_auth.CodexTokenError("not-a-string"))
+    for reason, token in specimens.items():
+        with pytest.raises(codex_auth.CodexTokenError) as caught:
+            codex_auth.decode_seat(token)
+        assert caught.value.reason == reason
+        # The operator-facing text is the same constant regardless of reason...
+        assert str(caught.value) == constant_text
+        # ...and the reason stays out of repr(), which the leak test also scans.
+        assert reason not in repr(caught.value)
+
+    # The closed vocabulary is enforced by the type itself, not merely by convention: a raise site
+    # that ever passed a token-derived string (defeating the leak guarantee) fails loudly here.
+    with pytest.raises(ValueError):
+        codex_auth.CodexTokenError("a-reason-not-in-the-vocabulary")
+
+
+def test_codex_seat_rejects_malformed_tokens():
+    """Every shape that cannot yield a seat. The last two are the silent-pass traps: a 4-segment
+    token still has a decodable segment 1, and a JSON payload that isn't an object still parses —
+    both sail past a naive split-and-decode."""
+    import base64
+    import json as _json
+
+    from remote import codex_auth
+
+    def _payload(value):
+        return (
+            base64.urlsafe_b64encode(_json.dumps(value).encode()).decode().rstrip("=")
+        )
+
+    cases = {
+        "empty": "",
+        "not a jwt": "opaque-not-a-jwt",
+        "one segment": "header",
+        "two segments": f"header.{_payload({'a': 1})}",
+        "four segments": f"header.{_payload({'a': 1})}.sig.extra",
+        "payload not base64": "header.!!!not-base64!!!.sig",
+        "payload not json": f"header.{base64.urlsafe_b64encode(b'not json').decode().rstrip('=')}.sig",
+        "payload is a list": f"header.{_payload([1, 2])}.sig",
+        "payload is a number": f"header.{_payload(123)}.sig",
+        "payload is null": f"header.{_payload(None)}.sig",
+        "claim missing": _codex_jwt(None, sub="u1"),
+        "claim not a dict": _codex_jwt("not-a-dict"),
+        # A deeply-nested payload makes json.loads raise RecursionError (a RuntimeError, NOT a
+        # ValueError) — the decoder must still answer with CodexTokenError, never a raw crash.
+        "deeply nested payload": "header."
+        + base64.urlsafe_b64encode(b"[" * 100_000 + b"]" * 100_000).decode().rstrip("=")
+        + ".sig",
+    }
+    for label, token in cases.items():
+        # try/except/else rather than `pytest.raises`, so the per-case label survives a regression
+        # (pytest.raises alone would report only "DID NOT RAISE", not which of the 12 shapes leaked
+        # through). The `pytest.fail` is reachable here — it runs when decode_seat wrongly returns.
+        try:
+            codex_auth.decode_seat(token)
+        except codex_auth.CodexTokenError:
+            continue
+        pytest.fail(f"{label!r} should not decode to a seat")
+
+
+def test_codex_seat_accepts_unpadded_base64url():
+    """A JWT strips base64 '=' padding, so the decoder must restore it for every residue class —
+    otherwise decoding works or fails depending on how long the account id happens to be."""
+    from remote import codex_auth
+
+    for filler in ("a", "aa", "aaa", "aaaa"):
+        token = _codex_jwt({"chatgpt_account_id": f"acct-{filler}"})
+        assert "=" not in token.split(".")[1]  # the helper really does strip padding
+        assert codex_auth.decode_seat(token).account_id == f"acct-{filler}"
+
+
+def test_codex_seat_errors_never_leak_the_token():
+    """Issue 04's AC: no code path prints a token value or raw JWT. A plain `token not in str(exc)`
+    is too weak — it misses a truncated echo and anything reachable through the exception chain —
+    so slide an 8-char window over everything a human could see."""
+    import traceback
+
+    from remote import codex_auth
+
+    import base64
+
+    # A payload that decodes as base64 but NOT as JSON is the one input that chains an exception
+    # carrying content: json.JSONDecodeError.doc holds the DECODED PAYLOAD — exactly where the
+    # account id and the operator's email live. It has to be in this list, not merely in the
+    # rejects-malformed-tokens table, because it is the only branch where the chain matters.
+    not_json = base64.urlsafe_b64encode(b'{"chatgpt_account_id": "acct-SECRET-42" ')
+    tokens = (
+        _codex_jwt({"chatgpt_plan_type": "free"}),  # decodable, no account id -> raises
+        _codex_jwt({"chatgpt_account_id": "acct-SECRET-42\r\nX-Evil: 1"}),  # unusable id
+        f"header.{not_json.decode().rstrip('=')}.sig",  # base64 ok, JSON fails -> chains
+        "header.!!!not-base64!!!.sig",
+        "opaque-not-a-jwt",
+    )
+    for token in tokens:
+        try:
+            codex_auth.decode_seat(token)
+        except codex_auth.CodexTokenError as exc:
+            rendered = (
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                + str(exc)
+                + repr(exc)
+            )
+            leaked = sum(1 for i in range(len(token) - 7) if token[i : i + 8] in rendered)
+            # Report a COUNT, never the fragment itself: a failing assertion message is an output
+            # channel too, and echoing the offending bytes would leak them into the CI log.
+            assert not leaked, f"{leaked} fragment(s) of the token reached a rendered error"
+            # NEITHER link may survive. `from None` alone would leave __context__ reachable, and
+            # with it `.doc` — so decode_seat raises outside the except block instead.
+            assert exc.__cause__ is None
+            assert exc.__context__ is None
+        else:
+            pytest.fail("expected CodexTokenError")
+
+
+def test_codex_seat_repr_does_not_leak_the_account_id():
+    """The account id is the operator's identity, held to the same bar as the token (issue 04): it
+    may not reach a log, a terminal, or a run record.
+
+    A plain dataclass repr prints every field, so `logger.debug(f"joined {seat}")` — the most
+    natural line anyone writes when wiring up issue 05/06 — would ship it with no bug, no edge case
+    and no regression required. The error-path leak test cannot catch this: it is the SUCCESS path.
+    """
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt({"chatgpt_account_id": "acct-SECRET-42", "chatgpt_plan_type": "free"})
+    )
+
+    assert seat.account_id == "acct-SECRET-42"  # readable by the code that needs it...
+    for rendered in (repr(seat), str(seat), f"{seat}"):  # ...never by anything that prints it
+        assert "SECRET" not in rendered
+    # The non-secret fields stay visible: this is redaction, not an opaque blob.
+    assert "free" in repr(seat)
+
+
+def test_codex_seat_carries_no_verification_verdict():
+    """The decoder does NOT verify the JWT signature, so nothing it returns may look like an
+    authorization result. Structural guard: no bool field exists for a future caller to branch on
+    as though the seat had been validated."""
+    import dataclasses
+
+    from remote import codex_auth
+
+    fields = {f.name: f for f in dataclasses.fields(codex_auth.CodexSeat)}
+    assert set(fields) == {"account_id", "plan_type", "expires_at"}
+    # codex_auth enables PEP 563, so every `f.type` is the annotation's SOURCE TEXT, not the type
+    # object — `f.type is bool` would be dead code. Match the text, which also catches
+    # `bool | None` and `Optional[bool]`.
+    assert all(isinstance(f.type, str) for f in fields.values()), (
+        "PEP 563 assumption broke"
+    )
+    assert not any("bool" in f.type for f in fields.values())
+
+    seat = codex_auth.decode_seat(_codex_jwt({"chatgpt_account_id": "a"}))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        seat.account_id = "mutated"
+
+
+def test_codex_seat_decodes_an_expired_token():
+    """The decoder never reads the clock. ADR 0015 D-d's refresh must read the account id OUT of an
+    already-expired token to rotate it — a decoder that rejected expired tokens would brick exactly
+    the case refresh exists for. Expiry is the caller's decision, not the parser's."""
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt({"chatgpt_account_id": "acct-x", "chatgpt_plan_type": "free"}, exp=1)
+    )
+
+    assert seat.account_id == "acct-x"
+    assert seat.expires_at == 1
+
+
 def test_download_surfaces_non_2xx_as_clean_systemexit(monkeypatch, tmp_path):
     # A non-2xx HF response must yield "Download failed (<status>): <body>",
     # not an httpx.ResponseNotRead traceback from reading .text on an unread stream.
