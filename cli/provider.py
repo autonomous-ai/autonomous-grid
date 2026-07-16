@@ -22,7 +22,7 @@ from typing import Any
 import httpx
 
 from local import config
-from shared import paths, run_records
+from shared import logging_setup, paths, run_records
 from local import runtime
 
 
@@ -188,7 +188,7 @@ def _spawn_engine(
     _write_record(grid_id, engine_id, record)
 
     log_path = paths.engines_dir(grid_id) / f"{engine_id}.log"
-    log = log_path.open("ab")
+    log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     proc = subprocess.Popen(
         runtime.cli_command() + ["__engine", grid_id, engine_id],
         stdout=log,

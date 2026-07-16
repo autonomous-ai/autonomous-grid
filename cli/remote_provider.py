@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 
-from shared import paths, run_records
+from shared import logging_setup, paths, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
 
@@ -664,7 +664,7 @@ def _spawn_remote_engine(network_id: str, engine_id: str) -> subprocess.Popen:
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("ab")
+    log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     return subprocess.Popen(
         runtime.cli_command() + ["__remote-engine", network_id, engine_id],
         stdout=log,
