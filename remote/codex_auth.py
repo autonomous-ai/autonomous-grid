@@ -8,8 +8,24 @@ things the join needs are already inside it — no network call, no cost:
 * **the plan type**, which is the seat's subscription tier (ADR 0015 D-f).
 
 Verified against a live seat on 2026-07-15 (spike 01, ``.scratch/codex-subs/facts.md``): both live
-under the vendor's namespaced ``https://api.openai.com/auth`` claim, and the claim's account id is
-byte-identical to the ``account_id`` the token exchange returns alongside it.
+under the vendor's namespaced ``https://api.openai.com/auth`` claim.
+
+**The token is the ONLY source of the account id — do not go looking for a second one.** An earlier
+version of this docstring said the claim's account id "is byte-identical to the ``account_id`` the
+token exchange returns alongside it", which motivated a planned cross-check of "two independent
+sources" at sign-in. Both halves were false, and the check was deleted rather than deferred
+(``facts.md`` fact 9, ADR 0015 D-c):
+
+* The exchange returns **three** fields — ``id_token``/``access_token``/``refresh_token`` — and no
+  account id at all (``binary:`` ``struct TokenResponse with 3 elements``). The *persisted* struct
+  has four (``struct TokenData with 4 elements``) because the vendor's client derives the account id
+  from this very claim before writing it to disk.
+* The "byte-identical" reading had compared the claim against ``~/.codex/auth.json`` — that client's
+  own copy of that same claim. One value, read twice.
+
+So a comparison would have been ``x == x``: incapable of failing, while reading like defence in
+depth. What actually defends this path is the OAuth ``state`` verification at sign-in
+(``remote/codex_oauth.py``), not any cross-check here.
 
 **This module decodes; it does NOT verify.** The signature is never checked, so nothing here is an
 authorization decision — and three things keep it that way:

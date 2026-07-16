@@ -47,7 +47,12 @@ def _catalog_api(args: argparse.Namespace) -> int:
 
     kind = args.api
     whitelist = api_catalog.WHITELISTS.get(kind)
-    if whitelist is None or not whitelist.entries:
+    # "Is this kind known?" is dict membership, and ONLY dict membership — the same question
+    # `_reject_api_conflicts` asks, answered the same way. This used to lean on "has entries" as a
+    # proxy, which held only while every row had some; a credential-only row (ADR 0015 D-c: codex
+    # ships its credential path before issue 05's per-tier model table) made the proxy disagree with
+    # the real predicate and print "Unknown API kind 'codex'. Supported: codex, openai".
+    if whitelist is None:
         supported = ", ".join(api_catalog.supported_kinds())
         raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
 
@@ -71,6 +76,17 @@ def _catalog_api(args: argparse.Namespace) -> int:
                 for entry in whitelist.entries
             ],
         }, indent=2))
+        return 0
+
+    if not whitelist.entries:
+        # A known kind with no models listed yet — not an error, and emphatically not "unknown".
+        # `grid catalog` answered the question it was asked (ADR 0012 D-a: no credential, no network);
+        # the answer happens to be "none". Exit 0, like `--json`'s `models: []`.
+        print(f"No models are listed for `{kind}` in this version of grid yet.")
+        print(
+            f"`grid join --api {kind}` will still sign you in, but there is nothing for it to serve "
+            "until a release carries the model list."
+        )
         return 0
 
     print(

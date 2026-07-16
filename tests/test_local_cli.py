@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import errno
 import json
 import os
 import shutil
@@ -20,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import cli
+from cli import codex_signin as _codex_signin  # noqa: F401 - binds `cli.codex_signin` for monkeypatching
 from cli import dispatch
 from local import config
 from shared import paths
@@ -688,9 +691,8 @@ def test_catalog_without_api_unchanged(monkeypatch, tmp_path, capsys):
 def test_api_whitelist_integrity():
     from datetime import date
 
-    assert api_catalog.supported_kinds() == ("openai",)
+    assert api_catalog.supported_kinds() == ("codex", "openai")
     for kind, whitelist in api_catalog.WHITELISTS.items():
-        assert whitelist.entries, f"{kind} whitelist must not be empty"
         names = [entry.vendor_name for entry in whitelist.entries]
         assert all(names), f"{kind} has an entry with an empty vendor name"
         assert len(set(names)) == len(names), f"{kind} has duplicate vendor names"
@@ -700,7 +702,90 @@ def test_api_whitelist_integrity():
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
         assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
         assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
+
+
+def test_catalog_api_codex_says_the_list_is_empty_not_that_the_kind_is_unknown(capsys):
+    """`grid catalog --api codex` used to contradict itself in one sentence: "Unknown API kind
+    'codex'. Supported: codex, openai".
+
+    `_catalog_api` used "has entries" as its is-this-kind-known proxy, which was safe only while
+    every row had entries — the credential-only codex row is the first that doesn't. Two predicates
+    for one question then disagreed: `_reject_api_conflicts` asks `kind in WHITELISTS` (known),
+    `_catalog_api` asked "has entries" (unknown).
+
+    An empty list is legitimate today — the per-tier table is issue 05's. Saying so honestly is the
+    fix; calling a supported kind "Unknown" is not.
+
+    Exit 0, matching `--json`'s 0-with-`models: []`: the command was asked to report the whitelist
+    and did. An empty answer is an answer. The same query must not change exit code just because a
+    human is reading it.
+    """
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Unknown" not in out  # it is listed as Supported two words later
+    assert "codex" in out
+    assert "grid join --api codex" in out  # sign-in already works; say what does
+
+
+def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
+    """The other half of the split: a kind absent from the catalog keeps its "Unknown" message,
+    listing what IS supported. This is the assertion that stops the fix above from degrading into
+    "accept anything"."""
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_catalog(argparse.Namespace(api="anthropic", json=False))
+
+    msg = str(exc.value)
+    assert "Unknown" in msg and "anthropic" in msg
+    assert "codex" in msg and "openai" in msg  # the supported list
+
+
+def test_catalog_api_codex_json_reports_an_empty_model_list(capsys):
+    """`--json` is the machine-readable contract (ADR 0012). A consumer asking what codex serves
+    gets a well-formed answer with zero models — not a non-zero exit it has to parse an error out
+    of. The empty list IS the fact."""
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["kind"] == "codex"
+    assert payload["models"] == []
+    assert payload["last_verified"] == api_catalog.CODEX_LAST_VERIFIED
+
+
+def test_api_whitelist_key_kinds_name_their_env_var():
+    """A kind whose credential IS an API key must name the env var it is read from — that is the
+    first step of ADR 0012 D-c's env → stored → prompt precedence. `codex` is exempt and must be:
+    ADR 0015 D-c gives an OAuth seat no env-var input path at all, precisely so a stray
+    CODEX_API_KEY can never masquerade as a signed-in subscription."""
+    for kind, whitelist in api_catalog.WHITELISTS.items():
+        if kind == "codex":
+            continue
+        assert whitelist.entries, f"{kind} whitelist must not be empty"
         assert whitelist.env_var, f"{kind} needs the env var its key is read from"
+
+
+def test_codex_whitelist_is_a_credential_only_row():
+    """Issue 05 fills the per-tier model entries. What issue 04 needs on disk today is the kind
+    EXISTING with the two fields an OAuth seat cannot have:
+
+    * no `env_var` — ADR 0015 D-c: no env-var input path, so nothing in the environment can pose as
+      a seat, and `_api_bearers` has no name to synthesise a fallback from.
+    * no `max_output_param` — facts.md #1: this backend accepts NO output-cap parameter at all
+      (`max_tokens`, `max_output_tokens` and `max_completion_tokens` each 400 "Unsupported
+      parameter"), so there is no name to translate to. All three, plus `temperature`, are refused
+      before the round-trip instead.
+    """
+    codex = api_catalog.WHITELISTS["codex"]
+
+    assert codex.env_var is None
+    assert codex.max_output_param is None
+    assert codex.base_url == "https://chatgpt.com/backend-api/codex"
+    assert set(codex.unsupported_params) == {
+        "max_tokens", "max_output_tokens", "max_completion_tokens", "temperature",
+    }
+    assert codex.entries == ()  # issue 05's, keyed by tier
 
 
 def test_api_whitelist_carries_base_url_and_env_var():
@@ -1085,6 +1170,454 @@ def test_codex_seat_decodes_an_expired_token():
 
     assert seat.account_id == "acct-x"
     assert seat.expires_at == 1
+
+
+# ---------------------------------------------------------------------------
+# codex OAuth PKCE (ADR 0015 D-c) — the vendor protocol `grid join --api codex` speaks.
+# Every test here mocks the vendor: this suite never makes a network call.
+# ---------------------------------------------------------------------------
+
+
+def test_codex_pkce_challenge_is_the_s256_transform_of_the_verifier():
+    """The vendor recomputes SHA256(verifier) at exchange and compares it to the challenge the
+    authorize URL carried; a pair that doesn't satisfy the transform fails the sign-in. Recomputed
+    here from the RFC 7636 definition rather than from the implementation's own helper."""
+    import hashlib
+    import string
+
+    from remote import codex_oauth
+
+    pkce = codex_oauth.generate_pkce()
+
+    digest = hashlib.sha256(pkce.verifier.encode("ascii")).digest()
+    assert pkce.challenge == base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    # RFC 7636 §4.1: 43-128 chars from the unreserved set. A verifier outside it is rejected by
+    # the vendor, and the padding-stripped challenge must stay URL-safe unencoded.
+    assert 43 <= len(pkce.verifier) <= 128
+    assert set(pkce.verifier) <= set(string.ascii_letters + string.digits + "-._~")
+    assert "=" not in pkce.challenge
+    # A generator that returned a constant would satisfy the transform above and defeat PKCE
+    # entirely — the verifier is a per-sign-in nonce.
+    assert codex_oauth.generate_pkce().verifier != pkce.verifier
+
+
+def test_codex_authorize_url_carries_the_pkce_challenge_and_state():
+    """What the operator's browser opens. The vendor pins the client id, the redirect uri and the
+    S256 method; `state` is what makes a foreign redirect detectable at parse time (ADR 0015 D-c),
+    so it must actually reach the vendor rather than only being remembered locally."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from remote import codex_oauth
+
+    url = codex_oauth.build_authorize_url(state="state-abc", challenge="challenge-xyz")
+
+    split = urlsplit(url)
+    assert f"{split.scheme}://{split.netloc}{split.path}" == "https://auth.openai.com/oauth/authorize"
+    query = {key: values[-1] for key, values in parse_qs(split.query).items()}
+    assert query["response_type"] == "code"
+    assert query["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
+    assert query["redirect_uri"] == f"http://localhost:{codex_oauth.CALLBACK_PORT}/auth/callback"
+    assert query["code_challenge"] == "challenge-xyz"
+    assert query["code_challenge_method"] == "S256"
+    assert query["state"] == "state-abc"
+    # `offline_access` is what earns the refresh token; without it the seat dies at the first expiry.
+    assert "offline_access" in query["scope"].split()
+    # The vendor keys the simplified Codex consent screen off these; a bare OAuth authorize request
+    # is not the same flow.
+    assert query["id_token_add_organizations"] == "true"
+    assert query["codex_cli_simplified_flow"] == "true"
+    assert query["originator"]
+
+
+def test_codex_parse_redirect_returns_the_authorization_code():
+    """The redirect the browser lands on (or the operator pastes back) carries the one-time code
+    the exchange spends."""
+    from remote import codex_oauth
+
+    code = codex_oauth.parse_redirect(
+        "http://localhost:1455/auth/callback?code=auth-code-1&state=state-abc",
+        expected_state="state-abc",
+    )
+
+    assert code == "auth-code-1"
+
+
+def test_codex_parse_redirect_refuses_a_redirect_whose_state_is_not_ours():
+    """`state` is THE defence against OAuth code injection (ADR 0015 D-c). A redirect URL from an
+    attacker's own authorize session carries a REAL code, and the token it exchanges for is
+    genuinely signed — so no amount of JWT checking downstream catches it. Only this comparison
+    does, which is why a mismatch is terminal and never a warning.
+
+    Both shapes must be refused: a foreign state, and no state at all.
+    """
+    from remote import codex_oauth
+
+    for query in (
+        "code=attacker-code&state=attacker-state",  # a foreign/replayed authorize session
+        "code=attacker-code",  # ... or one that simply drops the parameter
+    ):
+        with pytest.raises(SystemExit) as exc:
+            codex_oauth.parse_redirect(
+                f"http://localhost:1455/auth/callback?{query}", expected_state="state-abc"
+            )
+        assert "state" in str(exc.value).lower()
+        # The refusal must not quote back what it received: this URL is attacker-supplied text, and
+        # the terminal is the operator's. It must also not leak the code, which is still live.
+        assert "attacker-code" not in str(exc.value)
+        assert "attacker-state" not in str(exc.value)
+
+
+def test_codex_parse_redirect_reports_a_vendor_error_redirect():
+    """The operator clicked Deny (or the vendor refused the grant). The vendor still redirects — with
+    `?error=` and no code — and RFC 6749 §4.1.2.1 requires it to echo our `state`, so this lands
+    after the state check. It must not read as 'that URL had no code in it': the causes are
+    different and so is the fix."""
+    from remote import codex_oauth
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.parse_redirect(
+            "http://localhost:1455/auth/callback?error=access_denied&state=state-abc",
+            expected_state="state-abc",
+        )
+
+    msg = str(exc.value)
+    assert "access_denied" in msg  # the vendor's own code, so the operator can look it up
+    assert "denied" in msg.lower() or "refus" in msg.lower()
+
+
+def test_codex_parse_redirect_reports_a_url_carrying_neither_code_nor_error():
+    """Its own case, and the likeliest operator mistake in the paste flow: pasting back the
+    authorize URL they were just given instead of the one the browser landed on. That URL carries
+    OUR state, so it clears the state check and reaches here — nothing is wrong with the sign-in,
+    they just have the wrong string, and the message has to say which string to bring."""
+    from remote import codex_oauth
+
+    for query in (
+        "state=state-abc",  # the authorize URL pasted back — carries our state, no code
+        "code=&state=state-abc",  # ... or a redirect whose code is empty
+    ):
+        with pytest.raises(SystemExit) as exc:
+            codex_oauth.parse_redirect(
+                f"http://localhost:1455/auth/callback?{query}", expected_state="state-abc"
+            )
+        msg = str(exc.value)
+        assert "code" in msg.lower()
+        # Distinct from both neighbours: this is not a refusal and not a foreign sign-in.
+        assert "refused" not in msg.lower()
+        assert "different sign-in" not in msg.lower()
+
+
+def test_codex_exchange_code_posts_a_form_encoded_grant_and_derives_the_seat(monkeypatch):
+    """The authorization_code grant is FORM-encoded — the refresh grant (issue 06) is JSON. Two
+    grants, two encodings, verified against the real client; sending the wrong one is a 400.
+
+    The response carries exactly three fields and NO account id: the seat is derived from the access
+    token's own claim, which is the only place it exists.
+    """
+    from urllib.parse import parse_qs
+
+    from remote import codex_oauth
+
+    access = _codex_jwt(
+        {"chatgpt_account_id": "acct-1", "chatgpt_plan_type": "free"}, exp=2_000_000_000
+    )
+    seen = _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"id_token": "id-tok", "access_token": access, "refresh_token": "rt-1"},
+    ))
+
+    bundle = codex_oauth.exchange_code("auth-code-1", "verifier-1")
+
+    assert seen["method"] == "POST"
+    assert seen["url"] == "https://auth.openai.com/oauth/token"
+    assert seen["content_type"] == "application/x-www-form-urlencoded"
+    body = {key: values[-1] for key, values in parse_qs(seen["body"].decode()).items()}
+    assert body["grant_type"] == "authorization_code"
+    assert body["code"] == "auth-code-1"
+    assert body["client_id"] == codex_oauth.CLIENT_ID
+    assert body["code_verifier"] == "verifier-1"
+    # Must match the authorize request's redirect_uri exactly — the vendor re-checks it here.
+    assert body["redirect_uri"] == codex_oauth.redirect_uri()
+    # A public PKCE client has no secret; the verifier is what proves possession.
+    assert "client_secret" not in body
+
+    assert bundle.access_token == access
+    assert bundle.refresh_token == "rt-1"
+    assert bundle.account_id == "acct-1"  # from the token's claim, not from the response
+    assert bundle.plan_type == "free"  # free alongside it — issue 05's tier, at no extra cost
+    assert abs(bundle.last_refresh - time.time()) < 60  # stamped now, for D-d's proactive refresh
+
+
+def test_codex_exchange_code_surfaces_a_rejected_grant_as_a_clean_error(monkeypatch):
+    """The usual cause is a slow paste — the code is single-use and short-lived. The operator gets a
+    terminal message naming the status and the retry, never an httpx traceback, and never the
+    vendor's error body (unbounded text on a path where a 200's body IS the tokens)."""
+    from remote import codex_oauth
+
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        400, json={"error": "invalid_grant", "error_description": "code expired"},
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.exchange_code("stale-code", "verifier-1")
+    msg = str(exc.value)
+    assert "400" in msg
+    assert "grid join --api codex" in msg  # the operator's next move
+    assert "stale-code" not in msg and "verifier-1" not in msg
+
+
+def test_codex_exchange_code_refuses_a_grant_with_no_refresh_token(monkeypatch):
+    """A 200 missing either token is a vendor contract change, not something a re-sign-in fixes —
+    and a bundle with a null refresh token would brick the seat at the first expiry (ADR 0015 D-d
+    has nothing to rotate). Terminal, and distinct from 'the vendor rejected you'."""
+    from remote import codex_oauth
+
+    access = _codex_jwt({"chatgpt_account_id": "acct-1"})
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"id_token": "id-tok", "access_token": access},  # offline_access silently dropped
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.exchange_code("auth-code-1", "verifier-1")
+    msg = str(exc.value)
+    assert "refresh" in msg.lower()
+    assert "rejected" not in msg.lower()  # not the vendor-said-no message
+    assert access not in msg
+
+
+def test_codex_exchange_code_reports_an_unreadable_fresh_token_as_a_vendor_change(monkeypatch, capsys):
+    """A token we exchanged one second ago that carries no readable seat is NOT a stale credential:
+    the operator has just signed in successfully. `decode_seat` raises `CodexTokenError`, whose
+    message is "…sign in again" — correct for a token off the disk, useless here, because signing in
+    again reproduces it exactly (issue 04's amendment). So the exchange re-words it, and logs
+    `.reason`, which is the ONLY thing that separates a vendor claim rename from a corrupt token.
+
+    It must also not escape as `CodexTokenError`: that is a ValueError, and `cli/_main.py`'s `main`
+    has no handler for one — the operator would get a traceback.
+
+    The stderr assertion below is on `codex_oauth` DIRECTLY, and that is deliberate, not an
+    oversight: the module's docstring names this one line as its explicit exception to "no operator
+    I/O" — it is a log, not interaction, and it must stay in this module because ADR 0015 D-d's
+    refresh reaches the same case from the serve loop, which never imports `cli/`. If the line ever
+    moves to the CLI, this assertion is supposed to fail and be moved with it.
+    """
+    from remote import codex_auth, codex_oauth
+
+    # Decodes cleanly; the seat facts are simply no longer under the claim URL we know — the vendor
+    # rename that `reason="claim-missing"` exists to name.
+    renamed = _codex_jwt(
+        None, exp=2_000_000_000, **{"https://api.openai.com/authz": {"chatgpt_account_id": "acct-1"}}
+    )
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={
+        "id_token": "id-tok", "access_token": renamed, "refresh_token": "rt-1",
+    }))
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.exchange_code("auth-code-1", "verifier-1")
+
+    msg = str(exc.value)
+    assert not isinstance(exc.value, codex_auth.CodexTokenError)
+    assert "sign in again" not in msg.lower()  # they just did — don't send them round the loop
+    assert "grid" in msg.lower()  # points at the version/contract, which is the real fix
+    # `.reason` is a constant from a closed vocabulary, so it can be logged; the claims it came
+    # from carry the operator's email and must not be.
+    err = capsys.readouterr().err
+    assert "claim-missing" in err
+    assert renamed not in msg + err and "acct-1" not in msg + err
+
+
+def test_codex_callback_listener_captures_the_redirect_without_logging_it(capsys):
+    """The browser flow's half: bind a loopback port, let the vendor's redirect land on it, hand the
+    URL back for `parse_redirect` to check. Bound to 127.0.0.1 only — a callback on 0.0.0.0 would let
+    anything on the LAN post an authorization code at this operator.
+
+    The URL carries the live authorization code, and `BaseHTTPRequestHandler` logs every request line
+    to stderr by default — i.e. the default listener prints the code. That must be off.
+    """
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="state-abc") as listener:  # port 0: never 1455
+        visitor = threading.Thread(
+            target=lambda: httpx.get(
+                f"http://127.0.0.1:{listener.port}/auth/callback"
+                "?code=AUTHCODE-SEKRIT&state=state-abc"
+            ),
+            daemon=True,
+        )
+        visitor.start()
+        url = listener.wait(deadline=time.monotonic() + 10)
+        visitor.join(timeout=10)
+
+    assert url is not None
+    assert codex_oauth_parse(url, "state-abc") == "AUTHCODE-SEKRIT"
+    out_err = capsys.readouterr()
+    assert "AUTHCODE-SEKRIT" not in out_err.out + out_err.err
+
+
+def codex_oauth_parse(url, state):
+    from remote import codex_oauth
+
+    return codex_oauth.parse_redirect(url, expected_state=state)
+
+
+def test_codex_callback_listener_ignores_hits_that_are_not_our_redirect(capsys):
+    """A path match is not enough to end the wait — the redirect has to be OURS.
+
+    `do_GET` used to filter on path alone, so the first request to reach `/auth/callback` won the
+    race unconditionally, even a bare `GET /auth/callback` with no code, state or error. That is
+    reachable from any page in a background tab: `<img src="http://localhost:1455/auth/callback">`
+    is a plain cross-origin GET, no preflight, during the sign-in window. The operator's REAL
+    approval then arrives 0.2s later to a closed socket and is discarded, and they are told "That
+    redirect URL is from a different sign-in" about a sign-in that genuinely succeeded at the vendor.
+
+    So the handler compares `state` too — a filter, not the control: it only decides what ends the
+    wait. `parse_redirect` on the main thread still makes the authoritative refusal, because a
+    handler thread cannot raise (its `SystemExit` would be swallowed and the operator would see a
+    hang instead of an error).
+    """
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="real-state") as listener:
+        base = f"http://127.0.0.1:{listener.port}/auth/callback"
+        # Each GET blocks until `wait()`'s loop serves it, so they must run off the main thread.
+        # They land in order; only the last is ours.
+        threading.Thread(
+            target=lambda: [
+                httpx.get(base, timeout=10),  # the <img src> hit: no code, no state, no error
+                httpx.get(f"{base}?code=X&state=someone-elses", timeout=10),  # a foreign sign-in
+                httpx.get(f"{base}?code=REAL-CODE&state=real-state", timeout=10),  # ours
+            ],
+            daemon=True,
+        ).start()
+
+        url = listener.wait(deadline=time.monotonic() + 20)
+
+    assert url is not None, "the real redirect never ended the wait"
+    assert codex_oauth_parse(url, "real-state") == "REAL-CODE"
+    assert "REAL-CODE" not in capsys.readouterr().err
+
+
+def test_codex_callback_listener_reports_a_port_someone_else_holds():
+    """The callback port is the real Codex CLI's too, so an operator signing into Codex proper in
+    another terminal holds it — an ordinary collision, not an exotic one. It surfaces as its own type
+    so the join can fall back with guidance instead of dying.
+
+    Bind-and-catch, never probe-then-bind: `connect_ex` (the repo's nearest neighbour, in
+    `shared/engine/launcher.py`) would answer "free" and lose the race to whoever binds next.
+    """
+    import socket
+
+    from remote import codex_callback
+
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    try:
+        with pytest.raises(codex_callback.PortInUse):
+            with codex_callback.listen(holder.getsockname()[1], expected_state="s"):
+                pytest.fail("must not hand back a listener it never bound")
+    finally:
+        holder.close()
+
+
+def test_codex_callback_listener_reports_an_unclassifiable_bind_failure_cleanly(monkeypatch):
+    """EADDRINUSE has its own type and a fallback. Every OTHER bind failure — an exhausted fd table,
+    a sandbox refusing loopback — used to re-raise as a bare `OSError`, and nothing between `listen`
+    and `cli/_main.py::main()` catches one (`cli/dispatch.py` has no try/except). The operator got a
+    traceback: loud rather than silent, but still the one outcome this feature's error contract rules
+    out.
+
+    The bind is induced to fail because a real EACCES needs a privileged port, which a test cannot
+    portably rely on (and would flip under a root CI runner).
+    """
+    from remote import codex_callback
+
+    def refuse(address, handler):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(codex_callback, "_CallbackServer", refuse)
+
+    with pytest.raises(SystemExit) as exc:  # not a bare OSError
+        with codex_callback.listen(0, expected_state="s"):
+            pytest.fail("must not yield a listener it never bound")
+
+    assert not isinstance(exc.value, codex_callback.PortInUse)  # not dressed up as a collision
+    assert "Permission denied" in str(exc.value)  # the OS's own reason, so it is diagnosable
+
+
+def test_codex_callback_listener_gives_up_at_its_deadline():
+    """Nobody ever approves (the operator wandered off, or the browser never opened). The wait ends
+    at the deadline and says so, rather than parking the CLI on a socket forever.
+
+    Covers only the *nobody connects* case — see the test below for the one that actually bit."""
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="s") as listener:
+        assert listener.wait(deadline=time.monotonic() + 0.2) is None
+
+
+def test_codex_callback_listener_deadline_holds_against_a_client_that_says_nothing():
+    """The deadline must bound the WHOLE wait, not just the gap before someone connects.
+
+    `BaseServer.handle_request`'s timeout only bounds the `select()` for a *new* connection. Once one
+    is accepted, control passes to the handler — a `StreamRequestHandler` whose own `timeout` class
+    attribute defaults to None, so `setup()` never calls `settimeout()` and `rfile.readline()` blocks
+    with no bound at all. One TCP connect that sends nothing therefore hangs `grid join --api codex`
+    straight past `_SIGNIN_DEADLINE_S` with no error — the CLI just stops — and, the server being
+    single-threaded, also stops the real browser's redirect from ever being accepted.
+
+    No HTTP, no valid `state`, no local code execution: `nc 127.0.0.1 1455` is the whole attack. It
+    silently defeats the deadline ADR 0015 D-c promises.
+
+    The wait runs on a daemon thread so that a regression fails this test instead of hanging the suite.
+    """
+    import socket
+
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="s") as listener:
+        silent = socket.create_connection(("127.0.0.1", listener.port), timeout=5)
+        try:
+            done = {}
+            waiter = threading.Thread(
+                target=lambda: done.update(returned=listener.wait(deadline=time.monotonic() + 1.0)),
+                daemon=True,
+            )
+            waiter.start()
+            waiter.join(timeout=20)  # 20x the deadline: generous, but bounded
+
+            assert not waiter.is_alive(), "wait() blew its deadline — a silent client hung the sign-in"
+            assert done["returned"] is None
+        finally:
+            silent.close()
+
+
+def test_codex_parse_redirect_refuses_to_verify_against_an_empty_state():
+    """A guard on the CALLER, not on the URL — and the reason it exists is that the failure is
+    silent: `compare_digest("", "")` is True, so an empty `expected_state` turns this check into
+    accept-any-state-less-redirect while still looking like it verifies. The one real control on
+    this path must fail loudly rather than pass vacuously.
+
+    Not a `SystemExit`: no operator can act on it. It is a bug in a caller (`codex_auth` guards its
+    own closed vocabulary the same way, and for the same reason).
+    """
+    from remote import codex_oauth
+
+    with pytest.raises(ValueError):
+        codex_oauth.parse_redirect("http://localhost:1455/auth/callback?code=c", expected_state="")
+
+
+def test_codex_parse_redirect_state_check_survives_a_non_ascii_state():
+    """The received state is attacker-controlled text. A constant-time compare over `str` raises
+    TypeError on non-ASCII, which would turn a hostile URL into a traceback instead of a refusal —
+    the one outcome issue 04 rules out."""
+    from remote import codex_oauth
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.parse_redirect(
+            "http://localhost:1455/auth/callback?code=c&state=caf%C3%A9-%F0%9F%92%A5",
+            expected_state="state-abc",
+        )
+    assert "state" in str(exc.value).lower()
 
 
 def test_download_surfaces_non_2xx_as_clean_systemexit(monkeypatch, tmp_path):
@@ -2729,6 +3262,11 @@ def _mock_vendor(monkeypatch, handler, _real=httpx.Client):
     def wrapped(request):
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("authorization")
+        # The codex OAuth exchange is a POST whose encoding is part of the contract (form here,
+        # JSON for the refresh grant) — the listing callers above only ever read url/auth.
+        seen["method"] = request.method
+        seen["content_type"] = request.headers.get("content-type")
+        seen["body"] = request.content
         return handler(request)
 
     monkeypatch.setattr(
@@ -2889,6 +3427,393 @@ def test_remote_join_api_unexpected_listing_shape_is_diagnostic(monkeypatch, tmp
     assert "shape" in msg.lower() or "unexpected" in msg.lower()
     assert "available to this" not in msg  # not the key-permissions message
     assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+# --- `grid join --api codex` sign-in (ADR 0015 D-c) -----------------------------------------
+
+def _mock_codex_browser(monkeypatch, *, code="AUTHCODE-1", state=None, listen=None):
+    """Stand in for the operator's browser AND the one-shot callback listener.
+
+    The redirect echoes back the `state` grid actually generated (read out of the authorize URL it
+    opened), because that is what the real vendor does — a fixed state would make every test pass
+    against an implementation that never checks it. Pass `state` to play the attacker instead.
+    """
+    import webbrowser
+    from urllib.parse import parse_qs, urlsplit
+
+    from remote import codex_callback
+
+    seen = {}
+
+    class _FakeListener:
+        port = 1455
+
+        def wait(self, *, deadline):
+            seen["deadline"] = deadline
+            return (
+                f"http://localhost:1455/auth/callback"
+                f"?code={code}&state={state or seen['state']}"
+            )
+
+    @contextlib.contextmanager
+    def fake_listen(port, *, expected_state):
+        seen["bound_port"] = port
+        seen["listener_state"] = expected_state
+        yield _FakeListener()
+
+    def fake_open(url):
+        seen["authorize_url"] = url
+        seen["state"] = parse_qs(urlsplit(url).query)["state"][0]
+        return True
+
+    monkeypatch.setattr(codex_callback, "listen", listen or fake_listen)
+    monkeypatch.setattr(webbrowser, "open", fake_open)
+    return seen
+
+
+def _mock_codex_exchange(monkeypatch, *, account="acct-1", plan="free"):
+    """The vendor's token endpoint. Returns the 3 fields the real one returns — no account id."""
+    access = _codex_jwt(
+        {"chatgpt_account_id": account, "chatgpt_plan_type": plan}, exp=2_000_000_000
+    )
+    seen = _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={
+        "id_token": "id-tok", "access_token": access, "refresh_token": "rt-1",
+    }))
+    return access, seen
+
+
+def test_remote_join_api_codex_browser_flow_lands_the_bundle(monkeypatch, tmp_path, capsys):
+    """The default sign-in (ADR 0015 D-c): bind the callback port, open the browser, catch the
+    redirect, exchange the code, store the seat. Grid runs the OAuth itself — no `--api-key` flag,
+    no env var, and `~/.codex/auth.json` is never read."""
+    from remote import api_keys, codex_oauth
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    access, exchanged = _mock_codex_exchange(monkeypatch)
+    browser = _mock_codex_browser(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        # Sign-in is issue 04's; the tier's model table (and the probe that confirms it) is issue
+        # 05's, so the join itself cannot complete yet. The credential still lands — exactly as an
+        # openai key does, which is stored the moment the vendor validates it and before the model
+        # intersection can fail.
+        cli.main(["join", "--api", "codex"])
+
+    assert browser["bound_port"] == codex_oauth.CALLBACK_PORT  # bound BEFORE the browser opened
+    assert browser["authorize_url"].startswith("https://auth.openai.com/oauth/authorize?")
+    assert exchanged["url"] == "https://auth.openai.com/oauth/token"
+
+    assert api_keys.load_codex_bundle() == codex_oauth.CodexBundle(
+        access_token=access, refresh_token="rt-1", account_id="acct-1",
+        plan_type="free", last_refresh=api_keys.load_codex_bundle().last_refresh,
+    )
+    # Secret hygiene: nothing about the seat reaches the terminal.
+    out_err = capsys.readouterr()
+    assert access not in out_err.out + out_err.err
+    assert "rt-1" not in out_err.out + out_err.err
+    assert "acct-1" not in out_err.out + out_err.err
+
+
+def _authorize_url_from(text):
+    for line in text.splitlines():
+        if line.strip().startswith("https://auth.openai.com/oauth/authorize?"):
+            return line.strip()
+    raise AssertionError(f"no authorize URL was printed for the operator to open:\n{text}")
+
+
+def _no_browser_and_no_bind(monkeypatch):
+    """Assert the paste flow needs neither of the two things a headless box hasn't got."""
+    import webbrowser
+
+    from remote import codex_callback
+
+    monkeypatch.setattr(webbrowser, "open", lambda url: pytest.fail("--no-browser opened a browser"))
+    monkeypatch.setattr(codex_callback, "listen",
+                        lambda port, **kw: pytest.fail("--no-browser bound a port"))
+
+
+def test_remote_join_api_codex_no_browser_flow_takes_a_pasted_redirect(monkeypatch, tmp_path, capsys):
+    """User story 2 — a headless box. Grid prints the URL, the operator approves it on a machine that
+    has a browser, and brings the redirect back by hand. Nothing opens and nothing binds.
+
+    The test plays the operator literally: it reads the URL off the terminal and pastes back the
+    redirect the vendor would send for THAT authorize request, `state` and all.
+    """
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    access, exchanged = _mock_codex_exchange(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    _no_browser_and_no_bind(monkeypatch)
+
+    printed = {}
+
+    def fake_paste():
+        from urllib.parse import parse_qs, urlsplit
+
+        printed["out"] = capsys.readouterr().out
+        url = _authorize_url_from(printed["out"])
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        return f"http://localhost:1455/auth/callback?code=AUTHCODE-1&state={state}"
+
+    monkeypatch.setattr(cli.codex_signin, "_prompt_redirect_url", fake_paste)
+
+    with pytest.raises(SystemExit):  # the model table is issue 05's; the seat still lands
+        cli.main(["join", "--api", "codex", "--no-browser"])
+
+    assert exchanged["url"] == "https://auth.openai.com/oauth/token"
+    bundle = api_keys.load_codex_bundle()
+    assert bundle is not None and bundle.access_token == access and bundle.account_id == "acct-1"
+    assert "AUTHCODE-1" not in printed["out"]  # grid printed the authorize URL, never the code
+
+
+def test_remote_join_api_codex_paste_deadline_stores_nothing(monkeypatch, tmp_path):
+    """The operator wandered off mid-approval and pasted a URL whose code died on the way. Refused
+    before the exchange is even attempted: the vendor would reject it anyway, and a message about
+    a 10-minute code beats a bare HTTP 400. Nothing is stored."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    _no_browser_and_no_bind(monkeypatch)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("a dead code is never spent"))
+
+    # The clock jumps past the code's lifetime while the operator is pasting. Read once at the start
+    # of the paste flow, once after the paste returns.
+    clock = iter([1000.0, 1000.0 + 601.0])
+    monkeypatch.setattr(cli.codex_signin.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        cli.codex_signin, "_prompt_redirect_url",
+        lambda: "http://localhost:1455/auth/callback?code=AUTHCODE-1&state=whatever",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex", "--no-browser"])
+
+    assert "too long" in str(exc.value).lower() or "expired" in str(exc.value).lower()
+    assert api_keys.load_codex_bundle() is None
+    assert not paths.api_keys_file().exists()
+
+
+def _callback_port_taken(monkeypatch):
+    """The real Codex CLI holds the callback port. `listen` binds-and-catches, so this is what the
+    join sees — raised from the bind, not from a probe that could have raced."""
+    from remote import codex_callback
+
+    def taken(port, *, expected_state):
+        raise codex_callback.PortInUse(48, "Address already in use")
+
+    monkeypatch.setattr(codex_callback, "listen", taken)
+
+
+def test_remote_join_api_codex_falls_back_to_paste_when_callback_port_is_taken(
+    monkeypatch, tmp_path, capsys
+):
+    """User story 4: the operator's real Codex CLI is signing in and holds port 1455 — grid's
+    callback port is theirs too. The two tools have to coexist, so this is a fallback and not just a
+    refusal: the paste flow needs no port, so the join completes through it. Never a traceback."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    access, _ = _mock_codex_exchange(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    _callback_port_taken(monkeypatch)
+
+    def fake_paste():
+        from urllib.parse import parse_qs, urlsplit
+
+        url = _authorize_url_from(capsys.readouterr().out)
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        return f"http://localhost:1455/auth/callback?code=AUTHCODE-1&state={state}"
+
+    monkeypatch.setattr(cli.codex_signin, "_prompt_redirect_url", fake_paste)
+
+    with pytest.raises(SystemExit):  # the model table is issue 05's; the seat still lands
+        cli.main(["join", "--api", "codex"])
+
+    bundle = api_keys.load_codex_bundle()
+    assert bundle is not None and bundle.access_token == access
+
+
+def test_remote_join_api_codex_port_taken_with_no_terminal_names_the_flag(monkeypatch, tmp_path, capsys):
+    """Same collision on a box with no terminal to paste into: there is nothing to fall back TO. It
+    ends with the cause named (that port belongs to the Codex apps too) and the flag that would have
+    worked — not a traceback, and not a silent hang on a port we never got."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("no code, no exchange"))
+    _callback_port_taken(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    assert "--no-browser" in str(exc.value)
+    err = capsys.readouterr().err
+    assert "1455" in err and "Codex" in err  # the cause, so the operator knows what to close
+    from remote import api_keys
+    assert api_keys.load_codex_bundle() is None
+
+
+def test_remote_join_api_codex_refuses_a_redirect_from_a_foreign_sign_in(monkeypatch, tmp_path):
+    """`state`, end to end. Anything else on the box can reach the loopback callback and post a code
+    from its OWN authorize session; the token that code buys is genuinely signed, so no downstream
+    check catches it. This wiring is the only thing that does — and a `sign_in` that generated a
+    state but compared against the wrong one would pass every unit test in isolation."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    _mock_codex_browser(monkeypatch, code="INJECTED-CODE", state="attacker-state")
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("an injected code is never spent"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    assert "state" in str(exc.value).lower()
+    assert "INJECTED-CODE" not in str(exc.value)
+    assert api_keys.load_codex_bundle() is None
+    assert not paths.api_keys_file().exists()  # nothing stored at all
+
+
+def test_remote_join_api_codex_never_touches_the_real_codex_cli_credential(monkeypatch, tmp_path):
+    """ADR 0015 D-c / user story 6: `~/.codex/auth.json` is never read or written. Not once.
+
+    Adopting the real Codex CLI's bundle would look like a free sign-in and then double-spend its
+    single-use, rotating refresh token — revoking the operator's actual Codex seat. Grid runs its own
+    authorization from scratch instead, and keeps its own bundle.
+
+    A tripwire rather than a grep over the source: it catches any route into that file, including one
+    a later refactor adds through a helper nobody thought to check.
+    """
+    import builtins
+    import pathlib
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    _mock_codex_exchange(monkeypatch)
+    _mock_codex_browser(monkeypatch)
+
+    real_open, real_path_open = builtins.open, pathlib.Path.open
+    touched = []
+
+    def guard(path):
+        if "/.codex/" in str(path) or str(path).endswith("/.codex"):
+            touched.append(str(path))
+
+    def fake_open(file, *a, **k):
+        guard(file)
+        return real_open(file, *a, **k)
+
+    def fake_path_open(self, *a, **k):
+        guard(self)
+        return real_path_open(self, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(pathlib.Path, "open", fake_path_open)
+
+    with pytest.raises(SystemExit):  # the model table is issue 05's; the seat still lands
+        cli.main(["join", "--api", "codex"])
+
+    assert touched == []
+
+
+def test_remote_join_api_codex_reuses_a_stored_seat_with_no_sign_in(monkeypatch, tmp_path, capsys):
+    """Acceptance: a later join reuses the stored bundle without re-auth (user story 15 —
+    `grid leave --engine codex` then re-joining is one command). Nothing opens, nothing binds,
+    nothing is pasted, and the vendor is not called: the seat is already ours."""
+    import webbrowser
+
+    from remote import api_keys, codex_callback
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_bundle())
+    monkeypatch.setattr(webbrowser, "open", lambda url: pytest.fail("a stored seat needs no browser"))
+    monkeypatch.setattr(codex_callback, "listen",
+                        lambda port, **kw: pytest.fail("a stored seat binds nothing"))
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("a stored seat is not re-exchanged"))
+    monkeypatch.setattr(
+        cli.codex_signin, "_prompt_redirect_url", lambda: pytest.fail("a stored seat is not re-pasted")
+    )
+
+    with pytest.raises(SystemExit):  # the model table is issue 05's
+        cli.main(["join", "--api", "codex"])
+
+    assert api_keys.load_codex_bundle() == _bundle()  # untouched, not re-minted
+    out_err = capsys.readouterr()
+    assert "at-1" not in out_err.out + out_err.err and "rt-1" not in out_err.out + out_err.err
+
+
+def test_remote_join_api_key_path_refuses_a_kind_that_names_no_env_var(monkeypatch, tmp_path):
+    """The twin of the bug that already bit at `_api_bearers`, in the join's key path.
+
+    `env_var` is `str | None` now, so `os.environ.get(whitelist.env_var)` is a `TypeError` for any
+    kind that doesn't name one — an unhandled traceback, not this repo's clean-SystemExit contract.
+    Unreachable today (codex routes to `_resolve_codex_targets` first, and
+    `test_api_whitelist_key_kinds_name_their_env_var` forces every OTHER kind to name one), which is
+    exactly what makes it a landmine: the next credential-less kind trips it, and nothing before this
+    test would have caught it. `require_bearer` already guards its side; this mirrors it.
+    """
+    from shared.models import api_catalog
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("no credential, no vendor call"))
+    # A second OAuth-shaped kind, as issue 04 leaves the door open for — entries present (so the
+    # `-m` guard passes) but no env var to read a key from.
+    monkeypatch.setitem(api_catalog.WHITELISTS, "futurekind", api_catalog.ApiWhitelist(
+        last_verified="2026-07-15",
+        base_url="https://future.example",
+        entries=(api_catalog.ApiModelEntry(
+            vendor_name="m1", context_window=1000, supports_tools=False, supports_vision=False,
+            supports_json_mode=False, supports_structured_outputs=False,
+        ),),
+        env_var=None,
+    ))
+
+    with pytest.raises(SystemExit) as exc:  # not TypeError
+        cli.main(["join", "--api", "futurekind"])
+
+    assert "futurekind" in str(exc.value)
+    assert "None" not in str(exc.value)  # never interpolate the absent env var's name
+    assert cli.provider._read_records("n1") == {}
+
+
+def test_remote_join_no_browser_says_so_when_it_cannot_apply(monkeypatch, tmp_path, capsys):
+    """`--no-browser` only means anything for the codex OAuth sign-in. Everywhere else it is inert,
+    and this repo says so rather than swallowing it — the same courtesy `--pricing-input` and
+    `--engine-label` already get. A flag that silently does nothing teaches the operator it worked.
+
+    Note rather than error: it is a no-op, not a conflict, and failing the join over an inert flag
+    would be worse than the silence.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--serve", "m", "--no-browser"]) == 0
+
+    err = capsys.readouterr().err
+    assert "--no-browser" in err and "--api codex" in err
+
+
+def test_remote_join_no_browser_is_silent_where_it_does_apply(monkeypatch, tmp_path, capsys):
+    """... and the note must NOT fire on the one command the flag is for. A warning that cries wolf
+    on correct usage is worse than no warning."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_bundle())  # stored seat: no sign-in, no prompt needed
+
+    with pytest.raises(SystemExit):  # the model table is issue 05's
+        cli.main(["join", "--api", "codex", "--no-browser"])
+
+    assert "--no-browser" not in capsys.readouterr().err
 
 
 def test_remote_join_member_falls_back_to_bundle_url_when_status_forbidden(monkeypatch, tmp_path):
@@ -5695,6 +6620,113 @@ def test_api_key_store_preserves_other_kinds(monkeypatch, tmp_path):
     assert api_keys.load_key("other") == "sk-other"  # ...leaves the sibling intact
 
 
+def _bundle(**overrides):
+    from remote.codex_oauth import CodexBundle
+
+    return CodexBundle(**{
+        "access_token": "at-1", "refresh_token": "rt-1", "account_id": "acct-1",
+        "plan_type": "free", "last_refresh": 1_700_000_000, **overrides,
+    })
+
+
+def test_codex_bundle_round_trips_through_the_store_beside_an_openai_key(monkeypatch, tmp_path):
+    """ADR 0015 D-c: the OAuth bundle lives under the `codex` kind in the SAME store as vendor API
+    keys — one file, 0o600, the one hardened atomic writer. The two kinds' shapes differ (one string
+    vs a rotating bundle) but their entries stay independent, in both directions."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_key("openai", "sk-openai")
+    api_keys.store_codex_bundle(_bundle())
+
+    assert api_keys.load_codex_bundle() == _bundle()
+    assert api_keys.load_key("openai") == "sk-openai"  # writing codex left the sibling alone
+
+    key_file = paths.api_keys_file()
+    assert (key_file.stat().st_mode & 0o777) == 0o600
+    data = tomllib.loads(key_file.read_text())
+    assert data["openai"] == {"key": "sk-openai"}  # ... byte-for-byte, not merely present
+    assert data["codex"]["account_id"] == "acct-1"
+
+    # ... and the reverse: rotating openai's key leaves the whole codex bundle intact.
+    api_keys.store_key("openai", "sk-openai-2")
+    assert api_keys.load_codex_bundle() == _bundle()
+
+
+def test_codex_bundle_survives_a_tier_the_token_never_stated(monkeypatch, tmp_path):
+    """`plan_type` is None when the token doesn't say, and TOML has no null — so a naive write either
+    raises or drops the key. It must round-trip as None, because ADR 0015 D-f reads exactly that to
+    decide "unknown tier ⇒ the minimal whitelist"; a None that came back as the string "None" would
+    look like a tier and advertise a seat's worth of models it cannot serve."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_bundle(plan_type=None))
+
+    assert api_keys.load_codex_bundle() == _bundle(plan_type=None)
+    assert "plan_type" not in tomllib.loads(paths.api_keys_file().read_text())["codex"]
+
+
+def test_codex_bundle_load_is_none_when_the_store_has_no_codex_entry(monkeypatch, tmp_path):
+    """No file, and a file holding only another kind, both mean "not signed in" — the join's
+    signal to run the OAuth flow. Never a half-built bundle."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    assert api_keys.load_codex_bundle() is None
+
+    api_keys.store_key("openai", "sk-openai")
+    assert api_keys.load_codex_bundle() is None
+
+
+def _codex_record():
+    return {"engines": [{
+        "endpoint_url": "https://chatgpt.com/backend-api/codex",
+        "models": ["codex:gpt-5.4-mini"], "engine_label": "codex", "api_kind": "codex",
+    }]}
+
+
+def test_api_bearers_resolves_a_stored_codex_seat(monkeypatch, tmp_path):
+    """The serve loop's bearer resolution is single-string-shaped and would take the whole process
+    down for codex (issue 04): the codex whitelist's `env_var` is None, so the old
+    `os.environ.get(env_var)` raised TypeError before it could even reach its own SystemExit. A
+    stored seat must resolve to its access token, at startup and on every hot-reload."""
+    from remote import api_keys, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_bundle(access_token="at-codex"))
+
+    assert serve._api_bearers(_codex_record()) == {
+        "https://chatgpt.com/backend-api/codex": "at-codex"
+    }
+
+
+def test_api_bearers_never_lets_an_env_var_pose_as_a_codex_seat(monkeypatch, tmp_path, capsys):
+    """ADR 0015 D-c: an OAuth kind has NO env-var input path. The old resolution synthesised
+    `{KIND}_API_KEY` for any kind the whitelist didn't name, so a stray `CODEX_API_KEY` would have
+    been adopted as a subscription and Bearer'd at the vendor. Not signed in means not signed in —
+    and the message must not advertise the env var as a way out, because it isn't one.
+
+    The mechanism that makes this true is **branch order**, not `env_var=None`: `require_bearer`
+    dispatches on the codex kind and returns before any env var is consulted at all. The catalog's
+    `env_var=None` is the belt to that braces — it means even a future path that DID reach the key
+    branch would have no name to read (see
+    `test_remote_join_api_key_path_refuses_a_kind_that_names_no_env_var`).
+    """
+    from remote import serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_API_KEY", "sk-not-a-seat")
+
+    with pytest.raises(SystemExit) as exc:
+        serve._api_bearers(_codex_record())
+
+    msg = str(exc.value)
+    assert "sk-not-a-seat" not in msg
+    assert "CODEX_API_KEY" not in msg
+    assert "grid join --api codex" in msg  # the only way to get a seat
+
+
 def test_remote_engine_startup_missing_api_key_reaps_record(monkeypatch, tmp_path):
     """A startup that dies before registering (key gone from store AND env) must reap its on-disk
     run record like any other died-before-registering engine — not leave a stale singleton that
@@ -6117,6 +7149,30 @@ def test_serve_handle_job_api_null_unsupported_param_still_forwards(monkeypatch,
                                       "stop": None}, "is_stream": False})
 
     assert seen["model"] == "gpt-5.5"  # reached the vendor
+
+
+def test_adapt_output_token_param_leaves_a_kind_with_no_cap_parameter_alone():
+    """A vendor with NO output-cap parameter under any name (`max_output_param=None` — facts.md #1:
+    codex 400s `max_tokens`, `max_output_tokens` and `max_completion_tokens` alike) has nothing to
+    rename *to*. `None` is not a parameter name, so the body must come back untouched.
+
+    The bug this pins is a shared blind spot between two functions, and the null is the hinge:
+    `unsupported_params` deliberately lets a null through (api_catalog: "Null values are NOT refused
+    (the vendor accepts them)"), and the old guard here tested key PRESENCE — `"max_tokens" not in
+    body` — not truthiness. So `max_tokens: null` slipped past both and became `adapted[None] = None`,
+    serialising as a literal `{"null": null}` key on the wire. One function's deliberate exception
+    was the other's unguarded path.
+    """
+    from remote.serve import _adapt_output_token_param
+
+    for value in (None, 16):  # the null is what slipped through; a real value must not re-key either
+        body = {"model": "codex:gpt-5.4-mini", "max_tokens": value, "messages": []}
+
+        adapted = _adapt_output_token_param(body, "codex")
+
+        assert adapted == body
+        assert None not in adapted  # `adapted[None] = ...` — not a JSON key
+        assert '"null"' not in json.dumps(adapted)
 
 
 def test_serve_handle_job_hardware_keeps_stop(monkeypatch, tmp_path):
@@ -7257,6 +8313,22 @@ def test_logout_leaves_api_key_store_intact(monkeypatch, tmp_path, capsys):
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
     assert not paths.credentials_file().exists()
     assert api_keys.load_key("openai") == "sk-keep-me"
+
+
+def test_logout_leaves_the_codex_seat_intact(monkeypatch, tmp_path, capsys):
+    """Same rule for the OAuth seat (ADR 0015 D-c, user story 5): signing out of the grid must not
+    disconnect the provider's ChatGPT subscription. The bundle is a rotating credential rather than
+    a static key, so a logout that took it would cost a full re-authorization, not just a re-read —
+    and a later join must reuse it with no browser."""
+    from remote import api_keys, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    api_keys.store_codex_bundle(_bundle())
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert not paths.credentials_file().exists()
+    assert api_keys.load_codex_bundle() == _bundle()
 
 
 def test_logout_json(monkeypatch, tmp_path, capsys):

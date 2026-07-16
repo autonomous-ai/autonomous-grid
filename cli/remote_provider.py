@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
+from typing import NoReturn
 
 from shared import paths, run_records
 from shared.filelock import file_lock
@@ -106,6 +107,17 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         "Note: --engine-label is deprecated and no longer changes the grid page — the engine's kind "
         "is derived automatically. (It still matches `grid leave --engine <label>`.)",
     )
+    # Not deprecated, just scoped — so this is spelled out rather than routed through
+    # `_warn_deprecated`, whose name is its contract. `--no-browser` drives the codex OAuth sign-in
+    # and nothing else. Said aloud rather than swallowed: a flag that silently does nothing reads as
+    # a flag that worked. A note, not an error — it is inert, not contradictory, and failing an
+    # otherwise-valid join over it would be the worse trade.
+    if getattr(args, "no_browser", False) and getattr(args, "api", None) != "codex":
+        print(
+            "Note: --no-browser only applies to `grid join --api codex` (the subscription sign-in); "
+            "ignoring it.",
+            file=sys.stderr,
+        )
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
 
@@ -217,13 +229,13 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
 
 
 def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
-    """The single API-engine spec for ``join --api <kind>``, plus whether the stored key rotated:
-    ``-m`` validated against the static whitelist first (no key, no network), then the key resolved
-    (env var, else key store, else hidden prompt), then the vendor's model listing — the ONLY place
-    the CLI itself calls the vendor (ADR 0012) — which doubles as key validation and as the
-    whitelist ∩ visible-models filter. The spec is kind-generic and never carries the key; the
-    vendor model names are derived from the advertised names at serve time (a stored map would go
-    stale on an additive re-join, which unions models only)."""
+    """The single API-engine spec for ``join --api <kind>``, plus whether the stored credential rotated.
+
+    ``-m`` is validated against the static whitelist first — no credential, no network — so a typo'd
+    model name never costs the operator a key prompt or a whole browser sign-in. How the credential
+    itself is then resolved is per-kind and splits below: openai has a metered key (ADR 0012 D-c's
+    env → stored → prompt), codex has an OAuth seat (ADR 0015 D-c: sign-in, no env var, no flag).
+    """
     kind = args.api
     whitelist = api_catalog.WHITELISTS[kind]  # kind already validated by _reject_api_conflicts
     if getattr(args, "advertise_as", None):
@@ -240,22 +252,81 @@ def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, objec
         )
     from remote import api_keys  # lazy: only stdlib + shared.* at module top (see module docstring)
 
+    if kind == api_keys.CODEX_KIND:
+        return _resolve_codex_targets(args)
+    return _resolve_key_api_targets(args, kind, whitelist, valid, chosen)
+
+
+def _resolve_codex_targets(args: argparse.Namespace) -> NoReturn:
+    """The codex seat for ``join --api codex`` — signing in when this machine has no seat yet.
+
+    ``NoReturn`` rather than the spec tuple its sibling returns, because today it genuinely never
+    returns one: the sign-in lands, and then the join stops. That is the honest signature for
+    scaffolding — issue 05 gives it a model set to return and the type changes with it.
+
+    Deliberately shares nothing with the key path: there is no env var to read, no flag to accept and
+    no prompt to hide, and the vendor call that validates an openai key (`GET /v1/models`) is not the
+    one that validates a seat (ADR 0015 D-f's free `GET {base}/models` probe, which also carries
+    reachability and the seat's real entitled set).
+    """
+    from . import codex_signin
+
+    codex_signin.resolve_seat(no_browser=bool(getattr(args, "no_browser", False)))
+    # The seat is stored. What is not built yet is everything downstream of it: the per-tier model
+    # table and the probe that confirms the seat can actually reach the vendor from this box. Until
+    # they land there is nothing to advertise, so the join stops here rather than registering an
+    # engine that serves nothing. The sign-in is kept — a re-join costs no second authorization.
+    raise SystemExit(
+        "Your codex sign-in was saved. This version of grid has no model list for the codex kind "
+        "yet, so there is nothing to serve — no engine was joined."
+    )
+
+
+def _resolve_key_api_targets(
+    args: argparse.Namespace,
+    kind: str,
+    whitelist: api_catalog.ApiWhitelist,
+    valid: dict[str, api_catalog.ApiModelEntry],
+    chosen: list[str],
+) -> tuple[list[dict[str, object]], bool]:
+    """The spec for a metered-key API engine (``openai``), plus whether the stored key rotated.
+
+    The key is resolved (env var, else key store, else hidden prompt), then the vendor's model
+    listing — the ONLY place the CLI itself calls the vendor (ADR 0012) — doubles as key validation
+    and as the whitelist ∩ visible-models filter. The spec is kind-generic and never carries the key;
+    the vendor model names are derived from the advertised names at serve time (a stored map would go
+    stale on an additive re-join, which unions models only).
+    """
+    from remote import api_keys
+
     from . import provider
 
+    # A kind reaching the KEY path must name the env var its key is read from — that IS the first
+    # step of the precedence below. Without this, `os.environ.get(None)` is a TypeError, i.e. a
+    # traceback rather than this repo's clean-SystemExit contract, and the two f-strings below would
+    # tell the operator to `export None=...`. Unreachable while codex is the only env-var-less kind
+    # (it routes to `_resolve_codex_targets` above), so this is the landmine guard for the next one —
+    # `api_keys.require_bearer` holds the same line on the serve side.
+    env_var = whitelist.env_var
+    if not env_var:
+        raise SystemExit(
+            f"--api {kind} has no API-key sign-in path in this version of grid. "
+            f"This is a bug: {kind} needs its own credential resolution."
+        )
     # Key precedence (ADR 0012): env var, else the machine-local key store, else a hidden
     # interactive prompt. Never a flag — a key on the command line leaks into shell history.
     # The env value is stripped like the prompt's, so accidental whitespace can't make an
     # identical key look rotated on the `key != stored` check below.
     stored = api_keys.load_key(kind)
-    key = (os.environ.get(whitelist.env_var) or "").strip() or stored
+    key = (os.environ.get(env_var) or "").strip() or stored
     if not key and provider._interactive():
-        key = _prompt_api_key(kind, whitelist.env_var)
+        key = _prompt_api_key(kind, env_var)
         if not key:
             raise SystemExit(f"No {kind} API key entered.")
     if not key:
         raise SystemExit(
-            f"--api {kind} needs your API key in {whitelist.env_var} "
-            f"(export {whitelist.env_var}=... and re-run), or run interactively to be prompted."
+            f"--api {kind} needs your API key in {env_var} "
+            f"(export {env_var}=... and re-run), or run interactively to be prompted."
         )
     visible = _list_vendor_models(kind, whitelist.base_url, key)
     # The listing call above proved the key valid — only now persist it to the machine-local key

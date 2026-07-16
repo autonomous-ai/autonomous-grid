@@ -45,7 +45,7 @@ the target consumer already speaks Responses natively); a contract-free pass-thr
 unmetered open proxy for the provider's seat).
 
 > **Amended 2026-07-15 (spike 01 — `.scratch/codex-subs/facts.md`).** One leg of the guard ring
-> above is **unimplementable as written, and needs a decision**: the vendor accepts **no
+> above is **unimplementable as written**: the vendor accepts **no
 > output-token cap parameter at all** — `max_output_tokens`, `max_tokens`, and
 > `max_completion_tokens` each return `400 {"detail":"Unsupported parameter: …"}`. The response
 > object *echoes* `"max_output_tokens": null`, so the field is readable but not settable. There
@@ -53,6 +53,33 @@ unmetered open proxy for the provider's seat).
 > and cut it — which protects the relay and consumer but **not** the provider's allowance, since
 > the vendor has already generated the tokens; or (b) drop the output cap on this path and
 > document it. Body-size, image caps, and billing estimation are unaffected.
+>
+> **RESOLVED 2026-07-15 (issue 02) — option (b): there is no output ceiling on the responses path.**
+> D-a's "output-token cap" leg is struck. The relay does not count-and-cut: cutting the stream cannot
+> refund a member's allowance (the vendor has already generated the tokens), so it would buy the
+> consumer a truncated answer at full cost to the provider — the one party the cap was meant to
+> protect. Instead all three cap spellings join the responses denylist and are refused up front, so a
+> consumer asking for a ceiling is told plainly that none exists rather than being silently billed for
+> an uncapped response. `normalize_responses_request` therefore never calls `_enforce_max_tokens`.
+> Two consequences worth naming:
+> - The guard ring on this path is **body-size + image caps + real-usage metering**, nothing more.
+>   Body-size is what bounds a runaway agentic session, and it bites sooner than it looks: every turn
+>   resends the full history.
+> - A responses transaction records `max_output_tokens = NULL`, **not** the chat default of 1024.
+>   Settlement clamps billed output to that column (`_settlement_usage`), so borrowing the chat default
+>   would invent a ceiling the consumer could not have asked for and quietly bill a 5,000-token turn
+>   as 1,024 — under-paying the provider on exactly the jobs this feature exists to serve.
+>
+> **RESOLVED 2026-07-15 (issue 02) — the responses endpoint answers in the vendor's error envelope.**
+> Not previously recorded here at all. `POST /relay/v1/responses` always emits `{"detail": "<message>"}`
+> and skips the dialect negotiation the chat endpoints run (`should_use_openai_errors`), even for an
+> `lga_sk_` api-key consumer that gets `{"error": {…}}` everywhere else. Rationale: this endpoint
+> receives **two** kinds of rejection for one class of problem — the ones the relay catches (the ~6
+> parameters it enumerates) and the ones the vendor catches (everything else; it runs an allowlist and
+> refused `temperature` outright, facts.md #7). Two envelopes would fork a client's error handling on
+> *which side happened to catch the mistake*, which is not a distinction the consumer can act on. The
+> carve-out is small and additive: a sibling `_run_responses_endpoint` wrapper that omits the
+> negotiation branch. The chat contract is untouched.
 >
 > Two further corrections to this decision's shape:
 > - The "denylist with passthrough default" is the **inverse of the backend's own behaviour**:
@@ -89,6 +116,44 @@ D-c's env → stored → prompt precedence: there is **no env-var input path** (
 bundle cannot be an env var; the whitelist's `env_var` field becomes optional), and
 `~/.codex/auth.json` is **never read or written** — adopting it would double-spend the
 single-use refresh token against the operator's real Codex CLI and revoke the seat.
+
+> **Amended 2026-07-15 (issue 04 — as built).** The decision stands and is implemented
+> (`remote/codex_oauth.py`, `remote/codex_callback.py`, `cli/codex_signin.py`). Three notes:
+>
+> - **The whitelist's codex row is credential-only for now.** `env_var=None` and
+>   `max_output_param=None` (facts.md #1 — the vendor has no output-cap parameter under any name),
+>   with `entries=()` until issue 05 lands the per-tier model table. Making `env_var` optional
+>   reordered `ApiWhitelist`'s fields (it now follows the still-required `entries`). Optional
+>   `env_var` is what lets the credential resolution stop consulting it: `api_keys.require_bearer`
+>   is now the single place that knows a kind's credential *shape*, so the serve loop can neither
+>   read an env var for codex nor **synthesise** a `CODEX_API_KEY` name for a kind the catalog
+>   doesn't describe. "No env-var input path" is therefore true by construction rather than by
+>   everyone remembering it.
+> - **The planned account-id cross-check is deleted, not deferred.** An earlier amendment to this
+>   decision's issue proposed comparing the JWT's `chatgpt_account_id` against "the `account_id` the
+>   exchange returns beside it" as a free integrity check on two independent sources. **There are
+>   not two sources.** The exchange returns three fields and no account id (`binary:` `struct
+>   TokenResponse with 3 elements`); the client derives the account id from the token's own claim
+>   before persisting it (`struct TokenData with 4 elements`). The "byte-identical" observation that
+>   motivated the check had read `~/.codex/auth.json` — the Codex client's copy of that same claim.
+>   The comparison would have been `x == x`. Detail in `.scratch/codex-subs/facts.md` fact 9.
+> - **`state` is the control, and it is the only one.** An injected redirect carries a *real* code
+>   whose token is *genuinely signed*, so neither a JWT decode nor a signature check would catch it
+>   (`remote/codex_auth.py` says the same from the other side). The `state` comparison is what makes
+>   a foreign authorize session refusable, which is why it is checked before the code is even read,
+>   and why it is compared as bytes (`secrets.compare_digest` raises on a non-ASCII `str`, and that
+>   value is attacker-supplied). It is read in **two** places for two different jobs, sharing one
+>   comparison so they cannot drift: the callback listener uses it as a *filter* (which request ends
+>   the wait — anything on the box, and any webpage via `<img src="http://localhost:1455/...">`, can
+>   reach that port, and the first path-match used to win and discard the operator's real approval),
+>   while `parse_redirect` remains the *decision*, on the main thread, where a refusal can actually
+>   raise. A `SystemExit` on the handler thread would be swallowed and read as a hang.
+>
+> - **The sign-in deadline binds two sockets, not one.** `HTTPServer.timeout` bounds only the wait
+>   for a new connection; the accepted socket needs `BaseHTTPRequestHandler.timeout`, which defaults
+>   to `None`. Without it a single `nc 127.0.0.1 1455` that sends nothing parks the sign-in past
+>   `_SIGNIN_DEADLINE_S` forever, with no error — silently voiding the deadline this decision
+>   promises, and (the server being single-threaded) blocking the real redirect too.
 
 **D-d (refresh discipline: cross-process CAS under the store lock; token outside the routing
 snapshot).** The refresh token is single-use and rotates; a double-spend revokes the seat,

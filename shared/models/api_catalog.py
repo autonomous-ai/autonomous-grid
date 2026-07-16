@@ -26,12 +26,20 @@ class ApiModelEntry:
 class ApiWhitelist:
     last_verified: str  # ISO date the table was last checked against the vendor's docs
     base_url: str  # the vendor endpoint jobs forward to, no trailing slash
-    env_var: str  # the environment variable the provider's key is read from
     entries: tuple[ApiModelEntry, ...]
+    # The environment variable the provider's key is read from — the first step of ADR 0012 D-c's
+    # env → stored → prompt precedence. **None for a kind with no env-var input path**: a `codex`
+    # seat is a rotating OAuth bundle, which cannot be an env var, and ADR 0015 D-c bars the path
+    # outright so that a stray `CODEX_API_KEY` can never masquerade as a signed-in subscription.
+    # Ordered after `entries` because it is now optional and `entries` is not.
+    env_var: str | None = None
     # The vendor's name for the output-token cap. The grid speaks `max_tokens` internally — the only
     # name hardware engines know — so a vendor that renamed it needs the value translated on the way
     # out, or every job 400s. See `_adapt_output_token_param` in remote/serve.py.
-    max_output_param: str = "max_tokens"
+    # **None when the vendor has no such parameter under any name** — verified for codex, whose
+    # backend rejects every candidate rather than ignoring it (facts.md #1). None means "do not
+    # translate", which is not the same as "translate to the default name".
+    max_output_param: str | None = "max_tokens"
     # Request parameters the vendor rejects outright (no translation exists). A job carrying one is
     # refused by the provider before any upstream call, wearing the vendor's own error shape — same
     # outcome as forwarding, minus the round-trip. Null values are NOT refused (the vendor accepts
@@ -88,6 +96,13 @@ OPENAI_WHITELIST: tuple[ApiModelEntry, ...] = (
     ),
 )
 
+# The seat's backend (ADR 0015). Verified live on 2026-07-15 (spike 01, `.scratch/codex-subs/facts.md`).
+# The model entries are deliberately EMPTY here: a codex seat's model set is bounded by its
+# subscription tier, so the table is keyed by tier rather than flat, and populating it is issue 05's
+# — with only the free tier verified, any paid-tier row today would be guesswork (ADR 0015 D-f's
+# "unknown ⇒ minimal, never full" is what protects the gap meanwhile).
+CODEX_LAST_VERIFIED = "2026-07-15"
+
 # One structure per kind: the verified-date and the entries can't drift apart.
 WHITELISTS: dict[str, ApiWhitelist] = {
     "openai": ApiWhitelist(
@@ -101,6 +116,18 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # All four whitelist models reject `stop` ("Unsupported parameter: 'stop' is not supported
         # with this model.") — verified against the live API on 2026-07-14. `stop: null` is accepted.
         unsupported_params=("stop",),
+    ),
+    "codex": ApiWhitelist(
+        last_verified=CODEX_LAST_VERIFIED,
+        base_url="https://chatgpt.com/backend-api/codex",
+        entries=(),  # issue 05's, keyed by subscription tier
+        env_var=None,  # ADR 0015 D-c: an OAuth seat has no env-var input path
+        max_output_param=None,  # facts.md #1: this backend has no output-cap parameter, under any name
+        # Refused before the round-trip rather than translated, because no translation exists. The
+        # three cap names each return `400 {"detail":"Unsupported parameter: ..."}`, as does
+        # `temperature` — this backend runs a small allowlist and denies chat-era knobs outright
+        # rather than ignoring them (facts.md #1, #7).
+        unsupported_params=("max_tokens", "max_output_tokens", "max_completion_tokens", "temperature"),
     ),
 }
 

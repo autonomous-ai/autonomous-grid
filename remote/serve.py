@@ -373,27 +373,22 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
-    """{vendor base URL: API key} for every API spec in the record — the machine-local key store
-    first (the join validated and stored the key pre-spawn, so the store is the resolved truth),
-    each kind's env var as fallback (a pre-store record respawned in a key-bearing environment).
+    """{vendor base URL: Bearer} for every API spec in the record.
 
-    A key missing from BOTH is terminal: better to die naming the fix than to serve models whose
-    every job errors upstream. The key never appears in the message.
+    A kind's credential SHAPE lives in `api_keys.require_bearer` — one metered key for openai, an
+    OAuth bundle's access token for codex — so this stays shape-blind and never consults the
+    whitelist's env var (ADR 0015 D-c: an OAuth kind has no env-var input path, and a name guessed
+    here would hand a stray `CODEX_API_KEY` the seat's job).
+
+    A credential missing everywhere is terminal: better to die naming the fix than to serve models
+    whose every job errors upstream. The credential never appears in the message.
     """
     bearers: dict[str, str] = {}
     for spec in record.get("engines") or []:
         kind = spec.get("api_kind")
         if not kind:
             continue
-        whitelist = api_catalog.WHITELISTS.get(kind)
-        env_var = whitelist.env_var if whitelist else f"{kind.upper()}_API_KEY"
-        key = api_keys.load_key(kind) or os.environ.get(env_var)
-        if not key:
-            raise SystemExit(
-                f"This engine serves --api {kind} models but no key is stored and {env_var} is "
-                f"not set. Re-run `grid join --api {kind}` to store a key (or export {env_var})."
-            )
-        bearers[(spec.get("endpoint_url") or "").rstrip("/")] = key
+        bearers[(spec.get("endpoint_url") or "").rstrip("/")] = api_keys.require_bearer(str(kind))
     return bearers
 
 
@@ -453,13 +448,20 @@ def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dic
     out. ``max_tokens`` holds the value the relay validated against its cap, so it wins over any
     ``max_completion_tokens`` left beside it by that rewrite; only one name may go upstream.
 
-    Returns ``body`` unchanged for hardware engines and for vendors that still take ``max_tokens``.
+    Returns ``body`` unchanged for hardware engines, for vendors that still take ``max_tokens``, and
+    for vendors that take no output cap at all.
     """
     if not api_kind:
         return body
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     param = whitelist.max_output_param if whitelist else "max_tokens"
-    if param == "max_tokens" or "max_tokens" not in body:
+    # `param is None` means the vendor has no output-cap parameter under ANY name (codex — facts.md
+    # #1), so there is nothing to rename to and the body is left alone; `unsupported_params` refuses
+    # a real value before the round-trip. It must be tested FIRST and on its own: the `"max_tokens"
+    # not in body` disjunct below is a key-PRESENCE check, so `max_tokens: null` — which
+    # `_api_unsupported_params` deliberately lets through — would otherwise reach `adapted[param]`
+    # and write `adapted[None] = None`, i.e. a literal `{"null": null}` on the wire.
+    if param is None or param == "max_tokens" or "max_tokens" not in body:
         return body
     adapted = {k: v for k, v in body.items() if k not in ("max_tokens", param)}
     adapted[param] = body["max_tokens"]
