@@ -298,7 +298,8 @@ grid join research --api codex  # signs in, probes, serves your seat's models as
 `codex:*` models serve OpenAI's **Responses API** for external **Codex apps** — point a Codex
 CLI/Desktop at your grid with the values from `grid info --env` ([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models));
 `grid chat` refuses them with that same guidance. Jobs **spend the seat's own monthly Codex
-allowance**, on your own OpenAI account's terms. See [ADR 0015](docs/adr/0015-codex-subscription-engine.md).
+allowance**, on your own OpenAI account's terms. End-to-end walkthrough:
+[docs/codex-quickstart.md](docs/codex-quickstart.md). See [ADR 0015](docs/adr/0015-codex-subscription-engine.md).
 
 ### Don't know which model to ask for? Send `auto`
 

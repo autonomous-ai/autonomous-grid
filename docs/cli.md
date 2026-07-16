@@ -271,7 +271,9 @@ key); a stored seat the vendor now rejects gets one inline fresh sign-in on an i
 `codex:*` models serve the vendor's **`responses` endpoint only** — point an external Codex app at
 your grid; `grid chat` refuses them client-side with exactly that guidance. **Jobs spend the
 seat's own monthly Codex allowance.** See
-[ADR 0015](./adr/0015-codex-subscription-engine.md).
+[ADR 0015](./adr/0015-codex-subscription-engine.md), or the step-by-step
+[codex quickstart](./codex-quickstart.md) (join → sign-in, headless included → serve → point the
+Codex CLI at the grid).
 
 ### Pointing a Codex app at your grid (using `codex:*` models)
 
