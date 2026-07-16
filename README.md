@@ -284,6 +284,23 @@ terms — the `openai:` prefix keeps that visible in every model list. There's n
 put a budget limit on the key's OpenAI project if you want one. Full contract, key store, and rotation
 in [docs/cli.md](docs/cli.md#engines).
 
+**Got a ChatGPT subscription instead of a key?** `grid join --api codex` contributes a
+ChatGPT/Codex **subscription seat** the same way — no API key: the CLI signs you into your ChatGPT
+account itself (browser OAuth; `--no-browser` for headless boxes) and a free probe checks the seat
+and your egress IP before anything is advertised (datacenter/VPS addresses are typically refused —
+serve from a residential connection):
+
+```bash
+grid catalog --api codex        # per-tier table — what a seat would serve (offline, no sign-in)
+grid join research --api codex  # signs in, probes, serves your seat's models as codex:*
+```
+
+`codex:*` models serve OpenAI's **Responses API** for external **Codex apps** — point a Codex
+CLI/Desktop at your grid with the values from `grid info --env` ([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models));
+`grid chat` refuses them with that same guidance. Jobs **spend the seat's own monthly Codex
+allowance**, on your own OpenAI account's terms. End-to-end walkthrough:
+[docs/codex-quickstart.md](docs/codex-quickstart.md). See [ADR 0015](docs/adr/0015-codex-subscription-engine.md).
+
 ### Don't know which model to ask for? Send `auto`
 
 A grid's catalog is heterogeneous and shifts as engines join and leave. Instead of hardcoding a model

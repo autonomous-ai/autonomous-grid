@@ -21,10 +21,16 @@ from pathlib import Path
 from typing import Any
 
 from shared import jsonio, paths
+from shared.models import api_catalog
 
 
 # How long ``stop_engine`` waits for a SIGTERM'd child to exit before SIGKILLing its group.
-_STOP_GRACE_SECONDS = 8
+# SIGTERM → SIGKILL escalation budget for a detached engine child. 25 = the serve loop's worker
+# drain (5s) + a codex token exchange caught mid-flight (its 15s vendor timeout — remote/serve.py
+# waits that exchange out rather than losing a journaled rotation, ADR 0015 D-d) + unregister/
+# teardown margin. Costs nothing on healthy exits — the wait below polls `pid_alive` every 0.2s
+# and returns the moment the child dies; only a genuinely wedged child feels the longer fuse.
+_STOP_GRACE_SECONDS = 25
 
 
 def record_path(grid_id: str, engine_id: str) -> Path:
@@ -122,14 +128,19 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
 
     An explicit ``--max-concurrency`` (stored truthy on the record) always wins; otherwise the
     default is derived from the union: 8 when every engine spec is an API engine and the identity
-    serves no media, else 1. Like ``media_signature``, this is the ONE definition shared by the
-    CLI's hot-reload-vs-respawn choice and the serve loop's startup, so the two can never desync
-    (ADR 0010 C3). A legacy flat record (no ``engines`` field) keeps the default of 1.
+    serves no media — **unless the union contains a codex engine, which pins the default to 1**
+    (ADR 0015 D-f: a codex seat is a flat-rate subscription; eight workers would drain the
+    operator's personal monthly allowance eight-wide by default) — else 1. Like
+    ``media_signature``, this is the ONE definition shared by the CLI's hot-reload-vs-respawn
+    choice and the serve loop's startup, so the two can never desync (ADR 0010 C3). A legacy flat
+    record (no ``engines`` field) keeps the default of 1.
     """
     explicit = record.get("max_concurrency")
     if explicit:
         return int(explicit)
     engines = record.get("engines") or []
+    if any(spec.get("api_kind") == api_catalog.CODEX_KIND for spec in engines):
+        return 1  # a flat-rate seat is never hammered eight-wide by default (ADR 0015)
     api_only = bool(engines) and all(spec.get("api_kind") for spec in engines)
     return API_ONLY_DEFAULT_CONCURRENCY if api_only and not record.get("media") else 1
 

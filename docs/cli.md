@@ -175,7 +175,7 @@ grid join [grid] --all                                # join every detected engi
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
-grid join [grid] --api <kind> [-m <model>...]         # remote only: join a third-party API engine (v1: openai)
+grid join [grid] --api <kind> [-m <model>...]         # remote only: join a third-party API engine (openai, codex)
 grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
 grid engine ls [grid] [--json]                        # live engines joined to a grid (legacy alias: grid engines)
 ```
@@ -226,8 +226,9 @@ up ComfyUI + the media server, registers the `comfyui:*` workflows the host's VR
 relay forwards `media/*` jobs to the media server on loopback; the SSE (progress + base64 result
 files) streams back exactly as in local mode.
 
-`grid join --api <kind> [-m <model>...]` (v1: `openai`) joins an **API engine** — a third-party LLM
-API service served through your own key ([ADR 0012](./adr/0012-api-engines.md)). The key is
+`grid join --api <kind> [-m <model>...]` joins an **API engine** — a third-party LLM API service
+served through your own vendor credential ([ADR 0012](./adr/0012-api-engines.md)). Two kinds exist:
+`openai` (a metered API key) and `codex` (a ChatGPT/Codex subscription seat — see below). The key is
 resolved in order: the `OPENAI_API_KEY` env var, else the machine-local key store, else a hidden
 interactive prompt (there is deliberately no `--api-key` flag; non-interactive with no key anywhere
 is a clear error). It is validated at join time against the vendor's model listing — an invalid key
@@ -254,6 +255,84 @@ grid for the vendor**, under your key and your own OpenAI account's terms. `--ap
 exclusive with `--at`/`--serve`/`--advertise-as`/`--media`/`--bundle` in one invocation — join
 other engines with a separate (additive) `grid join`.
 
+**A subscription as an API engine (`--api codex`).** `grid join --api codex` joins a ChatGPT/Codex
+**subscription seat** instead of a metered key: the CLI runs the vendor's OAuth sign-in itself
+(browser + localhost callback by default; `--no-browser` prints the URL and takes the pasted
+redirect on a headless box) and stores the rotating token bundle in the same `api_keys.toml`
+(`grid logout` leaves it intact; `~/.codex/auth.json` is never touched). The join then runs **one
+free probe** — the vendor's own model listing — proving in a single round-trip that the seat is
+live, that this machine's egress IP isn't blocked (Cloudflare typically challenges datacenter/VPS
+addresses; such a join is refused naming the cause), and which models the seat actually has. The
+advertised set is the seat's **tier's verified list ∩ the seat's live set** (`grid catalog --api
+codex` prints the per-tier table; an unknown or unverified tier advertises the minimal `free` set,
+with a warning when the token names no tier at all). A re-join that changes nothing performs
+**zero vendor calls**; a fresh sign-in restarts a live engine (credential rotation, like a rotated
+key); a stored seat the vendor now rejects gets one inline fresh sign-in on an interactive run.
+`codex:*` models serve the vendor's **`responses` endpoint only** — point an external Codex app at
+your grid; `grid chat` refuses them client-side with exactly that guidance. **Jobs spend the
+seat's own monthly Codex allowance.** See
+[ADR 0015](./adr/0015-codex-subscription-engine.md), or the step-by-step
+[codex quickstart](./codex-quickstart.md) (join → sign-in, headless included → serve → point the
+Codex CLI at the grid).
+
+### Pointing a Codex app at your grid (using `codex:*` models)
+
+A `codex:*` model is **used from an external Codex-compatible app** (Codex CLI, Codex Desktop),
+never from `grid chat` — the grid's own use verbs speak `chat/completions`, codex engines serve
+only the `responses` endpoint, and traffic is never translated between the two. The app needs the
+same two values every OpenAI SDK needs, printed by **`grid info --env`** (the grid must be up, and
+your sign-in must be a member): the relay base URL and your per-grid access token.
+
+For the Codex CLI, add a provider to `~/.codex/config.toml` and select a `codex:*` model
+(keys verified against `codex-cli 0.144.2`):
+
+```toml
+model = "codex:gpt-5.4-mini"            # a codex:* name from `grid models`
+model_provider = "grid"
+model_context_window = 272000           # pin it — an unknown slug gets fallback metadata otherwise
+
+[model_providers.grid]
+name = "Autonomous Grid"
+base_url = "https://<your relay>/relay/v1"   # OPENAI_BASE_URL from `grid info --env`
+env_key = "GRID_API_KEY"                     # the env var the app reads your api key from
+wire_api = "responses"                       # mandatory — `wire_api = "chat"` is rejected by the app
+supports_websockets = false                  # the grid relay streams HTTP SSE, not WebSocket
+```
+
+```bash
+export GRID_API_KEY="<your access token>"    # OPENAI_API_KEY from `grid info --env`
+codex "explain this repo"
+```
+
+(The same keys can hang off a `[profiles.<name>]` block instead of the config root if you don't
+want to change the app's default provider.)
+
+What the passthrough contract means for the app, in plain language:
+
+- **Requests leave the grid for the vendor** (OpenAI), forwarded by the member whose seat serves
+  them — and **spend that member's own monthly Codex allowance**.
+- **The vendor is forced stateless**: the relay refuses `store: true`, `previous_response_id`, and
+  `conversation` up front (in the vendor's own error shape), so every turn resends the full
+  history — exactly how the Codex CLI already behaves. A long session therefore grows toward the
+  relay's request body-size cap, which is the practical session bound.
+- **The relay still retains stream chunks for its task TTL** — like every other grid endpoint —
+  even though the vendor is forced stateless. Statelessness upstream is not zero retention on the
+  relay. And the vendor itself **caches prompts for ~24h even under `store: false`** (the response
+  advertises `prompt_cache_retention: "24h"`) — "stateless" bounds conversation state, not every
+  vendor-side trace.
+- **There is no output-token ceiling on this path.** The vendor's codex backend accepts no cap
+  parameter under any name (`max_output_tokens`, `max_tokens`, `max_completion_tokens` are all
+  refused, as is `temperature` — it runs an allowlist and rejects chat-era knobs). The relay
+  refuses the cap spellings up front so you learn there is no ceiling instead of being silently
+  billed for an uncapped response; anything else it passes through verbatim, so an unlisted
+  parameter surfaces as the vendor's own 400.
+- **The app's `/model` picker writes bare vendor names — the relay absorbs that.** Picking a
+  model inside the Codex app rewrites its `config.toml` to the bare slug (`gpt-5.6-terra`),
+  dropping the `codex:` prefix; the app never reads the grid's model list, so it cannot know the
+  grid's names. On `/responses` (only), a bare name that matches nothing is aliased onto the one
+  `codex:<name>` engine that serves it — responses replies still name the `codex:*` model. If two
+  kinds ever serve the same bare name, the relay refuses and names both rather than picking.
+
 An API engine merges into your grid's **one serving identity** exactly like a hardware engine.
 `grid join --api openai` onto an identity already serving other engines appends to the union and
 **hot-reloads in place** — no restart, no dropped in-flight requests (the vendor key is re-read from
@@ -271,9 +350,11 @@ The `grid join` flag set is the union of both modes, gated by mode:
 - **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
 - **Remote-only:** `--api <kind>` (join a third-party API engine; `-m` optionally narrows the
-  whitelist, omitted = every whitelisted model the key can see), and `--max-concurrency` (how many
-  requests this engine serves at once; the provider runs one poll worker per slot — default 1, or
-  8 when the identity serves only API engines).
+  whitelist, omitted = every whitelisted model the key can see), `--no-browser` (the codex OAuth
+  sign-in's paste flow for headless boxes; inert elsewhere, with a note), and `--max-concurrency`
+  (how many requests this engine serves at once; the provider runs one poll worker per slot —
+  default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
+  them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
   `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.
@@ -289,7 +370,7 @@ is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
 ```
 grid models [grid] [--verbose] [--json] # live models the grid can run now
 grid catalog [--json]                   # models Grid can pull
-grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (v1: openai)
+grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (openai, codex)
 grid pull <model>                       # pull a model for the default text engine
 grid rm <model> [--yes]                 # remove a pulled model
 ```
@@ -343,6 +424,13 @@ Models a `grid join --api openai` would serve (verified 2026-07-08):
 No key needed to view. Requests to openai:* models leave the grid for the vendor.
 ```
 
+For the `codex` kind the whitelist is keyed by **subscription tier** (a seat's model set depends
+on its plan), so `grid catalog --api codex` prints per tier — only live-verified tiers are listed,
+and every other tier advertises the minimal `free` set at join time. Codex rows claim no
+chat-dialect capabilities (no json/structured column): these models serve the vendor's
+`responses` endpoint, for external Codex apps, never `grid chat`. `--json` for codex accordingly
+speaks `tiers` (plus `endpoints` and `minimal_tier`) instead of the flat `models` list.
+
 See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
 the `openai:*` namespacing, and the key-store lifecycle.
 
@@ -376,6 +464,11 @@ Check engines:
 model the grid ranked and had free, and the `X-Grid-Routed-Model` response header (and the reply's
 `model` field) name it. On a grid without routing enabled, `auto` is a clear "not enabled" error. See
 [Router](#router).
+
+**`codex:*` models are not chat models.** They serve the vendor's `responses` endpoint for external
+Codex apps; `grid chat -m codex:…` is refused client-side, before any network call, with the
+guidance to point a Codex-compatible app at the grid instead
+([Pointing a Codex app at your grid](#pointing-a-codex-app-at-your-grid-using-codex-models)).
 
 ## Members
 

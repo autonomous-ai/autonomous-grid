@@ -26,17 +26,32 @@ class ApiModelEntry:
 class ApiWhitelist:
     last_verified: str  # ISO date the table was last checked against the vendor's docs
     base_url: str  # the vendor endpoint jobs forward to, no trailing slash
-    env_var: str  # the environment variable the provider's key is read from
     entries: tuple[ApiModelEntry, ...]
+    # The environment variable the provider's key is read from — the first step of ADR 0012 D-c's
+    # env → stored → prompt precedence. **None for a kind with no env-var input path**: a `codex`
+    # seat is a rotating OAuth bundle, which cannot be an env var, and ADR 0015 D-c bars the path
+    # outright so that a stray `CODEX_API_KEY` can never masquerade as a signed-in subscription.
+    # Ordered after `entries` because it is now optional and `entries` is not.
+    env_var: str | None = None
     # The vendor's name for the output-token cap. The grid speaks `max_tokens` internally — the only
     # name hardware engines know — so a vendor that renamed it needs the value translated on the way
     # out, or every job 400s. See `_adapt_output_token_param` in remote/serve.py.
-    max_output_param: str = "max_tokens"
+    # **None when the vendor has no such parameter under any name** — verified for codex, whose
+    # backend rejects every candidate rather than ignoring it (facts.md #1). None means "do not
+    # translate", which is not the same as "translate to the default name".
+    max_output_param: str | None = "max_tokens"
     # Request parameters the vendor rejects outright (no translation exists). A job carrying one is
     # refused by the provider before any upstream call, wearing the vendor's own error shape — same
     # outcome as forwarding, minus the round-trip. Null values are NOT refused (the vendor accepts
     # them). See `_api_unsupported_params` in remote/serve.py.
     unsupported_params: tuple[str, ...] = ()
+    # Which relay endpoint(s) this kind's models serve — the wire half of ADR 0015 D-b's per-kind
+    # matrix, copied into every advertised model's capability envelope. Hand-duplicated with
+    # grid-src's per-model `endpoints` filter (absent there ⇒ chat-only, so old CLIs fail closed);
+    # the literal "responses" must match its endpoint_path byte-for-byte (CLAUDE.local.md lockstep
+    # rule). Default = the API-engine chat single: an API kind never serves legacy `completions`
+    # (ADR 0012); hardware's chat pair is remote/probe.py's own default, not a whitelist row's.
+    endpoints: tuple[str, ...] = ("chat/completions",)
 
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
@@ -88,6 +103,90 @@ OPENAI_WHITELIST: tuple[ApiModelEntry, ...] = (
     ),
 )
 
+# The seat's backend (ADR 0015). Verified live on 2026-07-15 (spike 01, `.scratch/codex-subs/facts.md`).
+CODEX_LAST_VERIFIED = "2026-07-15"
+
+# The service-kind key. Defined here — not in remote/api_keys, which re-exports it — because the
+# run-record concurrency rule in shared/ needs it and shared/ must not import remote/.
+CODEX_KIND = "codex"
+
+# The `client_version` the join probe pins on `GET {base}/models` (the endpoint 400s without one —
+# facts.md B1). The REAL client's version at verification time; static data, re-verified by hand
+# with the whitelist itself.
+CODEX_CLIENT_VERSION = "0.144.2"
+
+# The vendor's own `PlanType` vocabulary, read from the client binary (facts.md #5). Distinguishes
+# "unrecognized tier" (vendor drift — outside this set) from "known but unverified" (inside it, no
+# populated row in CODEX_TIER_MODELS). Neither advertises beyond the minimal row; only the warn
+# wording turns on the difference, and that wording lives with the CLI (issue 05).
+CODEX_PLAN_TYPES = frozenset({
+    "free", "go", "plus", "pro", "prolite", "team", "self_serve_business_usage_based",
+    "business", "enterprise_cbp_usage_based", "enterprise", "hc", "edu", "education",
+})
+
+# Per-tier rows: ONLY a tier verified against a live seat may be populated — paid tiers are
+# UNRESOLVED-NOACCESS and must not be filled from guesswork (facts.md #5); an absent row means
+# "unverified", never "empty tier". Vendor priority order preserved. `codex-auto-review`
+# (visibility: "hide") is deliberately excluded. The json-mode/structured-outputs booleans are
+# False because they are chat-dialect notions a Responses passthrough cannot honestly claim — and
+# the capability envelope OMITS those keys outright rather than advertising False
+# (remote/probe.codex_capability_entry, issue 05).
+_CODEX_FREE_MODELS: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="gpt-5.6-terra",
+        context_window=272_000,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Balanced agentic coding model for everyday work.",
+    ),
+    ApiModelEntry(
+        vendor_name="gpt-5.6-luna",
+        context_window=272_000,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Fast and affordable agentic coding model.",
+    ),
+    ApiModelEntry(
+        vendor_name="gpt-5.5",
+        context_window=272_000,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Frontier model for complex coding, research, and real-world work.",
+    ),
+    ApiModelEntry(
+        vendor_name="gpt-5.4-mini",
+        context_window=272_000,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Small, fast, and cost-efficient model for simpler coding tasks.",
+    ),
+)
+
+CODEX_TIER_MODELS: dict[str, tuple[ApiModelEntry, ...]] = {"free": _CODEX_FREE_MODELS}
+
+# What a missing, unrecognized, or unverified tier advertises (ADR 0015 D-f: never the full
+# table). Free is the least-entitled tier, so degrading to it can only under-advertise.
+CODEX_MINIMAL_TIER = "free"
+
+
+def _codex_tier_union() -> tuple[ApiModelEntry, ...]:
+    """The flat ``entries`` for the codex whitelist row: every tier row merged, first occurrence
+    wins. Keeping ``entries`` = the union is what lets the kind-generic helpers — ``find_advertised``,
+    the join's ``-m`` validation — resolve every codex model without learning about tiers."""
+    merged: dict[str, ApiModelEntry] = {}
+    for entries in CODEX_TIER_MODELS.values():
+        for entry in entries:
+            merged.setdefault(entry.vendor_name, entry)
+    return tuple(merged.values())
+
 # One structure per kind: the verified-date and the entries can't drift apart.
 WHITELISTS: dict[str, ApiWhitelist] = {
     "openai": ApiWhitelist(
@@ -101,6 +200,21 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # All four whitelist models reject `stop` ("Unsupported parameter: 'stop' is not supported
         # with this model.") — verified against the live API on 2026-07-14. `stop: null` is accepted.
         unsupported_params=("stop",),
+    ),
+    "codex": ApiWhitelist(
+        last_verified=CODEX_LAST_VERIFIED,
+        base_url="https://chatgpt.com/backend-api/codex",
+        # The union of the tier rows (issue 05); per-tier selection is `codex_tier_entries`.
+        entries=_codex_tier_union(),
+        env_var=None,  # ADR 0015 D-c: an OAuth seat has no env-var input path
+        max_output_param=None,  # facts.md #1: this backend has no output-cap parameter, under any name
+        # Refused before the round-trip rather than translated, because no translation exists. The
+        # three cap names each return `400 {"detail":"Unsupported parameter: ..."}`, as does
+        # `temperature` — this backend runs a small allowlist and denies chat-era knobs outright
+        # rather than ignoring them (facts.md #1, #7).
+        unsupported_params=("max_tokens", "max_output_tokens", "max_completion_tokens", "temperature"),
+        # ADR 0015 D-b: a codex seat serves the `responses` endpoint ONLY.
+        endpoints=("responses",),
     ),
 }
 
@@ -127,6 +241,26 @@ def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
     return None
 
 
+def codex_effective_tier(plan_type: str | None) -> str:
+    """The tier whose row a seat claiming ``plan_type`` advertises: its own when populated, else
+    the minimal tier. Split from ``codex_tier_entries`` because operator messages need the NAME
+    of the row they ended up on, not just its contents."""
+    if plan_type is not None and plan_type in CODEX_TIER_MODELS:
+        return plan_type
+    return CODEX_MINIMAL_TIER
+
+
+def codex_tier_entries(plan_type: str | None) -> tuple[ApiModelEntry, ...]:
+    """The tier row a seat claiming ``plan_type`` may advertise (ADR 0015 D-f).
+
+    Missing (``None``), unrecognized (outside ``CODEX_PLAN_TYPES``), and known-but-unverified (no
+    populated row) tiers all degrade to the minimal row — the join must never widen on a guess.
+    Pure lookup: the operator-facing warns for the three degrade cases are the CLI's (issue 05),
+    because they differ only in wording, not in what is advertised.
+    """
+    return CODEX_TIER_MODELS[codex_effective_tier(plan_type)]
+
+
 def probed_features(entry: ApiModelEntry) -> dict[str, bool]:
     """The entry's capabilities in the probed-dict shape ``remote.probe.capability_entry``
     consumes — API engines register these statically, never via a live probe."""
@@ -138,6 +272,42 @@ def probed_features(entry: ApiModelEntry) -> dict[str, bool]:
         "json_object": entry.supports_json_mode,
         "json_schema": entry.supports_structured_outputs,
     }
+
+
+def codex_features(entry: ApiModelEntry) -> dict[str, bool]:
+    """The honest feature claims for one codex model — the ONE derivation both the capability
+    envelope (`remote/probe.codex_capability_entry`) and `grid catalog --api codex --json` read,
+    so the two surfaces cannot disagree (issue 05).
+
+    `parallel_tool_calls` is derived `= supports_tools` — the `probed_features` rule, and true of
+    every verified codex model (facts.md #5). Chat-dialect notions (json_object/json_schema) are
+    ABSENT, not False: a Responses passthrough cannot honestly claim them either way.
+    """
+    return {
+        "vision": entry.supports_vision,
+        "tools": entry.supports_tools,
+        "parallel_tool_calls": entry.supports_tools,
+    }
+
+
+def responses_only_kind(model: str) -> str | None:
+    """The API-service kind ``model`` is namespaced under, IF that kind cannot serve
+    chat/completions — else ``None``.
+
+    The `grid chat` pre-flight (ADR 0015 D-b consumer clarity): a chat request to a
+    responses-only model is refused before any network round-trip, with a message saying which
+    client to use instead. Data-driven from the whitelist's ``endpoints`` so a future
+    responses-only kind inherits the refusal without anyone remembering this function exists.
+    A name that merely contains ``:`` without being a known kind's namespace is not an API model
+    and returns ``None`` — hardware engines may serve colons in model names.
+    """
+    kind, sep, _ = model.partition(":")
+    if not sep:
+        return None
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None or "chat/completions" in whitelist.endpoints:
+        return None
+    return kind
 
 
 def format_api_entry(kind: str, entry: ApiModelEntry) -> str:

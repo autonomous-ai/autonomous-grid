@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import errno
 import json
 import os
 import shutil
@@ -20,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import cli
+from cli import codex_signin as _codex_signin  # noqa: F401 - binds `cli.codex_signin` for monkeypatching
 from cli import dispatch
 from local import config
 from shared import paths
@@ -688,9 +691,8 @@ def test_catalog_without_api_unchanged(monkeypatch, tmp_path, capsys):
 def test_api_whitelist_integrity():
     from datetime import date
 
-    assert api_catalog.supported_kinds() == ("openai",)
+    assert api_catalog.supported_kinds() == ("codex", "openai")
     for kind, whitelist in api_catalog.WHITELISTS.items():
-        assert whitelist.entries, f"{kind} whitelist must not be empty"
         names = [entry.vendor_name for entry in whitelist.entries]
         assert all(names), f"{kind} has an entry with an empty vendor name"
         assert len(set(names)) == len(names), f"{kind} has duplicate vendor names"
@@ -700,7 +702,212 @@ def test_api_whitelist_integrity():
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
         assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
         assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
+
+
+def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
+    """`grid catalog --api codex` prints the static per-tier table — offline, with no credential
+    (ADR 0012 D-a posture; the sign-in and the live probe belong to `grid join`). Each populated
+    tier prints its rows; the fallback rule for every other tier is stated naming the minimal
+    tier; and the consumer-facing facts are disclosed: these models serve the `responses`
+    endpoint (an external Codex app, not `grid chat`), requests leave the grid, and jobs spend
+    the seat's own monthly allowance."""
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Unknown" not in out
+    assert api_catalog.CODEX_LAST_VERIFIED in out
+    for tier, entries in api_catalog.CODEX_TIER_MODELS.items():
+        assert f"\n{tier}:\n" in out  # a per-tier section header
+        for entry in entries:
+            assert api_catalog.advertised_name("codex", entry) in out
+            assert f"{entry.context_window:,}" in out
+    # Chat-dialect capability words never appear on codex rows (honest passthrough claims only).
+    assert "json" not in out and "structured" not in out
+    assert api_catalog.CODEX_MINIMAL_TIER in out  # the fallback rule names the minimal tier
+    assert "responses" in out  # the endpoint disclosure...
+    assert "grid chat" in out  # ...and what NOT to point at it
+    assert "leave the grid" in out  # provenance disclosure (openai parity)
+    assert "allowance" in out  # flat-rate seat: jobs spend the provider's own allowance
+
+
+def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
+    """The other half of the split: a kind absent from the catalog keeps its "Unknown" message,
+    listing what IS supported. This is the assertion that stops the fix above from degrading into
+    "accept anything"."""
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_catalog(argparse.Namespace(api="anthropic", json=False))
+
+    msg = str(exc.value)
+    assert "Unknown" in msg and "anthropic" in msg
+    assert "codex" in msg and "openai" in msg  # the supported list
+
+
+def test_catalog_api_codex_json_emits_per_tier_contract(capsys):
+    """`--json` for codex speaks `tiers`, not the flat `models` (the reshape is safe: v0.2.1
+    predates every codex commit, so the interim flat-empty shape never shipped in a release).
+    Entries carry NO chat-dialect keys — json-mode/structured-outputs are chat notions a
+    Responses passthrough cannot honestly claim — and `supports_parallel_tool_calls` is the one
+    shared derivation the capability envelope also uses, so the two surfaces cannot disagree."""
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["kind"] == "codex"
+    assert payload["last_verified"] == api_catalog.CODEX_LAST_VERIFIED
+    assert payload["endpoints"] == ["responses"]
+    assert payload["minimal_tier"] == api_catalog.CODEX_MINIMAL_TIER
+    assert "models" not in payload  # per-tier kinds speak `tiers`
+    assert set(payload["tiers"]) == set(api_catalog.CODEX_TIER_MODELS)
+    free = payload["tiers"]["free"]
+    assert len(free) == len(api_catalog.CODEX_TIER_MODELS["free"])
+    first, first_entry = free[0], api_catalog.CODEX_TIER_MODELS["free"][0]
+    assert first["advertised"] == api_catalog.advertised_name("codex", first_entry)
+    assert first["vendor_name"] == first_entry.vendor_name
+    assert first["context_window"] == first_entry.context_window
+    assert first["supports_tools"] is True
+    assert first["supports_vision"] is True
+    assert first["supports_parallel_tool_calls"] is True
+    assert first["notes"] == first_entry.notes
+    assert "supports_json_mode" not in first
+    assert "supports_structured_outputs" not in first
+
+
+def test_api_whitelist_key_kinds_name_their_env_var():
+    """A kind whose credential IS an API key must name the env var it is read from — that is the
+    first step of ADR 0012 D-c's env → stored → prompt precedence. `codex` is exempt and must be:
+    ADR 0015 D-c gives an OAuth seat no env-var input path at all, precisely so a stray
+    CODEX_API_KEY can never masquerade as a signed-in subscription."""
+    for kind, whitelist in api_catalog.WHITELISTS.items():
+        if kind == "codex":
+            continue
+        assert whitelist.entries, f"{kind} whitelist must not be empty"
         assert whitelist.env_var, f"{kind} needs the env var its key is read from"
+
+
+def test_codex_whitelist_has_no_env_var_and_no_output_cap():
+    """The two fields an OAuth seat cannot have (issue 04), kept true now that issue 05 populates
+    the row's model entries (the tier union — see test_codex_tier_whitelist_integrity):
+
+    * no `env_var` — ADR 0015 D-c: no env-var input path, so nothing in the environment can pose as
+      a seat, and `_api_bearers` has no name to synthesise a fallback from.
+    * no `max_output_param` — facts.md #1: this backend accepts NO output-cap parameter at all
+      (`max_tokens`, `max_output_tokens` and `max_completion_tokens` each 400 "Unsupported
+      parameter"), so there is no name to translate to. All three, plus `temperature`, are refused
+      before the round-trip instead.
+    """
+    codex = api_catalog.WHITELISTS["codex"]
+
+    assert codex.env_var is None
+    assert codex.max_output_param is None
+    assert codex.base_url == "https://chatgpt.com/backend-api/codex"
+    assert set(codex.unsupported_params) == {
+        "max_tokens", "max_output_tokens", "max_completion_tokens", "temperature",
+    }
+    assert codex.entries  # issue 05: populated from the tier table
+
+
+def test_codex_tier_whitelist_integrity():
+    """The per-tier codex table (issue 05). Guards the D-f data rules: every populated tier is
+    real vendor `PlanType` vocabulary; rows are non-empty, duplicate-free, and inside the flat
+    union (`entries` IS the union, so `find_advertised` resolves every codex model); the minimal
+    tier's row exists (the fallback every unknown/unverified tier degrades to); the hidden
+    `codex-auto-review` slug is excluded everywhere (facts.md #5, visibility: "hide"); and the
+    table is dated + carries the probe's pinned client version."""
+    from datetime import date
+
+    tiers = api_catalog.CODEX_TIER_MODELS
+    assert tiers, "at least one tier must be populated"
+    assert set(tiers) <= api_catalog.CODEX_PLAN_TYPES, "tier keys are vendor vocabulary, not ours"
+    assert api_catalog.CODEX_MINIMAL_TIER in tiers, "the minimal fallback row must be populated"
+
+    union = {entry.vendor_name for entry in api_catalog.WHITELISTS["codex"].entries}
+    seen: set[str] = set()
+    by_name: dict = {}
+    for tier, entries in tiers.items():
+        names = [entry.vendor_name for entry in entries]
+        assert names, f"tier {tier!r} must not be an empty row (absent means unverified)"
+        assert all(names) and len(set(names)) == len(names), f"tier {tier!r} rows must be unique"
+        assert set(names) <= union, f"tier {tier!r} names something the flat union lacks"
+        for entry in entries:
+            # A vendor_name shared across tiers must be the SAME entry: the flat union keeps the
+            # first occurrence (`_codex_tier_union` setdefault), so a colliding second-tier entry
+            # with different specs would silently lose to it in every serve-time lookup
+            # (silent-failure review, latent trap — inert while one tier exists).
+            assert by_name.setdefault(entry.vendor_name, entry) == entry, (
+                f"{entry.vendor_name!r} appears in two tiers with different specs"
+            )
+        seen |= set(names)
+    assert seen == union, "WHITELISTS['codex'].entries must be exactly the union of the tier rows"
+    assert "codex-auto-review" not in union  # visibility: "hide" — never advertised
+
+    # The free row is the live-verified 2026-07-15 set, in the vendor's priority order.
+    free = [entry.vendor_name for entry in tiers["free"]]
+    assert free == ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"]
+    for entry in api_catalog.WHITELISTS["codex"].entries:
+        assert entry.context_window == 272_000
+        assert entry.supports_tools and entry.supports_vision
+        # Chat-dialect notions — a passthrough kind cannot honestly claim them (issue 05).
+        assert not entry.supports_json_mode and not entry.supports_structured_outputs
+
+    date.fromisoformat(api_catalog.CODEX_LAST_VERIFIED)
+    assert api_catalog.CODEX_CLIENT_VERSION  # the `GET /models?client_version=…` pin
+
+
+def test_codex_tier_entries_selects_row_or_minimal():
+    """D-f's selection rule as one pure lookup: a populated tier gets its row; a missing (None),
+    unrecognized ("banana"), or known-but-unverified ("plus") tier degrades to the minimal row —
+    the join never widens on a guess. The warn wording for the three degrade cases is the CLI's
+    (they differ only in what the operator is told, not in what is advertised)."""
+    free_row = api_catalog.CODEX_TIER_MODELS["free"]
+    minimal = api_catalog.CODEX_TIER_MODELS[api_catalog.CODEX_MINIMAL_TIER]
+
+    assert api_catalog.codex_tier_entries("free") == free_row
+    assert api_catalog.codex_tier_entries(None) == minimal      # vendor said nothing
+    assert api_catalog.codex_tier_entries("banana") == minimal  # outside the vendor vocabulary
+    assert api_catalog.codex_tier_entries("plus") == minimal    # known tier, row unverified
+    assert "plus" in api_catalog.CODEX_PLAN_TYPES  # pin: "plus" IS known — its degrade differs from banana's only in wording
+
+
+def test_api_whitelist_endpoints_per_kind():
+    """Which relay endpoint a kind's models serve — the wire contract half this repo owns. The
+    values are hand-duplicated with grid-src's `provider_supports` filter (absent ⇒ chat-only,
+    old CLIs fail closed); the literal `"responses"` must match its `endpoint_path` byte-for-byte
+    (CLAUDE.local.md lockstep rule)."""
+    assert api_catalog.WHITELISTS["openai"].endpoints == ("chat/completions",)
+    assert api_catalog.WHITELISTS["codex"].endpoints == ("responses",)
+
+
+def test_codex_kind_constant_is_defined_in_shared_and_reexported():
+    """`CODEX_KIND` lives in shared/ (the run-record concurrency rule needs it and shared/ must
+    not import remote/); remote/api_keys re-exports it so its existing call sites keep working
+    without a second definition to drift. Equality, not `is`: CPython interns short string
+    literals, so `is` would pass even against an independent literal — it proves nothing here.
+    What this guards is a rename on either side."""
+    from remote import api_keys
+
+    assert api_catalog.CODEX_KIND == "codex"
+    assert api_keys.CODEX_KIND == api_catalog.CODEX_KIND
+
+
+def test_responses_only_kind_flags_codex_models_only():
+    """The `grid chat` pre-flight asks one question — "is this model namespaced under a kind that
+    cannot serve chat/completions?" — and the answer is data-driven from the whitelist's
+    `endpoints`, never a hardcoded kind name. Anything that isn't such a namespace (openai's chat
+    kind, a hardware model whose NAME merely contains a colon, no namespace at all) is None."""
+    assert api_catalog.responses_only_kind("codex:gpt-5.5") == "codex"
+    assert api_catalog.responses_only_kind("codex:") == "codex"  # still a codex-namespaced request
+    assert api_catalog.responses_only_kind("openai:gpt-5.5") is None  # serves chat/completions
+    assert api_catalog.responses_only_kind("llama3:8b") is None  # colon, but not an API kind
+    assert api_catalog.responses_only_kind("gpt-5.5") is None  # no namespace
+    assert api_catalog.responses_only_kind("") is None
 
 
 def test_api_whitelist_carries_base_url_and_env_var():
@@ -742,6 +949,1139 @@ def test_catalog_api_json_roundtrips(capsys):
     assert first["context_window"] == first_entry.context_window
     assert first["supports_tools"] is first_entry.supports_tools
     assert first["supports_vision"] is first_entry.supports_vision
+
+
+# ---------------------------------------------------------------------------
+# codex seat claims (ADR 0015) — the OAuth access token is a JWT carrying the seat's identity
+# ---------------------------------------------------------------------------
+
+
+def _codex_jwt(auth_claim=None, /, **top_level):
+    """A synthetic codex access token. Never a real one: these tests must never carry a secret.
+
+    Mirrors the real shape — three segments, base64url payload with the '=' padding stripped, and
+    the seat facts nested under the vendor's namespaced claim.
+    """
+    import base64
+    import json as _json
+
+    claims = dict(top_level)
+    if auth_claim is not None:
+        claims["https://api.openai.com/auth"] = auth_claim
+    body = base64.urlsafe_b64encode(_json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{body}.signature"
+
+
+def test_codex_seat_decodes_a_synthetic_seat_token():
+    """The claim SHAPE is real (verified against a live seat 2026-07-15, spike 01); the values are
+    synthetic. Decoding yields the account id the forward header needs, plus the seat's tier."""
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt(
+            {
+                "chatgpt_account_id": "acct-synthetic-0001",
+                "chatgpt_plan_type": "free",
+                "chatgpt_account_user_id": "user-synthetic-0002",
+                "chatgpt_user_id": "user-synthetic-0003",
+                "chatgpt_compute_residency": "no_constraint",
+                "user_id": "user-synthetic-0004",
+                "amr": [],
+                "localhost": False,
+            },
+            exp=2_000_000_000,
+            iss="https://auth.openai.com",
+        )
+    )
+
+    assert seat.account_id == "acct-synthetic-0001"
+    assert seat.plan_type == "free"
+    assert seat.expires_at == 2_000_000_000
+
+
+def test_codex_seat_reads_the_namespaced_claim_not_the_top_level():
+    """The seat facts live INSIDE the namespaced claim. An implementation that reads the top level
+    passes the happy-path test by accident, so pin it with decoys under the identical names."""
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt(
+            {"chatgpt_account_id": "acct-real", "chatgpt_plan_type": "pro"},
+            chatgpt_account_id="acct-DECOY",
+            chatgpt_plan_type="DECOY",
+        )
+    )
+
+    assert seat.account_id == "acct-real"
+    assert seat.plan_type == "pro"
+
+
+def test_codex_seat_plan_type_is_none_when_absent_or_not_a_string():
+    """Tier only chooses which models we advertise, and ADR 0015 D-f already has a safe default for
+    not knowing it (the minimal whitelist). Degrade to None — never fail a working seat's join."""
+    from remote import codex_auth
+
+    assert (
+        codex_auth.decode_seat(_codex_jwt({"chatgpt_account_id": "a"})).plan_type
+        is None
+    )
+    assert (
+        codex_auth.decode_seat(
+            _codex_jwt(
+                {"chatgpt_account_id": "a", "chatgpt_plan_type": {"nested": "junk"}}
+            )
+        ).plan_type
+        is None
+    )
+
+
+def test_codex_seat_expires_at_is_none_when_exp_is_missing_or_not_an_int():
+    """`exp` only triggers ADR 0015 D-d's proactive refresh, which has its own fallback, so a bad
+    one degrades to None. `exp: true` is the trap: bool IS an int in Python, so an unguarded
+    implementation yields expires_at=1 → epoch 1970 → refreshing eagerly forever."""
+    from remote import codex_auth
+
+    base = {"chatgpt_account_id": "a"}
+    assert codex_auth.decode_seat(_codex_jwt(base)).expires_at is None
+    assert codex_auth.decode_seat(_codex_jwt(base, exp="soon")).expires_at is None
+    assert codex_auth.decode_seat(_codex_jwt(base, exp=True)).expires_at is None
+    assert (
+        codex_auth.decode_seat(_codex_jwt(base, exp=2_000_000_000)).expires_at
+        == 2_000_000_000
+    )
+
+
+def test_codex_seat_requires_a_header_safe_account_id():
+    """Account id is the one field with no safe default: it is the Chatgpt-Account-Id header on
+    every forward, so a token without one identifies no seat and cannot serve.
+
+    It is checked for header-SAFETY, not just truthiness, because it is spent as a header value and
+    the forward path uses httpx — which (unlike urllib) will send a header containing CRLF. Reaching
+    this needs a forged token, so it is defence in depth, not a live hole.
+    """
+    from remote import codex_auth
+
+    for claim in (
+        {},
+        {"chatgpt_account_id": ""},
+        {"chatgpt_account_id": None},
+        {"chatgpt_account_id": 12345},
+        {"chatgpt_account_id": "   "},  # blank: would send an empty header
+        {"chatgpt_account_id": "acct-a\r\nX-Injected: pwned"},  # CRLF header injection
+        {"chatgpt_account_id": "acct-a\tb"},
+    ):
+        with pytest.raises(codex_auth.CodexTokenError):
+            codex_auth.decode_seat(_codex_jwt(claim))
+
+    # A legitimate non-ASCII id is NOT collateral damage — printable is the bar, not ASCII.
+    assert codex_auth.decode_seat(
+        _codex_jwt({"chatgpt_account_id": "acct-日本語"})
+    ).account_id == ("acct-日本語")
+
+
+def test_codex_seat_rejects_a_token_that_is_not_a_string():
+    """The store's loader is `str | None`-shaped (remote/api_keys.load_key), and ADR 0015 D-d
+    accepts a crash mid-rotation as a residual risk — so a half-written bundle really can hand this
+    a None. Without a guard that is an AttributeError escaping the module's whole error contract,
+    and a caller that catches CodexTokenError (as the design invites) would not catch it."""
+    from remote import codex_auth
+
+    for value in (None, 12345, b"header.payload.sig", ["header", "payload", "sig"]):
+        with pytest.raises(codex_auth.CodexTokenError) as caught:
+            codex_auth.decode_seat(value)
+        assert caught.value.reason == "not-a-string"
+
+
+def test_codex_seat_error_reasons_come_from_the_closed_vocabulary():
+    """`.reason` exists so a vendor claim-rename is distinguishable from a corrupt store — both say
+    'sign in again' to the operator, and signing in again fixes neither. It is drawn from a closed
+    set precisely so it can never smuggle a token value into a log, and it stays out of `args` so
+    `repr()` keeps leaking nothing."""
+    from remote import codex_auth
+
+    import base64
+    import json as _json
+
+    def _raw(payload):
+        body = (
+            base64.urlsafe_b64encode(_json.dumps(payload).encode()).decode().rstrip("=")
+        )
+        return f"header.{body}.signature"
+
+    # One specimen per reason — every constant in REASONS must be reachable, and each case must
+    # report its OWN reason (a single collapsed code would be no better than the message).
+    specimens = {
+        "not-a-string": None,
+        "bad-segment-count": "header.payload",
+        "undecodable-payload": "header.!!!not-base64!!!.sig",
+        "payload-not-an-object": _raw([1, 2]),
+        "claim-missing": _codex_jwt(None, sub="u1"),
+        "account-id-unusable": _codex_jwt({"chatgpt_plan_type": "free"}),
+    }
+    assert set(specimens) == codex_auth.REASONS, (
+        "every reason needs a specimen (and vice versa)"
+    )
+
+    constant_text = str(codex_auth.CodexTokenError("not-a-string"))
+    for reason, token in specimens.items():
+        with pytest.raises(codex_auth.CodexTokenError) as caught:
+            codex_auth.decode_seat(token)
+        assert caught.value.reason == reason
+        # The operator-facing text is the same constant regardless of reason...
+        assert str(caught.value) == constant_text
+        # ...and the reason stays out of repr(), which the leak test also scans.
+        assert reason not in repr(caught.value)
+
+    # The closed vocabulary is enforced by the type itself, not merely by convention: a raise site
+    # that ever passed a token-derived string (defeating the leak guarantee) fails loudly here.
+    with pytest.raises(ValueError):
+        codex_auth.CodexTokenError("a-reason-not-in-the-vocabulary")
+
+
+def test_codex_seat_rejects_malformed_tokens():
+    """Every shape that cannot yield a seat. The last two are the silent-pass traps: a 4-segment
+    token still has a decodable segment 1, and a JSON payload that isn't an object still parses —
+    both sail past a naive split-and-decode."""
+    import base64
+    import json as _json
+
+    from remote import codex_auth
+
+    def _payload(value):
+        return (
+            base64.urlsafe_b64encode(_json.dumps(value).encode()).decode().rstrip("=")
+        )
+
+    cases = {
+        "empty": "",
+        "not a jwt": "opaque-not-a-jwt",
+        "one segment": "header",
+        "two segments": f"header.{_payload({'a': 1})}",
+        "four segments": f"header.{_payload({'a': 1})}.sig.extra",
+        "payload not base64": "header.!!!not-base64!!!.sig",
+        "payload not json": f"header.{base64.urlsafe_b64encode(b'not json').decode().rstrip('=')}.sig",
+        "payload is a list": f"header.{_payload([1, 2])}.sig",
+        "payload is a number": f"header.{_payload(123)}.sig",
+        "payload is null": f"header.{_payload(None)}.sig",
+        "claim missing": _codex_jwt(None, sub="u1"),
+        "claim not a dict": _codex_jwt("not-a-dict"),
+        # A deeply-nested payload makes json.loads raise RecursionError (a RuntimeError, NOT a
+        # ValueError) — the decoder must still answer with CodexTokenError, never a raw crash.
+        "deeply nested payload": "header."
+        + base64.urlsafe_b64encode(b"[" * 100_000 + b"]" * 100_000).decode().rstrip("=")
+        + ".sig",
+    }
+    for label, token in cases.items():
+        # try/except/else rather than `pytest.raises`, so the per-case label survives a regression
+        # (pytest.raises alone would report only "DID NOT RAISE", not which of the 12 shapes leaked
+        # through). The `pytest.fail` is reachable here — it runs when decode_seat wrongly returns.
+        try:
+            codex_auth.decode_seat(token)
+        except codex_auth.CodexTokenError:
+            continue
+        pytest.fail(f"{label!r} should not decode to a seat")
+
+
+def test_codex_seat_accepts_unpadded_base64url():
+    """A JWT strips base64 '=' padding, so the decoder must restore it for every residue class —
+    otherwise decoding works or fails depending on how long the account id happens to be."""
+    from remote import codex_auth
+
+    for filler in ("a", "aa", "aaa", "aaaa"):
+        token = _codex_jwt({"chatgpt_account_id": f"acct-{filler}"})
+        assert "=" not in token.split(".")[1]  # the helper really does strip padding
+        assert codex_auth.decode_seat(token).account_id == f"acct-{filler}"
+
+
+def test_codex_seat_errors_never_leak_the_token():
+    """Issue 04's AC: no code path prints a token value or raw JWT. A plain `token not in str(exc)`
+    is too weak — it misses a truncated echo and anything reachable through the exception chain —
+    so slide an 8-char window over everything a human could see."""
+    import traceback
+
+    from remote import codex_auth
+
+    import base64
+
+    # A payload that decodes as base64 but NOT as JSON is the one input that chains an exception
+    # carrying content: json.JSONDecodeError.doc holds the DECODED PAYLOAD — exactly where the
+    # account id and the operator's email live. It has to be in this list, not merely in the
+    # rejects-malformed-tokens table, because it is the only branch where the chain matters.
+    not_json = base64.urlsafe_b64encode(b'{"chatgpt_account_id": "acct-SECRET-42" ')
+    tokens = (
+        _codex_jwt({"chatgpt_plan_type": "free"}),  # decodable, no account id -> raises
+        _codex_jwt({"chatgpt_account_id": "acct-SECRET-42\r\nX-Evil: 1"}),  # unusable id
+        f"header.{not_json.decode().rstrip('=')}.sig",  # base64 ok, JSON fails -> chains
+        "header.!!!not-base64!!!.sig",
+        "opaque-not-a-jwt",
+    )
+    for token in tokens:
+        try:
+            codex_auth.decode_seat(token)
+        except codex_auth.CodexTokenError as exc:
+            rendered = (
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                + str(exc)
+                + repr(exc)
+            )
+            leaked = sum(1 for i in range(len(token) - 7) if token[i : i + 8] in rendered)
+            # Report a COUNT, never the fragment itself: a failing assertion message is an output
+            # channel too, and echoing the offending bytes would leak them into the CI log.
+            assert not leaked, f"{leaked} fragment(s) of the token reached a rendered error"
+            # NEITHER link may survive. `from None` alone would leave __context__ reachable, and
+            # with it `.doc` — so decode_seat raises outside the except block instead.
+            assert exc.__cause__ is None
+            assert exc.__context__ is None
+        else:
+            pytest.fail("expected CodexTokenError")
+
+
+def test_codex_seat_repr_does_not_leak_the_account_id():
+    """The account id is the operator's identity, held to the same bar as the token (issue 04): it
+    may not reach a log, a terminal, or a run record.
+
+    A plain dataclass repr prints every field, so `logger.debug(f"joined {seat}")` — the most
+    natural line anyone writes when wiring up issue 05/06 — would ship it with no bug, no edge case
+    and no regression required. The error-path leak test cannot catch this: it is the SUCCESS path.
+    """
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt({"chatgpt_account_id": "acct-SECRET-42", "chatgpt_plan_type": "free"})
+    )
+
+    assert seat.account_id == "acct-SECRET-42"  # readable by the code that needs it...
+    for rendered in (repr(seat), str(seat), f"{seat}"):  # ...never by anything that prints it
+        assert "SECRET" not in rendered
+    # The non-secret fields stay visible: this is redaction, not an opaque blob.
+    assert "free" in repr(seat)
+
+
+def test_codex_seat_carries_no_verification_verdict():
+    """The decoder does NOT verify the JWT signature, so nothing it returns may look like an
+    authorization result. Structural guard: no bool field exists for a future caller to branch on
+    as though the seat had been validated."""
+    import dataclasses
+
+    from remote import codex_auth
+
+    fields = {f.name: f for f in dataclasses.fields(codex_auth.CodexSeat)}
+    assert set(fields) == {"account_id", "plan_type", "expires_at"}
+    # codex_auth enables PEP 563, so every `f.type` is the annotation's SOURCE TEXT, not the type
+    # object — `f.type is bool` would be dead code. Match the text, which also catches
+    # `bool | None` and `Optional[bool]`.
+    assert all(isinstance(f.type, str) for f in fields.values()), (
+        "PEP 563 assumption broke"
+    )
+    assert not any("bool" in f.type for f in fields.values())
+
+    seat = codex_auth.decode_seat(_codex_jwt({"chatgpt_account_id": "a"}))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        seat.account_id = "mutated"
+
+
+def test_codex_seat_decodes_an_expired_token():
+    """The decoder never reads the clock. ADR 0015 D-d's refresh must read the account id OUT of an
+    already-expired token to rotate it — a decoder that rejected expired tokens would brick exactly
+    the case refresh exists for. Expiry is the caller's decision, not the parser's."""
+    from remote import codex_auth
+
+    seat = codex_auth.decode_seat(
+        _codex_jwt({"chatgpt_account_id": "acct-x", "chatgpt_plan_type": "free"}, exp=1)
+    )
+
+    assert seat.account_id == "acct-x"
+    assert seat.expires_at == 1
+
+
+# ---------------------------------------------------------------------------
+# codex join probe (ADR 0015 D-f, issue 05) — one free GET {base}/models per changed join.
+# Every test here mocks the vendor via httpx.MockTransport: this suite never makes a network call.
+# ---------------------------------------------------------------------------
+
+
+def _codex_bundle(plan_type="free"):
+    from remote import codex_oauth
+
+    return codex_oauth.CodexBundle(
+        access_token="tok-access",
+        refresh_token="tok-refresh",
+        account_id="acct-1",
+        plan_type=plan_type,
+        last_refresh=0,
+    )
+
+
+def _mock_probe(monkeypatch, handler, _real=httpx.Client):
+    """The `_mock_vendor` pattern for the codex probe: a REAL httpx.Client with MockTransport
+    injected, capturing the whole request for the URL/header asserts."""
+    seen = {}
+
+    def wrapped(request):
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        seen["headers"] = dict(request.headers)
+        seen.setdefault("calls", 0)
+        seen["calls"] += 1
+        return handler(request)
+
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda *a, **k: _real(*a, **{**k, "transport": httpx.MockTransport(wrapped)}),
+    )
+    return seen
+
+
+def _probe(monkeypatch, handler):
+    """Run probe_seat against a mocked vendor; returns (result_or_exc, seen)."""
+    from remote import codex_probe
+
+    seen = _mock_probe(monkeypatch, handler)
+    slugs = codex_probe.probe_seat(
+        _codex_bundle(),
+        base_url=api_catalog.WHITELISTS["codex"].base_url,
+        client_version=api_catalog.CODEX_CLIENT_VERSION,
+    )
+    return slugs, seen
+
+
+def test_codex_probe_sends_the_verified_request_and_returns_visible_slugs(monkeypatch):
+    """The probe is the ONE vendor call a changed join makes, and it is free (facts.md B1). It
+    sends the verified URL + `client_version` pin and exactly the five headers the real client
+    sends (spike probe.py `headers_for`). It returns the seat's visible slugs — a
+    `visibility: "hide"` row (codex-auto-review) is never advertised — deduped, vendor order
+    preserved; the ~42 unknown fields per model ride along ignored. A CF-RAY header on the 200
+    is NOT a Cloudflare block: CF-RAY rides every response, including successes (facts.md B4)."""
+    body = {"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list", "context_window": 272000, "unknown_field": 1},
+        {"slug": "gpt-5.5", "visibility": "list"},
+        {"slug": "gpt-5.5", "visibility": "list"},            # vendor dupe → deduped
+        {"slug": "codex-auto-review", "visibility": "hide"},  # hidden → excluded
+    ]}
+
+    slugs, seen = _probe(monkeypatch, lambda request: httpx.Response(
+        200, json=body, headers={"CF-RAY": "a1b94a2e9cacfd7c-SIN"},
+    ))
+
+    assert slugs == ("gpt-5.6-terra", "gpt-5.5")
+    assert seen["calls"] == 1  # one request, no retry
+    assert seen["method"] == "GET"
+    assert seen["url"] == (
+        "https://chatgpt.com/backend-api/codex/models"
+        f"?client_version={api_catalog.CODEX_CLIENT_VERSION}"
+    )
+    assert seen["headers"]["authorization"] == "Bearer tok-access"
+    assert seen["headers"]["chatgpt-account-id"] == "acct-1"
+    assert seen["headers"]["originator"] == "codex_cli_rs"
+    assert seen["headers"]["user-agent"] == "codex_cli_rs"
+    assert seen["headers"]["accept"] == "application/json"
+
+
+def test_codex_probe_auth_failures_raise_the_typed_seat_rejection(monkeypatch):
+    """401, and 403 WITHOUT the Cloudflare marker, are the seat's fault — the ONE class the join
+    may catch to offer a stored-but-dead seat a fresh sign-in. Typed, not SystemExit: the join
+    must never string-match a terminal message to decide whether a retry applies. The typed error
+    carries the status only — never vendor body text (unbounded shape on an auth host)."""
+    from remote import codex_probe
+
+    for status in (401, 403):
+        with pytest.raises(codex_probe.SeatRejected) as exc:
+            _probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"detail": "denied"}))
+        assert exc.value.status_code == status
+        assert "denied" not in str(exc.value)
+
+
+def test_codex_probe_cf_challenge_keys_on_cf_mitigated_not_cf_ray(monkeypatch):
+    """403 + `Cf-Mitigated` = Cloudflare challenged this machine's egress IP. Refusing the join
+    names that cause — a datacenter/VPS address typically cannot serve a seat, and signing in
+    again cannot fix an IP, so this is deliberately NOT the auth class. Keyed on `Cf-Mitigated`,
+    never on CF-RAY, which rides every response including 200s (facts.md B4; the happy-path test
+    pins a CF-RAY-bearing 200 succeeding)."""
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            403,
+            text="<html>Just a moment...</html>",
+            headers={"Cf-Mitigated": "challenge", "CF-RAY": "a1b94a2e9cacfd7c-SIN"},
+        ))
+
+    msg = str(exc.value)
+    assert "egress IP" in msg
+    assert "Nothing was joined." in msg
+    assert "sign in" not in msg.lower()  # an IP block is not fixed by re-authenticating
+    assert "Just a moment" not in msg  # never the challenge page's HTML
+
+
+def test_codex_probe_remaining_classes_have_distinct_terminal_messages(monkeypatch):
+    """429 (seat rate-limited — wait), 5xx (vendor outage — not the operator's fault), 400
+    (contract drift — check for a newer release), transport (unreachable). Together with the CF
+    message these are the taxonomy's terminal classes; each must be distinct, name nothing
+    joined, and the 400 class must never be worded as a tier problem (facts.md #5 — the vendor's
+    refusals name the auth mode, never the tier)."""
+
+    messages = {}
+    for status in (429, 503, 400):
+        with pytest.raises(SystemExit) as exc:
+            _probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"detail": "d"}))
+        messages[status] = str(exc.value)
+
+    def _transport_fail(request):
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, _transport_fail)
+    messages["transport"] = str(exc.value)
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            403, text="x", headers={"Cf-Mitigated": "challenge"},
+        ))
+    messages["cf"] = str(exc.value)
+
+    assert len(set(messages.values())) == len(messages)  # pairwise distinct
+    for msg in messages.values():
+        assert "Nothing was joined." in msg
+        assert "tier" not in msg.lower()
+    assert "rate-limited" in messages[429]
+    assert "outage" in messages[503]
+    assert "newer grid release" in messages[400]
+    assert "Could not reach" in messages["transport"]
+    assert "egress IP" in messages["cf"]
+
+
+def test_codex_probe_400_detail_echo_is_bounded(monkeypatch):
+    """The 400 message may quote the vendor's `detail` — the one field that tells an operator
+    what drifted — but vendor text is untrusted: over-long or non-printable detail is dropped,
+    never truncated into the message (ANSI escapes and newlines could forge output lines)."""
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            400, json={"detail": "Unsupported parameter: client_version"},
+        ))
+    assert "Unsupported parameter: client_version" in str(exc.value)
+
+    for hostile in ("x" * 500, "line\nforged", "\x1b[31mred\x1b[0m", "", 42):
+        with pytest.raises(SystemExit) as exc:
+            _probe(monkeypatch, lambda request, d=hostile: httpx.Response(400, json={"detail": d}))
+        msg = str(exc.value)
+        assert "forged" not in msg and "\x1b" not in msg and "x" * 100 not in msg
+
+
+def test_codex_probe_unreadable_listing_is_contract_drift_but_empty_is_empty(monkeypatch):
+    """A 200 whose body can't yield slugs is shape drift → the contract-drift error, never a
+    KeyError. But a WELL-FORMED empty listing returns () — an empty seat is a selection problem
+    (the join's empty-intersection error names it), not a probe failure."""
+
+    for body in ('"not a dict"', '{"nothing": 1}', '{"models": "not-a-list"}'):
+        with pytest.raises(SystemExit) as exc:
+            _probe(monkeypatch, lambda request, b=body: httpx.Response(
+                200, content=b, headers={"Content-Type": "application/json"},
+            ))
+        assert "can't read" in str(exc.value)
+
+    # Non-empty models, zero readable slugs: drift, not "empty seat".
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            200, json={"models": [{"id": "renamed-away"}, "junk"]},
+        ))
+    assert "can't read" in str(exc.value)
+
+    slugs, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": []}))
+    assert slugs == ()
+
+
+# ---------------------------------------------------------------------------
+# codex OAuth PKCE (ADR 0015 D-c) — the vendor protocol `grid join --api codex` speaks.
+# Every test here mocks the vendor: this suite never makes a network call.
+# ---------------------------------------------------------------------------
+
+
+def test_codex_pkce_challenge_is_the_s256_transform_of_the_verifier():
+    """The vendor recomputes SHA256(verifier) at exchange and compares it to the challenge the
+    authorize URL carried; a pair that doesn't satisfy the transform fails the sign-in. Recomputed
+    here from the RFC 7636 definition rather than from the implementation's own helper."""
+    import hashlib
+    import string
+
+    from remote import codex_oauth
+
+    pkce = codex_oauth.generate_pkce()
+
+    digest = hashlib.sha256(pkce.verifier.encode("ascii")).digest()
+    assert pkce.challenge == base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    # RFC 7636 §4.1: 43-128 chars from the unreserved set. A verifier outside it is rejected by
+    # the vendor, and the padding-stripped challenge must stay URL-safe unencoded.
+    assert 43 <= len(pkce.verifier) <= 128
+    assert set(pkce.verifier) <= set(string.ascii_letters + string.digits + "-._~")
+    assert "=" not in pkce.challenge
+    # A generator that returned a constant would satisfy the transform above and defeat PKCE
+    # entirely — the verifier is a per-sign-in nonce.
+    assert codex_oauth.generate_pkce().verifier != pkce.verifier
+
+
+def test_codex_authorize_url_carries_the_pkce_challenge_and_state():
+    """What the operator's browser opens. The vendor pins the client id, the redirect uri and the
+    S256 method; `state` is what makes a foreign redirect detectable at parse time (ADR 0015 D-c),
+    so it must actually reach the vendor rather than only being remembered locally."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from remote import codex_oauth
+
+    url = codex_oauth.build_authorize_url(state="state-abc", challenge="challenge-xyz")
+
+    split = urlsplit(url)
+    assert f"{split.scheme}://{split.netloc}{split.path}" == "https://auth.openai.com/oauth/authorize"
+    query = {key: values[-1] for key, values in parse_qs(split.query).items()}
+    assert query["response_type"] == "code"
+    assert query["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
+    assert query["redirect_uri"] == f"http://localhost:{codex_oauth.CALLBACK_PORT}/auth/callback"
+    assert query["code_challenge"] == "challenge-xyz"
+    assert query["code_challenge_method"] == "S256"
+    assert query["state"] == "state-abc"
+    # `offline_access` is what earns the refresh token; without it the seat dies at the first expiry.
+    assert "offline_access" in query["scope"].split()
+    # The vendor keys the simplified Codex consent screen off these; a bare OAuth authorize request
+    # is not the same flow.
+    assert query["id_token_add_organizations"] == "true"
+    assert query["codex_cli_simplified_flow"] == "true"
+    assert query["originator"]
+
+
+def test_codex_parse_redirect_returns_the_authorization_code():
+    """The redirect the browser lands on (or the operator pastes back) carries the one-time code
+    the exchange spends."""
+    from remote import codex_oauth
+
+    code = codex_oauth.parse_redirect(
+        "http://localhost:1455/auth/callback?code=auth-code-1&state=state-abc",
+        expected_state="state-abc",
+    )
+
+    assert code == "auth-code-1"
+
+
+def test_codex_parse_redirect_refuses_a_redirect_whose_state_is_not_ours():
+    """`state` is THE defence against OAuth code injection (ADR 0015 D-c). A redirect URL from an
+    attacker's own authorize session carries a REAL code, and the token it exchanges for is
+    genuinely signed — so no amount of JWT checking downstream catches it. Only this comparison
+    does, which is why a mismatch is terminal and never a warning.
+
+    Both shapes must be refused: a foreign state, and no state at all.
+    """
+    from remote import codex_oauth
+
+    for query in (
+        "code=attacker-code&state=attacker-state",  # a foreign/replayed authorize session
+        "code=attacker-code",  # ... or one that simply drops the parameter
+    ):
+        with pytest.raises(SystemExit) as exc:
+            codex_oauth.parse_redirect(
+                f"http://localhost:1455/auth/callback?{query}", expected_state="state-abc"
+            )
+        assert "state" in str(exc.value).lower()
+        # The refusal must not quote back what it received: this URL is attacker-supplied text, and
+        # the terminal is the operator's. It must also not leak the code, which is still live.
+        assert "attacker-code" not in str(exc.value)
+        assert "attacker-state" not in str(exc.value)
+
+
+def test_codex_parse_redirect_reports_a_vendor_error_redirect():
+    """The operator clicked Deny (or the vendor refused the grant). The vendor still redirects — with
+    `?error=` and no code — and RFC 6749 §4.1.2.1 requires it to echo our `state`, so this lands
+    after the state check. It must not read as 'that URL had no code in it': the causes are
+    different and so is the fix."""
+    from remote import codex_oauth
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.parse_redirect(
+            "http://localhost:1455/auth/callback?error=access_denied&state=state-abc",
+            expected_state="state-abc",
+        )
+
+    msg = str(exc.value)
+    assert "access_denied" in msg  # the vendor's own code, so the operator can look it up
+    assert "denied" in msg.lower() or "refus" in msg.lower()
+
+
+def test_codex_parse_redirect_reports_a_url_carrying_neither_code_nor_error():
+    """Its own case, and the likeliest operator mistake in the paste flow: pasting back the
+    authorize URL they were just given instead of the one the browser landed on. That URL carries
+    OUR state, so it clears the state check and reaches here — nothing is wrong with the sign-in,
+    they just have the wrong string, and the message has to say which string to bring."""
+    from remote import codex_oauth
+
+    for query in (
+        "state=state-abc",  # the authorize URL pasted back — carries our state, no code
+        "code=&state=state-abc",  # ... or a redirect whose code is empty
+    ):
+        with pytest.raises(SystemExit) as exc:
+            codex_oauth.parse_redirect(
+                f"http://localhost:1455/auth/callback?{query}", expected_state="state-abc"
+            )
+        msg = str(exc.value)
+        assert "code" in msg.lower()
+        # Distinct from both neighbours: this is not a refusal and not a foreign sign-in.
+        assert "refused" not in msg.lower()
+        assert "different sign-in" not in msg.lower()
+
+
+def test_codex_exchange_code_posts_a_form_encoded_grant_and_derives_the_seat(monkeypatch):
+    """The authorization_code grant is FORM-encoded — the refresh grant (issue 06) is JSON. Two
+    grants, two encodings, verified against the real client; sending the wrong one is a 400.
+
+    The response carries exactly three fields and NO account id: the seat is derived from the access
+    token's own claim, which is the only place it exists.
+    """
+    from urllib.parse import parse_qs
+
+    from remote import codex_oauth
+
+    access = _codex_jwt(
+        {"chatgpt_account_id": "acct-1", "chatgpt_plan_type": "free"}, exp=2_000_000_000
+    )
+    seen = _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"id_token": "id-tok", "access_token": access, "refresh_token": "rt-1"},
+    ))
+
+    bundle = codex_oauth.exchange_code("auth-code-1", "verifier-1")
+
+    assert seen["method"] == "POST"
+    assert seen["url"] == "https://auth.openai.com/oauth/token"
+    assert seen["content_type"] == "application/x-www-form-urlencoded"
+    body = {key: values[-1] for key, values in parse_qs(seen["body"].decode()).items()}
+    assert body["grant_type"] == "authorization_code"
+    assert body["code"] == "auth-code-1"
+    assert body["client_id"] == codex_oauth.CLIENT_ID
+    assert body["code_verifier"] == "verifier-1"
+    # Must match the authorize request's redirect_uri exactly — the vendor re-checks it here.
+    assert body["redirect_uri"] == codex_oauth.redirect_uri()
+    # A public PKCE client has no secret; the verifier is what proves possession.
+    assert "client_secret" not in body
+
+    assert bundle.access_token == access
+    assert bundle.refresh_token == "rt-1"
+    assert bundle.account_id == "acct-1"  # from the token's claim, not from the response
+    assert bundle.plan_type == "free"  # free alongside it — issue 05's tier, at no extra cost
+    assert abs(bundle.last_refresh - time.time()) < 60  # stamped now, for D-d's proactive refresh
+
+
+def test_codex_exchange_code_surfaces_a_rejected_grant_as_a_clean_error(monkeypatch):
+    """The usual cause is a slow paste — the code is single-use and short-lived. The operator gets a
+    terminal message naming the status and the retry, never an httpx traceback, and never the
+    vendor's error body (unbounded text on a path where a 200's body IS the tokens)."""
+    from remote import codex_oauth
+
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        400, json={"error": "invalid_grant", "error_description": "code expired"},
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.exchange_code("stale-code", "verifier-1")
+    msg = str(exc.value)
+    assert "400" in msg
+    assert "grid join --api codex" in msg  # the operator's next move
+    assert "stale-code" not in msg and "verifier-1" not in msg
+
+
+def test_codex_exchange_code_refuses_a_grant_with_no_refresh_token(monkeypatch):
+    """A 200 missing either token is a vendor contract change, not something a re-sign-in fixes —
+    and a bundle with a null refresh token would brick the seat at the first expiry (ADR 0015 D-d
+    has nothing to rotate). Terminal, and distinct from 'the vendor rejected you'."""
+    from remote import codex_oauth
+
+    access = _codex_jwt({"chatgpt_account_id": "acct-1"})
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"id_token": "id-tok", "access_token": access},  # offline_access silently dropped
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.exchange_code("auth-code-1", "verifier-1")
+    msg = str(exc.value)
+    assert "refresh" in msg.lower()
+    assert "rejected" not in msg.lower()  # not the vendor-said-no message
+    assert access not in msg
+
+
+def test_codex_exchange_code_reports_an_unreadable_fresh_token_as_a_vendor_change(monkeypatch, capsys):
+    """A token we exchanged one second ago that carries no readable seat is NOT a stale credential:
+    the operator has just signed in successfully. `decode_seat` raises `CodexTokenError`, whose
+    message is "…sign in again" — correct for a token off the disk, useless here, because signing in
+    again reproduces it exactly (issue 04's amendment). So the exchange re-words it, and logs
+    `.reason`, which is the ONLY thing that separates a vendor claim rename from a corrupt token.
+
+    It must also not escape as `CodexTokenError`: that is a ValueError, and `cli/_main.py`'s `main`
+    has no handler for one — the operator would get a traceback.
+
+    The stderr assertion below is on `codex_oauth` DIRECTLY, and that is deliberate, not an
+    oversight: the module's docstring names this one line as its explicit exception to "no operator
+    I/O" — it is a log, not interaction, and it must stay in this module because ADR 0015 D-d's
+    refresh reaches the same case from the serve loop, which never imports `cli/`. If the line ever
+    moves to the CLI, this assertion is supposed to fail and be moved with it.
+    """
+    from remote import codex_auth, codex_oauth
+
+    # Decodes cleanly; the seat facts are simply no longer under the claim URL we know — the vendor
+    # rename that `reason="claim-missing"` exists to name.
+    renamed = _codex_jwt(
+        None, exp=2_000_000_000, **{"https://api.openai.com/authz": {"chatgpt_account_id": "acct-1"}}
+    )
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={
+        "id_token": "id-tok", "access_token": renamed, "refresh_token": "rt-1",
+    }))
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.exchange_code("auth-code-1", "verifier-1")
+
+    msg = str(exc.value)
+    assert not isinstance(exc.value, codex_auth.CodexTokenError)
+    assert "sign in again" not in msg.lower()  # they just did — don't send them round the loop
+    assert "grid" in msg.lower()  # points at the version/contract, which is the real fix
+    # `.reason` is a constant from a closed vocabulary, so it can be logged; the claims it came
+    # from carry the operator's email and must not be.
+    err = capsys.readouterr().err
+    assert "claim-missing" in err
+    assert renamed not in msg + err and "acct-1" not in msg + err
+
+
+def test_codex_refresh_posts_the_json_grant_and_rotates_the_bundle(monkeypatch):
+    """The refresh grant is JSON — the authorization_code exchange is FORM (facts.md #9: same
+    endpoint, two encodings; unifying them 400s one of the two). A 200 rotates the whole bundle:
+    new tokens, seat identity re-derived from the NEW access token, `last_refresh` restamped for
+    D-d's proactive window."""
+    from remote import codex_oauth
+
+    new_access = _codex_jwt(
+        {"chatgpt_account_id": "acct-1", "chatgpt_plan_type": "plus"}, exp=2_000_000_000
+    )
+    seen = _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"id_token": "id-tok", "access_token": new_access, "refresh_token": "rt-2"},
+    ))
+
+    fresh = codex_oauth.refresh_bundle(_codex_bundle())
+
+    assert seen["method"] == "POST"
+    assert seen["url"] == "https://auth.openai.com/oauth/token"
+    assert seen["content_type"] == "application/json"  # NOT the exchange's form encoding
+    assert json.loads(seen["body"]) == {
+        "client_id": codex_oauth.CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": "tok-refresh",
+    }
+    assert fresh.access_token == new_access
+    assert fresh.refresh_token == "rt-2"
+    assert fresh.account_id == "acct-1"
+    assert fresh.plan_type == "plus"  # re-derived from the new token, not carried over
+    assert abs(fresh.last_refresh - time.time()) < 60
+
+
+def test_codex_refresh_keeps_the_old_refresh_token_when_the_vendor_omits_it(monkeypatch):
+    """A 200 that rotates the access token but sends no new refresh token means the old one is
+    still the live grant — carry it forward (the `_ServeState.refresh` pattern for relay tokens).
+    Dropping it would leave a bundle with nothing to rotate; refusing the 200 would discard a
+    rotation the vendor already performed."""
+    from remote import codex_oauth
+
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=2_000_000_000)
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"access_token": new_access},
+    ))
+
+    fresh = codex_oauth.refresh_bundle(_codex_bundle())
+
+    assert fresh.access_token == new_access
+    assert fresh.refresh_token == "tok-refresh"  # the old grant, still live
+
+    # A non-string refresh_token (vendor contract drift) is refused at THIS boundary the same
+    # way — persisting it would surface later as a baffling RefreshRefused on the NEXT rotation,
+    # far from where the bad data actually appeared (python review).
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"access_token": new_access, "refresh_token": 12345},
+    ))
+    assert codex_oauth.refresh_bundle(_codex_bundle()).refresh_token == "tok-refresh"
+
+
+def test_codex_refresh_error_taxonomy_covers_every_status(monkeypatch):
+    """The serve loop acts on the CLASS of a refresh failure, so every response must land in
+    exactly one of two buckets and none may escape as a raw httpx error:
+
+    * `RefreshRefused` — the vendor PROCESSED the grant and said no: a definitive 4xx (never 408 /
+      429, which are rate/timeout noise), or a 200 whose body carries no usable tokens (the vendor
+      said success ⇒ the single-use token is spent either way ⇒ only a re-sign-in helps).
+    * `RefreshUnavailable` — the grant could not be concluded: 5xx, 408, 429, a 3xx (httpx does
+      not follow redirects here), or transport failure. `request_sent=False` only when the request
+      provably never left the machine (connect failure) — that is what licenses journal cleanup.
+
+    No failure may quote the refresh token back (the most dangerous string in the store)."""
+    from remote import codex_oauth
+
+    def classify(handler):
+        _mock_vendor(monkeypatch, handler)
+        try:
+            codex_oauth.refresh_bundle(_codex_bundle())
+        except (codex_oauth.RefreshRefused, codex_oauth.RefreshUnavailable) as exc:
+            assert "tok-refresh" not in str(exc)  # never echo the grant
+            return exc
+        return None
+
+    refused_400 = classify(lambda r: httpx.Response(400, json={"error": "invalid_grant"}))
+    assert isinstance(refused_400, codex_oauth.RefreshRefused)
+    assert (refused_400.status_code, refused_400.reason) == (400, "grant-rejected")
+
+    refused_401 = classify(lambda r: httpx.Response(401, json={}))
+    assert isinstance(refused_401, codex_oauth.RefreshRefused)
+    assert refused_401.reason == "grant-rejected"
+
+    no_tokens = classify(lambda r: httpx.Response(200, json={"id_token": "only"}))
+    assert isinstance(no_tokens, codex_oauth.RefreshRefused)
+    assert (no_tokens.status_code, no_tokens.reason) == (200, "unusable-grant")
+
+    not_json = classify(lambda r: httpx.Response(200, content=b"<html>sorry</html>"))
+    assert isinstance(not_json, codex_oauth.RefreshRefused)
+    assert not_json.reason == "unusable-grant"
+
+    for status in (500, 503, 408, 429, 302):  # 3xx: the default bucket, not a refusal
+        exc = classify(lambda r, s=status: httpx.Response(s, json={}))
+        assert isinstance(exc, codex_oauth.RefreshUnavailable), status
+        assert exc.status_code == status
+        assert exc.request_sent is True
+
+    def connect_error(request):
+        raise httpx.ConnectError("dns says no", request=request)
+
+    never_left = classify(connect_error)
+    assert isinstance(never_left, codex_oauth.RefreshUnavailable)
+    assert never_left.request_sent is False  # licenses the CAS to clear its own journal
+
+    def read_timeout(request):
+        raise httpx.ReadTimeout("mid-flight", request=request)
+
+    ambiguous = classify(read_timeout)
+    assert isinstance(ambiguous, codex_oauth.RefreshUnavailable)
+    assert ambiguous.request_sent is True  # the grant MAY have reached the vendor — journal stays
+
+    # `reason` is a CLOSED vocabulary, enforced at construction like CodexTokenError — a future
+    # raise site that passed vendor-derived text would silently defeat the "safe to log"
+    # guarantee the docstring claims (python review).
+    with pytest.raises(ValueError):
+        codex_oauth.RefreshRefused(400, "vendor-derived text")
+
+
+def test_codex_refresh_keeps_the_stored_identity_when_the_rotated_token_is_unreadable(monkeypatch, capsys):
+    """By the time the rotated token arrives the OLD refresh token is SPENT — discarding the new
+    tokens would brick the seat. So unlike the exchange (terminal: at sign-in there is no fallback
+    identity, and refusing loses nothing), the refresh carries the STORED account_id/plan_type
+    forward — the account is stable per seat — persists the new tokens, and logs the
+    closed-vocabulary reason: the only trace separating a vendor claim rename from corruption."""
+    from remote import codex_oauth
+
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(
+        200, json={"access_token": "not-a-jwt", "refresh_token": "rt-2"},
+    ))
+
+    fresh = codex_oauth.refresh_bundle(_codex_bundle())
+
+    assert fresh.access_token == "not-a-jwt"  # the vendor honours it whether or not WE can read it
+    assert fresh.refresh_token == "rt-2"
+    assert fresh.account_id == "acct-1"  # carried from the stored bundle, not dropped
+    assert fresh.plan_type == "free"
+    err = capsys.readouterr().err
+    assert "bad-segment-count" in err  # `.reason` is a constant — safe to log; claims are not
+    assert "not-a-jwt" not in err and "rt-2" not in err
+
+
+def test_codex_callback_listener_captures_the_redirect_without_logging_it(capsys):
+    """The browser flow's half: bind a loopback port, let the vendor's redirect land on it, hand the
+    URL back for `parse_redirect` to check. Bound to 127.0.0.1 only — a callback on 0.0.0.0 would let
+    anything on the LAN post an authorization code at this operator.
+
+    The URL carries the live authorization code, and `BaseHTTPRequestHandler` logs every request line
+    to stderr by default — i.e. the default listener prints the code. That must be off.
+    """
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="state-abc") as listener:  # port 0: never 1455
+        visitor = threading.Thread(
+            target=lambda: httpx.get(
+                f"http://127.0.0.1:{listener.port}/auth/callback"
+                "?code=AUTHCODE-SEKRIT&state=state-abc"
+            ),
+            daemon=True,
+        )
+        visitor.start()
+        url = listener.wait(deadline=time.monotonic() + 10)
+        visitor.join(timeout=10)
+
+    assert url is not None
+    assert codex_oauth_parse(url, "state-abc") == "AUTHCODE-SEKRIT"
+    out_err = capsys.readouterr()
+    assert "AUTHCODE-SEKRIT" not in out_err.out + out_err.err
+
+
+def codex_oauth_parse(url, state):
+    from remote import codex_oauth
+
+    return codex_oauth.parse_redirect(url, expected_state=state)
+
+
+def test_codex_callback_listener_ignores_hits_that_are_not_our_redirect(capsys):
+    """A path match is not enough to end the wait — the redirect has to be OURS.
+
+    `do_GET` used to filter on path alone, so the first request to reach `/auth/callback` won the
+    race unconditionally, even a bare `GET /auth/callback` with no code, state or error. That is
+    reachable from any page in a background tab: `<img src="http://localhost:1455/auth/callback">`
+    is a plain cross-origin GET, no preflight, during the sign-in window. The operator's REAL
+    approval then arrives 0.2s later to a closed socket and is discarded, and they are told "That
+    redirect URL is from a different sign-in" about a sign-in that genuinely succeeded at the vendor.
+
+    So the handler compares `state` too — a filter, not the control: it only decides what ends the
+    wait. `parse_redirect` on the main thread still makes the authoritative refusal, because a
+    handler thread cannot raise (its `SystemExit` would be swallowed and the operator would see a
+    hang instead of an error).
+    """
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="real-state") as listener:
+        base = f"http://127.0.0.1:{listener.port}/auth/callback"
+        # Each GET blocks until `wait()`'s loop serves it, so they must run off the main thread.
+        # They land in order; only the last is ours.
+        threading.Thread(
+            target=lambda: [
+                httpx.get(base, timeout=10),  # the <img src> hit: no code, no state, no error
+                httpx.get(f"{base}?code=X&state=someone-elses", timeout=10),  # a foreign sign-in
+                httpx.get(f"{base}?code=REAL-CODE&state=real-state", timeout=10),  # ours
+            ],
+            daemon=True,
+        ).start()
+
+        url = listener.wait(deadline=time.monotonic() + 20)
+
+    assert url is not None, "the real redirect never ended the wait"
+    assert codex_oauth_parse(url, "real-state") == "REAL-CODE"
+    assert "REAL-CODE" not in capsys.readouterr().err
+
+
+def test_codex_callback_listener_reports_a_port_someone_else_holds():
+    """The callback port is the real Codex CLI's too, so an operator signing into Codex proper in
+    another terminal holds it — an ordinary collision, not an exotic one. It surfaces as its own type
+    so the join can fall back with guidance instead of dying.
+
+    Bind-and-catch, never probe-then-bind: `connect_ex` (the repo's nearest neighbour, in
+    `shared/engine/launcher.py`) would answer "free" and lose the race to whoever binds next.
+    """
+    import socket
+
+    from remote import codex_callback
+
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    try:
+        with pytest.raises(codex_callback.PortInUse):
+            with codex_callback.listen(holder.getsockname()[1], expected_state="s"):
+                pytest.fail("must not hand back a listener it never bound")
+    finally:
+        holder.close()
+
+
+def test_codex_callback_listener_reports_an_unclassifiable_bind_failure_cleanly(monkeypatch):
+    """EADDRINUSE has its own type and a fallback. Every OTHER bind failure — an exhausted fd table,
+    a sandbox refusing loopback — used to re-raise as a bare `OSError`, and nothing between `listen`
+    and `cli/_main.py::main()` catches one (`cli/dispatch.py` has no try/except). The operator got a
+    traceback: loud rather than silent, but still the one outcome this feature's error contract rules
+    out.
+
+    The bind is induced to fail because a real EACCES needs a privileged port, which a test cannot
+    portably rely on (and would flip under a root CI runner).
+    """
+    from remote import codex_callback
+
+    def refuse(address, handler):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(codex_callback, "_CallbackServer", refuse)
+
+    with pytest.raises(SystemExit) as exc:  # not a bare OSError
+        with codex_callback.listen(0, expected_state="s"):
+            pytest.fail("must not yield a listener it never bound")
+
+    assert not isinstance(exc.value, codex_callback.PortInUse)  # not dressed up as a collision
+    assert "Permission denied" in str(exc.value)  # the OS's own reason, so it is diagnosable
+
+
+def test_codex_callback_listener_gives_up_at_its_deadline():
+    """Nobody ever approves (the operator wandered off, or the browser never opened). The wait ends
+    at the deadline and says so, rather than parking the CLI on a socket forever.
+
+    Covers only the *nobody connects* case — see the test below for the one that actually bit."""
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="s") as listener:
+        assert listener.wait(deadline=time.monotonic() + 0.2) is None
+
+
+def test_codex_callback_listener_deadline_holds_against_a_client_that_says_nothing():
+    """The deadline must bound the WHOLE wait, not just the gap before someone connects.
+
+    `BaseServer.handle_request`'s timeout only bounds the `select()` for a *new* connection. Once one
+    is accepted, control passes to the handler — a `StreamRequestHandler` whose own `timeout` class
+    attribute defaults to None, so `setup()` never calls `settimeout()` and `rfile.readline()` blocks
+    with no bound at all. One TCP connect that sends nothing therefore hangs `grid join --api codex`
+    straight past `_SIGNIN_DEADLINE_S` with no error — the CLI just stops — and, the server being
+    single-threaded, also stops the real browser's redirect from ever being accepted.
+
+    No HTTP, no valid `state`, no local code execution: `nc 127.0.0.1 1455` is the whole attack. It
+    silently defeats the deadline ADR 0015 D-c promises.
+
+    The wait runs on a daemon thread so that a regression fails this test instead of hanging the suite.
+    """
+    import socket
+
+    from remote import codex_callback
+
+    with codex_callback.listen(0, expected_state="s") as listener:
+        silent = socket.create_connection(("127.0.0.1", listener.port), timeout=5)
+        try:
+            done = {}
+            waiter = threading.Thread(
+                target=lambda: done.update(returned=listener.wait(deadline=time.monotonic() + 1.0)),
+                daemon=True,
+            )
+            waiter.start()
+            waiter.join(timeout=20)  # 20x the deadline: generous, but bounded
+
+            assert not waiter.is_alive(), "wait() blew its deadline — a silent client hung the sign-in"
+            assert done["returned"] is None
+        finally:
+            silent.close()
+
+
+def test_codex_parse_redirect_refuses_to_verify_against_an_empty_state():
+    """A guard on the CALLER, not on the URL — and the reason it exists is that the failure is
+    silent: `compare_digest("", "")` is True, so an empty `expected_state` turns this check into
+    accept-any-state-less-redirect while still looking like it verifies. The one real control on
+    this path must fail loudly rather than pass vacuously.
+
+    Not a `SystemExit`: no operator can act on it. It is a bug in a caller (`codex_auth` guards its
+    own closed vocabulary the same way, and for the same reason).
+    """
+    from remote import codex_oauth
+
+    with pytest.raises(ValueError):
+        codex_oauth.parse_redirect("http://localhost:1455/auth/callback?code=c", expected_state="")
+
+
+def test_codex_parse_redirect_state_check_survives_a_non_ascii_state():
+    """The received state is attacker-controlled text. A constant-time compare over `str` raises
+    TypeError on non-ASCII, which would turn a hostile URL into a traceback instead of a refusal —
+    the one outcome issue 04 rules out."""
+    from remote import codex_oauth
+
+    with pytest.raises(SystemExit) as exc:
+        codex_oauth.parse_redirect(
+            "http://localhost:1455/auth/callback?code=c&state=caf%C3%A9-%F0%9F%92%A5",
+            expected_state="state-abc",
+        )
+    assert "state" in str(exc.value).lower()
 
 
 def test_download_surfaces_non_2xx_as_clean_systemexit(monkeypatch, tmp_path):
@@ -2386,6 +3726,11 @@ def _mock_vendor(monkeypatch, handler, _real=httpx.Client):
     def wrapped(request):
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("authorization")
+        # The codex OAuth exchange is a POST whose encoding is part of the contract (form here,
+        # JSON for the refresh grant) — the listing callers above only ever read url/auth.
+        seen["method"] = request.method
+        seen["content_type"] = request.headers.get("content-type")
+        seen["body"] = request.content
         return handler(request)
 
     monkeypatch.setattr(
@@ -2546,6 +3891,932 @@ def test_remote_join_api_unexpected_listing_shape_is_diagnostic(monkeypatch, tmp
     assert "shape" in msg.lower() or "unexpected" in msg.lower()
     assert "available to this" not in msg  # not the key-permissions message
     assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+# --- `grid join --api codex` sign-in (ADR 0015 D-c) -----------------------------------------
+
+def _mock_codex_browser(monkeypatch, *, code="AUTHCODE-1", state=None, listen=None):
+    """Stand in for the operator's browser AND the one-shot callback listener.
+
+    The redirect echoes back the `state` grid actually generated (read out of the authorize URL it
+    opened), because that is what the real vendor does — a fixed state would make every test pass
+    against an implementation that never checks it. Pass `state` to play the attacker instead.
+    """
+    import webbrowser
+    from urllib.parse import parse_qs, urlsplit
+
+    from remote import codex_callback
+
+    seen = {}
+
+    class _FakeListener:
+        port = 1455
+
+        def wait(self, *, deadline):
+            seen["deadline"] = deadline
+            return (
+                f"http://localhost:1455/auth/callback"
+                f"?code={code}&state={state or seen['state']}"
+            )
+
+    @contextlib.contextmanager
+    def fake_listen(port, *, expected_state):
+        seen["bound_port"] = port
+        seen["listener_state"] = expected_state
+        yield _FakeListener()
+
+    def fake_open(url):
+        seen["authorize_url"] = url
+        seen["state"] = parse_qs(urlsplit(url).query)["state"][0]
+        return True
+
+    monkeypatch.setattr(codex_callback, "listen", listen or fake_listen)
+    monkeypatch.setattr(webbrowser, "open", fake_open)
+    return seen
+
+
+def _mock_codex_exchange(monkeypatch, *, account="acct-1", plan="free", models=None):
+    """The vendor, both halves: the token endpoint (3 fields, no account id — fact 9) AND the
+    free `GET /models` probe a successful sign-in now flows straight into (issue 05). Returns
+    (access_token, seen) where seen records the exchange under `token_*` keys and the probe
+    under `probe_*` keys — a flat `url` would be whichever call came LAST."""
+    access = _codex_jwt(
+        {"chatgpt_account_id": account, "chatgpt_plan_type": plan}, exp=2_000_000_000
+    )
+    listing = {"models": [
+        {"slug": slug, "visibility": "list"}
+        for slug in (models if models is not None
+                     else ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"])
+    ]}
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "/oauth/token" in url:
+            seen["token_url"] = url
+            seen["token_method"] = request.method
+            seen["token_content_type"] = request.headers.get("content-type")
+            seen["token_body"] = request.content
+            return httpx.Response(200, json={
+                "id_token": "id-tok", "access_token": access, "refresh_token": "rt-1",
+            })
+        seen["probe_url"] = url
+        seen["probe_auth"] = request.headers.get("authorization")
+        seen.setdefault("probe_calls", 0)
+        seen["probe_calls"] += 1
+        return httpx.Response(200, json=listing)
+
+    _mock_vendor(monkeypatch, handler)
+    return access, seen
+
+
+def test_remote_join_api_codex_browser_flow_lands_the_bundle(monkeypatch, tmp_path, capsys):
+    """The default sign-in (ADR 0015 D-c): bind the callback port, open the browser, catch the
+    redirect, exchange the code, store the seat. Grid runs the OAuth itself — no `--api-key` flag,
+    no env var, and `~/.codex/auth.json` is never read."""
+    from remote import api_keys, codex_oauth
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    access, exchanged = _mock_codex_exchange(monkeypatch)
+    browser = _mock_codex_browser(monkeypatch)
+
+    # Sign-in (issue 04) flows straight into the probe + join (issue 05): one command, seat
+    # stored, engine registered.
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert browser["bound_port"] == codex_oauth.CALLBACK_PORT  # bound BEFORE the browser opened
+    assert browser["authorize_url"].startswith("https://auth.openai.com/oauth/authorize?")
+    assert exchanged["token_url"] == "https://auth.openai.com/oauth/token"
+    assert exchanged["probe_calls"] == 1  # the fresh seat was probed before anything spawned
+
+    assert api_keys.load_codex_bundle() == codex_oauth.CodexBundle(
+        access_token=access, refresh_token="rt-1", account_id="acct-1",
+        plan_type="free", last_refresh=api_keys.load_codex_bundle().last_refresh,
+    )
+    # Secret hygiene: nothing about the seat reaches the terminal.
+    out_err = capsys.readouterr()
+    assert access not in out_err.out + out_err.err
+    assert "rt-1" not in out_err.out + out_err.err
+    assert "acct-1" not in out_err.out + out_err.err
+
+
+def _authorize_url_from(text):
+    for line in text.splitlines():
+        if line.strip().startswith("https://auth.openai.com/oauth/authorize?"):
+            return line.strip()
+    raise AssertionError(f"no authorize URL was printed for the operator to open:\n{text}")
+
+
+def _no_browser_and_no_bind(monkeypatch):
+    """Assert the paste flow needs neither of the two things a headless box hasn't got."""
+    import webbrowser
+
+    from remote import codex_callback
+
+    monkeypatch.setattr(webbrowser, "open", lambda url: pytest.fail("--no-browser opened a browser"))
+    monkeypatch.setattr(codex_callback, "listen",
+                        lambda port, **kw: pytest.fail("--no-browser bound a port"))
+
+
+def test_remote_join_api_codex_no_browser_flow_takes_a_pasted_redirect(monkeypatch, tmp_path, capsys):
+    """User story 2 — a headless box. Grid prints the URL, the operator approves it on a machine that
+    has a browser, and brings the redirect back by hand. Nothing opens and nothing binds.
+
+    The test plays the operator literally: it reads the URL off the terminal and pastes back the
+    redirect the vendor would send for THAT authorize request, `state` and all.
+    """
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    access, exchanged = _mock_codex_exchange(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    _no_browser_and_no_bind(monkeypatch)
+
+    printed = {}
+
+    def fake_paste():
+        from urllib.parse import parse_qs, urlsplit
+
+        printed["out"] = capsys.readouterr().out
+        url = _authorize_url_from(printed["out"])
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        return f"http://localhost:1455/auth/callback?code=AUTHCODE-1&state={state}"
+
+    monkeypatch.setattr(cli.codex_signin, "_prompt_redirect_url", fake_paste)
+
+    assert cli.main(["join", "--api", "codex", "--no-browser"]) == 0  # sign-in flows into the join
+
+    assert exchanged["token_url"] == "https://auth.openai.com/oauth/token"
+    bundle = api_keys.load_codex_bundle()
+    assert bundle is not None and bundle.access_token == access and bundle.account_id == "acct-1"
+    assert "AUTHCODE-1" not in printed["out"]  # grid printed the authorize URL, never the code
+
+
+def test_remote_join_api_codex_paste_deadline_stores_nothing(monkeypatch, tmp_path):
+    """The operator wandered off mid-approval and pasted a URL whose code died on the way. Refused
+    before the exchange is even attempted: the vendor would reject it anyway, and a message about
+    a 10-minute code beats a bare HTTP 400. Nothing is stored."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    _no_browser_and_no_bind(monkeypatch)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("a dead code is never spent"))
+
+    # The clock jumps past the code's lifetime while the operator is pasting. Read once at the start
+    # of the paste flow, once after the paste returns.
+    clock = iter([1000.0, 1000.0 + 601.0])
+    monkeypatch.setattr(cli.codex_signin.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        cli.codex_signin, "_prompt_redirect_url",
+        lambda: "http://localhost:1455/auth/callback?code=AUTHCODE-1&state=whatever",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex", "--no-browser"])
+
+    assert "too long" in str(exc.value).lower() or "expired" in str(exc.value).lower()
+    assert api_keys.load_codex_bundle() is None
+    assert not paths.api_keys_file().exists()
+
+
+def _callback_port_taken(monkeypatch):
+    """The real Codex CLI holds the callback port. `listen` binds-and-catches, so this is what the
+    join sees — raised from the bind, not from a probe that could have raced."""
+    from remote import codex_callback
+
+    def taken(port, *, expected_state):
+        raise codex_callback.PortInUse(48, "Address already in use")
+
+    monkeypatch.setattr(codex_callback, "listen", taken)
+
+
+def test_remote_join_api_codex_falls_back_to_paste_when_callback_port_is_taken(
+    monkeypatch, tmp_path, capsys
+):
+    """User story 4: the operator's real Codex CLI is signing in and holds port 1455 — grid's
+    callback port is theirs too. The two tools have to coexist, so this is a fallback and not just a
+    refusal: the paste flow needs no port, so the join completes through it. Never a traceback."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    access, _ = _mock_codex_exchange(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+    _callback_port_taken(monkeypatch)
+
+    def fake_paste():
+        from urllib.parse import parse_qs, urlsplit
+
+        url = _authorize_url_from(capsys.readouterr().out)
+        state = parse_qs(urlsplit(url).query)["state"][0]
+        return f"http://localhost:1455/auth/callback?code=AUTHCODE-1&state={state}"
+
+    monkeypatch.setattr(cli.codex_signin, "_prompt_redirect_url", fake_paste)
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # the paste flow completes the join
+
+    bundle = api_keys.load_codex_bundle()
+    assert bundle is not None and bundle.access_token == access
+
+
+def test_remote_join_api_codex_port_taken_with_no_terminal_names_the_flag(monkeypatch, tmp_path, capsys):
+    """Same collision on a box with no terminal to paste into: there is nothing to fall back TO. It
+    ends with the cause named (that port belongs to the Codex apps too) and the flag that would have
+    worked — not a traceback, and not a silent hang on a port we never got."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("no code, no exchange"))
+    _callback_port_taken(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    assert "--no-browser" in str(exc.value)
+    err = capsys.readouterr().err
+    assert "1455" in err and "Codex" in err  # the cause, so the operator knows what to close
+    from remote import api_keys
+    assert api_keys.load_codex_bundle() is None
+
+
+def test_remote_join_api_codex_refuses_a_redirect_from_a_foreign_sign_in(monkeypatch, tmp_path):
+    """`state`, end to end. Anything else on the box can reach the loopback callback and post a code
+    from its OWN authorize session; the token that code buys is genuinely signed, so no downstream
+    check catches it. This wiring is the only thing that does — and a `sign_in` that generated a
+    state but compared against the wrong one would pass every unit test in isolation."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    _mock_codex_browser(monkeypatch, code="INJECTED-CODE", state="attacker-state")
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("an injected code is never spent"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    assert "state" in str(exc.value).lower()
+    assert "INJECTED-CODE" not in str(exc.value)
+    assert api_keys.load_codex_bundle() is None
+    assert not paths.api_keys_file().exists()  # nothing stored at all
+
+
+def test_remote_join_api_codex_never_touches_the_real_codex_cli_credential(monkeypatch, tmp_path):
+    """ADR 0015 D-c / user story 6: `~/.codex/auth.json` is never read or written. Not once.
+
+    Adopting the real Codex CLI's bundle would look like a free sign-in and then double-spend its
+    single-use, rotating refresh token — revoking the operator's actual Codex seat. Grid runs its own
+    authorization from scratch instead, and keeps its own bundle.
+
+    A tripwire rather than a grep over the source: it catches any route into that file, including one
+    a later refactor adds through a helper nobody thought to check.
+    """
+    import builtins
+    import pathlib
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    _mock_codex_exchange(monkeypatch)
+    _mock_codex_browser(monkeypatch)
+
+    real_open, real_path_open = builtins.open, pathlib.Path.open
+    touched = []
+
+    def guard(path):
+        if "/.codex/" in str(path) or str(path).endswith("/.codex"):
+            touched.append(str(path))
+
+    def fake_open(file, *a, **k):
+        guard(file)
+        return real_open(file, *a, **k)
+
+    def fake_path_open(self, *a, **k):
+        guard(self)
+        return real_path_open(self, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(pathlib.Path, "open", fake_path_open)
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # the whole join, sign-in through spawn
+
+    assert touched == []
+
+
+def test_remote_join_api_codex_reuses_a_stored_seat_with_no_sign_in(monkeypatch, tmp_path, capsys):
+    """Acceptance: a later join reuses the stored bundle without re-auth (user story 15 —
+    `grid leave --engine codex` then re-joining is one command). Nothing opens, nothing binds,
+    nothing is pasted, and the token endpoint is never touched: the seat is already ours. The
+    ONE vendor call is the free probe (this box has no live codex engine, so the spec changed
+    and D-f says probe)."""
+    import webbrowser
+
+    from remote import api_keys, codex_callback
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_bundle())
+    monkeypatch.setattr(webbrowser, "open", lambda url: pytest.fail("a stored seat needs no browser"))
+    monkeypatch.setattr(codex_callback, "listen",
+                        lambda port, **kw: pytest.fail("a stored seat binds nothing"))
+    monkeypatch.setattr(
+        cli.codex_signin, "_prompt_redirect_url", lambda: pytest.fail("a stored seat is not re-pasted")
+    )
+
+    def vendor(request):
+        if "/oauth/token" in str(request.url):
+            pytest.fail("a stored seat is not re-exchanged")
+        return httpx.Response(200, json={"models": [{"slug": "gpt-5.5", "visibility": "list"}]})
+
+    _mock_probe(monkeypatch, vendor)
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert api_keys.load_codex_bundle() == _bundle()  # untouched, not re-minted
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["codex:gpt-5.5"]  # tier row ∩ what the seat actually has
+    out_err = capsys.readouterr()
+    assert "at-1" not in out_err.out + out_err.err and "rt-1" not in out_err.out + out_err.err
+
+
+def test_remote_join_api_codex_stored_seat_probes_and_serves_the_tier_set(monkeypatch, tmp_path, capsys):
+    """The tracer join (issue 05): a stored free seat, no -m. ONE free probe (`GET {base}/models`
+    with the seat's bearer + account-id header) proves reachability and the entitled set; the
+    advertised set is the tier row ∩ the seat's live set, namespaced `codex:*`; the record's spec
+    is kind-generic (endpoint_url/models/engine_label/api_kind — never a token, never the account
+    id); the serve process spawns. A populated, verified tier draws NO tier warning."""
+    from remote import api_keys
+    from shared import run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+        {"slug": "gpt-5.6-luna", "visibility": "list"},
+        {"slug": "gpt-5.5", "visibility": "list"},
+        {"slug": "gpt-5.4-mini", "visibility": "list"},
+        {"slug": "codex-auto-review", "visibility": "hide"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert seen["calls"] == 1  # exactly one vendor call: the free probe
+    assert seen["url"].startswith("https://chatgpt.com/backend-api/codex/models?client_version=")
+    assert seen["headers"]["authorization"] == "Bearer tok-access"
+    assert seen["headers"]["chatgpt-account-id"] == "acct-1"
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["engines"] == [{
+        "endpoint_url": "https://chatgpt.com/backend-api/codex",
+        "models": ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna", "codex:gpt-5.5", "codex:gpt-5.4-mini"],
+        "engine_label": "codex",
+        "api_kind": "codex",
+    }]
+    assert record["models"] == record["engines"][0]["models"]
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    # Secret hygiene: the bearer and the account id reach no record and no terminal output.
+    record_text = run_records.record_path("n1", "remote").read_text()
+    assert "tok-access" not in record_text and "acct-1" not in record_text
+    out_err = capsys.readouterr()
+    assert "tok-access" not in out_err.out + out_err.err
+    assert "acct-1" not in out_err.out + out_err.err
+    assert "Warning" not in out_err.err  # a verified populated tier draws no tier warning
+
+
+def test_remote_join_api_codex_tier_selects_the_row_and_warns_per_degrade_case(monkeypatch, tmp_path, capsys):
+    """D-f row selection + the issue's mandated warn-log, with a synthetic second tier (the real
+    table has only `free`, so a bigger `plus` row is the only way to SEE selection — review L3).
+    Four seats, four outcomes:
+
+      * plus (populated row)   → the plus row, NO tier line at all
+      * None (vendor silent)   → minimal row + "Warning:" — the alarm the issue amendment demands:
+                                 a vendor claim-rename must not silently downgrade seats forever
+      * banana (unrecognized)  → minimal row + "Warning:" (vendor vocabulary drift)
+      * go (known, unverified) → minimal row + an info line that is NOT a warning
+    """
+    from remote import api_keys
+
+    free_row = api_catalog.CODEX_TIER_MODELS["free"][:2]
+    plus_row = api_catalog.CODEX_TIER_MODELS["free"]
+    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free_row, "plus": plus_row})
+    listing = {"models": [{"slug": e.vendor_name, "visibility": "list"} for e in plus_row]}
+
+    cases = [
+        ("plus", 4), (None, 2), ("banana", 2), ("go", 2),
+    ]
+    errs = {}
+    for plan, expected_count in cases:
+        home = tmp_path / f"case-{plan}"
+        _seed_running_remote_grid(monkeypatch, home)
+        _mock_remote_spawn(monkeypatch)
+        api_keys.store_codex_bundle(_codex_bundle(plan_type=plan))
+        _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=listing))
+
+        assert cli.main(["join", "--api", "codex"]) == 0
+
+        record = cli.provider._read_records("n1")["remote"]
+        assert len(record["models"]) == expected_count, f"plan={plan!r}"
+        errs[plan] = capsys.readouterr().err
+
+    assert "Warning" not in errs["plus"] and "isn't verified" not in errs["plus"]
+    assert "Warning:" in errs[None] and "no subscription tier" in errs[None]
+    assert "newer grid release" in errs[None]  # the recovery hint — this case may be OUR staleness
+    assert "Warning:" in errs["banana"]
+    assert "recognize" in errs["banana"]
+    assert "Warning:" not in errs["go"]  # known tier, merely unverified — informational only
+    assert "isn't verified" in errs["go"] and "'go'" in errs["go"]
+
+
+def test_remote_join_api_codex_explicit_model_errors_name_what_is_available(monkeypatch, tmp_path):
+    """D5's explicit--m semantics: an explicit ask is REFUSED, never silently narrowed (the
+    deliberate divergence from openai's skip — a personal seat asked for a model it lacks
+    deserves a refusal). Outside the tier row → the tier's verified list is named (D-f bounds
+    advertising to the verified row whatever the seat has); in the row but not on the seat →
+    what the seat CAN serve is named, and the message never claims the seat "serves none" when
+    it demonstrably serves others. Nothing spawns on either."""
+    from remote import api_keys
+
+    # Synthetic split (review L3): the union whitelist keeps all 4 entries, the tier row shrinks
+    # to 2 — the only way a union-valid, tier-invalid name can exist while only `free` is real.
+    free_row = api_catalog.CODEX_TIER_MODELS["free"][:2]  # terra, luna
+    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free_row})
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+    ]}))
+
+    # -m outside the tier row (but inside the union whitelist): the tier bound refuses it.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.5"])
+    msg = str(exc.value)
+    assert "codex:gpt-5.5" in msg and "'free'" in msg
+    assert "codex:gpt-5.6-terra" in msg and "codex:gpt-5.6-luna" in msg  # the tier's verified list
+
+    # -m inside the tier row but absent from the live seat: name what IS available, truthfully.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-luna"])
+    msg = str(exc.value)
+    assert "codex:gpt-5.6-luna" in msg
+    assert "codex:gpt-5.6-terra" in msg   # the seat CAN serve this...
+    assert "serves none" not in msg       # ...so "serves none" would be a lie
+
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_codex_identical_rejoin_is_noop_with_zero_vendor_calls(monkeypatch, tmp_path, capsys):
+    """Acceptance (issue 05): re-running an identical join is a no-op that performs ZERO vendor
+    calls — same credential, no new models ⇒ nothing a probe could inform (D-f: the probe runs
+    only when the credential or the engine spec actually changed). The openai path probes before
+    the no-op gate; codex must not."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # first join probes and spawns
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "an identical re-join must perform zero vendor calls"
+    ))
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # identical → no-op, no probe
+    # A -m subset of what's already served is equally unchanged (narrowing is leave-then-rejoin).
+    assert cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.5"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("nothing to append") == 2
+    assert terminated == []
+
+
+def test_remote_join_api_codex_adding_a_model_probes_once_and_hot_reloads(monkeypatch, tmp_path):
+    """A -m beyond the live union IS a spec change: exactly one fresh probe runs and the union
+    hot-reloads in place (SIGHUP, zero-drop — the openai append precedent)."""
+    import signal as _sig
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    api_keys.store_codex_bundle(_codex_bundle())
+    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+        {"slug": "gpt-5.6-luna", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-terra"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-luna"]) == 0  # a NEW model
+
+    assert seen["calls"] == 2  # one probe per CHANGED join — never more
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna"]
+    assert (4242, _sig.SIGHUP) in spawned["signals"]  # hot-reloaded, zero-drop
+    assert terminated == []
+
+
+def test_remote_join_api_codex_fresh_signin_onto_live_seat_respawns(monkeypatch, tmp_path, capsys):
+    """A fresh sign-in while a codex engine is live is a credential rotation: the identity
+    RESPAWNS (openai key-rotation policy — operator certainty that the new seat is live), never
+    a silent no-op, never SIGHUP."""
+    import signal as _sig
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    # The stored seat vanishes (e.g. the operator wiped it) — the re-join signs in fresh.
+    monkeypatch.setattr(api_keys, "load_codex_bundle", lambda: None)
+    _mock_codex_exchange(monkeypatch, models=["gpt-5.5"])  # answers the token endpoint AND the probe
+    _mock_codex_browser(monkeypatch)
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert terminated == [4242]                           # stopped the stale-seat process...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
+    assert "restarting the engine" in capsys.readouterr().out
+
+
+def test_chat_refuses_codex_models_client_side_in_both_modes(monkeypatch, tmp_path):
+    """Issue 05 consumer clarity: a `codex:*` model serves the vendor's `responses` endpoint, and
+    `grid chat` (chat/completions) can NEVER call it — codex traffic is never translated (ADR
+    0015 D-b). Refused before ANY network call in both modes — before the local grid lookup and
+    before the remote sign-in gate (a signed-out box still gets THIS message, not "not signed
+    in") — naming the client to use instead. Other namespaces flow past untouched."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "the codex refusal must precede any network call"
+    ))
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail(
+        "the codex refusal must precede any network call"
+    ))
+
+    for argv in (
+        ["chat", "-m", "codex:gpt-5.5", "hi"],              # local mode (the default)
+        ["--remote", "chat", "-m", "codex:gpt-5.5", "hi"],  # remote, signed out — still THIS message
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        msg = str(exc.value)
+        assert "responses" in msg and "grid chat" in msg, argv
+        assert "Codex" in msg  # which client to use instead
+        assert "grid info --env" in msg  # where its base URL comes from
+        assert "not signed in" not in msg.lower()
+
+    # A chat kind's namespace is untouched: openai:* flows past the guard (and this empty home
+    # then fails it later for an unrelated, non-responses reason).
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["chat", "-m", "openai:gpt-5.5", "hi"])
+    assert "responses" not in str(exc.value)
+
+
+def test_remote_join_api_codex_probe_failure_spawns_and_stores_nothing(monkeypatch, tmp_path):
+    """Acceptance: every probe-failure class ends with no record written and nothing spawned. The
+    OAuth bundle itself deliberately SURVIVES — it is the operator's credential, not this join's
+    state, and a vendor outage or rate-limit must not force a re-auth."""
+    from remote import api_keys
+
+    for status in (429, 503, 400):
+        home = tmp_path / f"case-{status}"
+        _seed_running_remote_grid(monkeypatch, home)
+        spawned = _mock_remote_spawn(monkeypatch)
+        api_keys.store_codex_bundle(_codex_bundle())
+        _mock_probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"detail": "d"}))
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["join", "--api", "codex"])
+
+        assert "Nothing was joined." in str(exc.value), f"status={status}"
+        assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+        assert api_keys.load_codex_bundle() is not None  # the credential survives a failed join
+
+
+def test_remote_join_api_codex_dead_stored_seat_offers_one_fresh_signin(monkeypatch, tmp_path, capsys):
+    """D6 — the PRD's sign-in inline "when the stored one is dead". A STORED seat the vendor
+    rejects gets exactly ONE fresh sign-in and one re-probe on an interactive run; without this,
+    every re-join would load the same dead bundle and fail forever (there is no other re-sign-in
+    verb). The fresh seat then serves."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+
+    fresh_access = _codex_jwt(
+        {"chatgpt_account_id": "acct-2", "chatgpt_plan_type": "free"}, exp=2_000_000_000
+    )
+    calls = {"probes": 0}
+
+    def vendor(request):
+        if "/oauth/token" in str(request.url):
+            return httpx.Response(200, json={
+                "id_token": "id", "access_token": fresh_access, "refresh_token": "rt-2",
+            })
+        calls["probes"] += 1
+        if request.headers.get("authorization") == "Bearer tok-access":  # the dead stored seat
+            return httpx.Response(401, json={"detail": "denied"})
+        return httpx.Response(200, json={"models": [{"slug": "gpt-5.5", "visibility": "list"}]})
+
+    _mock_probe(monkeypatch, vendor)
+    _mock_codex_browser(monkeypatch)
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert calls["probes"] == 2  # the dead probe + exactly one retry
+    assert api_keys.load_codex_bundle().account_id == "acct-2"  # the fresh seat replaced the dead one
+    err = capsys.readouterr().err
+    assert "rejected" in err and "sign-in" in err  # the operator saw why a browser opened
+    assert cli.provider._read_records("n1")["remote"]["models"] == ["codex:gpt-5.5"]
+
+
+def test_remote_join_api_codex_rejected_seat_non_interactive_is_terminal(monkeypatch, tmp_path):
+    """The same dead seat on a non-TTY run cannot re-sign-in: the auth-class taxonomy message
+    ends the join — nothing spawned — and points recovery at an interactive run."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
+    _mock_probe(monkeypatch, lambda request: httpx.Response(401, json={"detail": "denied"}))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    msg = str(exc.value)
+    assert "401" in msg and "Nothing was joined." in msg
+    assert "interactive" in msg  # where recovery lives
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_codex_fresh_seat_rejected_is_terminal_not_a_loop(monkeypatch, tmp_path):
+    """A seat that fails auth seconds after a successful fresh sign-in is NOT retried with
+    another sign-in — that loop would never converge. One sign-in, one probe, terminal."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+
+    access = _codex_jwt(
+        {"chatgpt_account_id": "acct-1", "chatgpt_plan_type": "free"}, exp=2_000_000_000
+    )
+    calls = {"exchanges": 0}
+
+    def vendor(request):
+        if "/oauth/token" in str(request.url):
+            calls["exchanges"] += 1
+            return httpx.Response(200, json={
+                "id_token": "id", "access_token": access, "refresh_token": "rt-1",
+            })
+        return httpx.Response(401, json={"detail": "denied"})
+
+    _mock_probe(monkeypatch, vendor)
+    _mock_codex_browser(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    assert "401" in str(exc.value)
+    assert calls["exchanges"] == 1  # exactly one sign-in — never a sign-in loop
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_codex_probe_all_hidden_listing_is_empty_not_drift(monkeypatch):
+    """(silent-failure review #1) A listing whose rows ALL carry visibility:"hide" parsed
+    perfectly — it is an empty SEAT (a legitimate vendor state), not contract drift: () comes
+    back and the join's selection layer then says truthfully that the seat serves nothing. The
+    old discriminator sent all-hidden operators chasing a grid upgrade that doesn't exist. Only
+    a non-empty listing with NO readable slug anywhere is drift."""
+    slugs, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "codex-auto-review", "visibility": "hide"},
+        {"slug": "under-review-model", "visibility": "hide"},
+    ]}))
+    assert slugs == ()
+
+
+def test_remote_join_api_codex_hidden_models_never_advertised_even_if_the_flag_renames(monkeypatch, tmp_path):
+    """(silent-failure review #1, containment pin) If the vendor renames `visibility` the hide
+    filter no-ops — fails OPEN. What actually bounds advertising is the verified tier row: a
+    model absent from it (codex-auto-review) can never be advertised whatever the live listing
+    says. This test pins that containment so the filter stays defence-in-depth, not the wall."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "codex-auto-review", "visible": "hidden"},  # renamed flag → filter can't see it
+        {"slug": "gpt-5.5", "visible": "listed"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["models"] == ["codex:gpt-5.5"]
+
+
+def test_remote_join_api_codex_rejoin_warns_again_while_tier_is_degraded(monkeypatch, tmp_path, capsys):
+    """(silent-failure review #4) The mandated tier warn fires on EVERY join — including the
+    zero-vendor-call no-op re-join — while the degraded condition persists. A seat stuck at
+    plan_type=None must not warn once at the first join and then never again for the life of
+    the seat: habitual re-joins (reboots, timers) would otherwise never resurface it, which is
+    exactly the silent decay the issue's amendment exists to prevent."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle(plan_type=None))
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+    assert "no subscription tier" in capsys.readouterr().err  # join #1 warns
+
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "a no-op re-join still performs zero vendor calls"
+    ))
+    for _ in range(2):
+        assert cli.main(["join", "--api", "codex"]) == 0
+        err = capsys.readouterr().err
+        assert "Warning:" in err and "no subscription tier" in err  # ...and still warns
+
+
+def test_remote_join_api_codex_noop_requires_the_current_backend_url(monkeypatch, tmp_path):
+    """(silent-failure review #3a) The no-op precheck holds only while the live spec's
+    endpoint_url matches the CURRENT catalog base_url. A release that moves the codex backend
+    must not be echoed away by "nothing to append" forever — and it must not silently union two
+    codex engines either (`_spec_key` keys by URL, so merge would APPEND the new-URL spec beside
+    the old). The mismatch is refused loudly with the leave-then-rejoin remedy, offline."""
+    import dataclasses
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # joined against the old base_url
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    moved = dataclasses.replace(
+        api_catalog.WHITELISTS["codex"], base_url="https://chatgpt.com/backend-api/codex-v2"
+    )
+    monkeypatch.setitem(api_catalog.WHITELISTS, "codex", moved)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "the URL-mismatch refusal is offline — no probe against either URL"
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    msg = str(exc.value)
+    assert "grid leave --engine codex" in msg  # the remedy
+    record = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in record["engines"]] == ["https://chatgpt.com/backend-api/codex"]
+
+
+def test_codex_bundle_load_refuses_a_header_unsafe_account_id(monkeypatch, tmp_path):
+    """(security review) The account id is spent as an HTTP header value, and httpx will happily
+    send CRLF in one (facts.md B5b). `decode_seat` guards the SIGN-IN path; this guards the LOAD
+    path — the one every re-join takes — so the header-safety property travels with the store
+    instead of living in one caller three hops upstream. An unusable entry reads as "not signed
+    in" (None): a state the join fixes by signing in fresh, exactly like a half-written bundle."""
+    from remote import api_keys, credentials
+    from shared import paths
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    for hostile in ("acct-a\r\nX-Injected: pwned", "acct-\x00nul", "   ", ""):
+        credentials.atomic_write_toml(paths.api_keys_file(), {"codex": {
+            "access_token": "at", "refresh_token": "rt",
+            "account_id": hostile, "last_refresh": 1,
+        }})
+        assert api_keys.load_codex_bundle() is None, repr(hostile)
+
+    # The guard rejects unusable ids, not usable ones: a normal entry still loads.
+    credentials.atomic_write_toml(paths.api_keys_file(), {"codex": {
+        "access_token": "at", "refresh_token": "rt", "account_id": "acct-ok", "last_refresh": 1,
+    }})
+    loaded = api_keys.load_codex_bundle()
+    assert loaded is not None and loaded.account_id == "acct-ok"
+
+
+def test_remote_leave_codex_survivor_respawns_for_concurrency_flip(monkeypatch, tmp_path):
+    """(code review) The leave direction of the codex concurrency flip: dropping the codex seat
+    from a codex+openai union (pinned to 1) leaves an API-only survivor whose default is 8 — the
+    shrink must RESPAWN so the pool can grow (a SIGHUP would keep the live pool of 1, silently
+    serving 8x fewer concurrent requests than advertised)."""
+    import signal as _sig
+
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "https://chatgpt.com/backend-api/codex", "models": ["codex:gpt-5.5"],
+         "engine_label": "codex", "api_kind": "codex"},
+        {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+         "engine_label": "openai", "api_kind": "openai"},
+    ])
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", "codex"]) == 0
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["https://api.openai.com/v1"]
+    assert terminated == [4242]                           # respawned so the pool can grow to 8...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...not left at 1 by a hot-reload
+
+
+def test_remote_join_api_key_path_refuses_a_kind_that_names_no_env_var(monkeypatch, tmp_path):
+    """The twin of the bug that already bit at `_api_bearers`, in the join's key path.
+
+    `env_var` is `str | None` now, so `os.environ.get(whitelist.env_var)` is a `TypeError` for any
+    kind that doesn't name one — an unhandled traceback, not this repo's clean-SystemExit contract.
+    Unreachable today (codex routes to `_resolve_codex_targets` first, and
+    `test_api_whitelist_key_kinds_name_their_env_var` forces every OTHER kind to name one), which is
+    exactly what makes it a landmine: the next credential-less kind trips it, and nothing before this
+    test would have caught it. `require_bearer` already guards its side; this mirrors it.
+    """
+    from shared.models import api_catalog
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("no credential, no vendor call"))
+    # A second OAuth-shaped kind, as issue 04 leaves the door open for — entries present (so the
+    # `-m` guard passes) but no env var to read a key from.
+    monkeypatch.setitem(api_catalog.WHITELISTS, "futurekind", api_catalog.ApiWhitelist(
+        last_verified="2026-07-15",
+        base_url="https://future.example",
+        entries=(api_catalog.ApiModelEntry(
+            vendor_name="m1", context_window=1000, supports_tools=False, supports_vision=False,
+            supports_json_mode=False, supports_structured_outputs=False,
+        ),),
+        env_var=None,
+    ))
+
+    with pytest.raises(SystemExit) as exc:  # not TypeError
+        cli.main(["join", "--api", "futurekind"])
+
+    assert "futurekind" in str(exc.value)
+    assert "None" not in str(exc.value)  # never interpolate the absent env var's name
+    assert cli.provider._read_records("n1") == {}
+
+
+def test_remote_join_no_browser_says_so_when_it_cannot_apply(monkeypatch, tmp_path, capsys):
+    """`--no-browser` only means anything for the codex OAuth sign-in. Everywhere else it is inert,
+    and this repo says so rather than swallowing it — the same courtesy `--pricing-input` and
+    `--engine-label` already get. A flag that silently does nothing teaches the operator it worked.
+
+    Note rather than error: it is a no-op, not a conflict, and failing the join over an inert flag
+    would be worse than the silence.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--serve", "m", "--no-browser"]) == 0
+
+    err = capsys.readouterr().err
+    assert "--no-browser" in err and "--api codex" in err
+
+
+def test_remote_join_no_browser_is_silent_where_it_does_apply(monkeypatch, tmp_path, capsys):
+    """... and the note must NOT fire on the one command the flag is for. A warning that cries wolf
+    on correct usage is worse than no warning."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_bundle())  # stored seat: no sign-in, no prompt needed
+
+    with pytest.raises(SystemExit):  # the model table is issue 05's
+        cli.main(["join", "--api", "codex", "--no-browser"])
+
+    assert "--no-browser" not in capsys.readouterr().err
 
 
 def test_remote_join_member_falls_back_to_bundle_url_when_status_forbidden(monkeypatch, tmp_path):
@@ -4417,6 +6688,261 @@ def test_probe_tok_s_from_response_extracts_or_none():
 
 
 # ---------------------------------------------------------------------------
+# codex refresh CAS (remote/api_keys.rotate_codex_bundle — ADR 0015 D-d, issue 06)
+# Real store + real flock on GRID_HOME=tmp_path; the vendor is always MockTransport.
+# ---------------------------------------------------------------------------
+
+def _raw_codex_entry():
+    """The codex TOML table as written — for asserting journal presence, which
+    `load_codex_bundle` deliberately does not surface."""
+    from remote import credentials
+
+    return credentials.load_toml(paths.api_keys_file()).get("codex") or {}
+
+
+def test_codex_rotate_journals_before_the_exchange_and_persist_clears_it(monkeypatch, tmp_path):
+    """ADR 0015 D-d's crash-window discipline: the in-flight exchange is journaled BEFORE the
+    vendor call (a kill after the vendor rotates but before we persist must be detectable), and
+    the new bundle is persisted the moment it returns — a wholesale replace, so the journal
+    field vanishes with no cleanup code to forget."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=2_000_000_000)
+
+    def vendor(request):
+        assert "refresh_pending_since" in _raw_codex_entry()  # journaled before the network call
+        return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+
+    _mock_vendor(monkeypatch, vendor)
+
+    fresh = api_keys.rotate_codex_bundle("tok-access")
+
+    assert fresh.access_token == new_access and fresh.refresh_token == "rt-2"
+    assert api_keys.load_codex_bundle() == fresh  # persisted immediately, not held in memory
+    assert "refresh_pending_since" not in _raw_codex_entry()  # the wholesale replace cleared it
+
+
+def test_codex_rotate_adopts_a_fresher_store_without_spending(monkeypatch, tmp_path):
+    """The loser's half of the CAS: the store already holds a token fresher than the one that just
+    401ed, so another process rotated first — adopt it and spend NOTHING (the refresh token is
+    single-use; a second exchange would revoke the seat)."""
+    from remote import api_keys, codex_oauth
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    winner = codex_oauth.CodexBundle(
+        access_token="tok-access-2", refresh_token="tok-refresh-2", account_id="acct-1",
+        plan_type="free", last_refresh=1_700_000_000,
+    )
+    api_keys.store_codex_bundle(winner)
+    _mock_vendor(monkeypatch, lambda request: pytest.fail("the loser must never reach the vendor"))
+
+    adopted = api_keys.rotate_codex_bundle("tok-access-STALE")
+
+    assert adopted == winner
+    assert "refresh_pending_since" not in _raw_codex_entry()  # adopt writes nothing
+
+
+def test_codex_rotate_two_concurrent_refreshers_spend_one_exchange(monkeypatch, tmp_path):
+    """AC 4, on the REAL file lock: each `file_lock` acquisition opens its own fd, so two threads
+    genuinely contend like two processes do. The winner journals + exchanges + persists under the
+    lock; the loser blocks, re-reads, sees the fresher token, and adopts — exactly ONE vendor
+    exchange for N racers."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=2_000_000_000)
+    exchanges = []
+
+    def vendor(request):
+        exchanges.append(1)
+        time.sleep(0.2)  # hold the winner in the exchange so the loser really blocks on the flock
+        return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+
+    _mock_vendor(monkeypatch, vendor)
+    results, errors = [], []
+
+    def racer():
+        try:
+            results.append(api_keys.rotate_codex_bundle("tok-access"))
+        except Exception as exc:  # surfaced below — a hang would be worse than a raise
+            errors.append(exc)
+
+    threads = [threading.Thread(target=racer, daemon=True) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert errors == []
+    assert len(exchanges) == 1  # one vendor exchange; the loser adopted
+    assert [r.access_token for r in results] == [new_access, new_access]
+    assert api_keys.load_codex_bundle().access_token == new_access
+
+
+def test_codex_rotate_reports_an_interrupted_rotation_when_a_journal_was_left_behind(monkeypatch, tmp_path):
+    """AC 6: a kill between the journal write and the persist leaves `refresh_pending_since` on
+    disk. The NEXT attempt that the vendor refuses must say so — `interrupted=True` is what turns
+    "the vendor said no" into "a previous rotation was lost; sign in again" instead of a silent
+    zombie. The journal stays (only a persisted bundle resolves the doubt) and the stored bundle
+    is untouched."""
+    from remote import api_keys, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    # Simulate the kill: a journal from a dead attempt, planted exactly as the CAS writes it.
+    data = credentials.load_toml(paths.api_keys_file())
+    credentials.atomic_write_toml(
+        paths.api_keys_file(),
+        {**data, "codex": {**data["codex"], "refresh_pending_since": 1_700_000_000}},
+    )
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(400, json={"error": "invalid_grant"}))
+
+    with pytest.raises(api_keys.CodexRotationRefused) as caught:
+        api_keys.rotate_codex_bundle("tok-access")
+
+    assert caught.value.interrupted is True
+    assert caught.value.status_code == 400
+    assert "refresh_pending_since" in _raw_codex_entry()  # still unresolved — keeps re-diagnosing
+    assert api_keys.load_codex_bundle() == _codex_bundle()  # the stored bundle is untouched
+
+
+def test_codex_rotate_refusal_without_a_journal_is_not_interrupted(monkeypatch, tmp_path):
+    """The plain dead-seat case (revoked, signed out elsewhere): the vendor refuses but no prior
+    exchange died mid-flight — `interrupted` must be False, or every refusal would carry the
+    scarier lost-rotation diagnosis and the operator could not tell the two apart.
+
+    And it must STAY False on every subsequent refusal: a definitive refusal is a completed
+    attempt, so it withdraws its OWN journal — left behind, attempt 1's pre-call journal write
+    would become attempt 2's "a prior exchange died" evidence, and a stably-dead seat would be
+    misdiagnosed as a lost rotation from the second refusal onward, forever (silent-failure
+    review). `interrupted` means exactly "an exchange died between the vendor call and the
+    persist" — nothing here died."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(401, json={}))
+
+    with pytest.raises(api_keys.CodexRotationRefused) as caught:
+        api_keys.rotate_codex_bundle("tok-access")
+    assert caught.value.interrupted is False
+    assert "refresh_pending_since" not in _raw_codex_entry()  # a completed attempt cleans up
+
+    with pytest.raises(api_keys.CodexRotationRefused) as caught:
+        api_keys.rotate_codex_bundle("tok-access")  # the same dead seat, one cooldown later
+    assert caught.value.interrupted is False  # still a plain refusal — not self-poisoned
+
+
+def test_codex_journal_is_cleared_by_any_persisted_bundle_and_never_affects_loading(monkeypatch, tmp_path):
+    """The journal's whole lifecycle rides the wholesale replace: a successful rotation clears it
+    (pinned in the tracer test), a fresh sign-in (`store_codex_bundle`) clears it, and
+    `load_codex_bundle` never even sees it — a journaled entry still loads as a valid bundle, so
+    a leftover journal can never lock an operator out of their own seat."""
+    from remote import api_keys, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    data = credentials.load_toml(paths.api_keys_file())
+    credentials.atomic_write_toml(
+        paths.api_keys_file(),
+        {**data, "codex": {**data["codex"], "refresh_pending_since": 1_700_000_000}},
+    )
+
+    assert api_keys.load_codex_bundle() == _codex_bundle()  # journaled entry loads fine
+
+    api_keys.store_codex_bundle(_codex_bundle(plan_type="plus"))  # the re-sign-in path
+
+    assert "refresh_pending_since" not in _raw_codex_entry()  # replace=True dropped it
+    assert api_keys.load_codex_bundle().plan_type == "plus"
+
+
+def test_codex_rotate_clears_its_own_journal_when_the_request_never_left(monkeypatch, tmp_path):
+    """A connect failure means the exchange provably never left this machine — nothing was spent,
+    so OUR journal is withdrawn before re-raising. Left behind, it would sharpen a WRONG
+    "rotation was lost" diagnosis out of an ordinary offline blip. An AMBIGUOUS failure
+    (`ReadTimeout` — the grant may have reached the vendor) keeps the journal, truthfully."""
+    from remote import api_keys, codex_oauth
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+
+    def connect_error(request):
+        raise httpx.ConnectError("offline", request=request)
+
+    _mock_vendor(monkeypatch, connect_error)
+    with pytest.raises(codex_oauth.RefreshUnavailable):
+        api_keys.rotate_codex_bundle("tok-access")
+    assert "refresh_pending_since" not in _raw_codex_entry()  # withdrawn — nothing was spent
+
+    def read_timeout(request):
+        raise httpx.ReadTimeout("mid-flight", request=request)
+
+    _mock_vendor(monkeypatch, read_timeout)
+    with pytest.raises(codex_oauth.RefreshUnavailable):
+        api_keys.rotate_codex_bundle("tok-access")
+    assert "refresh_pending_since" in _raw_codex_entry()  # ambiguous — the doubt is real, keep it
+
+
+def test_codex_rotate_never_withdraws_a_journal_it_did_not_write(monkeypatch, tmp_path):
+    """Withdrawal is scoped to the attempt's OWN journal: a journal left by an EARLIER crash is
+    someone's unresolved doubt, and neither a connect failure (spent nothing, resolved nothing)
+    nor a clean refusal may erase it — that would downgrade the next refusal's diagnosis from
+    "a rotation was lost" to a plain revocation (python review). Only a persisted bundle — a
+    rotation or a re-sign-in — resolves it."""
+    from remote import api_keys, codex_oauth, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    data = credentials.load_toml(paths.api_keys_file())
+    credentials.atomic_write_toml(
+        paths.api_keys_file(),
+        {**data, "codex": {**data["codex"], "refresh_pending_since": 1_700_000_000}},
+    )
+
+    def connect_error(request):
+        raise httpx.ConnectError("offline", request=request)
+
+    _mock_vendor(monkeypatch, connect_error)
+    with pytest.raises(codex_oauth.RefreshUnavailable):
+        api_keys.rotate_codex_bundle("tok-access")
+    assert "refresh_pending_since" in _raw_codex_entry()  # the earlier crash's doubt survives
+
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(400, json={"error": "invalid_grant"}))
+    with pytest.raises(api_keys.CodexRotationRefused) as caught:
+        api_keys.rotate_codex_bundle("tok-access")
+    assert caught.value.interrupted is True  # the crash's diagnosis, intact through the blip
+    assert "refresh_pending_since" in _raw_codex_entry()  # and it keeps resurfacing
+
+
+def test_codex_rotate_guards_the_empty_store_and_the_shutdown_race(monkeypatch, tmp_path):
+    """Two refusals that must spend NOTHING: a store with no seat (signed out mid-serve) raises
+    `CodexNotSignedIn`; a shutdown that wins the race to the lock raises `RotationAbandoned` with
+    no journal written — the drain invariant is 'flag unset ⇒ nothing was spent AND nothing will
+    be', and a journal written after stop would break its second half."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_vendor(monkeypatch, lambda request: pytest.fail("neither guard may reach the vendor"))
+
+    with pytest.raises(api_keys.CodexNotSignedIn):
+        api_keys.rotate_codex_bundle("tok-access")  # empty store
+
+    api_keys.store_codex_bundle(_codex_bundle())
+    stopping = threading.Event()
+    stopping.set()
+    flag = threading.Event()
+
+    with pytest.raises(api_keys.RotationAbandoned):
+        api_keys.rotate_codex_bundle("tok-access", exchange_in_flight=flag, abandon=stopping)
+
+    assert not flag.is_set()  # cleared in the finally, abandon path included
+    assert "refresh_pending_since" not in _raw_codex_entry()  # no journal after stop, ever
+
+
+# ---------------------------------------------------------------------------
 # Remote serve loop (remote/serve.py)
 # ---------------------------------------------------------------------------
 
@@ -5352,6 +7878,107 @@ def test_api_key_store_preserves_other_kinds(monkeypatch, tmp_path):
     assert api_keys.load_key("other") == "sk-other"  # ...leaves the sibling intact
 
 
+def _bundle(**overrides):
+    from remote.codex_oauth import CodexBundle
+
+    return CodexBundle(**{
+        "access_token": "at-1", "refresh_token": "rt-1", "account_id": "acct-1",
+        "plan_type": "free", "last_refresh": 1_700_000_000, **overrides,
+    })
+
+
+def test_codex_bundle_round_trips_through_the_store_beside_an_openai_key(monkeypatch, tmp_path):
+    """ADR 0015 D-c: the OAuth bundle lives under the `codex` kind in the SAME store as vendor API
+    keys — one file, 0o600, the one hardened atomic writer. The two kinds' shapes differ (one string
+    vs a rotating bundle) but their entries stay independent, in both directions."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_key("openai", "sk-openai")
+    api_keys.store_codex_bundle(_bundle())
+
+    assert api_keys.load_codex_bundle() == _bundle()
+    assert api_keys.load_key("openai") == "sk-openai"  # writing codex left the sibling alone
+
+    key_file = paths.api_keys_file()
+    assert (key_file.stat().st_mode & 0o777) == 0o600
+    data = tomllib.loads(key_file.read_text())
+    assert data["openai"] == {"key": "sk-openai"}  # ... byte-for-byte, not merely present
+    assert data["codex"]["account_id"] == "acct-1"
+
+    # ... and the reverse: rotating openai's key leaves the whole codex bundle intact.
+    api_keys.store_key("openai", "sk-openai-2")
+    assert api_keys.load_codex_bundle() == _bundle()
+
+
+def test_codex_bundle_survives_a_tier_the_token_never_stated(monkeypatch, tmp_path):
+    """`plan_type` is None when the token doesn't say, and TOML has no null — so a naive write either
+    raises or drops the key. It must round-trip as None, because ADR 0015 D-f reads exactly that to
+    decide "unknown tier ⇒ the minimal whitelist"; a None that came back as the string "None" would
+    look like a tier and advertise a seat's worth of models it cannot serve."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_bundle(plan_type=None))
+
+    assert api_keys.load_codex_bundle() == _bundle(plan_type=None)
+    assert "plan_type" not in tomllib.loads(paths.api_keys_file().read_text())["codex"]
+
+
+def test_codex_bundle_load_is_none_when_the_store_has_no_codex_entry(monkeypatch, tmp_path):
+    """No file, and a file holding only another kind, both mean "not signed in" — the join's
+    signal to run the OAuth flow. Never a half-built bundle."""
+    from remote import api_keys
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    assert api_keys.load_codex_bundle() is None
+
+    api_keys.store_key("openai", "sk-openai")
+    assert api_keys.load_codex_bundle() is None
+
+
+def _codex_record():
+    return {"engines": [{
+        "endpoint_url": "https://chatgpt.com/backend-api/codex",
+        "models": ["codex:gpt-5.4-mini"], "engine_label": "codex", "api_kind": "codex",
+    }]}
+
+
+def test_codex_seat_resolution_moved_to_the_holder_with_the_same_guarantees(monkeypatch, tmp_path):
+    """Issue 06 (ADR 0015 D-d) moved the codex credential OUT of `_api_bearers` — a snapshot copy
+    would go stale at the first rotation — and into the seat holder, primed at startup/reload by
+    `_prime_codex_seat`. The guarantees the old resolution carried move WITH it, re-pinned here at
+    the new seam (superseding issue 05's `_api_bearers`-level pins):
+
+    * a stored seat resolves — at startup and on every hot-reload (the prime path);
+    * ADR 0015 D-c: NO env-var input path. A stray `CODEX_API_KEY` is never adopted as a
+      subscription — not signed in means not signed in, terminal, naming the only real fix and
+      never advertising the env var as a way out. Branch order still makes this true for
+      `require_bearer` too: the codex kind returns before any env var is consulted.
+    """
+    from remote import api_keys, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_API_KEY", "sk-not-a-seat")
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        serve._prime_codex_seat(state, _codex_record())  # env var set, store empty → still refused
+
+    msg = str(exc.value)
+    assert "sk-not-a-seat" not in msg
+    assert "CODEX_API_KEY" not in msg
+    assert "grid join --api codex" in msg  # the only way to get a seat
+
+    with pytest.raises(SystemExit):
+        api_keys.require_bearer("codex")  # the shape-blind resolver refuses identically
+
+    api_keys.store_codex_bundle(_bundle(access_token="at-codex"))
+    serve._prime_codex_seat(state, _codex_record())
+    assert state.codex_seat.bundle().access_token == "at-codex"  # a stored seat resolves
+    assert api_keys.require_bearer("codex") == "at-codex"
+
+
 def test_remote_engine_startup_missing_api_key_reaps_record(monkeypatch, tmp_path):
     """A startup that dies before registering (key gone from store AND env) must reap its on-disk
     run record like any other died-before-registering engine — not leave a stale singleton that
@@ -5475,6 +8102,155 @@ def test_effective_max_concurrency_default_rules():
     assert run_records.effective_max_concurrency({}) == 1
     assert run_records.effective_max_concurrency({"engines": [api], "max_concurrency": 3}) == 3
     assert run_records.effective_max_concurrency({"engines": [hw], "max_concurrency": 8}) == 8
+
+
+def test_effective_max_concurrency_codex_union_pins_one():
+    """ADR 0015 D-f: a codex seat is flat-rate — ANY codex engine in the union pins the default
+    to 1, overriding the API-only 8 (a seat must not be hammered eight-wide by default). An
+    explicit --max-concurrency still wins: the operator asked. Lives in the ONE shared
+    derivation, so the CLI's reload-vs-respawn gate and serve startup cannot desync on it."""
+    from shared import run_records
+
+    codex = {"endpoint_url": "https://chatgpt.com/backend-api/codex",
+             "models": ["codex:gpt-5.5"], "api_kind": "codex"}
+    openai_spec = {"endpoint_url": "https://api.openai.com/v1",
+                   "models": ["openai:gpt-5.5"], "api_kind": "openai"}
+    hw = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"]}
+
+    assert run_records.effective_max_concurrency({"engines": [codex]}) == 1
+    assert run_records.effective_max_concurrency({"engines": [openai_spec, codex]}) == 1
+    assert run_records.effective_max_concurrency({"engines": [codex, hw]}) == 1
+    assert run_records.effective_max_concurrency({"engines": [codex], "max_concurrency": 4}) == 4
+    assert run_records.effective_max_concurrency({"engines": [openai_spec]}) == 8  # openai-only keeps 8
+
+
+def test_remote_engine_codex_union_defaults_to_one_worker(monkeypatch, tmp_path):
+    """The serve-side half of the codex concurrency rule: a codex-only identity advertises AND
+    pools exactly 1 worker by default (the `api_only_defaults_to_eight_workers` skeleton, flipped);
+    an explicit --max-concurrency still wins."""
+    from remote import api_keys, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "https://chatgpt.com/backend-api/codex",
+                           "models": ["codex:gpt-5.5"],
+                           "engine_label": "codex", "api_kind": "codex"}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    state_seen = {}
+
+    def fake_poll(s):
+        state_seen["max_concurrency"] = s.max_concurrency
+        s.stop.set()
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+    assert seen["max_concurrency"] == 1          # advertised to the relay
+    assert state_seen["max_concurrency"] == 1    # ... and sizing the real pool
+
+    record = {**record, "max_concurrency": 3}
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+    assert seen["max_concurrency"] == 3 and state_seen["max_concurrency"] == 3
+
+
+def test_remote_join_codex_onto_api_only_respawns_for_concurrency_flip(monkeypatch, tmp_path):
+    """Appending codex to an API-only identity flips the concurrency default (8 → 1). The pool
+    is sized once at spawn, so this join must RESPAWN — a SIGHUP would leave 8 workers hammering
+    a flat-rate seat the default exists to protect."""
+    import signal as _sig
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    api_keys.store_codex_bundle(_codex_bundle())
+
+    def vendor(request):
+        if "api.openai.com" in str(request.url):
+            return httpx.Response(200, json={"data": [{"id": "gpt-5.5"}]})
+        return httpx.Response(200, json={"models": [{"slug": "gpt-5.5", "visibility": "list"}]})
+
+    _mock_vendor(monkeypatch, vendor)
+
+    assert cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"]) == 0  # 8-worker identity
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--api", "codex"]) == 0  # default flips 8 → 1
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert {e["api_kind"] for e in rec["engines"]} == {"openai", "codex"}
+    assert terminated == [4242]                           # stopped the 8-worker process...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
+
+
+def _codex_serve_skeleton(monkeypatch, tmp_path, models):
+    """The register-capture skeleton (:api_only_defaults_to_eight_workers pattern) for a
+    codex-only record serving ``models``. Returns the kwargs register_node saw."""
+    from remote import api_keys, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "https://chatgpt.com/backend-api/codex",
+                           "models": list(models),
+                           "engine_label": "codex", "api_kind": "codex"}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: s.stop.set())
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+    return seen
+
+
+def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch, tmp_path):
+    """The codex capability envelope carries ONLY what passthrough can honestly claim (issue 05):
+    `endpoints: ["responses"]` (the wire literal grid-src's per-model filter reads — absent means
+    chat-only there, so old CLIs fail closed), the verified context window, and features
+    {vision, tools, parallel_tool_calls}. It OMITS — not False — the chat-dialect flags
+    (json_object/json_schema), `max_output_tokens` and the `limits` block (facts #1: the backend
+    has no output cap under any name; a fabricated 64000 would be a provider-written limit the
+    relay might act on), and audio/logprobs."""
+    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:gpt-5.5"])
+
+    caps = seen["capabilities"]
+    assert caps["schema_version"] == 1
+    entry = caps["models"]["codex:gpt-5.5"]
+    assert entry["endpoints"] == ["responses"]
+    assert entry["input_modalities"] == ["text", "image"]
+    assert entry["output_modalities"] == ["text"]
+    assert entry["context_window"] == 272_000
+    assert entry["features"] == {"vision": True, "tools": True, "parallel_tool_calls": True}
+    assert "max_output_tokens" not in entry
+    assert "limits" not in entry
+    assert "json_object" not in entry["features"] and "json_schema" not in entry["features"]
+
+
+def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeypatch, tmp_path, capsys):
+    """The stale-catalog degrade (catalog edited between join and respawn) stays honest for
+    codex: a warn plus an entry that still says `responses`-only with NO feature claims — never
+    the chat-dialect all-False shape, and never a fabricated output cap."""
+    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"])
+
+    entry = seen["capabilities"]["models"]["codex:ghost"]
+    assert entry["endpoints"] == ["responses"]
+    assert entry["features"] == {}
+    assert "max_output_tokens" not in entry and "limits" not in entry
+    assert "context_window" not in entry  # unknown is omitted, never invented
+    assert "no longer in the codex whitelist" in capsys.readouterr().err
 
 
 def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path):
@@ -5776,6 +8552,30 @@ def test_serve_handle_job_api_null_unsupported_param_still_forwards(monkeypatch,
     assert seen["model"] == "gpt-5.5"  # reached the vendor
 
 
+def test_adapt_output_token_param_leaves_a_kind_with_no_cap_parameter_alone():
+    """A vendor with NO output-cap parameter under any name (`max_output_param=None` — facts.md #1:
+    codex 400s `max_tokens`, `max_output_tokens` and `max_completion_tokens` alike) has nothing to
+    rename *to*. `None` is not a parameter name, so the body must come back untouched.
+
+    The bug this pins is a shared blind spot between two functions, and the null is the hinge:
+    `unsupported_params` deliberately lets a null through (api_catalog: "Null values are NOT refused
+    (the vendor accepts them)"), and the old guard here tested key PRESENCE — `"max_tokens" not in
+    body` — not truthiness. So `max_tokens: null` slipped past both and became `adapted[None] = None`,
+    serialising as a literal `{"null": null}` key on the wire. One function's deliberate exception
+    was the other's unguarded path.
+    """
+    from remote.serve import _adapt_output_token_param
+
+    for value in (None, 16):  # the null is what slipped through; a real value must not re-key either
+        body = {"model": "codex:gpt-5.4-mini", "max_tokens": value, "messages": []}
+
+        adapted = _adapt_output_token_param(body, "codex")
+
+        assert adapted == body
+        assert None not in adapted  # `adapted[None] = ...` — not a JSON key
+        assert '"null"' not in json.dumps(adapted)
+
+
 def test_serve_handle_job_hardware_keeps_stop(monkeypatch, tmp_path):
     """The refusal is per API kind: hardware engines support `stop` and must keep receiving it."""
     from remote import relay, serve
@@ -5902,6 +8702,899 @@ def test_serve_handle_job_hardware_forward_has_no_bearer(monkeypatch, tmp_path):
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
                              "body": {"model": "llama3"}, "is_stream": False})
     assert captured.get("ok") is True
+
+
+_CODEX_BASE = "https://chatgpt.com/backend-api/codex"
+
+
+def _codex_serve_state(monkeypatch, tmp_path, **overrides):
+    """A `_ServeState` serving one codex seat: advertised `codex:gpt-5.4-mini` routed to the
+    vendor base URL, vendor-name rewrite, the target marked `codex` for the endpoint matrix —
+    and NO bearer in the snapshot (ADR 0015 D-d: the seat lives in the holder, not the routing)."""
+    kwargs = dict(
+        models=["codex:gpt-5.4-mini"],
+        routes={"codex:gpt-5.4-mini": _CODEX_BASE},
+        upstream={"codex:gpt-5.4-mini": "gpt-5.4-mini"},
+        bearer_by_url={},
+        api_kind_by_url={_CODEX_BASE: "codex"},
+    )
+    kwargs.update(overrides)
+    return _serve_state(monkeypatch, tmp_path, **kwargs)
+
+
+def test_serve_handle_job_codex_refuses_a_chat_job_with_a_structured_error(monkeypatch, tmp_path):
+    """ADR 0015 D-b: a codex seat serves `responses` ONLY. A chat/completions job routed to it —
+    the relay should never send one, but the matrix is the provider's own wall — is refused with
+    a structured error naming the matrix, never forwarded to the vendor and never translated."""
+    from remote import relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a mismatched job must never reach the vendor"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+
+    assert "serves responses only" in captured["error"]
+    assert "'chat/completions'" in captured["error"]
+
+
+def test_serve_handle_job_codex_refuses_chat_via_the_single_url_fallback_too(monkeypatch, tmp_path):
+    """The fallback route (unknown model on a single-engine union) lands on the codex engine like
+    any other — ADR 0015 D-b's rejected alternative is exactly a job that slips past a
+    model-keyed gate this way. The matrix is kind-keyed, so the fallback changes nothing."""
+    from remote import relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("the fallback must not blind-forward"))
+
+    serve.handle_job(state, {"transaction_id": "t2", "endpoint_path": "chat/completions",
+                             "body": {"model": "some-unknown-model"}, "is_stream": False})
+
+    assert "serves responses only" in captured["error"]
+
+
+def test_serve_handle_job_responses_never_reaches_a_hardware_engine(monkeypatch, tmp_path):
+    """The other half of D-b: the global allow-list is NOT widened, so a responses job that routes
+    to a hardware engine — direct or via the fallback — is refused before any URL interpolation,
+    with the pre-matrix wording."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)  # one hardware engine serving "m"
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("responses must never reach a hardware engine"))
+
+    serve.handle_job(state, {"transaction_id": "t3", "endpoint_path": "responses",
+                             "body": {"model": "m"}, "is_stream": True})
+
+    assert "unsupported endpoint" in captured["error"].lower()
+    assert "'responses'" in captured["error"]
+
+
+def test_serve_handle_job_responses_never_reaches_an_openai_engine(monkeypatch, tmp_path):
+    """openai stays chat-only under the matrix — its refusal message is byte-compatible with the
+    pre-matrix one, so consumers and the relay's terminal-error mapper see no difference."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("responses must never reach the openai vendor"))
+
+    serve.handle_job(state, {"transaction_id": "t4", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": True})
+
+    assert "API engine 'openai' serves chat/completions only" in captured["error"]
+
+
+def test_serve_codex_seat_holder_primes_from_the_store_and_self_heals(monkeypatch, tmp_path):
+    """ADR 0015 D-d: the codex credential lives OUTSIDE the routing snapshot, in a per-kind holder
+    on the serve state — a rotation must not rebuild routing or race a hot-reload swap. The holder
+    exists unconditionally (no None state to branch on): unprimed on an empty store it refuses
+    with the typed error the forward path turns into a job error; unprimed on a box WITH a seat it
+    lazily self-heals from the store; primed, it answers from memory."""
+    from remote import api_keys
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+
+    with pytest.raises(api_keys.CodexNotSignedIn):
+        state.codex_seat.bundle()  # unprimed, empty store
+
+    api_keys.store_codex_bundle(_codex_bundle())
+    assert state.codex_seat.bundle() == _codex_bundle()  # the lazy backstop self-heals
+
+    primed = _codex_serve_state(monkeypatch, tmp_path)
+    primed.codex_seat.prime_from_store()
+    assert primed.codex_seat.bundle() == _codex_bundle()
+
+
+def test_serve_codex_seat_holder_refresh_rotates_once_and_collapses_racers(monkeypatch, tmp_path):
+    """`refresh(stale)` is the ONE entry for reactive (upstream 401) and proactive (heartbeat)
+    rotation. Success adopts the rotated bundle in memory — the very next job forwards the new
+    bearer with no reload — and persists it; a second caller holding the same stale token
+    short-circuits on the in-memory compare, so N workers 401ing together collapse to one
+    exchange."""
+    from remote import api_keys
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=2_000_000_000)
+    exchanges = []
+
+    def vendor(request):
+        exchanges.append(1)
+        return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    assert state.codex_seat.refresh("tok-access") is True
+    assert state.codex_seat.bundle().access_token == new_access
+    assert api_keys.load_codex_bundle().access_token == new_access  # persisted immediately
+
+    assert state.codex_seat.refresh("tok-access") is True  # a racer with the same stale token
+    assert len(exchanges) == 1  # collapsed on the in-memory compare — no second exchange
+
+
+def test_serve_codex_seat_holder_gates_failures_but_adopts_through_the_gate(monkeypatch, tmp_path, capsys):
+    """A refused seat earns ONE vendor 4xx per cooldown window — the next refresh inside the gate
+    makes no vendor call (a dead seat must not be hammered by every 401ing job plus every 30s
+    tick). The gate never blocks the free heal, though: a bundle another PROCESS wrote (a
+    re-sign-in from a second grid on this box) is adopted lock-free straight through it. And once
+    stop is set, refresh never starts spending at all."""
+    from remote import api_keys
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    exchanges = []
+
+    def vendor(request):
+        exchanges.append(1)
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    assert state.codex_seat.refresh("tok-access") is False
+    assert len(exchanges) == 1
+    assert "sign in again" in capsys.readouterr().err
+
+    assert state.codex_seat.refresh("tok-access") is False  # inside the gate
+    assert len(exchanges) == 1  # no second vendor call
+
+    rotated_elsewhere = _codex_bundle()
+    rotated_elsewhere = type(rotated_elsewhere)(
+        access_token="tok-access-2", refresh_token="tok-refresh-2", account_id="acct-1",
+        plan_type="free", last_refresh=1_700_000_000,
+    )
+    api_keys.store_codex_bundle(rotated_elsewhere)  # another process re-signed-in
+
+    assert state.codex_seat.refresh("tok-access") is True  # adopted THROUGH the gate, no exchange
+    assert state.codex_seat.bundle() == rotated_elsewhere
+    assert len(exchanges) == 1
+
+    state.stop.set()
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("nothing may be spent after stop"))
+    assert state.codex_seat.refresh("tok-access-2") is False
+
+
+def test_serve_api_bearers_skip_the_codex_seat(monkeypatch, tmp_path):
+    """ADR 0015 D-d: the codex bearer never enters the routing snapshot — a snapshot copy would go
+    stale at the first rotation (the holder is the live source, resolved at forward time). openai
+    keys stay snapshot-resident exactly as before."""
+    from remote import api_keys, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_key("openai", "sk-test-openai")
+    api_keys.store_codex_bundle(_codex_bundle())
+
+    bearers = serve._api_bearers({"engines": [
+        {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"], "api_kind": "openai"},
+        {"endpoint_url": _CODEX_BASE, "models": ["codex:gpt-5.4-mini"], "api_kind": "codex"},
+    ]})
+
+    assert bearers == {"https://api.openai.com/v1": "sk-test-openai"}  # codex absent by design
+
+
+def test_serve_prime_codex_seat_gates_startup_and_ignores_non_codex_records(monkeypatch, tmp_path):
+    """The die-before-advertise gate, moved with the credential (D-d): a record serving a codex
+    engine primes the holder — or dies naming the fix when the box is not signed in — while a
+    record with no codex spec never touches the store at all (an unprimed holder is inert; a
+    hardware-only engine must not go anywhere near another grid's seat). ONE derivation used by
+    startup and reload, so the two can't drift."""
+    from remote import api_keys, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+
+    serve._prime_codex_seat(state, {"engines": [{"endpoint_url": "http://e1/v1", "models": ["m"]}]})
+    with pytest.raises(api_keys.CodexNotSignedIn):
+        state.codex_seat.bundle()  # no codex spec → untouched, still unprimed
+
+    codex_record = {"engines": [
+        {"endpoint_url": _CODEX_BASE, "models": ["codex:gpt-5.4-mini"], "api_kind": "codex"},
+    ]}
+    with pytest.raises(SystemExit) as exc:
+        serve._prime_codex_seat(state, codex_record)  # empty store → terminal, names the fix
+    assert "grid join --api codex" in str(exc.value)
+
+    api_keys.store_codex_bundle(_codex_bundle())
+    serve._prime_codex_seat(state, codex_record)
+    assert state.codex_seat.bundle() == _codex_bundle()
+
+
+def test_serve_reload_refuses_a_codex_append_with_no_stored_seat(monkeypatch, tmp_path):
+    """Hot-appending a codex engine re-reads the seat BEFORE the routing swap: no stored seat →
+    the reload raises (absorbed by `_reload_loop`'s catch into a warn + `last_reload_error` — that
+    path is pinned elsewhere), the old routing keeps serving, and nothing re-registers. The reload
+    analogue of the startup die-before-advertise: a union must never advertise codex models whose
+    every job would error."""
+    from remote import relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": _CODEX_BASE, "models": ["codex:gpt-5.4-mini"], "api_kind": "codex"},
+    ])
+    monkeypatch.setattr(relay, "register_node",
+                        lambda *a, **k: pytest.fail("a refused reload must not re-register"))
+
+    with pytest.raises(SystemExit) as exc:
+        serve._reload_once(state, "remote")
+
+    assert "grid join --api codex" in str(exc.value)
+    assert state.models == ["a"]  # the swap never happened — old routing intact
+
+
+def test_serve_reload_appends_and_drops_codex_with_the_bundle_intact(monkeypatch, tmp_path):
+    """AC 7: hot-append advertises the union with the codex engine (whitelist caps, no probe, no
+    vendor call) and primes the seat; `grid leave --engine codex` re-advertises the survivors and
+    leaves the STORED bundle untouched — re-joining later is one command, no re-auth."""
+    from remote import api_keys, relay, serve
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": _CODEX_BASE, "models": ["codex:gpt-5.4-mini"], "api_kind": "codex"},
+    ])
+    api_keys.store_codex_bundle(_codex_bundle())
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+
+    serve._reload_once(state, "remote")  # the append
+
+    assert seen["models"] == ["a", "codex:gpt-5.4-mini"]
+    assert seen["capabilities"]["models"]["codex:gpt-5.4-mini"]["endpoints"] == ["responses"]
+    assert state.route_and_kind("codex:gpt-5.4-mini")[1] == "codex"
+    assert state.codex_seat.bundle() == _codex_bundle()  # primed by the reload
+
+    from shared import run_records
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "media": False, "media_bundles": [],
+        "engines": [{"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None}],
+    })
+
+    serve._reload_once(state, "remote")  # the leave --engine codex
+
+    assert seen["models"] == ["a"]  # survivors re-advertised
+    assert api_keys.load_codex_bundle() == _codex_bundle()  # the credential survives the leave
+
+
+def _codex_fixture_bytes():
+    """The shared wire fixture (grid-src issue 03, copied verbatim — see tests/fixtures/README.md):
+    47 LF-framed event blocks, each terminated by a blank line, no [DONE]."""
+    return (Path(__file__).parent / "fixtures" / "codex_stream.sse").read_bytes()
+
+
+def test_iter_event_blocks_regroups_any_chunking_into_whole_blocks(monkeypatch):
+    """ADR 0015 D-e: the streaming unit for a responses job is the whole SSE event block. However
+    the vendor's bytes arrive chunked, what leaves is one block per chunk — terminator included,
+    byte-concatenation identical (no strip, no decode, no [DONE], CR untouched: the relay is the
+    enforcement point for CR smuggling and refuses it; a provider that 'repaired' CR would mask
+    exactly what the relay's sanitiser refuses)."""
+    from remote import serve
+
+    fixture = _codex_fixture_bytes()
+    for size in (1, 7, 1024, len(fixture)):
+        chunks = [fixture[i:i + size] for i in range(0, len(fixture), size)]
+        blocks = list(serve._iter_event_blocks(iter(chunks)))
+        assert len(blocks) == 47
+        assert all(block.endswith(b"\n\n") for block in blocks)
+        assert b"".join(blocks) == fixture  # byte-for-byte, whatever the input chunking
+
+    # A `\n\n` straddling a chunk boundary is still one block.
+    assert list(serve._iter_event_blocks(iter([b"event: a\ndata: {}\n", b"\nevent: b\ndata: {}\n\n"]))) \
+        == [b"event: a\ndata: {}\n\n", b"event: b\ndata: {}\n\n"]
+
+    # A tail with no trailing blank line is flushed verbatim — swallowing it would eat exactly the
+    # `response.completed` that carries usage (the relay flushes its own final block the same way).
+    assert list(serve._iter_event_blocks(iter([b"event: a\ndata: {}"]))) == [b"event: a\ndata: {}"]
+
+    # CRLF input passes through byte-identical: the relay refuses bare-CR; we never re-frame.
+    crlf = b"event: a\r\ndata: {}\r\n\r\n"
+    assert b"".join(serve._iter_event_blocks(iter([crlf]))) == crlf
+
+    # An unbounded block cannot buffer unboundedly: past the cap it degrades to passthrough —
+    # alignment lost for one seam, bytes never lost (the relay re-splits on \n itself).
+    monkeypatch.setattr(serve, "_MAX_EVENT_BLOCK", 8)
+    giant = b"data: 0123456789ABCDEF"  # no blank line anywhere
+    assert b"".join(serve._iter_event_blocks(iter([giant[:12], giant[12:]]))) == giant
+
+
+def test_iter_event_blocks_never_flushes_a_partial_block_on_error():
+    """The crash-atomicity half of D-e: a vendor stream that dies mid-block must leave only WHOLE
+    events at the relay. The buffered partial block is dropped and the error propagates — a future
+    'flush buf in a finally' refactor would silently reverse this design (review F6)."""
+    from remote import serve
+
+    def dies_mid_block():
+        yield b"event: a\ndata: {}\n\nevent: b\ndata: {\"half\":"
+        raise httpx.ReadError("vendor died")
+
+    out = []
+    with pytest.raises(httpx.ReadError):
+        for block in serve._iter_event_blocks(dies_mid_block()):
+            out.append(block)
+
+    assert out == [b"event: a\ndata: {}\n\n"]  # exactly the complete block; the torn half never left
+
+
+def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypatch, tmp_path):
+    """AC 1: URL = the kind's base URL + the job's endpoint path; headers are the real client's
+    set, built fresh from the live bundle (bearer + account id + originator/user-agent + SSE
+    accept + json content-type — and NO OpenAI-Beta); the body goes verbatim except the
+    advertised→vendor model rewrite (the one existing alias mechanism). `temperature` — which IS
+    in the codex whitelist's `unsupported_params` — and a null `max_tokens` both pass through
+    untouched: the chat-dialect refusal and the output-param rename are provably inert on the
+    responses path (contract violations are the vendor's to answer, in its own shape)."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, body=b"".join(content))  # materialise while the stream is open
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    job_body = {"model": "codex:gpt-5.4-mini", "input": [{"role": "user", "content": "hi"}],
+                "stream": True, "temperature": 0.5, "max_tokens": None}
+
+    def vendor(request):
+        assert str(request.url) == f"{_CODEX_BASE}/responses"
+        assert request.headers["authorization"] == "Bearer tok-access"
+        assert request.headers["chatgpt-account-id"] == "acct-1"
+        assert request.headers["originator"] == "codex_cli_rs"
+        assert request.headers["user-agent"] == "codex_cli_rs"
+        assert request.headers["accept"] == "text/event-stream"
+        assert request.headers["content-type"] == "application/json"
+        assert "openai-beta" not in request.headers
+        assert json.loads(request.content) == {**job_body, "model": "gpt-5.4-mini"}
+        return httpx.Response(200, content=b"event: response.created\ndata: {}\n\n")
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": job_body, "is_stream": True})
+
+    assert "error" not in captured
+    assert captured["stream"] is True
+    assert captured["body"] == b"event: response.created\ndata: {}\n\n"
+
+
+def test_serve_handle_job_codex_streams_regardless_of_the_job_flag(monkeypatch, tmp_path):
+    """D-e: the upstream only speaks SSE, so a codex job takes the streaming forward whatever the
+    job's `is_stream` says (the relay always marks responses jobs streaming; this pins our side
+    against relay drift)."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, body=b"".join(content))
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(
+        200, content=b"event: response.created\ndata: {}\n\n"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": False})
+
+    assert captured["stream"] is True  # forced — the flag cannot demote a responses job
+
+
+def test_serve_handle_job_codex_submits_the_fixture_as_whole_event_blocks(monkeypatch, tmp_path):
+    """AC 2, end to end through handle_job on the shared wire fixture: whatever chunking the
+    vendor's socket produces, every chunk submitted to the relay is one whole event block —
+    47 blocks, byte-concatenation identical, no [DONE] appended."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    fixture = _codex_fixture_bytes()
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, chunks=list(content))  # keep the chunk boundaries
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+    # Awkward 7-byte chunking: block boundaries land mid-line, mid-JSON, everywhere.
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(
+        200, content=iter([fixture[i:i + 7] for i in range(0, len(fixture), 7)])))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+
+    assert captured["stream"] is True
+    assert len(captured["chunks"]) == 47
+    assert all(chunk.endswith(b"\n\n") for chunk in captured["chunks"])
+    assert b"".join(captured["chunks"]) == fixture
+    assert b"[DONE]" not in b"".join(captured["chunks"])
+
+
+def test_serve_handle_job_codex_401_refreshes_and_retries_once_with_the_new_bearer(monkeypatch, tmp_path):
+    """AC 3, reactive half: an upstream 401 rotates the seat and retries EXACTLY once, and the
+    retry carries the ROTATED bearer — resolved from the holder at forward time, no reload, no
+    snapshot rebuild (D-d). The rotation is persisted, so the next process adopts it for free."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=2_000_000_000)
+    inference, exchanges, captured = [], [], {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, body=b"".join(content))
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+
+    def vendor(request):
+        if request.url.host == "auth.openai.com":  # the token endpoint (one MockTransport, two hosts)
+            exchanges.append(1)
+            return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+        inference.append(request.headers["authorization"])
+        if len(inference) == 1:
+            return httpx.Response(401, json={"detail": "token expired"})
+        return httpx.Response(200, content=b"event: response.created\ndata: {}\n\n")
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+
+    assert inference == ["Bearer tok-access", f"Bearer {new_access}"]  # retry wore the rotation
+    assert exchanges == [1]
+    assert captured["stream"] is True  # the job succeeded on the retry
+    assert api_keys.load_codex_bundle().access_token == new_access  # persisted for the next process
+
+
+def test_serve_handle_job_codex_second_401_is_a_job_error_not_a_second_refresh(monkeypatch, tmp_path, capsys):
+    """Retry ONCE means once: a 401 on the rotated bearer is a job error carrying the upstream
+    status (byte-compatible `engine error 401:` for the relay's terminal mapper) plus the
+    check-your-seat warning — never a second exchange, never a loop."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=2_000_000_000)
+    inference, exchanges, captured = [], [], {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def vendor(request):
+        if request.url.host == "auth.openai.com":
+            exchanges.append(1)
+            return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+        inference.append(1)
+        return httpx.Response(401, json={"detail": "seat revoked"})
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+
+    assert len(inference) == 2 and exchanges == [1]  # one retry, one exchange, then stop
+    assert captured["error"].startswith("engine error 401:")
+    assert "sign in again" in capsys.readouterr().err
+
+
+def test_serve_handle_job_openai_401_never_touches_the_codex_token_endpoint(monkeypatch, tmp_path):
+    """AC 3, the scoping half: 401→refresh→retry-once exists for codex ONLY — openai keeps ADR
+    0012's job-error-without-retry. An openai vendor 401 must reach the consumer as a job error
+    after exactly one vendor call, with the OAuth token endpoint never contacted (its sibling pin,
+    `..._is_job_error_not_token_refresh`, covers the relay-token domain)."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    calls, captured = [], {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def vendor(request):
+        if request.url.host == "auth.openai.com":
+            pytest.fail("an openai 401 must never reach the codex token endpoint")
+        calls.append(1)
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": False})
+
+    assert len(calls) == 1  # no retry of any kind
+    assert captured["error"].startswith("engine error 401:")
+
+
+def test_serve_codex_upstream_warn_taxonomy_is_four_way(monkeypatch, tmp_path, capsys):
+    """AC 7 / ADR 0015 D-f: the two 403s demand OPPOSITE operator actions so their wordings must
+    not overlap — CF-challenge (403 + Cf-Mitigated) names the egress IP and says sign-in won't
+    help; a bare 403 says check your seat. 429 keeps the existing quota warning; a 5xx warns
+    nothing (a vendor outage says nothing about the seat). Every one still submits the
+    byte-compatible `engine error {status}:` job error."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    errors = []
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: errors.append(message))
+
+    def run(status, headers=None):
+        _mock_serve_engine(monkeypatch, lambda request: httpx.Response(
+            status, json={"detail": "x"}, headers=headers or {}))
+        serve.handle_job(state, {"transaction_id": "t", "endpoint_path": "responses",
+                                 "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+        return capsys.readouterr().err
+
+    cf = run(403, {"Cf-Mitigated": "challenge"})
+    assert "egress IP" in cf and "Cloudflare" in cf
+    assert "sign in again" not in cf.replace("signing in again will not help", "")  # opposite advice
+
+    auth = run(403)
+    assert "check your seat" in auth and "sign in again" in auth
+    assert "egress" not in auth
+
+    quota = run(429)
+    assert "quota" in quota  # the existing API-engine quota warning, reused
+
+    outage = run(502)
+    assert outage == ""  # a vendor outage earns no seat/quota warn — same as every other kind
+
+    assert [e.split(":")[0] for e in errors] == ["engine error 403", "engine error 403",
+                                                 "engine error 429", "engine error 502"]
+
+
+def test_serve_handle_job_codex_without_a_seat_is_a_job_error_naming_the_fix(monkeypatch, tmp_path):
+    """The defensive floor under the wiring: routing says codex but the holder is unprimed AND the
+    store has no seat (a reload race, or wiring drift). The job errors naming the one real fix —
+    it never blind-forwards bearer-less and never kills the loop."""
+    from remote import relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)  # nothing seeded, nothing primed
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("no seat, no forward"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+
+    assert "grid join --api codex" in captured["error"]
+
+
+def test_serve_codex_store_corruption_is_a_job_error_never_an_engine_stop(monkeypatch, tmp_path, capsys):
+    """The store's TOML loader raises SystemExit for a corrupt file — which skips every `except
+    Exception` guard, so unguarded it would sail through handle_job to `_supervise` and take the
+    WHOLE engine down (every model in the union, plus the waiting consumer gets no terminal error
+    at all) over one kind's transient store hiccup. Unlike a corrupt credentials.toml — which is
+    fatal by documented design, the engine cannot outlive its relay tokens — the codex store only
+    feeds the codex forward, so the blast radius must be one job (silent-failure + python
+    reviews). Both touchpoints are covered: a rotation mid-job, and the unprimed holder's
+    self-heal read."""
+    from remote import api_keys, credentials, relay, serve
+
+    # Touchpoint 1: the reactive refresh hits a store that turns unreadable mid-serve.
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(401, json={}))
+    real_load_toml = credentials.load_toml
+    monkeypatch.setattr(credentials, "load_toml",
+                        lambda path: (_ for _ in ()).throw(SystemExit("api_keys.toml is corrupt")))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})  # must not raise
+
+    assert not state.stop.is_set()  # the engine lives
+    assert captured["error"].startswith("engine error 401:")  # the consumer got a terminal signal
+    assert "unexpectedly" in capsys.readouterr().err  # and the operator got the real cause
+
+    # Touchpoint 2: an unprimed holder self-heals from a store that is garbage on disk.
+    monkeypatch.setattr(credentials, "load_toml", real_load_toml)
+    unprimed = _codex_serve_state(monkeypatch, tmp_path)
+    paths.api_keys_file().write_bytes(b"\x00 this is not TOML [")
+    captured.clear()
+
+    unprimed.codex_seat  # noqa: B018 — the holder exists; the job below reads through it
+    serve.handle_job(unprimed, {"transaction_id": "t2", "endpoint_path": "responses",
+                                "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
+
+    assert not unprimed.stop.is_set()
+    assert "unreadable" in captured["error"]  # a job error naming the state, not a hang
+
+
+def test_serve_codex_refusal_wording_distinguishes_interrupted_from_revoked(monkeypatch, tmp_path, capsys):
+    """AC 6's one observable artifact, pinned end to end through the holder (code review): the
+    journal left by a killed exchange must turn the NEXT refusal's warning into the
+    lost-rotation diagnosis, and a plain dead seat must NOT get that crash-sounding story. The
+    two wordings share the remedy but must never share the diagnosis — a regression collapsing
+    the `interrupted` branch would otherwise pass the whole suite."""
+    from remote import api_keys, credentials
+
+    # A prior exchange died between the vendor call and the persist (the planted journal).
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    data = credentials.load_toml(paths.api_keys_file())
+    credentials.atomic_write_toml(
+        paths.api_keys_file(),
+        {**data, "codex": {**data["codex"], "refresh_pending_since": 1_700_000_000}},
+    )
+    _mock_vendor(monkeypatch, lambda request: httpx.Response(400, json={"error": "invalid_grant"}))
+
+    assert state.codex_seat.refresh("tok-access") is False
+    interrupted = capsys.readouterr().err
+    assert "interrupted before it could be saved" in interrupted  # the lost-rotation diagnosis
+    assert "grid join --api codex" in interrupted
+
+    # The plain dead seat: same refusal, no journal — no crash-sounding story.
+    plain = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    plain.codex_seat.prime_from_store()
+
+    assert plain.codex_seat.refresh("tok-access") is False
+    revoked = capsys.readouterr().err
+    assert "revoked" in revoked
+    assert "interrupted before it could be saved" not in revoked  # the diagnoses never blur
+
+
+def test_serve_codex_maybe_refresh_fires_on_expiry_or_window_only(monkeypatch, tmp_path):
+    """AC 5's due-conditions (ADR 0015 D-d, proactive): rotate when the token's own expiry is
+    inside the margin, OR when the last rotation is older than the window (the vendor's real
+    rotation window is UNVERIFIED — facts #6 — so an idle grid errs toward rotating). A healthy,
+    recently-rotated seat is left alone (every rotation is one more crash window), and an
+    UNPRIMED holder never fires at all — an identity that serves no codex engine must not rotate
+    a seat another grid on this box may own, even though the store has one."""
+    from remote import api_keys, codex_oauth
+
+    now = int(time.time())
+
+    def holder_with(access_token, last_refresh):
+        state = _codex_serve_state(monkeypatch, tmp_path)
+        api_keys.store_codex_bundle(codex_oauth.CodexBundle(
+            access_token=access_token, refresh_token="rt-1", account_id="acct-1",
+            plan_type="free", last_refresh=last_refresh,
+        ))
+        state.codex_seat.prime_from_store()
+        calls = []
+        monkeypatch.setattr(state.codex_seat, "refresh", lambda stale: calls.append(stale) or True)
+        return state, calls
+
+    expiring = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=now + 60)
+    state, calls = holder_with(expiring, last_refresh=now - 10)
+    state.codex_seat.maybe_refresh(now)
+    assert calls == [expiring]  # expiry inside the margin → rotate, stale-compare on this token
+
+    no_exp = _codex_jwt({"chatgpt_account_id": "acct-1"})
+    state, calls = holder_with(no_exp, last_refresh=now - 86_401)
+    state.codex_seat.maybe_refresh(now)
+    assert calls == [no_exp]  # no readable expiry → the rotation window rules
+
+    healthy = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=now + 7_200)
+    state, calls = holder_with(healthy, last_refresh=now - 10)
+    state.codex_seat.maybe_refresh(now)
+    assert calls == []  # not due — no gratuitous rotation
+
+    unprimed = _codex_serve_state(monkeypatch, tmp_path)  # store still holds the last bundle
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("an unprimed holder must not rotate"))
+    unprimed.codex_seat.maybe_refresh(now)  # no-op, no store read adopted, nothing spent
+
+
+def test_serve_heartbeat_tick_rotates_a_due_seat_even_when_the_relay_errors(monkeypatch, tmp_path):
+    """AC 5, the wiring: the proactive check runs on the heartbeat TICK — a job-less loop still
+    rotates a near-expiry seat (one exchange, persisted), and a tick whose relay call failed still
+    checks (the relay being unreachable says nothing about the vendor). The rotated seat is not
+    due on the next tick, so exactly one exchange."""
+    from remote import api_keys, codex_oauth, relay, serve
+
+    def run_loop(heartbeat_behaviour):
+        state = _codex_serve_state(monkeypatch, tmp_path)
+        now = int(time.time())
+        api_keys.store_codex_bundle(codex_oauth.CodexBundle(
+            access_token=_codex_jwt({"chatgpt_account_id": "acct-1"}, exp=now + 60),
+            refresh_token="rt-1", account_id="acct-1", plan_type="free", last_refresh=now - 10,
+        ))
+        state.codex_seat.prime_from_store()
+        new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=now + 999_999)
+        exchanges = []
+
+        def vendor(request):
+            assert request.url.host == "auth.openai.com"  # job-less: only the token endpoint
+            exchanges.append(1)
+            return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+
+        _mock_serve_engine(monkeypatch, vendor)
+        ticks = []
+
+        def fake_heartbeat(url, tok, *, load):
+            ticks.append(1)
+            if len(ticks) >= 2:
+                state.stop.set()  # end the loop AFTER tick 2's wait
+            return heartbeat_behaviour()
+
+        monkeypatch.setattr(relay, "heartbeat", fake_heartbeat)
+        monkeypatch.setattr(relay, "HEARTBEAT_INTERVAL", 0.01)
+        serve._heartbeat_loop(state)
+        return exchanges, state
+
+    exchanges, state = run_loop(lambda: "ok")
+    assert exchanges == [1]  # tick 1 rotated; tick 2 saw a fresh seat and left it alone
+    assert api_keys.load_codex_bundle().refresh_token == "rt-2"
+
+    exchanges, _state = run_loop(lambda: (_ for _ in ()).throw(relay.RelayError("relay down")))
+    assert exchanges == [1]  # a failed heartbeat still runs the proactive check
+
+
+def test_serve_heartbeat_refresh_failure_never_stops_the_engine(monkeypatch, tmp_path, capsys):
+    """A refresh failure is a WARN, never an engine stop (no auto-eject — ADR 0015): the loop
+    survives the failed tick, the failure gate stops the next tick from hammering the vendor,
+    and even a maybe_refresh that RAISES is swallowed by the hook — `_heartbeat_loop` runs under
+    `_supervise`, where anything escaping stops the whole engine."""
+    from remote import api_keys, codex_oauth, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    now = int(time.time())
+    api_keys.store_codex_bundle(codex_oauth.CodexBundle(
+        access_token=_codex_jwt({"chatgpt_account_id": "acct-1"}, exp=now + 60),
+        refresh_token="rt-1", account_id="acct-1", plan_type="free", last_refresh=now - 10,
+    ))
+    state.codex_seat.prime_from_store()
+    exchanges = []
+
+    def vendor(request):
+        exchanges.append(1)
+        return httpx.Response(500, json={})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    ticks = []
+
+    def fake_heartbeat(url, tok, *, load):
+        ticks.append(1)
+        if len(ticks) >= 3:
+            state.stop.set()
+        return "ok"
+
+    monkeypatch.setattr(relay, "heartbeat", fake_heartbeat)
+    monkeypatch.setattr(relay, "HEARTBEAT_INTERVAL", 0.01)
+
+    serve._heartbeat_loop(state)
+
+    assert len(ticks) == 3  # the loop OUTLIVED the failure — only the fake heartbeat ended it
+    assert exchanges == [1]  # the failure gate held ticks 2-3 back from the vendor
+    assert "will retry" in capsys.readouterr().err  # transient wording, not sign-in-again
+
+    # The belt under the braces: a maybe_refresh that raises (even SystemExit — the TOML loader's
+    # corrupt-file idiom) is swallowed into a warn, so _supervise never sees it.
+    monkeypatch.setattr(state.codex_seat, "maybe_refresh",
+                        lambda now: (_ for _ in ()).throw(SystemExit("corrupt store")))
+    serve._maybe_refresh_codex(state)  # must not raise
+    assert "engine unaffected" in capsys.readouterr().err
+
+
+def test_serve_drain_waits_out_an_inflight_codex_exchange(monkeypatch, tmp_path, capsys):
+    """The shutdown clause of ADR 0015 D-d: a worker mid-exchange has a journal on disk and a
+    vendor call in flight — abandoning it at the drain loses a rotation the journal can then only
+    DIAGNOSE. `_serve_loop`'s teardown waits on the exchange FLAG (not the thread): it returns
+    only after the persist, the rotation lands, and a teardown with NO exchange in flight pays
+    nothing."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    now = int(time.time())
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 0.05)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    new_access = _codex_jwt({"chatgpt_account_id": "acct-1"}, exp=now + 999_999)
+    release = threading.Event()
+
+    def vendor(request):
+        release.wait(5)  # hold the exchange mid-flight until the test releases it
+        return httpx.Response(200, json={"access_token": new_access, "refresh_token": "rt-2"})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    refresher = threading.Thread(target=lambda: state.codex_seat.refresh("tok-access"), daemon=True)
+    refresher.start()
+    deadline = time.monotonic() + 5
+    while not state.codex_seat.exchange_in_flight() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert state.codex_seat.exchange_in_flight()
+
+    state.stop.set()  # a SIGTERM landed; the exchange is already past its abandon-check
+    threading.Timer(0.3, release.set).start()
+    started = time.monotonic()
+    serve._serve_loop(state)
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.25  # the teardown WAITED for the persist, well past the 0.05s drain
+    refresher.join(5)
+    assert api_keys.load_codex_bundle().access_token == new_access  # the rotation landed
+    assert "waiting for an in-flight codex token exchange" in capsys.readouterr().err
+
+    started = time.monotonic()
+    serve._serve_loop(state)  # nothing in flight now
+    assert time.monotonic() - started < 0.2  # no gratuitous wait
+    assert "waiting for an in-flight" not in capsys.readouterr().err
+
+
+def test_serve_drain_reports_an_exchange_it_could_not_wait_out(monkeypatch, tmp_path, capsys):
+    """The bounded half: an exchange that outlives even the exchange-drain budget is reported —
+    the journal it leaves makes the possible loss diagnosable at the next refresh, and the
+    operator hears it now rather than discovering a zombie later."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 0.05)
+    monkeypatch.setattr(serve, "_CODEX_EXCHANGE_DRAIN", 0.2)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    stuck = threading.Event()
+
+    def vendor(request):
+        stuck.wait(10)  # never released within the drain budget
+        return httpx.Response(500, json={})
+
+    _mock_serve_engine(monkeypatch, vendor)
+    refresher = threading.Thread(target=lambda: state.codex_seat.refresh("tok-access"), daemon=True)
+    refresher.start()
+    deadline = time.monotonic() + 5
+    while not state.codex_seat.exchange_in_flight() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    state.stop.set()
+    serve._serve_loop(state)
+
+    err = capsys.readouterr().err
+    assert "still unfinished" in err and "grid join --api codex" in err
+    stuck.set()  # unblock the daemon thread before the test ends
+    refresher.join(5)
 
 
 def test_serve_handle_job_api_upstream_401_is_job_error_not_token_refresh(monkeypatch, tmp_path):
@@ -6914,6 +10607,22 @@ def test_logout_leaves_api_key_store_intact(monkeypatch, tmp_path, capsys):
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
     assert not paths.credentials_file().exists()
     assert api_keys.load_key("openai") == "sk-keep-me"
+
+
+def test_logout_leaves_the_codex_seat_intact(monkeypatch, tmp_path, capsys):
+    """Same rule for the OAuth seat (ADR 0015 D-c, user story 5): signing out of the grid must not
+    disconnect the provider's ChatGPT subscription. The bundle is a rotating credential rather than
+    a static key, so a logout that took it would cost a full re-authorization, not just a re-read —
+    and a later join must reuse it with no browser."""
+    from remote import api_keys, credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "S"})
+    api_keys.store_codex_bundle(_bundle())
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert not paths.credentials_file().exists()
+    assert api_keys.load_codex_bundle() == _bundle()
 
 
 def test_logout_json(monkeypatch, tmp_path, capsys):

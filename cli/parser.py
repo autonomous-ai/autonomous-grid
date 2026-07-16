@@ -139,8 +139,15 @@ def _add_engines(sub) -> None:
         "--api",
         metavar="KIND",
         default=None,
-        help="Join a third-party API engine of this service kind (e.g. openai). "
-             "Remote only; requires -m with whitelisted models (see `grid catalog --api`).",
+        help="Join a third-party API engine of this service kind (e.g. openai, codex). "
+             "Remote only; -m optionally narrows the whitelist (see `grid catalog --api`), "
+             "omitted = every whitelisted model the credential can serve.",
+    )
+    choose.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="For `--api codex` on a headless machine: print the sign-in URL instead of opening a "
+             "browser, and take the redirect URL back by paste.",
     )
 
     naming = join.add_argument_group("Name & display")
@@ -220,7 +227,7 @@ def _add_models(sub) -> None:
     catalog.add_argument(
         "--api",
         metavar="KIND",
-        help="Show the API-engine whitelist for a service kind (e.g. openai).",
+        help="Show the API-engine whitelist for a service kind (e.g. openai, codex).",
     )
     catalog.set_defaults(handler=cmd_catalog)
 
