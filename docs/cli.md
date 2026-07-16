@@ -324,6 +324,12 @@ What the passthrough contract means for the app, in plain language:
   refuses the cap spellings up front so you learn there is no ceiling instead of being silently
   billed for an uncapped response; anything else it passes through verbatim, so an unlisted
   parameter surfaces as the vendor's own 400.
+- **The app's `/model` picker writes bare vendor names — the relay absorbs that.** Picking a
+  model inside the Codex app rewrites its `config.toml` to the bare slug (`gpt-5.6-terra`),
+  dropping the `codex:` prefix; the app never reads the grid's model list, so it cannot know the
+  grid's names. On `/responses` (only), a bare name that matches nothing is aliased onto the one
+  `codex:<name>` engine that serves it — responses replies still name the `codex:*` model. If two
+  kinds ever serve the same bare name, the relay refuses and names both rather than picking.
 
 An API engine merges into your grid's **one serving identity** exactly like a hardware engine.
 `grid join --api openai` onto an identity already serving other engines appends to the union and

@@ -151,6 +151,41 @@ unmetered open proxy for the provider's seat).
 > `"output_tokens": Infinity` and roll back the settle, 500 its own submit, and strand the row. It
 > defeated the new ceiling by crashing one line before it.
 
+> **Amended 2026-07-17 (issue 09 — found live in issue 07's E2E). Bare vendor names alias onto
+> the namespaced model, on `responses` only.** D-a's consumer contract said "the
+> `codex:`-prefixed model name"; the E2E showed the flagship consumer cannot reliably send one.
+> The Codex app's `/model` picker is its built-in vendor registry: picking a model rewrites the
+> app's own `config.toml` to the **bare** slug (`model = "gpt-5.6-terra"`), silently dropping the
+> prefix, and the app **never fetches `/relay/v1/models`** (zero hits in the E2E network's entire
+> `server.log`), so it can never learn the grid's names. Observed: a ~40-request 503 storm
+> ("Reconnecting… 5/5") the first time the picker was touched. Docs cannot fix this — the app
+> undoes them one picker use later.
+>
+> **The rule** (relay `_select_provider`, the would-have-503'd path only, so a matching request
+> never pays for it): a requested model that matches no provider as-is is retried as `<kind>:X`
+> against capability entries whose `endpoints` contain `"responses"`. Exactly one distinct raw id
+> matches → `body["model"]` is rewritten in place (the auto-router precedent — billing,
+> `txn.model`, enqueue, and the response `model` field all see only the namespaced name, and the
+> idempotency hash was already taken from the client's literal body). Zero → the unchanged 503.
+> More than one → a 503 naming the candidates (`code:"model_ambiguous"`), never a silent pick.
+>
+> **The `endpoints` gate is the whole safety argument.** Only API-engine capability entries carry
+> `endpoints` at all (`codex_capability_entry`; local engines have none — "absent means chat-only,
+> old CLIs fail closed"), so a local engine's Ollama-style colon-tag (`qwen2.5:0.5b`) can never be
+> an alias target, and the alias can never hand a responses job to an engine that cannot serve
+> one. No kind list is hardcoded: a future second Responses-capable kind joins the rule — and the
+> ambiguity refusal — automatically.
+>
+> Scope, deliberately narrow: `responses` only (chat keeps exact-name semantics; the
+> `grid chat -m codex:*` refusal is untouched); the non-target path only (`X-Target-Provider`
+> keeps strict names — an advanced surface the Codex app cannot reach). The response echoes the
+> **namespaced** name, not the bare request: the vendor itself never echoes the requested
+> spelling (it echoes dated snapshots), and a per-request display stash would add state for a
+> cosmetic distinction; revisit with the `request.state` pattern if some client ever
+> hard-compares. Rejected: fixing the client config (undone by the picker), documenting-only
+> (same), and aliasing by suffix alone without the endpoints gate (would let a bare tag reach a
+> local engine's colon-named model).
+
 **D-b (per-kind served-endpoint matrix, enforced on both sides).** Which relay endpoint an
 engine serves is a property of its kind: codex ⇒ `responses` only; openai ⇒
 `chat/completions` only; hardware ⇒ `chat/completions` + `completions`. The provider's serve
