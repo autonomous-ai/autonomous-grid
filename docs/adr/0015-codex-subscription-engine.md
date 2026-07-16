@@ -92,6 +92,13 @@ unmetered open proxy for the provider's seat).
 >   even under `store:false`). A pure pipe forwards the provider's stable identifier to every
 >   consumer of that seat. D-e's fidelity list needs a scrub entry, or D-a needs an explicit
 >   carve-out for identity fields.
+>
+>   > **Resolved 2026-07-16 (issue 03, grid-src `50d4f29`) — the scrub lives at the RELAY.** The
+>   > fidelity list got its scrub entry: `_PROVIDER_IDENTITY_FIELDS = ("safety_identifier",)` in
+>   > grid-src's `relay.py`, applied by the same structural sanitiser that masks the model name
+>   > (with bare-CR smuggling around it refused outright). Deliberately NOT the provider's job:
+>   > the provider's stream must stay byte-verbatim (D-e's concat invariant, issue 06), so the
+>   > one place that already rewrites consumer-facing chunks is the one place that can scrub.
 
 > **Amended 2026-07-16 (issue 08). "nothing more" is retired: settlement carries an overdraft
 > bound.** The clause above — *"The guard ring on this path is body-size + image caps + real-usage
@@ -155,6 +162,22 @@ closed: they never advertise `responses`, so the relay never sends them one. Rej
 widening the provider's global endpoint allow-list (a `responses` job could then
 blind-forward into a hardware engine via the single-URL fallback and die as a 404 instead of
 a clean refusal).
+
+> **Amended 2026-07-16 (issue 06 — as built).** The serving half landed; the deltas that bind:
+>
+> - **The matrix is checked AFTER routing, where the kind is known** — `_served_endpoints(kind)`
+>   reads the whitelist row (hardware ⇒ the legacy chat pair; a kind no longer in the catalog
+>   degrades to the `ApiWhitelist` chat-only default, the `_static_api_caps` posture). The global
+>   allow-list is untouched as decided, and the anti-traversal property survives: only a literal
+>   that matched the matrix ever reaches the URL interpolation. Named collateral: a junk endpoint
+>   whose model routes nowhere (a multi-URL union, or a zero-URL media-only identity) now errors
+>   "no engine serves model …" instead of "unsupported endpoint" — same structured-error class,
+>   the refusal order moved.
+> - **The codex row's `unsupported_params` is advisory catalog data now, not an executable gate.**
+>   The pre-flight refusal fabricates a CHAT `{"error":…}` envelope, so it is scoped to the chat
+>   forward (`endpoint == "chat/completions"`); a responses job's contract violations are the
+>   vendor's to answer in its own `{"detail":…}` shape (facts.md #7). openai behavior is
+>   byte-identical.
 
 **D-c (OAuth seat credential: grid-owned PKCE, no env var, no Codex-CLI dependency).**
 `grid join --api codex` runs the OAuth PKCE authorization itself — browser plus a one-shot
@@ -222,6 +245,51 @@ the seat; serve shutdown must not abandon a worker mid-exchange. Deviation from 
 the routing snapshot, resolved by kind at forward time — a rotation must not rebuild routing
 or race a hot-reload swap. Everything else about the engine (kind, models, caps) stays
 snapshot-resident, so hot-append and leave behave exactly as 0012.
+
+> **Amended 2026-07-16 (issue 06 — as built).** D-d's provider half landed
+> (`remote/codex_oauth.refresh_bundle`, `remote/api_keys.rotate_codex_bundle`,
+> `remote/serve._CodexSeatHolder`); the shapes that bind:
+>
+> - **The holder.** The seat lives in `_CodexSeatHolder` on the serve state, primed at startup and
+>   on every reload by ONE derivation (`_prime_codex_seat` — the die-before-advertise gate moved
+>   here from `_api_bearers`, which now skips codex specs entirely: a snapshot copy would go stale
+>   at the first rotation). A record with no codex spec never touches the store — the seat on a
+>   box may belong to another grid's identity.
+> - **The grant.** JSON-encoded at the same endpoint whose code exchange is form-encoded (facts.md
+>   #9) — one attempt, no transport retry (a retry re-presents a possibly-spent single-use token).
+>   A 200 missing `refresh_token` keeps the old one; a rotated access token that fails
+>   `decode_seat` keeps the STORED identity and is persisted anyway — by then the old refresh
+>   token is SPENT, so refusing would brick the seat; the deliberate asymmetry with
+>   `exchange_code`, where no fallback identity exists. Taxonomy: `RefreshRefused` = a definitive
+>   4xx (never 408/429) or a 200 with no usable tokens (the vendor processed the grant — spent
+>   either way); everything else is `RefreshUnavailable`, with `request_sent=False` reserved for
+>   connect failures that provably never left the machine.
+> - **The journal** is `refresh_pending_since` inside the codex store entry — presence is the
+>   signal; every persisted bundle is a wholesale replace, so it clears with no cleanup code to
+>   forget (a fresh sign-in clears it too). It is read-then-written under the SAME lock hold as
+>   the exchange, so `interrupted=True` on a later refusal means exactly "an exchange died between
+>   the vendor call and the persist" — the sign-in-again diagnosis. A `request_sent=False` failure
+>   withdraws its OWN journal (an offline blip must not sharpen a wrong diagnosis); an ambiguous
+>   one leaves it, truthfully.
+> - **The exchange runs under the store's file lock** as decided; the named cost is that every
+>   other api_keys write on the box blocks behind it (≤ the 15s vendor timeout). The lock is
+>   flock-based and NOT reentrant — everything inside the CAS writes through the unlocked layer.
+> - **Failure gates:** a refused seat retries at most every 600s, a transient failure every 60s —
+>   but a bundle another process persisted is adopted lock-free straight THROUGH the gate, so a
+>   re-sign-in from a second grid heals this one instantly. Refresh failures warn and gate; they
+>   never stop the loop (no auto-eject).
+> - **Proactive triggers:** expiry within 600s, or `last_refresh` older than 24h — both
+>   conservative picks; the vendor's real rotation window is UNVERIFIED (facts.md #6) and the
+>   quota window (B6) is not evidence of token TTL. Evaluated on every heartbeat tick, including
+>   ticks whose relay call failed, inside a guard that turns any escaping exception into a warn
+>   (`_supervise` would otherwise stop the engine).
+> - **Shutdown** waits on the exchange FLAG, not a thread: the flag is published before the first
+>   side-effect (before even the journal) and cleared after the persist, the holder refuses to
+>   START a rotation once stop is set, and the CAS re-checks stop under the lock — so flag-unset
+>   at teardown means nothing was spent and nothing will be. The wait is bounded by
+>   `_CODEX_EXCHANGE_DRAIN` (15s); `run_records._STOP_GRACE_SECONDS` rose 8 → 25 (5 drain + 15
+>   exchange + teardown margin) so the parent's SIGKILL cannot cut the wait short — free on
+>   healthy exits, which poll `pid_alive` every 0.2s.
 
 **D-e (the SSE event block is the streaming unit for responses jobs).** The vendor streams
 `event:` + `data:` line pairs; the relay's mailbox is line-oriented and would tear each pair
@@ -370,6 +438,25 @@ poll-worker default of 8 does **not** apply to codex — a codex-containing unio
 >   Also pre-existing and untouched: `_merge_engines` unions on any `endpoint_url` mismatch for
 >   ALL api kinds — the codex URL-mismatch refusal above sidesteps it for codex; openai keeps
 >   the historic behavior.
+
+> **Amended 2026-07-16 (issue 06 — as built, provider half).** The provider submits whole event
+> blocks via `remote/serve._iter_event_blocks`, regrouping the vendor's arbitrary socket chunking
+> so each HTTP chunk to the relay is one complete `event:`+`data:` block, blank line included —
+> and a provider death mid-stream therefore strands only whole events at the relay. Invariants,
+> pinned by test against the shared fixture (`tests/fixtures/codex_stream.sse`, grid-src's copy
+> byte-for-byte): concat(out) == concat(in) whatever the chunking; no strip, no decode, no
+> injected `[DONE]`; **no CR repair** — the relay refuses bare-CR smuggling, and a provider that
+> re-framed CR would mask exactly what that sanitiser catches; a tail with no trailing blank line
+> is flushed verbatim (it is the `response.completed` carrying the usage); a buffered PARTIAL
+> block is dropped when the vendor stream dies (crash-atomicity — do not "rescue" it in a
+> finally); a block past 8 MiB degrades to passthrough, losing alignment for one seam but never
+> bytes (the relay re-splits on `\n` itself). Codex jobs always take the streaming forward
+> regardless of the job's stream flag, and the job-level forward is `_forward_codex`: headers
+> built fresh per attempt from the holder (the real client's five + JSON content-type, no
+> OpenAI-Beta), 401 → refresh → retry exactly once with the refresh run OUTSIDE the response
+> context (no vendor connection held through a 15s exchange; the drained status/headers/body are
+> what feed the CF-403 vs auth-403 operator warnings, D-f), and every failure submitted with the
+> `engine error {status}:` prefix the relay's terminal mapper keys on.
 
 ## Consequences
 

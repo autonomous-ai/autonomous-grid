@@ -233,6 +233,140 @@ def _token_payload(resp: httpx.Response) -> dict[str, object]:
     return payload
 
 
+# --- The refresh grant (ADR 0015 D-d, issue 06) --------------------------------------------------
+
+# One vendor round-trip on the serve loop's refresh path; a hung socket must surface as an error the
+# loop can classify, not hang a poll worker. Mirrors `_EXCHANGE_TIMEOUT`, the sign-in's own bound.
+_REFRESH_TIMEOUT = 15.0
+
+
+# Why a refresh grant was definitively refused. A CLOSED vocabulary (the `CodexTokenError`
+# pattern): "grant-rejected" = a definitive 4xx; "unusable-grant" = a 200 whose body carries no
+# usable tokens (the vendor *processed* the grant, so the old refresh token is spent either way).
+_REFUSED_REASONS = frozenset({"grant-rejected", "unusable-grant"})
+
+
+class RefreshRefused(Exception):
+    """The token service answered the refresh grant and said no — the stored rotation is dead and
+    only a fresh sign-in can mint a new one.
+
+    ``reason`` comes from ``_REFUSED_REASONS`` and is ENFORCED at construction, not trusted (the
+    `CodexTokenError` pattern): the whole point of a closed vocabulary is that ``str(exc)`` is
+    provably safe to log, and a future raise site passing vendor-derived text would silently
+    defeat that. Never carries the body: a 200's body IS the tokens, and an error body is vendor
+    text of unbounded shape.
+    """
+
+    def __init__(self, status_code: int, reason: str) -> None:
+        if reason not in _REFUSED_REASONS:
+            # Report the SHAPE, never the value — if this fires for its real purpose (a
+            # regression passing vendor-derived text), interpolating it would leak what it caught.
+            raise ValueError(
+                f"RefreshRefused reason must be one of _REFUSED_REASONS; got a "
+                f"{type(reason).__name__}"
+                + (f" of length {len(reason)}" if isinstance(reason, str) else "")
+            )
+        super().__init__(f"HTTP {status_code} ({reason})")
+        self.status_code = status_code
+        self.reason = reason
+
+
+class RefreshUnavailable(Exception):
+    """The refresh grant could not be CONCLUDED — transport failure, vendor 5xx, or rate limiting.
+
+    Says nothing about the seat: the grant may or may not have been spent. ``request_sent=False``
+    means the request provably never left this machine (connect failed), so the caller may clear
+    any journal it wrote — nothing was spent. Never carries the body.
+    """
+
+    def __init__(
+        self, detail: str, *, status_code: int | None = None, request_sent: bool = True
+    ) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.request_sent = request_sent
+
+
+def refresh_bundle(old: CodexBundle) -> CodexBundle:
+    """Spend ``old``'s single-use refresh token for a rotated bundle (ADR 0015 D-d).
+
+    **JSON-encoded, unlike ``exchange_code``'s form encoding** — the same endpoint takes two grants
+    in two encodings (facts.md #9); unifying them 400s one of the two. One attempt, no transport
+    retry: a retry after an ambiguous failure would re-present a possibly-spent single-use token
+    (facts.md #6 — ``refresh_token_reused`` is a permanent vendor failure).
+    """
+    try:
+        with httpx.Client(timeout=_REFRESH_TIMEOUT) as client:
+            resp = client.post(
+                TOKEN_URL,
+                # `json=` is the refresh grant's shape; `data=` would be the exchange's. Not a
+                # style choice — the vendor accepts exactly one encoding per grant type.
+                json={
+                    "client_id": CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": old.refresh_token,
+                },
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # The request never left this machine — nothing was spent (`request_sent=False`).
+        raise RefreshUnavailable(
+            f"could not reach the sign-in service ({type(exc).__name__})", request_sent=False
+        ) from None
+    except httpx.HTTPError as exc:
+        raise RefreshUnavailable(f"transport failure mid-grant ({type(exc).__name__})") from None
+
+    status = resp.status_code
+    if status != 200:
+        # A definitive 4xx is the vendor processing the grant and saying no. 408/429 are excluded
+        # on purpose — timeout/rate noise says nothing about the grant — and everything else
+        # (5xx, 3xx: httpx follows no redirects here) lands in the retry-later bucket, so no
+        # status can fall outside the taxonomy.
+        if 400 <= status < 500 and status not in (408, 429):
+            raise RefreshRefused(status, "grant-rejected")
+        raise RefreshUnavailable(
+            f"the sign-in service is unavailable (HTTP {status})", status_code=status
+        )
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+    access_token = payload.get("access_token") if isinstance(payload, dict) else None
+    if not isinstance(access_token, str) or not access_token:
+        # The vendor said 200 — it PROCESSED the grant — but returned nothing we can use. The
+        # single-use token is spent either way, so this is a refusal (sign-in-again), not a
+        # retry-later: retrying would re-present a spent grant (facts.md #6).
+        raise RefreshRefused(200, "unusable-grant")
+    # No new refresh token beside the rotated access token means the old grant is still the live
+    # one — carry it forward (the `_ServeState.refresh` pattern). Dropping it would leave nothing
+    # to rotate; refusing the 200 would discard a rotation the vendor already performed. Guarded
+    # for TYPE, not just truth: a non-string here (vendor drift) would persist silently and
+    # surface as a baffling refusal on the NEXT rotation, far from where it appeared.
+    new_refresh = payload.get("refresh_token")
+    refresh_token = new_refresh if isinstance(new_refresh, str) and new_refresh else old.refresh_token
+    try:
+        seat = codex_auth.decode_seat(access_token)
+        account_id, plan_type = seat.account_id, seat.plan_type
+    except codex_auth.CodexTokenError as exc:
+        # The deliberate asymmetry with `exchange_code` (terminal on the same failure): by now the
+        # OLD refresh token is SPENT, so discarding the new tokens bricks the seat, and a fallback
+        # identity EXISTS — the account id is stable per seat and the vendor honours the token
+        # whether or not we can read it. Stale plan_type heals at the next decodable rotation.
+        # `.reason` is the closed vocabulary — loggable; the token and its claims are not.
+        print(
+            f"codex refresh: unreadable rotated access token ({exc.reason}) — keeping the seat's "
+            "stored identity",
+            file=sys.stderr,
+        )
+        account_id, plan_type = old.account_id, old.plan_type
+    return CodexBundle(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        account_id=account_id,
+        plan_type=plan_type,
+        last_refresh=int(time.time()),
+    )
+
+
 def parse_redirect(url: str, *, expected_state: str) -> str:
     """The authorization code carried by the vendor's redirect ``url``.
 

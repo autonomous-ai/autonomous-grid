@@ -25,7 +25,12 @@ from shared.models import api_catalog
 
 
 # How long ``stop_engine`` waits for a SIGTERM'd child to exit before SIGKILLing its group.
-_STOP_GRACE_SECONDS = 8
+# SIGTERM → SIGKILL escalation budget for a detached engine child. 25 = the serve loop's worker
+# drain (5s) + a codex token exchange caught mid-flight (its 15s vendor timeout — remote/serve.py
+# waits that exchange out rather than losing a journaled rotation, ADR 0015 D-d) + unregister/
+# teardown margin. Costs nothing on healthy exits — the wait below polls `pid_alive` every 0.2s
+# and returns the moment the child dies; only a genuinely wedged child feels the longer fuse.
+_STOP_GRACE_SECONDS = 25
 
 
 def record_path(grid_id: str, engine_id: str) -> Path:

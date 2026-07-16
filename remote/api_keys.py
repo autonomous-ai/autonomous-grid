@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
+import time
 
 from shared import paths
 from shared.filelock import file_lock
@@ -51,15 +53,7 @@ def require_bearer(kind: str) -> str:
     everyone remembering. The credential never appears in any message raised here.
     """
     if kind == CODEX_KIND:
-        bundle = load_codex_bundle()
-        if bundle is None:
-            # Deliberately names no environment variable: for an OAuth seat there is none, and
-            # offering one would invite exactly the spoof D-c exists to prevent.
-            raise SystemExit(
-                "This engine serves --api codex models but this machine is not signed in to a "
-                "codex subscription. Re-run `grid join --api codex` to sign in."
-            )
-        return bundle.access_token
+        return require_codex_bundle().access_token
 
     whitelist = api_catalog.WHITELISTS.get(kind)
     # No synthesised `{KIND}_API_KEY` fallback for a kind the catalog doesn't name: guessing an env
@@ -91,6 +85,21 @@ def store_key(kind: str, key: str) -> None:
 # Re-exported from the catalog (issue 05): shared/run_records' concurrency rule needs the kind
 # key and shared/ must not import remote/, so the single definition lives with the whitelist.
 CODEX_KIND = api_catalog.CODEX_KIND
+
+
+def require_codex_bundle() -> codex_oauth.CodexBundle:
+    """The stored codex seat, or the terminal error naming the fix (die-before-advertise).
+
+    Deliberately names no environment variable: for an OAuth seat there is none, and offering one
+    would invite exactly the spoof ADR 0015 D-c exists to prevent.
+    """
+    bundle = load_codex_bundle()
+    if bundle is None:
+        raise SystemExit(
+            "This engine serves --api codex models but this machine is not signed in to a "
+            "codex subscription. Re-run `grid join --api codex` to sign in."
+        )
+    return bundle
 
 
 def load_codex_bundle() -> codex_oauth.CodexBundle | None:
@@ -133,9 +142,19 @@ def store_codex_bundle(bundle: codex_oauth.CodexBundle) -> None:
     """Persist the codex seat (0o600), preserving every other kind.
 
     The whole bundle is replaced as one unit: the access and refresh tokens are minted together and a
-    mix of the two rotations is not a credential the vendor would honour.
+    mix of the two rotations is not a credential the vendor would honour. The wholesale replace is
+    also what clears a leftover ``refresh_pending_since`` journal — a fresh sign-in resolves any
+    in-doubt rotation by definition.
     """
-    entry = {
+    # Replaced wholesale rather than merged into the previous codex entry: a stale field left behind
+    # by an older grid version must not survive a re-sign-in inside a bundle it doesn't belong to.
+    _merge_kind(CODEX_KIND, _codex_entry(bundle), replace=True)
+
+
+def _codex_entry(bundle: codex_oauth.CodexBundle) -> dict[str, object]:
+    """The codex seat as a TOML table — shared by ``store_codex_bundle`` and the rotation's persist
+    so the two writers cannot drift."""
+    entry: dict[str, object] = {
         "access_token": bundle.access_token,
         "refresh_token": bundle.refresh_token,
         "account_id": bundle.account_id,
@@ -146,9 +165,122 @@ def store_codex_bundle(bundle: codex_oauth.CodexBundle) -> None:
     # "None" is the shape this omission exists to prevent.
     if bundle.plan_type is not None:
         entry["plan_type"] = bundle.plan_type
-    # Replaced wholesale rather than merged into the previous codex entry: a stale field left behind
-    # by an older grid version must not survive a re-sign-in inside a bundle it doesn't belong to.
-    _merge_kind(CODEX_KIND, entry, replace=True)
+    return entry
+
+
+# The rotation journal (ADR 0015 D-d): present in the codex entry while an exchange is in flight
+# and never afterwards — every persisted bundle is a wholesale replace, so a leftover key can only
+# mean an exchange died between the vendor call and the write. PRESENCE is the signal; the value
+# (POSIX seconds) is forensic only. `load_codex_bundle` reads fields by name, so the key never
+# affects bundle validity.
+_CODEX_JOURNAL_KEY = "refresh_pending_since"
+
+
+class CodexNotSignedIn(Exception):
+    """No usable codex seat in the store — signed out, never signed in, or half-written."""
+
+
+class RotationAbandoned(Exception):
+    """Shutdown won the race to the store lock: nothing was journaled and nothing was spent."""
+
+
+class CodexRotationRefused(Exception):
+    """The vendor refused to rotate the stored seat — only a fresh sign-in can revive it.
+
+    ``interrupted`` is True when a journal from a PREVIOUS attempt was already present when this
+    one started: an earlier exchange died between the vendor call and the persist, so the stored
+    refresh token was likely spent — the diagnosis ADR 0015 D-d's journal exists to make possible.
+    Carries no token and no vendor body; the operator wording is the caller's to compose.
+    """
+
+    def __init__(self, status_code: int, reason: str, *, interrupted: bool) -> None:
+        super().__init__(f"HTTP {status_code} ({reason})")
+        self.status_code = status_code
+        self.reason = reason
+        self.interrupted = interrupted
+
+
+def rotate_codex_bundle(
+    stale_access_token: str,
+    *,
+    exchange_in_flight: threading.Event | None = None,
+    abandon: threading.Event | None = None,
+) -> codex_oauth.CodexBundle:
+    """One cross-process compare-and-swap rotation of the codex seat (ADR 0015 D-d).
+
+    The vendor call happens UNDER the store's file lock — deliberately: N serve processes share
+    ONE single-use refresh token, and the lock is what makes "exactly one exchange, the losers
+    adopt" true across processes (the losers block on the flock, re-read, and see the winner's
+    fresher token). The named cost: any other api_keys write on this box waits out the exchange
+    (bounded by codex_oauth._REFRESH_TIMEOUT).
+
+    ``exchange_in_flight`` is published BEFORE the first side-effect and cleared in ``finally`` —
+    the shutdown drain waits on it, so "flag unset" must mean "nothing was spent and nothing will
+    be" (a worker that passed the ``abandon`` re-check below has already published the flag).
+    ``abandon`` (the serve loop's stop event) is re-checked under the lock so no journal is ever
+    written after shutdown began.
+
+    Returns the fresh bundle (already persisted). Raises ``CodexNotSignedIn``,
+    ``RotationAbandoned``, ``CodexRotationRefused`` (definitive vendor no — carries the
+    ``interrupted`` diagnosis), or re-raises ``codex_oauth.RefreshUnavailable`` (transient; the
+    journal stays unless the request provably never left this machine).
+
+    NEVER call the locked writers (``store_codex_bundle``/``_merge_kind``) from inside: the store
+    lock is flock-based and NOT reentrant — a nested acquire self-deadlocks. Everything in here
+    writes through ``_write_kind_unlocked``.
+    """
+    with file_lock(paths.api_keys_file()):
+        stored = load_codex_bundle()
+        if stored is None:
+            raise CodexNotSignedIn("the stored codex seat is gone")
+        if stored.access_token != stale_access_token:
+            return stored  # someone else already rotated — adopt, spend nothing (the CAS)
+        if exchange_in_flight is not None:
+            exchange_in_flight.set()  # before ANY side-effect, so the drain never sees a gap
+        try:
+            if abandon is not None and abandon.is_set():
+                raise RotationAbandoned()
+            raw = credentials.load_toml(paths.api_keys_file()).get(CODEX_KIND)
+            journal_was_present = isinstance(raw, dict) and _CODEX_JOURNAL_KEY in raw
+
+            def _withdraw_own_journal() -> None:
+                # Scoped to OUR OWN journal: when a journal predated this attempt, it is an
+                # EARLIER crash's unresolved doubt and only a persisted bundle may clear it —
+                # erasing it here would downgrade the next refusal's diagnosis from "a rotation
+                # was lost" to a plain revocation. When the journal is ours alone, `raw` IS the
+                # pre-journal entry (read under this same lock hold), so writing it back verbatim
+                # withdraws exactly what we added — no re-read, no filter.
+                if not journal_was_present and isinstance(raw, dict):
+                    _write_kind_unlocked(CODEX_KIND, dict(raw), replace=True)
+
+            _write_kind_unlocked(CODEX_KIND, {_CODEX_JOURNAL_KEY: int(time.time())})
+            try:
+                fresh = codex_oauth.refresh_bundle(stored)
+            except codex_oauth.RefreshRefused as exc:
+                # A definitive refusal is a COMPLETED attempt — nothing died mid-flight — so it
+                # withdraws its own journal; left behind, attempt 1's pre-call write would become
+                # attempt 2's "a prior exchange died" evidence and a stably-dead seat would be
+                # misdiagnosed as a lost rotation from the second refusal on. A journal that
+                # PREDATED this attempt stays (the earlier crash's doubt keeps resurfacing until
+                # a bundle persists — issue 05's posture), and is what `interrupted` reports.
+                _withdraw_own_journal()
+                raise CodexRotationRefused(
+                    exc.status_code, exc.reason, interrupted=journal_was_present
+                ) from None
+            except codex_oauth.RefreshUnavailable as exc:
+                if not exc.request_sent:
+                    # The exchange provably never left this machine — nothing was spent, so OUR
+                    # journal is withdrawn: left behind, it would sharpen a WRONG "rotation was
+                    # lost" diagnosis out of an ordinary offline blip. An ambiguous failure
+                    # (request_sent unknown/True) keeps it, truthfully — the grant may have
+                    # reached the vendor and died on the way back.
+                    _withdraw_own_journal()
+                raise
+            _write_kind_unlocked(CODEX_KIND, _codex_entry(fresh), replace=True)
+            return fresh
+        finally:
+            if exchange_in_flight is not None:
+                exchange_in_flight.clear()
 
 
 def _merge_kind(kind: str, entry: dict[str, object], *, replace: bool = False) -> None:
@@ -157,10 +289,19 @@ def _merge_kind(kind: str, entry: dict[str, object], *, replace: bool = False) -
     Immutable update: a fresh dict is written, never the loaded one mutated in place.
     """
     with file_lock(paths.api_keys_file()):  # serialize the read-merge-write (see module docstring)
-        data = credentials.load_toml(paths.api_keys_file())
-        existing = data.get(kind)
-        base = {} if replace or not isinstance(existing, dict) else existing
-        credentials.atomic_write_toml(paths.api_keys_file(), {**data, kind: {**base, **entry}})
+        _write_kind_unlocked(kind, entry, replace=replace)
+
+
+def _write_kind_unlocked(kind: str, entry: dict[str, object], *, replace: bool = False) -> None:
+    """The read-merge-atomic-write of one kind's entry. **The caller must hold the store's file
+    lock.** Split from ``_merge_kind`` because the lock is flock-based and NOT reentrant (each
+    acquisition opens a fresh fd, and flock treats same-process fds as independent holders) — the
+    rotation CAS holds the lock across its whole read→journal→exchange→persist sequence and must
+    write through this layer, never through the locked one."""
+    data = credentials.load_toml(paths.api_keys_file())
+    existing = data.get(kind)
+    base = {} if replace or not isinstance(existing, dict) else existing
+    credentials.atomic_write_toml(paths.api_keys_file(), {**data, kind: {**base, **entry}})
     # Best-effort: keep the home dir owner-only (mirrors credentials.save_credentials), so a local
     # user can't even list that a credential file exists — even when THIS write created ~/.grid.
     with contextlib.suppress(OSError):
