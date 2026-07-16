@@ -93,6 +93,57 @@ unmetered open proxy for the provider's seat).
 >   consumer of that seat. D-e's fidelity list needs a scrub entry, or D-a needs an explicit
 >   carve-out for identity fields.
 
+> **Amended 2026-07-16 (issue 08). "nothing more" is retired: settlement carries an overdraft
+> bound.** The clause above — *"The guard ring on this path is body-size + image caps + real-usage
+> metering, nothing more"* — was an explicit closure, and this adds a fourth leg. Recording why it
+> should not have been closed:
+>
+> Striking the **request** cap (correctly — the vendor accepts no cap parameter, and cutting the
+> stream cannot refund an allowance the vendor already spent) left `max_output_tokens = NULL` on
+> every responses transaction. Settlement's existing clamp is `if max_output_tokens:`, so on this
+> path it is a **permanent no-op** — making `responses` the first per-token-billed endpoint whose
+> `tokens_out` is taken verbatim from a **provider-composed** object with no bound of any kind.
+> `settle_usage_cost_within` multiplies it by `output_rate` and reports it to the control plane,
+> which is the sole balance authority and holds no local reconciliation; a balance may go negative
+> and only the *next* request is gated. **One request was therefore unbounded.** Inert only while no
+> codex price row exists — and one `PUT /relay/v1/grid/models` arms it, with no deploy and no review.
+>
+> **The bound:** `tokens_out = min(tokens_out, max(SETTLEMENT_MAX_OUTPUT_TOKENS, max_output_tokens))`,
+> default 272,000 (`config.settlement_max_output_tokens`).
+>
+> **This does not resurrect what was struck, and the `max()` is the whole reason.** The obvious
+> objection is that this decision's own text names this exact mechanism as the harm — *"settlement
+> clamps billed output to that column … would quietly bill a 5,000-token turn as 1,024 —
+> **under-paying the provider**"* — so a settlement clamp is precisely what D-a refused. The answer is
+> that the bound is taken against **this transaction's own consented ceiling**, so it can never clamp
+> below what a consumer asked for; it binds only where the consumer consented to *nothing*, which is
+> this path alone. It is a **floor underneath the consumer's ceiling, not a rival to it**, and chat is
+> inert *by construction* rather than by arithmetic coincidence. An earlier draft took the max against
+> `api_max_tokens_cap` instead — tying this guard to a knob about what chat consumers may *request* —
+> and under that draft the objection would have been correct and this decision right to forbid it.
+>
+> **What it is, stated so nobody over-reads it: an overdraft bound, NOT an anti-fraud control.**
+> Against a real 43-token response, 272,000 catches only absurdity — a provider claiming 271,999 is
+> billed in full and never trips the warning. It makes the per-request loss finite; it does not detect
+> the lie. **No honest bound can**, and that is structural, not an omission: `output_tokens` counts
+> reasoning tokens the vendor never streams, so delivered text cannot bound it from below, and every
+> per-model limit the relay can see (`grid_model_catalog.context_length`, the capability envelope's
+> own `max_output_tokens`) is **written by the provider** and therefore circular. The relay trusting
+> provider-reported usage is the original architecture, not a codex regression — `relay.py`'s
+> `_count_tokens_approximate` has said *"NOT for billing validation; v4 trusts the provider's reported
+> usage"* since the first commit. Calling this anti-fraud would make the next reader stop looking.
+>
+> Consequently the bound is **loud when it binds** (it names the transaction), because binding means
+> either a lying provider or a ceiling below what the seat's tier can legitimately produce, and both
+> want a human. **272,000 is a FREE-tier fact** (facts.md #5; paid tiers are UNRESOLVED-NOACCESS and
+> "must not be populated from guesswork") — that provenance is also its expiry trigger.
+>
+> **Also fixed here, same expression:** every coercion in `_settlement_usage` caught
+> `(TypeError, ValueError)`. `int(float('inf'))` raises **OverflowError** (an `ArithmeticError`), and
+> CPython's `json.loads` accepts the `Infinity` literal by default — so a provider could submit
+> `"output_tokens": Infinity` and roll back the settle, 500 its own submit, and strand the row. It
+> defeated the new ceiling by crashing one line before it.
+
 **D-b (per-kind served-endpoint matrix, enforced on both sides).** Which relay endpoint an
 engine serves is a property of its kind: codex ⇒ `responses` only; openai ⇒
 `chat/completions` only; hardware ⇒ `chat/completions` + `completions`. The provider's serve
