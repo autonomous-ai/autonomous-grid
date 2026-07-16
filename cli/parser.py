@@ -140,7 +140,8 @@ def _add_engines(sub) -> None:
         metavar="KIND",
         default=None,
         help="Join a third-party API engine of this service kind (e.g. openai, codex). "
-             "Remote only; requires -m with whitelisted models (see `grid catalog --api`).",
+             "Remote only; -m optionally narrows the whitelist (see `grid catalog --api`), "
+             "omitted = every whitelisted model the credential can serve.",
     )
     choose.add_argument(
         "--no-browser",

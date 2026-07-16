@@ -175,7 +175,7 @@ grid join [grid] --all                                # join every detected engi
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
-grid join [grid] --api <kind> [-m <model>...]         # remote only: join a third-party API engine (v1: openai)
+grid join [grid] --api <kind> [-m <model>...]         # remote only: join a third-party API engine (openai, codex)
 grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
 grid engine ls [grid] [--json]                        # live engines joined to a grid (legacy alias: grid engines)
 ```
@@ -226,8 +226,9 @@ up ComfyUI + the media server, registers the `comfyui:*` workflows the host's VR
 relay forwards `media/*` jobs to the media server on loopback; the SSE (progress + base64 result
 files) streams back exactly as in local mode.
 
-`grid join --api <kind> [-m <model>...]` (v1: `openai`) joins an **API engine** — a third-party LLM
-API service served through your own key ([ADR 0012](./adr/0012-api-engines.md)). The key is
+`grid join --api <kind> [-m <model>...]` joins an **API engine** — a third-party LLM API service
+served through your own vendor credential ([ADR 0012](./adr/0012-api-engines.md)). Two kinds exist:
+`openai` (a metered API key) and `codex` (a ChatGPT/Codex subscription seat — see below). The key is
 resolved in order: the `OPENAI_API_KEY` env var, else the machine-local key store, else a hidden
 interactive prompt (there is deliberately no `--api-key` flag; non-interactive with no key anywhere
 is a clear error). It is validated at join time against the vendor's model listing — an invalid key
@@ -271,6 +272,58 @@ key); a stored seat the vendor now rejects gets one inline fresh sign-in on an i
 your grid; `grid chat` refuses them client-side with exactly that guidance. **Jobs spend the
 seat's own monthly Codex allowance.** See
 [ADR 0015](./adr/0015-codex-subscription-engine.md).
+
+### Pointing a Codex app at your grid (using `codex:*` models)
+
+A `codex:*` model is **used from an external Codex-compatible app** (Codex CLI, Codex Desktop),
+never from `grid chat` — the grid's own use verbs speak `chat/completions`, codex engines serve
+only the `responses` endpoint, and traffic is never translated between the two. The app needs the
+same two values every OpenAI SDK needs, printed by **`grid info --env`** (the grid must be up, and
+your sign-in must be a member): the relay base URL and your per-grid access token.
+
+For the Codex CLI, add a provider to `~/.codex/config.toml` and select a `codex:*` model
+(keys verified against `codex-cli 0.144.2`):
+
+```toml
+model = "codex:gpt-5.4-mini"            # a codex:* name from `grid models`
+model_provider = "grid"
+model_context_window = 272000           # pin it — an unknown slug gets fallback metadata otherwise
+
+[model_providers.grid]
+name = "Autonomous Grid"
+base_url = "https://<your relay>/relay/v1"   # OPENAI_BASE_URL from `grid info --env`
+env_key = "GRID_API_KEY"                     # the env var the app reads your api key from
+wire_api = "responses"                       # mandatory — `wire_api = "chat"` is rejected by the app
+supports_websockets = false                  # the grid relay streams HTTP SSE, not WebSocket
+```
+
+```bash
+export GRID_API_KEY="<your access token>"    # OPENAI_API_KEY from `grid info --env`
+codex "explain this repo"
+```
+
+(The same keys can hang off a `[profiles.<name>]` block instead of the config root if you don't
+want to change the app's default provider.)
+
+What the passthrough contract means for the app, in plain language:
+
+- **Requests leave the grid for the vendor** (OpenAI), forwarded by the member whose seat serves
+  them — and **spend that member's own monthly Codex allowance**.
+- **The vendor is forced stateless**: the relay refuses `store: true`, `previous_response_id`, and
+  `conversation` up front (in the vendor's own error shape), so every turn resends the full
+  history — exactly how the Codex CLI already behaves. A long session therefore grows toward the
+  relay's request body-size cap, which is the practical session bound.
+- **The relay still retains stream chunks for its task TTL** — like every other grid endpoint —
+  even though the vendor is forced stateless. Statelessness upstream is not zero retention on the
+  relay. And the vendor itself **caches prompts for ~24h even under `store: false`** (the response
+  advertises `prompt_cache_retention: "24h"`) — "stateless" bounds conversation state, not every
+  vendor-side trace.
+- **There is no output-token ceiling on this path.** The vendor's codex backend accepts no cap
+  parameter under any name (`max_output_tokens`, `max_tokens`, `max_completion_tokens` are all
+  refused, as is `temperature` — it runs an allowlist and rejects chat-era knobs). The relay
+  refuses the cap spellings up front so you learn there is no ceiling instead of being silently
+  billed for an uncapped response; anything else it passes through verbatim, so an unlisted
+  parameter surfaces as the vendor's own 400.
 
 An API engine merges into your grid's **one serving identity** exactly like a hardware engine.
 `grid join --api openai` onto an identity already serving other engines appends to the union and
@@ -403,6 +456,11 @@ Check engines:
 model the grid ranked and had free, and the `X-Grid-Routed-Model` response header (and the reply's
 `model` field) name it. On a grid without routing enabled, `auto` is a clear "not enabled" error. See
 [Router](#router).
+
+**`codex:*` models are not chat models.** They serve the vendor's `responses` endpoint for external
+Codex apps; `grid chat -m codex:…` is refused client-side, before any network call, with the
+guidance to point a Codex-compatible app at the grid instead
+([Pointing a Codex app at your grid](#pointing-a-codex-app-at-your-grid-using-codex-models)).
 
 ## Members
 
