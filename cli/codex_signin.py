@@ -33,19 +33,22 @@ if TYPE_CHECKING:
 _SIGNIN_DEADLINE_S = 600
 
 
-def resolve_seat(*, no_browser: bool) -> CodexBundle:
-    """This machine's codex seat — the stored one, or a fresh sign-in.
+def resolve_seat(*, no_browser: bool) -> tuple[CodexBundle, bool]:
+    """This machine's codex seat — the stored one, or a fresh sign-in — plus whether the sign-in
+    ran. Fresh means the credential CHANGED: the join must probe it, and a live codex engine must
+    respawn to pick the new bundle up (the openai key-rotation policy, ADR 0012).
 
     A stored bundle is reused with no browser and no prompt (the acceptance criterion behind user
-    story 15: re-joining later is one command). Whether a stored seat is still *live* is ADR 0015
-    D-d's question, answered by the serve loop's refresh, not by a join.
+    story 15: re-joining later is one command). Whether a stored seat can still serve from this
+    machine is the join probe's question (ADR 0015 D-f, issue 05); whether it stays alive across
+    idle weeks is D-d's, answered by the serve loop's refresh.
     """
     from remote import api_keys
 
     stored = api_keys.load_codex_bundle()
     if stored is not None:
-        return stored
-    return sign_in(no_browser=no_browser)
+        return stored, False
+    return sign_in(no_browser=no_browser), True
 
 
 def sign_in(*, no_browser: bool) -> CodexBundle:

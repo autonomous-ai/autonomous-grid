@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # runtime imports stay lazy inside the handlers
+    from shared.models import api_catalog
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
@@ -56,6 +60,11 @@ def _catalog_api(args: argparse.Namespace) -> int:
         supported = ", ".join(api_catalog.supported_kinds())
         raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
 
+    # A tier-keyed kind prints per tier — its flat `entries` (the tier union) exists for the
+    # kind-generic helpers, not for display, and its `--json` contract speaks `tiers`.
+    if kind == api_catalog.CODEX_KIND:
+        return _catalog_codex(kind, whitelist, bool(getattr(args, "json", False)))
+
     if getattr(args, "json", False):
         # Explicit keys: this is the stable machine-readable contract (ADR 0012);
         # renaming an ApiModelEntry field must not silently rename a JSON key.
@@ -97,6 +106,68 @@ def _catalog_api(args: argparse.Namespace) -> int:
         print(api_catalog.format_api_entry(kind, entry))
     print()
     print(f"No key needed to view. Requests to {kind}:* models leave the grid for the vendor.")
+    return 0
+
+
+def _catalog_codex(kind: str, whitelist: api_catalog.ApiWhitelist, as_json: bool) -> int:
+    """The codex catalog: the per-tier table, offline (ADR 0012 D-a — no credential, no network).
+
+    Only verified tiers are printed; every other tier — unknown, unrecognized, or simply not yet
+    verified — advertises the minimal set at join time (ADR 0015 D-f), and the fallback rule is
+    stated rather than left for the operator to discover at join.
+    """
+    from shared.models import api_catalog
+
+    if as_json:
+        # Explicit keys — the stable machine-readable contract (ADR 0012). Per-tier kinds speak
+        # `tiers`, not the flat `models`; no chat-dialect keys (a Responses passthrough cannot
+        # honestly claim them either way); `supports_parallel_tool_calls` comes from the same
+        # `codex_features` derivation the capability envelope uses, so the two cannot disagree.
+        print(json.dumps({
+            "kind": kind,
+            "last_verified": whitelist.last_verified,
+            "endpoints": list(whitelist.endpoints),
+            "minimal_tier": api_catalog.CODEX_MINIMAL_TIER,
+            "tiers": {
+                tier: [
+                    {
+                        "advertised": api_catalog.advertised_name(kind, entry),
+                        "vendor_name": entry.vendor_name,
+                        "context_window": entry.context_window,
+                        "supports_tools": entry.supports_tools,
+                        "supports_vision": entry.supports_vision,
+                        "supports_parallel_tool_calls": api_catalog.codex_features(entry)["parallel_tool_calls"],
+                        "notes": entry.notes,
+                    }
+                    for entry in entries
+                ]
+                for tier, entries in api_catalog.CODEX_TIER_MODELS.items()
+            },
+        }, indent=2))
+        return 0
+
+    print(
+        f"Models a `grid join --api {kind}` would serve, by subscription tier "
+        f"(verified {whitelist.last_verified}):"
+    )
+    for tier, entries in api_catalog.CODEX_TIER_MODELS.items():
+        print()
+        print(f"{tier}:")
+        for entry in entries:
+            print(api_catalog.format_api_entry(kind, entry))
+    print()
+    print(
+        "Tiers not listed are unverified in this release — a seat on one advertises the "
+        f"`{api_catalog.CODEX_MINIMAL_TIER}` set, as does a seat whose tier its token doesn't say."
+    )
+    print(
+        f"No sign-in needed to view. {kind} models serve the vendor's `responses` endpoint — "
+        "point an external Codex app at your grid; `grid chat` cannot call them."
+    )
+    print(
+        f"Requests to {kind}:* models leave the grid for the vendor and spend the seat's own "
+        "monthly allowance."
+    )
     return 0
 
 

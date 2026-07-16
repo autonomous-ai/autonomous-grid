@@ -704,29 +704,38 @@ def test_api_whitelist_integrity():
         assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
 
 
-def test_catalog_api_codex_says_the_list_is_empty_not_that_the_kind_is_unknown(capsys):
-    """`grid catalog --api codex` used to contradict itself in one sentence: "Unknown API kind
-    'codex'. Supported: codex, openai".
+def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
+    """`grid catalog --api codex` prints the static per-tier table — offline, with no credential
+    (ADR 0012 D-a posture; the sign-in and the live probe belong to `grid join`). Each populated
+    tier prints its rows; the fallback rule for every other tier is stated naming the minimal
+    tier; and the consumer-facing facts are disclosed: these models serve the `responses`
+    endpoint (an external Codex app, not `grid chat`), requests leave the grid, and jobs spend
+    the seat's own monthly allowance."""
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
 
-    `_catalog_api` used "has entries" as its is-this-kind-known proxy, which was safe only while
-    every row had entries — the credential-only codex row is the first that doesn't. Two predicates
-    for one question then disagreed: `_reject_api_conflicts` asks `kind in WHITELISTS` (known),
-    `_catalog_api` asked "has entries" (unknown).
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
 
-    An empty list is legitimate today — the per-tier table is issue 05's. Saying so honestly is the
-    fix; calling a supported kind "Unknown" is not.
-
-    Exit 0, matching `--json`'s 0-with-`models: []`: the command was asked to report the whitelist
-    and did. An empty answer is an answer. The same query must not change exit code just because a
-    human is reading it.
-    """
     rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
 
     out = capsys.readouterr().out
     assert rc == 0
-    assert "Unknown" not in out  # it is listed as Supported two words later
-    assert "codex" in out
-    assert "grid join --api codex" in out  # sign-in already works; say what does
+    assert "Unknown" not in out
+    assert api_catalog.CODEX_LAST_VERIFIED in out
+    for tier, entries in api_catalog.CODEX_TIER_MODELS.items():
+        assert f"\n{tier}:\n" in out  # a per-tier section header
+        for entry in entries:
+            assert api_catalog.advertised_name("codex", entry) in out
+            assert f"{entry.context_window:,}" in out
+    # Chat-dialect capability words never appear on codex rows (honest passthrough claims only).
+    assert "json" not in out and "structured" not in out
+    assert api_catalog.CODEX_MINIMAL_TIER in out  # the fallback rule names the minimal tier
+    assert "responses" in out  # the endpoint disclosure...
+    assert "grid chat" in out  # ...and what NOT to point at it
+    assert "leave the grid" in out  # provenance disclosure (openai parity)
+    assert "allowance" in out  # flat-rate seat: jobs spend the provider's own allowance
 
 
 def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
@@ -741,17 +750,34 @@ def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
     assert "codex" in msg and "openai" in msg  # the supported list
 
 
-def test_catalog_api_codex_json_reports_an_empty_model_list(capsys):
-    """`--json` is the machine-readable contract (ADR 0012). A consumer asking what codex serves
-    gets a well-formed answer with zero models — not a non-zero exit it has to parse an error out
-    of. The empty list IS the fact."""
+def test_catalog_api_codex_json_emits_per_tier_contract(capsys):
+    """`--json` for codex speaks `tiers`, not the flat `models` (the reshape is safe: v0.2.1
+    predates every codex commit, so the interim flat-empty shape never shipped in a release).
+    Entries carry NO chat-dialect keys — json-mode/structured-outputs are chat notions a
+    Responses passthrough cannot honestly claim — and `supports_parallel_tool_calls` is the one
+    shared derivation the capability envelope also uses, so the two surfaces cannot disagree."""
     rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=True))
 
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["kind"] == "codex"
-    assert payload["models"] == []
     assert payload["last_verified"] == api_catalog.CODEX_LAST_VERIFIED
+    assert payload["endpoints"] == ["responses"]
+    assert payload["minimal_tier"] == api_catalog.CODEX_MINIMAL_TIER
+    assert "models" not in payload  # per-tier kinds speak `tiers`
+    assert set(payload["tiers"]) == set(api_catalog.CODEX_TIER_MODELS)
+    free = payload["tiers"]["free"]
+    assert len(free) == len(api_catalog.CODEX_TIER_MODELS["free"])
+    first, first_entry = free[0], api_catalog.CODEX_TIER_MODELS["free"][0]
+    assert first["advertised"] == api_catalog.advertised_name("codex", first_entry)
+    assert first["vendor_name"] == first_entry.vendor_name
+    assert first["context_window"] == first_entry.context_window
+    assert first["supports_tools"] is True
+    assert first["supports_vision"] is True
+    assert first["supports_parallel_tool_calls"] is True
+    assert first["notes"] == first_entry.notes
+    assert "supports_json_mode" not in first
+    assert "supports_structured_outputs" not in first
 
 
 def test_api_whitelist_key_kinds_name_their_env_var():
@@ -766,9 +792,9 @@ def test_api_whitelist_key_kinds_name_their_env_var():
         assert whitelist.env_var, f"{kind} needs the env var its key is read from"
 
 
-def test_codex_whitelist_is_a_credential_only_row():
-    """Issue 05 fills the per-tier model entries. What issue 04 needs on disk today is the kind
-    EXISTING with the two fields an OAuth seat cannot have:
+def test_codex_whitelist_has_no_env_var_and_no_output_cap():
+    """The two fields an OAuth seat cannot have (issue 04), kept true now that issue 05 populates
+    the row's model entries (the tier union — see test_codex_tier_whitelist_integrity):
 
     * no `env_var` — ADR 0015 D-c: no env-var input path, so nothing in the environment can pose as
       a seat, and `_api_bearers` has no name to synthesise a fallback from.
@@ -785,7 +811,103 @@ def test_codex_whitelist_is_a_credential_only_row():
     assert set(codex.unsupported_params) == {
         "max_tokens", "max_output_tokens", "max_completion_tokens", "temperature",
     }
-    assert codex.entries == ()  # issue 05's, keyed by tier
+    assert codex.entries  # issue 05: populated from the tier table
+
+
+def test_codex_tier_whitelist_integrity():
+    """The per-tier codex table (issue 05). Guards the D-f data rules: every populated tier is
+    real vendor `PlanType` vocabulary; rows are non-empty, duplicate-free, and inside the flat
+    union (`entries` IS the union, so `find_advertised` resolves every codex model); the minimal
+    tier's row exists (the fallback every unknown/unverified tier degrades to); the hidden
+    `codex-auto-review` slug is excluded everywhere (facts.md #5, visibility: "hide"); and the
+    table is dated + carries the probe's pinned client version."""
+    from datetime import date
+
+    tiers = api_catalog.CODEX_TIER_MODELS
+    assert tiers, "at least one tier must be populated"
+    assert set(tiers) <= api_catalog.CODEX_PLAN_TYPES, "tier keys are vendor vocabulary, not ours"
+    assert api_catalog.CODEX_MINIMAL_TIER in tiers, "the minimal fallback row must be populated"
+
+    union = {entry.vendor_name for entry in api_catalog.WHITELISTS["codex"].entries}
+    seen: set[str] = set()
+    by_name: dict = {}
+    for tier, entries in tiers.items():
+        names = [entry.vendor_name for entry in entries]
+        assert names, f"tier {tier!r} must not be an empty row (absent means unverified)"
+        assert all(names) and len(set(names)) == len(names), f"tier {tier!r} rows must be unique"
+        assert set(names) <= union, f"tier {tier!r} names something the flat union lacks"
+        for entry in entries:
+            # A vendor_name shared across tiers must be the SAME entry: the flat union keeps the
+            # first occurrence (`_codex_tier_union` setdefault), so a colliding second-tier entry
+            # with different specs would silently lose to it in every serve-time lookup
+            # (silent-failure review, latent trap — inert while one tier exists).
+            assert by_name.setdefault(entry.vendor_name, entry) == entry, (
+                f"{entry.vendor_name!r} appears in two tiers with different specs"
+            )
+        seen |= set(names)
+    assert seen == union, "WHITELISTS['codex'].entries must be exactly the union of the tier rows"
+    assert "codex-auto-review" not in union  # visibility: "hide" — never advertised
+
+    # The free row is the live-verified 2026-07-15 set, in the vendor's priority order.
+    free = [entry.vendor_name for entry in tiers["free"]]
+    assert free == ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"]
+    for entry in api_catalog.WHITELISTS["codex"].entries:
+        assert entry.context_window == 272_000
+        assert entry.supports_tools and entry.supports_vision
+        # Chat-dialect notions — a passthrough kind cannot honestly claim them (issue 05).
+        assert not entry.supports_json_mode and not entry.supports_structured_outputs
+
+    date.fromisoformat(api_catalog.CODEX_LAST_VERIFIED)
+    assert api_catalog.CODEX_CLIENT_VERSION  # the `GET /models?client_version=…` pin
+
+
+def test_codex_tier_entries_selects_row_or_minimal():
+    """D-f's selection rule as one pure lookup: a populated tier gets its row; a missing (None),
+    unrecognized ("banana"), or known-but-unverified ("plus") tier degrades to the minimal row —
+    the join never widens on a guess. The warn wording for the three degrade cases is the CLI's
+    (they differ only in what the operator is told, not in what is advertised)."""
+    free_row = api_catalog.CODEX_TIER_MODELS["free"]
+    minimal = api_catalog.CODEX_TIER_MODELS[api_catalog.CODEX_MINIMAL_TIER]
+
+    assert api_catalog.codex_tier_entries("free") == free_row
+    assert api_catalog.codex_tier_entries(None) == minimal      # vendor said nothing
+    assert api_catalog.codex_tier_entries("banana") == minimal  # outside the vendor vocabulary
+    assert api_catalog.codex_tier_entries("plus") == minimal    # known tier, row unverified
+    assert "plus" in api_catalog.CODEX_PLAN_TYPES  # pin: "plus" IS known — its degrade differs from banana's only in wording
+
+
+def test_api_whitelist_endpoints_per_kind():
+    """Which relay endpoint a kind's models serve — the wire contract half this repo owns. The
+    values are hand-duplicated with grid-src's `provider_supports` filter (absent ⇒ chat-only,
+    old CLIs fail closed); the literal `"responses"` must match its `endpoint_path` byte-for-byte
+    (CLAUDE.local.md lockstep rule)."""
+    assert api_catalog.WHITELISTS["openai"].endpoints == ("chat/completions",)
+    assert api_catalog.WHITELISTS["codex"].endpoints == ("responses",)
+
+
+def test_codex_kind_constant_is_defined_in_shared_and_reexported():
+    """`CODEX_KIND` lives in shared/ (the run-record concurrency rule needs it and shared/ must
+    not import remote/); remote/api_keys re-exports it so its existing call sites keep working
+    without a second definition to drift. Equality, not `is`: CPython interns short string
+    literals, so `is` would pass even against an independent literal — it proves nothing here.
+    What this guards is a rename on either side."""
+    from remote import api_keys
+
+    assert api_catalog.CODEX_KIND == "codex"
+    assert api_keys.CODEX_KIND == api_catalog.CODEX_KIND
+
+
+def test_responses_only_kind_flags_codex_models_only():
+    """The `grid chat` pre-flight asks one question — "is this model namespaced under a kind that
+    cannot serve chat/completions?" — and the answer is data-driven from the whitelist's
+    `endpoints`, never a hardcoded kind name. Anything that isn't such a namespace (openai's chat
+    kind, a hardware model whose NAME merely contains a colon, no namespace at all) is None."""
+    assert api_catalog.responses_only_kind("codex:gpt-5.5") == "codex"
+    assert api_catalog.responses_only_kind("codex:") == "codex"  # still a codex-namespaced request
+    assert api_catalog.responses_only_kind("openai:gpt-5.5") is None  # serves chat/completions
+    assert api_catalog.responses_only_kind("llama3:8b") is None  # colon, but not an API kind
+    assert api_catalog.responses_only_kind("gpt-5.5") is None  # no namespace
+    assert api_catalog.responses_only_kind("") is None
 
 
 def test_api_whitelist_carries_base_url_and_env_var():
@@ -1170,6 +1292,202 @@ def test_codex_seat_decodes_an_expired_token():
 
     assert seat.account_id == "acct-x"
     assert seat.expires_at == 1
+
+
+# ---------------------------------------------------------------------------
+# codex join probe (ADR 0015 D-f, issue 05) — one free GET {base}/models per changed join.
+# Every test here mocks the vendor via httpx.MockTransport: this suite never makes a network call.
+# ---------------------------------------------------------------------------
+
+
+def _codex_bundle(plan_type="free"):
+    from remote import codex_oauth
+
+    return codex_oauth.CodexBundle(
+        access_token="tok-access",
+        refresh_token="tok-refresh",
+        account_id="acct-1",
+        plan_type=plan_type,
+        last_refresh=0,
+    )
+
+
+def _mock_probe(monkeypatch, handler, _real=httpx.Client):
+    """The `_mock_vendor` pattern for the codex probe: a REAL httpx.Client with MockTransport
+    injected, capturing the whole request for the URL/header asserts."""
+    seen = {}
+
+    def wrapped(request):
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        seen["headers"] = dict(request.headers)
+        seen.setdefault("calls", 0)
+        seen["calls"] += 1
+        return handler(request)
+
+    monkeypatch.setattr(
+        httpx, "Client",
+        lambda *a, **k: _real(*a, **{**k, "transport": httpx.MockTransport(wrapped)}),
+    )
+    return seen
+
+
+def _probe(monkeypatch, handler):
+    """Run probe_seat against a mocked vendor; returns (result_or_exc, seen)."""
+    from remote import codex_probe
+
+    seen = _mock_probe(monkeypatch, handler)
+    slugs = codex_probe.probe_seat(
+        _codex_bundle(),
+        base_url=api_catalog.WHITELISTS["codex"].base_url,
+        client_version=api_catalog.CODEX_CLIENT_VERSION,
+    )
+    return slugs, seen
+
+
+def test_codex_probe_sends_the_verified_request_and_returns_visible_slugs(monkeypatch):
+    """The probe is the ONE vendor call a changed join makes, and it is free (facts.md B1). It
+    sends the verified URL + `client_version` pin and exactly the five headers the real client
+    sends (spike probe.py `headers_for`). It returns the seat's visible slugs — a
+    `visibility: "hide"` row (codex-auto-review) is never advertised — deduped, vendor order
+    preserved; the ~42 unknown fields per model ride along ignored. A CF-RAY header on the 200
+    is NOT a Cloudflare block: CF-RAY rides every response, including successes (facts.md B4)."""
+    body = {"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list", "context_window": 272000, "unknown_field": 1},
+        {"slug": "gpt-5.5", "visibility": "list"},
+        {"slug": "gpt-5.5", "visibility": "list"},            # vendor dupe → deduped
+        {"slug": "codex-auto-review", "visibility": "hide"},  # hidden → excluded
+    ]}
+
+    slugs, seen = _probe(monkeypatch, lambda request: httpx.Response(
+        200, json=body, headers={"CF-RAY": "a1b94a2e9cacfd7c-SIN"},
+    ))
+
+    assert slugs == ("gpt-5.6-terra", "gpt-5.5")
+    assert seen["calls"] == 1  # one request, no retry
+    assert seen["method"] == "GET"
+    assert seen["url"] == (
+        "https://chatgpt.com/backend-api/codex/models"
+        f"?client_version={api_catalog.CODEX_CLIENT_VERSION}"
+    )
+    assert seen["headers"]["authorization"] == "Bearer tok-access"
+    assert seen["headers"]["chatgpt-account-id"] == "acct-1"
+    assert seen["headers"]["originator"] == "codex_cli_rs"
+    assert seen["headers"]["user-agent"] == "codex_cli_rs"
+    assert seen["headers"]["accept"] == "application/json"
+
+
+def test_codex_probe_auth_failures_raise_the_typed_seat_rejection(monkeypatch):
+    """401, and 403 WITHOUT the Cloudflare marker, are the seat's fault — the ONE class the join
+    may catch to offer a stored-but-dead seat a fresh sign-in. Typed, not SystemExit: the join
+    must never string-match a terminal message to decide whether a retry applies. The typed error
+    carries the status only — never vendor body text (unbounded shape on an auth host)."""
+    from remote import codex_probe
+
+    for status in (401, 403):
+        with pytest.raises(codex_probe.SeatRejected) as exc:
+            _probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"detail": "denied"}))
+        assert exc.value.status_code == status
+        assert "denied" not in str(exc.value)
+
+
+def test_codex_probe_cf_challenge_keys_on_cf_mitigated_not_cf_ray(monkeypatch):
+    """403 + `Cf-Mitigated` = Cloudflare challenged this machine's egress IP. Refusing the join
+    names that cause — a datacenter/VPS address typically cannot serve a seat, and signing in
+    again cannot fix an IP, so this is deliberately NOT the auth class. Keyed on `Cf-Mitigated`,
+    never on CF-RAY, which rides every response including 200s (facts.md B4; the happy-path test
+    pins a CF-RAY-bearing 200 succeeding)."""
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            403,
+            text="<html>Just a moment...</html>",
+            headers={"Cf-Mitigated": "challenge", "CF-RAY": "a1b94a2e9cacfd7c-SIN"},
+        ))
+
+    msg = str(exc.value)
+    assert "egress IP" in msg
+    assert "Nothing was joined." in msg
+    assert "sign in" not in msg.lower()  # an IP block is not fixed by re-authenticating
+    assert "Just a moment" not in msg  # never the challenge page's HTML
+
+
+def test_codex_probe_remaining_classes_have_distinct_terminal_messages(monkeypatch):
+    """429 (seat rate-limited — wait), 5xx (vendor outage — not the operator's fault), 400
+    (contract drift — check for a newer release), transport (unreachable). Together with the CF
+    message these are the taxonomy's terminal classes; each must be distinct, name nothing
+    joined, and the 400 class must never be worded as a tier problem (facts.md #5 — the vendor's
+    refusals name the auth mode, never the tier)."""
+
+    messages = {}
+    for status in (429, 503, 400):
+        with pytest.raises(SystemExit) as exc:
+            _probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"detail": "d"}))
+        messages[status] = str(exc.value)
+
+    def _transport_fail(request):
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, _transport_fail)
+    messages["transport"] = str(exc.value)
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            403, text="x", headers={"Cf-Mitigated": "challenge"},
+        ))
+    messages["cf"] = str(exc.value)
+
+    assert len(set(messages.values())) == len(messages)  # pairwise distinct
+    for msg in messages.values():
+        assert "Nothing was joined." in msg
+        assert "tier" not in msg.lower()
+    assert "rate-limited" in messages[429]
+    assert "outage" in messages[503]
+    assert "newer grid release" in messages[400]
+    assert "Could not reach" in messages["transport"]
+    assert "egress IP" in messages["cf"]
+
+
+def test_codex_probe_400_detail_echo_is_bounded(monkeypatch):
+    """The 400 message may quote the vendor's `detail` — the one field that tells an operator
+    what drifted — but vendor text is untrusted: over-long or non-printable detail is dropped,
+    never truncated into the message (ANSI escapes and newlines could forge output lines)."""
+
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            400, json={"detail": "Unsupported parameter: client_version"},
+        ))
+    assert "Unsupported parameter: client_version" in str(exc.value)
+
+    for hostile in ("x" * 500, "line\nforged", "\x1b[31mred\x1b[0m", "", 42):
+        with pytest.raises(SystemExit) as exc:
+            _probe(monkeypatch, lambda request, d=hostile: httpx.Response(400, json={"detail": d}))
+        msg = str(exc.value)
+        assert "forged" not in msg and "\x1b" not in msg and "x" * 100 not in msg
+
+
+def test_codex_probe_unreadable_listing_is_contract_drift_but_empty_is_empty(monkeypatch):
+    """A 200 whose body can't yield slugs is shape drift → the contract-drift error, never a
+    KeyError. But a WELL-FORMED empty listing returns () — an empty seat is a selection problem
+    (the join's empty-intersection error names it), not a probe failure."""
+
+    for body in ('"not a dict"', '{"nothing": 1}', '{"models": "not-a-list"}'):
+        with pytest.raises(SystemExit) as exc:
+            _probe(monkeypatch, lambda request, b=body: httpx.Response(
+                200, content=b, headers={"Content-Type": "application/json"},
+            ))
+        assert "can't read" in str(exc.value)
+
+    # Non-empty models, zero readable slugs: drift, not "empty seat".
+    with pytest.raises(SystemExit) as exc:
+        _probe(monkeypatch, lambda request: httpx.Response(
+            200, json={"models": [{"id": "renamed-away"}, "junk"]},
+        ))
+    assert "can't read" in str(exc.value)
+
+    slugs, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": []}))
+    assert slugs == ()
 
 
 # ---------------------------------------------------------------------------
@@ -3471,14 +3789,38 @@ def _mock_codex_browser(monkeypatch, *, code="AUTHCODE-1", state=None, listen=No
     return seen
 
 
-def _mock_codex_exchange(monkeypatch, *, account="acct-1", plan="free"):
-    """The vendor's token endpoint. Returns the 3 fields the real one returns — no account id."""
+def _mock_codex_exchange(monkeypatch, *, account="acct-1", plan="free", models=None):
+    """The vendor, both halves: the token endpoint (3 fields, no account id — fact 9) AND the
+    free `GET /models` probe a successful sign-in now flows straight into (issue 05). Returns
+    (access_token, seen) where seen records the exchange under `token_*` keys and the probe
+    under `probe_*` keys — a flat `url` would be whichever call came LAST."""
     access = _codex_jwt(
         {"chatgpt_account_id": account, "chatgpt_plan_type": plan}, exp=2_000_000_000
     )
-    seen = _mock_vendor(monkeypatch, lambda request: httpx.Response(200, json={
-        "id_token": "id-tok", "access_token": access, "refresh_token": "rt-1",
-    }))
+    listing = {"models": [
+        {"slug": slug, "visibility": "list"}
+        for slug in (models if models is not None
+                     else ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"])
+    ]}
+    seen = {}
+
+    def handler(request):
+        url = str(request.url)
+        if "/oauth/token" in url:
+            seen["token_url"] = url
+            seen["token_method"] = request.method
+            seen["token_content_type"] = request.headers.get("content-type")
+            seen["token_body"] = request.content
+            return httpx.Response(200, json={
+                "id_token": "id-tok", "access_token": access, "refresh_token": "rt-1",
+            })
+        seen["probe_url"] = url
+        seen["probe_auth"] = request.headers.get("authorization")
+        seen.setdefault("probe_calls", 0)
+        seen["probe_calls"] += 1
+        return httpx.Response(200, json=listing)
+
+    _mock_vendor(monkeypatch, handler)
     return access, seen
 
 
@@ -3493,16 +3835,14 @@ def test_remote_join_api_codex_browser_flow_lands_the_bundle(monkeypatch, tmp_pa
     access, exchanged = _mock_codex_exchange(monkeypatch)
     browser = _mock_codex_browser(monkeypatch)
 
-    with pytest.raises(SystemExit):
-        # Sign-in is issue 04's; the tier's model table (and the probe that confirms it) is issue
-        # 05's, so the join itself cannot complete yet. The credential still lands — exactly as an
-        # openai key does, which is stored the moment the vendor validates it and before the model
-        # intersection can fail.
-        cli.main(["join", "--api", "codex"])
+    # Sign-in (issue 04) flows straight into the probe + join (issue 05): one command, seat
+    # stored, engine registered.
+    assert cli.main(["join", "--api", "codex"]) == 0
 
     assert browser["bound_port"] == codex_oauth.CALLBACK_PORT  # bound BEFORE the browser opened
     assert browser["authorize_url"].startswith("https://auth.openai.com/oauth/authorize?")
-    assert exchanged["url"] == "https://auth.openai.com/oauth/token"
+    assert exchanged["token_url"] == "https://auth.openai.com/oauth/token"
+    assert exchanged["probe_calls"] == 1  # the fresh seat was probed before anything spawned
 
     assert api_keys.load_codex_bundle() == codex_oauth.CodexBundle(
         access_token=access, refresh_token="rt-1", account_id="acct-1",
@@ -3560,10 +3900,9 @@ def test_remote_join_api_codex_no_browser_flow_takes_a_pasted_redirect(monkeypat
 
     monkeypatch.setattr(cli.codex_signin, "_prompt_redirect_url", fake_paste)
 
-    with pytest.raises(SystemExit):  # the model table is issue 05's; the seat still lands
-        cli.main(["join", "--api", "codex", "--no-browser"])
+    assert cli.main(["join", "--api", "codex", "--no-browser"]) == 0  # sign-in flows into the join
 
-    assert exchanged["url"] == "https://auth.openai.com/oauth/token"
+    assert exchanged["token_url"] == "https://auth.openai.com/oauth/token"
     bundle = api_keys.load_codex_bundle()
     assert bundle is not None and bundle.access_token == access and bundle.account_id == "acct-1"
     assert "AUTHCODE-1" not in printed["out"]  # grid printed the authorize URL, never the code
@@ -3632,8 +3971,7 @@ def test_remote_join_api_codex_falls_back_to_paste_when_callback_port_is_taken(
 
     monkeypatch.setattr(cli.codex_signin, "_prompt_redirect_url", fake_paste)
 
-    with pytest.raises(SystemExit):  # the model table is issue 05's; the seat still lands
-        cli.main(["join", "--api", "codex"])
+    assert cli.main(["join", "--api", "codex"]) == 0  # the paste flow completes the join
 
     bundle = api_keys.load_codex_bundle()
     assert bundle is not None and bundle.access_token == access
@@ -3716,8 +4054,7 @@ def test_remote_join_api_codex_never_touches_the_real_codex_cli_credential(monke
     monkeypatch.setattr(builtins, "open", fake_open)
     monkeypatch.setattr(pathlib.Path, "open", fake_path_open)
 
-    with pytest.raises(SystemExit):  # the model table is issue 05's; the seat still lands
-        cli.main(["join", "--api", "codex"])
+    assert cli.main(["join", "--api", "codex"]) == 0  # the whole join, sign-in through spawn
 
     assert touched == []
 
@@ -3725,7 +4062,9 @@ def test_remote_join_api_codex_never_touches_the_real_codex_cli_credential(monke
 def test_remote_join_api_codex_reuses_a_stored_seat_with_no_sign_in(monkeypatch, tmp_path, capsys):
     """Acceptance: a later join reuses the stored bundle without re-auth (user story 15 —
     `grid leave --engine codex` then re-joining is one command). Nothing opens, nothing binds,
-    nothing is pasted, and the vendor is not called: the seat is already ours."""
+    nothing is pasted, and the token endpoint is never touched: the seat is already ours. The
+    ONE vendor call is the free probe (this box has no live codex engine, so the spec changed
+    and D-f says probe)."""
     import webbrowser
 
     from remote import api_keys, codex_callback
@@ -3736,17 +4075,535 @@ def test_remote_join_api_codex_reuses_a_stored_seat_with_no_sign_in(monkeypatch,
     monkeypatch.setattr(webbrowser, "open", lambda url: pytest.fail("a stored seat needs no browser"))
     monkeypatch.setattr(codex_callback, "listen",
                         lambda port, **kw: pytest.fail("a stored seat binds nothing"))
-    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail("a stored seat is not re-exchanged"))
     monkeypatch.setattr(
         cli.codex_signin, "_prompt_redirect_url", lambda: pytest.fail("a stored seat is not re-pasted")
     )
 
-    with pytest.raises(SystemExit):  # the model table is issue 05's
-        cli.main(["join", "--api", "codex"])
+    def vendor(request):
+        if "/oauth/token" in str(request.url):
+            pytest.fail("a stored seat is not re-exchanged")
+        return httpx.Response(200, json={"models": [{"slug": "gpt-5.5", "visibility": "list"}]})
+
+    _mock_probe(monkeypatch, vendor)
+
+    assert cli.main(["join", "--api", "codex"]) == 0
 
     assert api_keys.load_codex_bundle() == _bundle()  # untouched, not re-minted
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["codex:gpt-5.5"]  # tier row ∩ what the seat actually has
     out_err = capsys.readouterr()
     assert "at-1" not in out_err.out + out_err.err and "rt-1" not in out_err.out + out_err.err
+
+
+def test_remote_join_api_codex_stored_seat_probes_and_serves_the_tier_set(monkeypatch, tmp_path, capsys):
+    """The tracer join (issue 05): a stored free seat, no -m. ONE free probe (`GET {base}/models`
+    with the seat's bearer + account-id header) proves reachability and the entitled set; the
+    advertised set is the tier row ∩ the seat's live set, namespaced `codex:*`; the record's spec
+    is kind-generic (endpoint_url/models/engine_label/api_kind — never a token, never the account
+    id); the serve process spawns. A populated, verified tier draws NO tier warning."""
+    from remote import api_keys
+    from shared import run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+        {"slug": "gpt-5.6-luna", "visibility": "list"},
+        {"slug": "gpt-5.5", "visibility": "list"},
+        {"slug": "gpt-5.4-mini", "visibility": "list"},
+        {"slug": "codex-auto-review", "visibility": "hide"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert seen["calls"] == 1  # exactly one vendor call: the free probe
+    assert seen["url"].startswith("https://chatgpt.com/backend-api/codex/models?client_version=")
+    assert seen["headers"]["authorization"] == "Bearer tok-access"
+    assert seen["headers"]["chatgpt-account-id"] == "acct-1"
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["engines"] == [{
+        "endpoint_url": "https://chatgpt.com/backend-api/codex",
+        "models": ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna", "codex:gpt-5.5", "codex:gpt-5.4-mini"],
+        "engine_label": "codex",
+        "api_kind": "codex",
+    }]
+    assert record["models"] == record["engines"][0]["models"]
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    # Secret hygiene: the bearer and the account id reach no record and no terminal output.
+    record_text = run_records.record_path("n1", "remote").read_text()
+    assert "tok-access" not in record_text and "acct-1" not in record_text
+    out_err = capsys.readouterr()
+    assert "tok-access" not in out_err.out + out_err.err
+    assert "acct-1" not in out_err.out + out_err.err
+    assert "Warning" not in out_err.err  # a verified populated tier draws no tier warning
+
+
+def test_remote_join_api_codex_tier_selects_the_row_and_warns_per_degrade_case(monkeypatch, tmp_path, capsys):
+    """D-f row selection + the issue's mandated warn-log, with a synthetic second tier (the real
+    table has only `free`, so a bigger `plus` row is the only way to SEE selection — review L3).
+    Four seats, four outcomes:
+
+      * plus (populated row)   → the plus row, NO tier line at all
+      * None (vendor silent)   → minimal row + "Warning:" — the alarm the issue amendment demands:
+                                 a vendor claim-rename must not silently downgrade seats forever
+      * banana (unrecognized)  → minimal row + "Warning:" (vendor vocabulary drift)
+      * go (known, unverified) → minimal row + an info line that is NOT a warning
+    """
+    from remote import api_keys
+
+    free_row = api_catalog.CODEX_TIER_MODELS["free"][:2]
+    plus_row = api_catalog.CODEX_TIER_MODELS["free"]
+    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free_row, "plus": plus_row})
+    listing = {"models": [{"slug": e.vendor_name, "visibility": "list"} for e in plus_row]}
+
+    cases = [
+        ("plus", 4), (None, 2), ("banana", 2), ("go", 2),
+    ]
+    errs = {}
+    for plan, expected_count in cases:
+        home = tmp_path / f"case-{plan}"
+        _seed_running_remote_grid(monkeypatch, home)
+        _mock_remote_spawn(monkeypatch)
+        api_keys.store_codex_bundle(_codex_bundle(plan_type=plan))
+        _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=listing))
+
+        assert cli.main(["join", "--api", "codex"]) == 0
+
+        record = cli.provider._read_records("n1")["remote"]
+        assert len(record["models"]) == expected_count, f"plan={plan!r}"
+        errs[plan] = capsys.readouterr().err
+
+    assert "Warning" not in errs["plus"] and "isn't verified" not in errs["plus"]
+    assert "Warning:" in errs[None] and "no subscription tier" in errs[None]
+    assert "newer grid release" in errs[None]  # the recovery hint — this case may be OUR staleness
+    assert "Warning:" in errs["banana"]
+    assert "recognize" in errs["banana"]
+    assert "Warning:" not in errs["go"]  # known tier, merely unverified — informational only
+    assert "isn't verified" in errs["go"] and "'go'" in errs["go"]
+
+
+def test_remote_join_api_codex_explicit_model_errors_name_what_is_available(monkeypatch, tmp_path):
+    """D5's explicit--m semantics: an explicit ask is REFUSED, never silently narrowed (the
+    deliberate divergence from openai's skip — a personal seat asked for a model it lacks
+    deserves a refusal). Outside the tier row → the tier's verified list is named (D-f bounds
+    advertising to the verified row whatever the seat has); in the row but not on the seat →
+    what the seat CAN serve is named, and the message never claims the seat "serves none" when
+    it demonstrably serves others. Nothing spawns on either."""
+    from remote import api_keys
+
+    # Synthetic split (review L3): the union whitelist keeps all 4 entries, the tier row shrinks
+    # to 2 — the only way a union-valid, tier-invalid name can exist while only `free` is real.
+    free_row = api_catalog.CODEX_TIER_MODELS["free"][:2]  # terra, luna
+    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free_row})
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+    ]}))
+
+    # -m outside the tier row (but inside the union whitelist): the tier bound refuses it.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.5"])
+    msg = str(exc.value)
+    assert "codex:gpt-5.5" in msg and "'free'" in msg
+    assert "codex:gpt-5.6-terra" in msg and "codex:gpt-5.6-luna" in msg  # the tier's verified list
+
+    # -m inside the tier row but absent from the live seat: name what IS available, truthfully.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-luna"])
+    msg = str(exc.value)
+    assert "codex:gpt-5.6-luna" in msg
+    assert "codex:gpt-5.6-terra" in msg   # the seat CAN serve this...
+    assert "serves none" not in msg       # ...so "serves none" would be a lie
+
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_codex_identical_rejoin_is_noop_with_zero_vendor_calls(monkeypatch, tmp_path, capsys):
+    """Acceptance (issue 05): re-running an identical join is a no-op that performs ZERO vendor
+    calls — same credential, no new models ⇒ nothing a probe could inform (D-f: the probe runs
+    only when the credential or the engine spec actually changed). The openai path probes before
+    the no-op gate; codex must not."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # first join probes and spawns
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "an identical re-join must perform zero vendor calls"
+    ))
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # identical → no-op, no probe
+    # A -m subset of what's already served is equally unchanged (narrowing is leave-then-rejoin).
+    assert cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.5"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("nothing to append") == 2
+    assert terminated == []
+
+
+def test_remote_join_api_codex_adding_a_model_probes_once_and_hot_reloads(monkeypatch, tmp_path):
+    """A -m beyond the live union IS a spec change: exactly one fresh probe runs and the union
+    hot-reloads in place (SIGHUP, zero-drop — the openai append precedent)."""
+    import signal as _sig
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    api_keys.store_codex_bundle(_codex_bundle())
+    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list"},
+        {"slug": "gpt-5.6-luna", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-terra"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-luna"]) == 0  # a NEW model
+
+    assert seen["calls"] == 2  # one probe per CHANGED join — never more
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna"]
+    assert (4242, _sig.SIGHUP) in spawned["signals"]  # hot-reloaded, zero-drop
+    assert terminated == []
+
+
+def test_remote_join_api_codex_fresh_signin_onto_live_seat_respawns(monkeypatch, tmp_path, capsys):
+    """A fresh sign-in while a codex engine is live is a credential rotation: the identity
+    RESPAWNS (openai key-rotation policy — operator certainty that the new seat is live), never
+    a silent no-op, never SIGHUP."""
+    import signal as _sig
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    # The stored seat vanishes (e.g. the operator wiped it) — the re-join signs in fresh.
+    monkeypatch.setattr(api_keys, "load_codex_bundle", lambda: None)
+    _mock_codex_exchange(monkeypatch, models=["gpt-5.5"])  # answers the token endpoint AND the probe
+    _mock_codex_browser(monkeypatch)
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert terminated == [4242]                           # stopped the stale-seat process...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
+    assert "restarting the engine" in capsys.readouterr().out
+
+
+def test_chat_refuses_codex_models_client_side_in_both_modes(monkeypatch, tmp_path):
+    """Issue 05 consumer clarity: a `codex:*` model serves the vendor's `responses` endpoint, and
+    `grid chat` (chat/completions) can NEVER call it — codex traffic is never translated (ADR
+    0015 D-b). Refused before ANY network call in both modes — before the local grid lookup and
+    before the remote sign-in gate (a signed-out box still gets THIS message, not "not signed
+    in") — naming the client to use instead. Other namespaces flow past untouched."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "the codex refusal must precede any network call"
+    ))
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail(
+        "the codex refusal must precede any network call"
+    ))
+
+    for argv in (
+        ["chat", "-m", "codex:gpt-5.5", "hi"],              # local mode (the default)
+        ["--remote", "chat", "-m", "codex:gpt-5.5", "hi"],  # remote, signed out — still THIS message
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        msg = str(exc.value)
+        assert "responses" in msg and "grid chat" in msg, argv
+        assert "Codex" in msg  # which client to use instead
+        assert "grid info --env" in msg  # where its base URL comes from
+        assert "not signed in" not in msg.lower()
+
+    # A chat kind's namespace is untouched: openai:* flows past the guard (and this empty home
+    # then fails it later for an unrelated, non-responses reason).
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["chat", "-m", "openai:gpt-5.5", "hi"])
+    assert "responses" not in str(exc.value)
+
+
+def test_remote_join_api_codex_probe_failure_spawns_and_stores_nothing(monkeypatch, tmp_path):
+    """Acceptance: every probe-failure class ends with no record written and nothing spawned. The
+    OAuth bundle itself deliberately SURVIVES — it is the operator's credential, not this join's
+    state, and a vendor outage or rate-limit must not force a re-auth."""
+    from remote import api_keys
+
+    for status in (429, 503, 400):
+        home = tmp_path / f"case-{status}"
+        _seed_running_remote_grid(monkeypatch, home)
+        spawned = _mock_remote_spawn(monkeypatch)
+        api_keys.store_codex_bundle(_codex_bundle())
+        _mock_probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"detail": "d"}))
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["join", "--api", "codex"])
+
+        assert "Nothing was joined." in str(exc.value), f"status={status}"
+        assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+        assert api_keys.load_codex_bundle() is not None  # the credential survives a failed join
+
+
+def test_remote_join_api_codex_dead_stored_seat_offers_one_fresh_signin(monkeypatch, tmp_path, capsys):
+    """D6 — the PRD's sign-in inline "when the stored one is dead". A STORED seat the vendor
+    rejects gets exactly ONE fresh sign-in and one re-probe on an interactive run; without this,
+    every re-join would load the same dead bundle and fail forever (there is no other re-sign-in
+    verb). The fresh seat then serves."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+
+    fresh_access = _codex_jwt(
+        {"chatgpt_account_id": "acct-2", "chatgpt_plan_type": "free"}, exp=2_000_000_000
+    )
+    calls = {"probes": 0}
+
+    def vendor(request):
+        if "/oauth/token" in str(request.url):
+            return httpx.Response(200, json={
+                "id_token": "id", "access_token": fresh_access, "refresh_token": "rt-2",
+            })
+        calls["probes"] += 1
+        if request.headers.get("authorization") == "Bearer tok-access":  # the dead stored seat
+            return httpx.Response(401, json={"detail": "denied"})
+        return httpx.Response(200, json={"models": [{"slug": "gpt-5.5", "visibility": "list"}]})
+
+    _mock_probe(monkeypatch, vendor)
+    _mock_codex_browser(monkeypatch)
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert calls["probes"] == 2  # the dead probe + exactly one retry
+    assert api_keys.load_codex_bundle().account_id == "acct-2"  # the fresh seat replaced the dead one
+    err = capsys.readouterr().err
+    assert "rejected" in err and "sign-in" in err  # the operator saw why a browser opened
+    assert cli.provider._read_records("n1")["remote"]["models"] == ["codex:gpt-5.5"]
+
+
+def test_remote_join_api_codex_rejected_seat_non_interactive_is_terminal(monkeypatch, tmp_path):
+    """The same dead seat on a non-TTY run cannot re-sign-in: the auth-class taxonomy message
+    ends the join — nothing spawned — and points recovery at an interactive run."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: False)
+    _mock_probe(monkeypatch, lambda request: httpx.Response(401, json={"detail": "denied"}))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    msg = str(exc.value)
+    assert "401" in msg and "Nothing was joined." in msg
+    assert "interactive" in msg  # where recovery lives
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_remote_join_api_codex_fresh_seat_rejected_is_terminal_not_a_loop(monkeypatch, tmp_path):
+    """A seat that fails auth seconds after a successful fresh sign-in is NOT retried with
+    another sign-in — that loop would never converge. One sign-in, one probe, terminal."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.provider, "_interactive", lambda: True)
+
+    access = _codex_jwt(
+        {"chatgpt_account_id": "acct-1", "chatgpt_plan_type": "free"}, exp=2_000_000_000
+    )
+    calls = {"exchanges": 0}
+
+    def vendor(request):
+        if "/oauth/token" in str(request.url):
+            calls["exchanges"] += 1
+            return httpx.Response(200, json={
+                "id_token": "id", "access_token": access, "refresh_token": "rt-1",
+            })
+        return httpx.Response(401, json={"detail": "denied"})
+
+    _mock_probe(monkeypatch, vendor)
+    _mock_codex_browser(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    assert "401" in str(exc.value)
+    assert calls["exchanges"] == 1  # exactly one sign-in — never a sign-in loop
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
+
+
+def test_codex_probe_all_hidden_listing_is_empty_not_drift(monkeypatch):
+    """(silent-failure review #1) A listing whose rows ALL carry visibility:"hide" parsed
+    perfectly — it is an empty SEAT (a legitimate vendor state), not contract drift: () comes
+    back and the join's selection layer then says truthfully that the seat serves nothing. The
+    old discriminator sent all-hidden operators chasing a grid upgrade that doesn't exist. Only
+    a non-empty listing with NO readable slug anywhere is drift."""
+    slugs, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "codex-auto-review", "visibility": "hide"},
+        {"slug": "under-review-model", "visibility": "hide"},
+    ]}))
+    assert slugs == ()
+
+
+def test_remote_join_api_codex_hidden_models_never_advertised_even_if_the_flag_renames(monkeypatch, tmp_path):
+    """(silent-failure review #1, containment pin) If the vendor renames `visibility` the hide
+    filter no-ops — fails OPEN. What actually bounds advertising is the verified tier row: a
+    model absent from it (codex-auto-review) can never be advertised whatever the live listing
+    says. This test pins that containment so the filter stays defence-in-depth, not the wall."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "codex-auto-review", "visible": "hidden"},  # renamed flag → filter can't see it
+        {"slug": "gpt-5.5", "visible": "listed"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["models"] == ["codex:gpt-5.5"]
+
+
+def test_remote_join_api_codex_rejoin_warns_again_while_tier_is_degraded(monkeypatch, tmp_path, capsys):
+    """(silent-failure review #4) The mandated tier warn fires on EVERY join — including the
+    zero-vendor-call no-op re-join — while the degraded condition persists. A seat stuck at
+    plan_type=None must not warn once at the first join and then never again for the life of
+    the seat: habitual re-joins (reboots, timers) would otherwise never resurface it, which is
+    exactly the silent decay the issue's amendment exists to prevent."""
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle(plan_type=None))
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+    assert "no subscription tier" in capsys.readouterr().err  # join #1 warns
+
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "a no-op re-join still performs zero vendor calls"
+    ))
+    for _ in range(2):
+        assert cli.main(["join", "--api", "codex"]) == 0
+        err = capsys.readouterr().err
+        assert "Warning:" in err and "no subscription tier" in err  # ...and still warns
+
+
+def test_remote_join_api_codex_noop_requires_the_current_backend_url(monkeypatch, tmp_path):
+    """(silent-failure review #3a) The no-op precheck holds only while the live spec's
+    endpoint_url matches the CURRENT catalog base_url. A release that moves the codex backend
+    must not be echoed away by "nothing to append" forever — and it must not silently union two
+    codex engines either (`_spec_key` keys by URL, so merge would APPEND the new-URL spec beside
+    the old). The mismatch is refused loudly with the leave-then-rejoin remedy, offline."""
+    import dataclasses
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list"},
+    ]}))
+
+    assert cli.main(["join", "--api", "codex"]) == 0  # joined against the old base_url
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    moved = dataclasses.replace(
+        api_catalog.WHITELISTS["codex"], base_url="https://chatgpt.com/backend-api/codex-v2"
+    )
+    monkeypatch.setitem(api_catalog.WHITELISTS, "codex", moved)
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
+        "the URL-mismatch refusal is offline — no probe against either URL"
+    ))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["join", "--api", "codex"])
+
+    msg = str(exc.value)
+    assert "grid leave --engine codex" in msg  # the remedy
+    record = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in record["engines"]] == ["https://chatgpt.com/backend-api/codex"]
+
+
+def test_codex_bundle_load_refuses_a_header_unsafe_account_id(monkeypatch, tmp_path):
+    """(security review) The account id is spent as an HTTP header value, and httpx will happily
+    send CRLF in one (facts.md B5b). `decode_seat` guards the SIGN-IN path; this guards the LOAD
+    path — the one every re-join takes — so the header-safety property travels with the store
+    instead of living in one caller three hops upstream. An unusable entry reads as "not signed
+    in" (None): a state the join fixes by signing in fresh, exactly like a half-written bundle."""
+    from remote import api_keys, credentials
+    from shared import paths
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    for hostile in ("acct-a\r\nX-Injected: pwned", "acct-\x00nul", "   ", ""):
+        credentials.atomic_write_toml(paths.api_keys_file(), {"codex": {
+            "access_token": "at", "refresh_token": "rt",
+            "account_id": hostile, "last_refresh": 1,
+        }})
+        assert api_keys.load_codex_bundle() is None, repr(hostile)
+
+    # The guard rejects unusable ids, not usable ones: a normal entry still loads.
+    credentials.atomic_write_toml(paths.api_keys_file(), {"codex": {
+        "access_token": "at", "refresh_token": "rt", "account_id": "acct-ok", "last_refresh": 1,
+    }})
+    loaded = api_keys.load_codex_bundle()
+    assert loaded is not None and loaded.account_id == "acct-ok"
+
+
+def test_remote_leave_codex_survivor_respawns_for_concurrency_flip(monkeypatch, tmp_path):
+    """(code review) The leave direction of the codex concurrency flip: dropping the codex seat
+    from a codex+openai union (pinned to 1) leaves an API-only survivor whose default is 8 — the
+    shrink must RESPAWN so the pool can grow (a SIGHUP would keep the live pool of 1, silently
+    serving 8x fewer concurrent requests than advertised)."""
+    import signal as _sig
+
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "https://chatgpt.com/backend-api/codex", "models": ["codex:gpt-5.5"],
+         "engine_label": "codex", "api_kind": "codex"},
+        {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
+         "engine_label": "openai", "api_kind": "openai"},
+    ])
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+
+    assert cli.main(["leave", "--engine", "codex"]) == 0
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["https://api.openai.com/v1"]
+    assert terminated == [4242]                           # respawned so the pool can grow to 8...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...not left at 1 by a hot-reload
 
 
 def test_remote_join_api_key_path_refuses_a_kind_that_names_no_env_var(monkeypatch, tmp_path):
@@ -6850,6 +7707,155 @@ def test_effective_max_concurrency_default_rules():
     assert run_records.effective_max_concurrency({}) == 1
     assert run_records.effective_max_concurrency({"engines": [api], "max_concurrency": 3}) == 3
     assert run_records.effective_max_concurrency({"engines": [hw], "max_concurrency": 8}) == 8
+
+
+def test_effective_max_concurrency_codex_union_pins_one():
+    """ADR 0015 D-f: a codex seat is flat-rate — ANY codex engine in the union pins the default
+    to 1, overriding the API-only 8 (a seat must not be hammered eight-wide by default). An
+    explicit --max-concurrency still wins: the operator asked. Lives in the ONE shared
+    derivation, so the CLI's reload-vs-respawn gate and serve startup cannot desync on it."""
+    from shared import run_records
+
+    codex = {"endpoint_url": "https://chatgpt.com/backend-api/codex",
+             "models": ["codex:gpt-5.5"], "api_kind": "codex"}
+    openai_spec = {"endpoint_url": "https://api.openai.com/v1",
+                   "models": ["openai:gpt-5.5"], "api_kind": "openai"}
+    hw = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"]}
+
+    assert run_records.effective_max_concurrency({"engines": [codex]}) == 1
+    assert run_records.effective_max_concurrency({"engines": [openai_spec, codex]}) == 1
+    assert run_records.effective_max_concurrency({"engines": [codex, hw]}) == 1
+    assert run_records.effective_max_concurrency({"engines": [codex], "max_concurrency": 4}) == 4
+    assert run_records.effective_max_concurrency({"engines": [openai_spec]}) == 8  # openai-only keeps 8
+
+
+def test_remote_engine_codex_union_defaults_to_one_worker(monkeypatch, tmp_path):
+    """The serve-side half of the codex concurrency rule: a codex-only identity advertises AND
+    pools exactly 1 worker by default (the `api_only_defaults_to_eight_workers` skeleton, flipped);
+    an explicit --max-concurrency still wins."""
+    from remote import api_keys, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "https://chatgpt.com/backend-api/codex",
+                           "models": ["codex:gpt-5.5"],
+                           "engine_label": "codex", "api_kind": "codex"}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    state_seen = {}
+
+    def fake_poll(s):
+        state_seen["max_concurrency"] = s.max_concurrency
+        s.stop.set()
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+    assert seen["max_concurrency"] == 1          # advertised to the relay
+    assert state_seen["max_concurrency"] == 1    # ... and sizing the real pool
+
+    record = {**record, "max_concurrency": 3}
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+    assert seen["max_concurrency"] == 3 and state_seen["max_concurrency"] == 3
+
+
+def test_remote_join_codex_onto_api_only_respawns_for_concurrency_flip(monkeypatch, tmp_path):
+    """Appending codex to an API-only identity flips the concurrency default (8 → 1). The pool
+    is sized once at spawn, so this join must RESPAWN — a SIGHUP would leave 8 workers hammering
+    a flat-rate seat the default exists to protect."""
+    import signal as _sig
+
+    from remote import api_keys
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: terminated.append(pid) or True)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-123")
+    api_keys.store_codex_bundle(_codex_bundle())
+
+    def vendor(request):
+        if "api.openai.com" in str(request.url):
+            return httpx.Response(200, json={"data": [{"id": "gpt-5.5"}]})
+        return httpx.Response(200, json={"models": [{"slug": "gpt-5.5", "visibility": "list"}]})
+
+    _mock_vendor(monkeypatch, vendor)
+
+    assert cli.main(["join", "--api", "openai", "-m", "openai:gpt-5.5"]) == 0  # 8-worker identity
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    assert cli.main(["join", "--api", "codex"]) == 0  # default flips 8 → 1
+
+    rec = cli.provider._read_records("n1")["remote"]
+    assert {e["api_kind"] for e in rec["engines"]} == {"openai", "codex"}
+    assert terminated == [4242]                           # stopped the 8-worker process...
+    assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
+
+
+def _codex_serve_skeleton(monkeypatch, tmp_path, models):
+    """The register-capture skeleton (:api_only_defaults_to_eight_workers pattern) for a
+    codex-only record serving ``models``. Returns the kwargs register_node saw."""
+    from remote import api_keys, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    api_keys.store_codex_bundle(_codex_bundle())
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "https://chatgpt.com/backend-api/codex",
+                           "models": list(models),
+                           "engine_label": "codex", "api_kind": "codex"}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: s.stop.set())
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+    return seen
+
+
+def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch, tmp_path):
+    """The codex capability envelope carries ONLY what passthrough can honestly claim (issue 05):
+    `endpoints: ["responses"]` (the wire literal grid-src's per-model filter reads — absent means
+    chat-only there, so old CLIs fail closed), the verified context window, and features
+    {vision, tools, parallel_tool_calls}. It OMITS — not False — the chat-dialect flags
+    (json_object/json_schema), `max_output_tokens` and the `limits` block (facts #1: the backend
+    has no output cap under any name; a fabricated 64000 would be a provider-written limit the
+    relay might act on), and audio/logprobs."""
+    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:gpt-5.5"])
+
+    caps = seen["capabilities"]
+    assert caps["schema_version"] == 1
+    entry = caps["models"]["codex:gpt-5.5"]
+    assert entry["endpoints"] == ["responses"]
+    assert entry["input_modalities"] == ["text", "image"]
+    assert entry["output_modalities"] == ["text"]
+    assert entry["context_window"] == 272_000
+    assert entry["features"] == {"vision": True, "tools": True, "parallel_tool_calls": True}
+    assert "max_output_tokens" not in entry
+    assert "limits" not in entry
+    assert "json_object" not in entry["features"] and "json_schema" not in entry["features"]
+
+
+def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeypatch, tmp_path, capsys):
+    """The stale-catalog degrade (catalog edited between join and respawn) stays honest for
+    codex: a warn plus an entry that still says `responses`-only with NO feature claims — never
+    the chat-dialect all-False shape, and never a fabricated output cap."""
+    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"])
+
+    entry = seen["capabilities"]["models"]["codex:ghost"]
+    assert entry["endpoints"] == ["responses"]
+    assert entry["features"] == {}
+    assert "max_output_tokens" not in entry and "limits" not in entry
+    assert "context_window" not in entry  # unknown is omitted, never invented
+    assert "no longer in the codex whitelist" in capsys.readouterr().err
 
 
 def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path):

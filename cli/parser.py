@@ -226,7 +226,7 @@ def _add_models(sub) -> None:
     catalog.add_argument(
         "--api",
         metavar="KIND",
-        help="Show the API-engine whitelist for a service kind (e.g. openai).",
+        help="Show the API-engine whitelist for a service kind (e.g. openai, codex).",
     )
     catalog.set_defaults(handler=cmd_catalog)
 

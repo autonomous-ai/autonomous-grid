@@ -304,6 +304,73 @@ poll-worker default of 8 does **not** apply to codex — a codex-containing unio
 1 (a flat-rate seat must not be hammered eight-wide by default); an explicit
 `--max-concurrency` still wins.
 
+> **Amended 2026-07-16 (issue 05 — as built).** The join half landed; the deltas that bind:
+>
+> - **The probe:** `GET {base}/models?client_version=<pin>` with the real client's five headers;
+>   the pin (`api_catalog.CODEX_CLIENT_VERSION` = 0.144.2) is static data re-verified by hand
+>   like the whitelist itself. The AUTH class (401, or 403 without `Cf-Mitigated`) is a **typed,
+>   catchable** error (`remote/codex_probe.SeatRejected`); every other class is terminal with its
+>   own distinct message. Cloudflare detection keys on 403 + `Cf-Mitigated` — never CF-RAY, which
+>   rides every response including 200s (facts.md B4) — and the 400 message claims contract
+>   drift, never a tier mismatch (the vendor's own refusals name the auth mode, facts.md #5).
+> - **Tier selection:** a populated row, else the minimal row — including a KNOWN tier with no
+>   verified row yet (every paid tier today): such a seat joins with the verified subset rather
+>   than being refused. Advertised = tier row ∩ live set ∩ `-m`; an explicit `-m` miss is an
+>   **error naming what is available** (never a silent narrowing — deliberate divergence from
+>   openai's skip), while the no-`-m` default skip-reports. Selection and its warns run **after**
+>   the probe, so a recovery re-sign-in's fresh tier is what selects (the probe is free — nothing
+>   is wasted by not pre-checking).
+> - **The tier warns** (the issue's amendment, landed at selection time, not sign-in):
+>   `plan_type=None` ⇒ a loud stderr Warning — a vendor claim-rename decays to exactly this, and
+>   without the line every seat would silently advertise minimal forever; an unrecognized tier ⇒
+>   Warning; a known-but-unverified tier ⇒ an info line. A populated tier prints nothing.
+> - **Probe-once:** the resolver prechecks the live record — same credential (no fresh sign-in)
+>   and no model beyond the live union ⇒ **zero vendor calls**; the existing no-op gate then ends
+>   the join. A fresh sign-in is a credential rotation: a live codex identity respawns (the
+>   openai key-rotation policy, through the same `rotated_live` path).
+> - **Dead stored seat ⇒ one inline re-sign-in** (interactive runs only): a probe auth-failure on
+>   a STORED bundle triggers a single fresh sign-in + one re-probe — the PRD's sign-in inline
+>   "when the stored one is dead", landed here because no other re-sign-in verb exists and a dead
+>   stored bundle would otherwise fail every future join identically. **No refresh attempt** —
+>   refresh discipline stays issue 06's (D-d).
+> - **Concurrency:** the codex⇒1 rule lives inside `shared/run_records.effective_max_concurrency`
+>   — the ONE derivation the CLI's reload-vs-respawn gate and serve startup already shared — so
+>   the 8→1 flip on an append forces a respawn through the existing comparison; no new gate code.
+> - **The capability envelope** (`remote/probe.codex_capability_entry`): `endpoints:
+>   ["responses"]` read from the whitelist row (the wire literal grid-src's `provider_supports`
+>   filter matches byte-for-byte; absent means chat-only there, so old CLIs fail closed), honest
+>   `features: {vision, tools, parallel_tool_calls}`, and **omits** — not False —
+>   `json_object`/`json_schema`, `max_output_tokens`, and the `limits` block (facts.md #1: no
+>   output cap exists under any name; a fabricated 64000 would be a provider-written limit,
+>   exactly the class D-a's settlement amendment distrusts).
+> - **Consumer surface:** the real chat verb is `grid chat` — this ADR's `grid request` prose was
+>   shorthand; no such subcommand exists. Both modes refuse `codex:*` client-side before any
+>   network call (before the remote sign-in gate, so a signed-out box gets the same answer),
+>   naming the Codex-app path. `grid catalog --api codex` prints per tier, offline; its `--json`
+>   speaks `tiers`/`endpoints`/`minimal_tier` instead of the flat `models` list (a safe reshape:
+>   v0.2.1 predates every codex commit, so the interim flat-empty shape never shipped).
+>
+> **Review pass (same day, 4 agents — folded in before commit):**
+> - An **all-hidden** `/models` listing is an empty seat, not contract drift: drift is decided by
+>   readability (no row anywhere with a readable slug), never by what survives the hide-filter —
+>   which is defence in depth, not the wall; the verified tier row is what actually bounds
+>   advertising (pinned by test against a renamed visibility field).
+> - The probe-skip precheck holds only while the live spec's `endpoint_url` matches the current
+>   catalog `base_url`; a release that moves the backend is refused loudly with the
+>   leave-then-rejoin remedy (echoing the old spec would pin a dead URL forever, and proceeding
+>   would union two codex engines — `_spec_key` keys by URL).
+> - The tier warn fires on EVERY join including the zero-vendor-call no-op — a degraded seat
+>   (`plan_type=None`) must resurface each join, not warn once and go silent for life.
+> - `load_codex_bundle` now refuses a header-unsafe `account_id` (blank/non-printable ⇒ treated
+>   as not-signed-in): the CRLF-safety property (facts.md B5b) travels with the STORE, not with
+>   one caller on the sign-in path — every future forward-path consumer (issue 06) inherits it.
+> - **Accepted, documented residual:** a `grid leave` racing the lock-free precheck read can let
+>   a just-serving spec re-join unprobed (window ≈ the gap between read and file_lock; contents
+>   were live moments ago; a seat dead in that window surfaces as job errors at serve time).
+>   Also pre-existing and untouched: `_merge_engines` unions on any `endpoint_url` mismatch for
+>   ALL api kinds — the codex URL-mismatch refusal above sidesteps it for codex; openai keeps
+>   the historic behavior.
+
 ## Consequences
 
 - The first cross-repo API-engine kind: the wire contracts (the `responses` endpoint-path

@@ -88,7 +88,9 @@ def store_key(kind: str, key: str) -> None:
     _merge_kind(kind, {"key": key})
 
 
-CODEX_KIND = "codex"
+# Re-exported from the catalog (issue 05): shared/run_records' concurrency rule needs the kind
+# key and shared/ must not import remote/, so the single definition lives with the whitelist.
+CODEX_KIND = api_catalog.CODEX_KIND
 
 
 def load_codex_bundle() -> codex_oauth.CodexBundle | None:
@@ -105,6 +107,13 @@ def load_codex_bundle() -> codex_oauth.CodexBundle | None:
     access_token, refresh_token = entry.get("access_token"), entry.get("refresh_token")
     account_id, last_refresh = entry.get("account_id"), entry.get("last_refresh")
     if not all(isinstance(v, str) and v for v in (access_token, refresh_token, account_id)):
+        return None
+    # The account id is spent as an HTTP header value on every vendor call, and httpx will send a
+    # CRLF-bearing header verbatim (facts.md B5b). `decode_seat` guards the SIGN-IN path; this
+    # guards the LOAD path — the one every re-join takes — so header-safety travels with the
+    # store rather than living in one caller three hops upstream (issue 05 security review).
+    # An unusable id reads as "not signed in": the join then mints a clean bundle.
+    if not str(account_id).strip() or not str(account_id).isprintable():
         return None
     plan_type = entry.get("plan_type")
     return codex_oauth.CodexBundle(

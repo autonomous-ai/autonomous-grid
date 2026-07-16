@@ -18,6 +18,8 @@ from typing import Any
 
 import httpx
 
+from shared.models import api_catalog
+
 
 _PROBE_TIMEOUT = 15.0
 _PROPS_TIMEOUT = 5.0
@@ -446,6 +448,42 @@ def envelope(
     return {
         "schema_version": 1,
         "models": {model_name: capability_entry(probed, context_window, endpoints=endpoints)},
+    }
+
+
+def codex_capability_entry(entry: "api_catalog.ApiModelEntry | None") -> dict[str, Any]:
+    """One codex model's capability entry — ONLY what a Responses passthrough can honestly claim
+    (issue 05), which is why this is a sibling of ``capability_entry`` rather than a parameter set
+    on it. Omitted outright, never False:
+
+    * ``json_object``/``json_schema`` — chat-dialect notions; even ``False`` implies the flag is
+      meaningful for this model, and it isn't;
+    * ``max_output_tokens`` + the ``limits`` block — the codex backend accepts NO output-cap
+      parameter under any name (facts.md #1), and every per-model limit the relay can see is
+      provider-written (ADR 0015 D-a's settlement amendment), so a fabricated 64000 here would be
+      a lie something might act on;
+    * ``audio``/``logprobs``/``top_logprobs`` — chat-pipeline knobs.
+
+    ``endpoints`` comes from the kind's whitelist row — the one source (issue 05 D2) — and is the
+    wire contract with grid-src's per-model ``provider_supports`` filter: absent means chat-only
+    there, so old CLIs fail closed. ``entry=None`` is the stale-catalog degrade (model no longer
+    in the whitelist between join and respawn): still ``responses``-only, zero feature claims.
+    """
+    codex_endpoints = list(api_catalog.WHITELISTS[api_catalog.CODEX_KIND].endpoints)
+    if entry is None:
+        return {
+            "endpoints": codex_endpoints,
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+            "features": {},
+        }
+    features = api_catalog.codex_features(entry)
+    return {
+        "endpoints": codex_endpoints,
+        "input_modalities": ["text", "image"] if features["vision"] else ["text"],
+        "output_modalities": ["text"],
+        "context_window": int(entry.context_window),
+        "features": features,
     }
 
 

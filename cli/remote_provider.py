@@ -22,11 +22,15 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import NoReturn
+from typing import TYPE_CHECKING
 
 from shared import paths, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
+
+if TYPE_CHECKING:  # runtime imports of remote.* stay lazy (see the module docstring)
+    from remote.codex_oauth import CodexBundle
+    from remote.codex_probe import SeatRejected
 
 # Remote has exactly ONE identity per grid: the relay node_id is pinned to the per-grid access token
 # (remote/serve._node_id_from_token), so two `grid join`s on a grid would register the same node and
@@ -136,7 +140,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
 
     key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
     if getattr(args, "api", None) is not None:
-        specs, key_rotated = _resolve_api_targets(args)
+        specs, key_rotated = _resolve_api_targets(args, network_id)
         media_detected = False
     else:
         specs, media_detected = _resolve_serve_targets(args)
@@ -201,7 +205,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, a
         # concurrency-default flip, or a rotated key (respawned by policy so the operator knows it's live).
         if rotated_live:
-            print(f"Rotated the stored {args.api} key — restarting the engine to apply it.")
+            # "credential", not "key": for openai it IS a key; for codex it is a fresh sign-in's
+            # OAuth bundle, which counts as a rotation for exactly the same reason.
+            print(f"Rotated the stored {args.api} credential — restarting the engine to apply it.")
         reloaded = (not rotated_live) and _hot_reloadable(live, merged_specs, record)
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
@@ -228,13 +234,17 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:
+def _resolve_api_targets(
+    args: argparse.Namespace, network_id: str
+) -> tuple[list[dict[str, object]], bool]:
     """The single API-engine spec for ``join --api <kind>``, plus whether the stored credential rotated.
 
     ``-m`` is validated against the static whitelist first — no credential, no network — so a typo'd
     model name never costs the operator a key prompt or a whole browser sign-in. How the credential
     itself is then resolved is per-kind and splits below: openai has a metered key (ADR 0012 D-c's
     env → stored → prompt), codex has an OAuth seat (ADR 0015 D-c: sign-in, no env var, no flag).
+    ``network_id`` exists for codex's probe-skip precheck (D-f: an unchanged re-join must cost zero
+    vendor calls, so the resolver has to see the live record); the key path ignores it.
     """
     kind = args.api
     whitelist = api_catalog.WHITELISTS[kind]  # kind already validated by _reject_api_conflicts
@@ -243,7 +253,8 @@ def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, objec
         raise SystemExit("--advertise-as aliasing doesn't apply with --api.")
     valid = {api_catalog.advertised_name(kind, entry): entry for entry in whitelist.entries}
     # No -m = the whole whitelist (zero-config default); `valid` preserves whitelist order.
-    chosen = list(dict.fromkeys(args.models or [])) or list(valid)  # dedupe so errors don't repeat
+    requested = list(dict.fromkeys(args.models or []))  # dedupe so errors don't repeat
+    chosen = requested or list(valid)
     unknown = [model for model in chosen if model not in valid]
     if unknown:
         raise SystemExit(
@@ -253,33 +264,211 @@ def _resolve_api_targets(args: argparse.Namespace) -> tuple[list[dict[str, objec
     from remote import api_keys  # lazy: only stdlib + shared.* at module top (see module docstring)
 
     if kind == api_keys.CODEX_KIND:
-        return _resolve_codex_targets(args)
+        # `requested`, not `chosen`: codex's no--m default is the seat's TIER row ∩ its live set
+        # (D-f), which the resolver computes itself — the union default here would name paid-tier
+        # models a lesser seat can never serve.
+        return _resolve_codex_targets(args, whitelist, requested, network_id)
     return _resolve_key_api_targets(args, kind, whitelist, valid, chosen)
 
 
-def _resolve_codex_targets(args: argparse.Namespace) -> NoReturn:
-    """The codex seat for ``join --api codex`` — signing in when this machine has no seat yet.
+def _resolve_codex_targets(
+    args: argparse.Namespace,
+    whitelist: api_catalog.ApiWhitelist,
+    requested: list[str],
+    network_id: str,
+) -> tuple[list[dict[str, object]], bool]:
+    """The codex seat's engine spec, plus whether the credential changed (a fresh sign-in ran —
+    the caller respawns a live codex identity for it, the openai key-rotation policy).
 
-    ``NoReturn`` rather than the spec tuple its sibling returns, because today it genuinely never
-    returns one: the sign-in lands, and then the join stops. That is the honest signature for
-    scaffolding — issue 05 gives it a model set to return and the type changes with it.
-
-    Deliberately shares nothing with the key path: there is no env var to read, no flag to accept and
-    no prompt to hide, and the vendor call that validates an openai key (`GET /v1/models`) is not the
-    one that validates a seat (ADR 0015 D-f's free `GET {base}/models` probe, which also carries
-    reachability and the seat's real entitled set).
+    Deliberately shares nothing with the key path: there is no env var to read, no flag to accept
+    and no prompt to hide (ADR 0015 D-c), and the validation call is D-f's free
+    ``GET {base}/models`` probe — egress reachability + seat liveness + the seat's real entitled
+    set in one round-trip — not the key path's ``GET /v1/models``.
     """
+    from remote import api_keys
+
     from . import codex_signin
 
-    codex_signin.resolve_seat(no_browser=bool(getattr(args, "no_browser", False)))
-    # The seat is stored. What is not built yet is everything downstream of it: the per-tier model
-    # table and the probe that confirms the seat can actually reach the vendor from this box. Until
-    # they land there is nothing to advertise, so the join stops here rather than registering an
-    # engine that serves nothing. The sign-in is kept — a re-join costs no second authorization.
-    raise SystemExit(
-        "Your codex sign-in was saved. This version of grid has no model list for the codex kind "
-        "yet, so there is nothing to serve — no engine was joined."
+    bundle, fresh = codex_signin.resolve_seat(no_browser=bool(getattr(args, "no_browser", False)))
+
+    # Probe-once (D-f): an identical re-join must cost ZERO vendor calls. Advisory and lock-free —
+    # the authoritative no-op gate still runs under the caller's file_lock. One narrow race is
+    # accepted and documented (ADR 0015 issue-05 note): a concurrent `grid leave` landing between
+    # this read and the lock lets a just-serving spec re-join unprobed — its contents were live
+    # moments ago, and a seat that died in that window surfaces as job errors at serve time.
+    live_codex = next(
+        (spec for spec in _engine_union(_live_records(network_id))
+         if spec.get("api_kind") == api_keys.CODEX_KIND),
+        None,
     )
+    if live_codex is not None and (
+        (live_codex.get("endpoint_url") or "").rstrip("/") != whitelist.base_url
+    ):
+        # This grid release moved the codex backend. Echoing the old spec would pin the identity
+        # to a dead URL forever ("nothing to append"), and proceeding would UNION a second codex
+        # engine beside it (`_spec_key` keys engines by URL) — refuse loudly instead
+        # (silent-failure review #3a).
+        raise SystemExit(
+            "This grid release moved the codex backend "
+            f"({live_codex.get('endpoint_url')} -> {whitelist.base_url}); a live codex engine "
+            "can't be re-pointed in place. Run `grid leave --engine codex`, then re-run "
+            "`grid join --api codex`. Nothing was changed."
+        )
+    if (
+        live_codex is not None and not fresh
+        and (not requested or set(requested) <= set(live_codex.get("models") or []))
+    ):
+        # Same credential, no model beyond the live union — nothing a probe could inform. (A -m
+        # SUBSET is unchanged too: narrowing is leave-then-rejoin by design, a join only ever
+        # adds.) The mandated tier warn still fires: a degraded tier must resurface on EVERY
+        # join, not once at the first one (silent-failure review #4). The spec's models list is
+        # copied so the returned spec can never alias the live record's own list.
+        _warn_codex_tier(bundle.plan_type)
+        return [{**live_codex, "models": list(live_codex.get("models") or [])}], False
+
+    live, bundle, fresh = _probe_codex_seat_with_recovery(args, whitelist, bundle, fresh)
+    served = _select_codex_models(bundle.plan_type, requested, live)
+    return [{
+        "endpoint_url": whitelist.base_url,
+        "models": served,
+        "engine_label": api_keys.CODEX_KIND,
+        "api_kind": api_keys.CODEX_KIND,
+    }], fresh
+
+
+def _probe_codex_seat_with_recovery(
+    args: argparse.Namespace,
+    whitelist: api_catalog.ApiWhitelist,
+    bundle: CodexBundle,
+    fresh: bool,
+) -> tuple[tuple[str, ...], CodexBundle, bool]:
+    """D-f's probe, with the ONE recovery issue 05 allows: a STORED seat the vendor rejects gets
+    a single fresh sign-in and one re-probe, interactive runs only (the PRD's sign-in inline
+    "when the stored one is dead" — without it, a dead stored bundle makes every re-join load the
+    same corpse and fail forever, since no other re-sign-in verb exists). A fresh seat failing, a
+    second failure, or a non-interactive run gets the terminal auth-class message. Returns
+    ``(live_slugs, bundle, fresh)`` — the bundle and freshness the join must proceed with, since
+    a recovery re-mints both.
+    """
+    from remote import codex_probe
+
+    from . import codex_signin, provider
+
+    try:
+        live = codex_probe.probe_seat(
+            bundle, base_url=whitelist.base_url, client_version=api_catalog.CODEX_CLIENT_VERSION,
+        )
+        return live, bundle, fresh
+    except codex_probe.SeatRejected as rejected:
+        if fresh or not provider._interactive():
+            raise SystemExit(_codex_seat_rejected(rejected)) from None
+        print(
+            f"The vendor rejected the stored codex seat (HTTP {rejected.status_code}) — "
+            "starting a fresh sign-in.",
+            file=sys.stderr,
+        )
+
+    # Outside the except block so a second refusal raises with no chained context to dig through.
+    bundle = codex_signin.sign_in(no_browser=bool(getattr(args, "no_browser", False)))
+    try:
+        live = codex_probe.probe_seat(
+            bundle, base_url=whitelist.base_url, client_version=api_catalog.CODEX_CLIENT_VERSION,
+        )
+    except codex_probe.SeatRejected as rejected:
+        raise SystemExit(_codex_seat_rejected(rejected)) from None
+    return live, bundle, True
+
+
+def _codex_seat_rejected(rejected: SeatRejected) -> str:
+    """The auth-class terminal message (issue 05's taxonomy): the seat, not the machine."""
+    return (
+        f"The vendor rejected this codex seat (HTTP {rejected.status_code}). Nothing was joined. "
+        "Re-run `grid join --api codex` from an interactive shell to sign in again."
+    )
+
+
+def _warn_codex_tier(plan_type: str | None) -> None:
+    """The issue's mandated tier warn (ADR 0015 D-f amendments): it fires HERE, at the moment the
+    tier picks the advertised row — not at sign-in, where the tier has no consumer yet. Three
+    degrade cases, three wordings — the operator's diagnosis differs, the advertised row doesn't:
+
+    * ``None`` — the vendor said NOTHING. Loud, because a vendor rename of the tier claim decays
+      to exactly this (``decode_seat`` degrades a renamed field to None by design), and without
+      this line every seat would quietly advertise the minimal set forever.
+    * unrecognized — the vendor said something outside its own known vocabulary (drift).
+    * known-but-unverified — our table simply has no verified row yet; informational, not a warn.
+
+    A populated known tier prints nothing. Only the LAST case may echo the tier: it is a member
+    of the closed ``CODEX_PLAN_TYPES`` vocabulary, so the echo cannot carry arbitrary token text.
+    """
+    minimal = api_catalog.CODEX_MINIMAL_TIER
+    if plan_type is None:
+        print(
+            "Warning: this codex seat is signed in but reports no subscription tier — the vendor "
+            f"may have changed its token format. Advertising the minimal ('{minimal}') model set; "
+            "if your plan should serve more, check for a newer grid release.",
+            file=sys.stderr,
+        )
+    elif plan_type not in api_catalog.CODEX_PLAN_TYPES:
+        print(
+            "Warning: this codex seat reports a subscription tier this grid release doesn't "
+            f"recognize — advertising the minimal ('{minimal}') model set.",
+            file=sys.stderr,
+        )
+    elif plan_type not in api_catalog.CODEX_TIER_MODELS:
+        print(
+            f"The '{plan_type}' tier's model list isn't verified in this grid release yet — "
+            f"advertising the verified '{minimal}' set.",
+            file=sys.stderr,
+        )
+
+
+def _select_codex_models(
+    plan_type: str | None, requested: list[str], live: tuple[str, ...]
+) -> list[str]:
+    """The advertised set: the seat's tier row ∩ its live entitled set ∩ any explicit ``-m``
+    request (ADR 0015 D-f). The tier row bounds advertising no matter what the seat can reach —
+    an unverified model must never be advertised on a guess."""
+    kind = api_catalog.CODEX_KIND
+    tier = api_catalog.codex_effective_tier(plan_type)
+    _warn_codex_tier(plan_type)
+    valid = {
+        api_catalog.advertised_name(kind, entry): entry
+        for entry in api_catalog.CODEX_TIER_MODELS[tier]
+    }
+    # An explicit ask is refused, never silently narrowed (issue 05 — deliberate divergence from
+    # openai's skip: a personal seat asked for a model it lacks deserves a refusal, and a silent
+    # subset would advertise less than the operator believes they joined).
+    outside_tier = [model for model in requested if model not in valid]
+    if outside_tier:
+        # The tier bound (D-f): only a verified row may be advertised, whatever the seat can
+        # reach — so this is refused even when the live set contains the model.
+        raise SystemExit(
+            f"Not in the '{tier}' tier's verified list: {', '.join(outside_tier)}. "
+            f"This seat's tier can serve: {', '.join(valid)}. Nothing was joined."
+        )
+    target = requested or list(valid)
+    served = [model for model in target if valid[model].vendor_name in live]
+    missing = [model for model in target if model not in served]
+    if requested and missing:
+        available = [model for model in valid if valid[model].vendor_name in live]
+        # Never "serves none" here — the seat may well serve OTHER verified models, and the
+        # actionable fact is which ones.
+        raise SystemExit(
+            f"Not available on this codex seat: {', '.join(missing)}. "
+            f"This seat can serve: {', '.join(available) or '(none of the verified models)'}. "
+            "Nothing was joined."
+        )
+    if not served:
+        # The no--m default found nothing: name the verified row so the operator sees what a
+        # serving seat WOULD have offered (nothing was "requested", so no name is blamed).
+        raise SystemExit(
+            f"This codex seat currently serves none of the verified '{tier}'-tier models: "
+            f"{', '.join(valid)}. Nothing was joined."
+        )
+    if missing:
+        print(f"Skipping (not on this seat): {', '.join(missing)}", file=sys.stderr)
+    return served
 
 
 def _resolve_key_api_targets(

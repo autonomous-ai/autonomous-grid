@@ -486,6 +486,11 @@ def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
                 f"{advertised_model!r} is no longer in the {api_kind} whitelist "
                 "(catalog changed since join) — advertising it with no capabilities"
             )
+        if api_kind == api_catalog.CODEX_KIND:
+            # The honest responses-only entry (issue 05): endpoints ["responses"], no chat-dialect
+            # flags, no output cap — a codex envelope must never look like a chat model's.
+            caps_models[advertised_model] = probe.codex_capability_entry(entry)
+            continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
         # chat/completions only: the gate in handle_job refuses legacy completions, so the relay
