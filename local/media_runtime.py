@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from shared import paths
+from shared import logging_setup, paths
 
 
 def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
@@ -18,7 +18,7 @@ def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
         raise SystemExit(f"Port {port} is already in use; cannot start provider media server.")
     paths.ensure_all()
     log_path = paths.logs_dir() / f"media_provider_{port}.log"
-    log = log_path.open("ab")
+    log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     proc = subprocess.Popen(
         _cli_subprocess_command() + [
             "__media-server",
