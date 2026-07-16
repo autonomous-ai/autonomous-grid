@@ -50,6 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The release notes are read off the annotated tag object below, so it has to
+          # be here in full. 0 is the setting that guarantees that; the default depth
+          # might well suffice, but a release is a poor place to find out.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
@@ -66,8 +71,37 @@ jobs:
           chmod +x grid-linux-* 2>/dev/null || true
           sha256sum grid-* > SHA256SUMS
           echo "::group::SHA256SUMS"; cat SHA256SUMS; echo "::endgroup::"
+      # The notes are the tag's own message: drafted with packaging/changelog.py, then
+      # edited and approved by a human, who tags with the result (see the
+      # release-grid-cli skill, step 5). CI generates nothing — what was reviewed at tag
+      # time is exactly what publishes.
+      #
+      # ref_name goes through env, not `${{ }}` inside run: git allows `"`, backticks and
+      # `$()` in ref names, so interpolating it into the shell would let a tag name run
+      # as code.
+      - name: Take the release notes from the tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # A lightweight tag has no message of its own, and %(contents) would quietly
+          # fall through to the commit's — publishing "chore(release): vX.Y.Z" as the notes.
+          if [ "$(git cat-file -t "$REF_NAME")" != tag ]; then
+            echo "::error::$REF_NAME is a lightweight tag, so it carries no release notes."
+            echo "::error::Re-tag with:  git tag -a $REF_NAME --cleanup=verbatim -F /tmp/notes.md"
+            exit 1
+          fi
+          git tag -l --format='%(contents)' "$REF_NAME" > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::$REF_NAME has an empty tag message — no notes to publish."
+            exit 1
+          fi
+          echo "::group::RELEASE_NOTES.md"; cat RELEASE_NOTES.md; echo "::endgroup::"
+
+      # event_name, not just the ref: workflow_dispatch accepts a *tag* for --ref, which
+      # would otherwise satisfy the refs/tags/ test and publish a "dry" run for real.
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -75,4 +109,9 @@ jobs:
             artifacts/grid-linux-arm64
             artifacts/grid-*-py3-none-any.whl
             artifacts/SHA256SUMS
-          generate_release_notes: true
+          # The approved tag message, verbatim. generate_release_notes would append a
+          # second, differently-built list under it — one that silently omits whatever
+          # reached main without a PR (every release bump, for one) — and would overrule
+          # the editing that just happened.
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
