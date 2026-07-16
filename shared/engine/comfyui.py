@@ -27,7 +27,7 @@ from typing import Iterator, Optional
 
 import httpx
 
-from shared import paths
+from shared import logging_setup, paths
 from shared.system import gpu as gpu_probe
 
 
@@ -398,7 +398,9 @@ def start(port: int = COMFYUI_PORT_DEFAULT) -> ComfyProcess:
     paths.ensure_all()
     output_dir().mkdir(parents=True, exist_ok=True)
     log = paths.logs_dir() / f"comfyui_{port}.log"
-    log_fh = log.open("a", buffering=1)
+    log_fh = logging_setup.cap_and_open_append(
+        log, logging_setup.engine_log_max_bytes(), text=True, buffering=1
+    )
     log_fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} grid starting comfyui on :{port} ===\n")
     cmd = [
         str(comfyui_python()),

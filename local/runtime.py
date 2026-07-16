@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from local import config
-from shared import paths
+from shared import logging_setup, paths
 
 
 GRID_TYPE = "lan-permissionless"
@@ -95,9 +95,11 @@ def start_grid(cfg: dict[str, Any]) -> int:
     if _tcp_port_in_use("127.0.0.1", port):
         raise SystemExit(f"Port {port} is already in use. Choose a different --port.")
 
-    log_path = paths.grid_dir(cfg["grid_id"]) / "server.log"
+    # The rotating handler inside the __server child owns server.log; this raw redirect captures
+    # only bootstrap/crash output (stays tiny — the server has no print()), capped on each start.
+    log_path = paths.grid_dir(cfg["grid_id"]) / "server.err"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("ab")
+    log = logging_setup.cap_and_open_append(log_path, logging_setup.ERR_LOG_MAX_BYTES)
     proc = subprocess.Popen(
         _cli_subprocess_command() + ["__server", cfg["grid_id"]],
         stdout=log,
@@ -138,8 +140,11 @@ def wait_for_health(cfg: dict[str, Any], timeout: int = 30) -> None:
         except Exception:
             pass
         time.sleep(0.25)
-    log = paths.grid_dir(cfg["grid_id"]) / "server.log"
-    raise SystemExit(f"local signaling server did not become healthy. See {log}")
+    grid_dir = paths.grid_dir(cfg["grid_id"])
+    raise SystemExit(
+        "local signaling server did not become healthy. "
+        f"See {grid_dir / 'server.log'} (and {grid_dir / 'server.err'} for bootstrap/crash output)"
+    )
 
 
 def grid_url(cfg: dict[str, Any]) -> str:

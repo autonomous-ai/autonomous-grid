@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from shared import paths
+from shared import logging_setup, paths
 
 
 MIN_LLAMA_SERVER_BUILD = 9240
@@ -122,7 +122,9 @@ def start_llm(
 
     log = paths.llama_log(port)
     log.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = log.open("a", buffering=1)
+    log_fh = logging_setup.cap_and_open_append(
+        log, logging_setup.engine_log_max_bytes(), text=True, buffering=1
+    )
     log_fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} grid starting llm on :{port} ===\n")
 
     cmd = [llama_server_path(), "-m", str(model_path)]
