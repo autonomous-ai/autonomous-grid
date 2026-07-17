@@ -4019,6 +4019,50 @@ def _no_browser_and_no_bind(monkeypatch):
                         lambda port, **kw: pytest.fail("--no-browser bound a port"))
 
 
+def test_remote_join_api_codex_no_auto_open_env_prints_url_without_opening_a_browser(
+    monkeypatch, tmp_path, capsys
+):
+    """`GRID_OAUTH_NO_OPEN`: a GUI front-end (the grid app) opens the URL itself — the way it drives
+    `grid login` — so the browser flow must NOT open a browser, yet must still bind the callback,
+    print the authorize URL, and land the seat from the redirect that front-end's browser triggers.
+    Without the gate the CLI would open a second tab."""
+    import webbrowser
+
+    from remote import api_keys, codex_callback, codex_oauth
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    _mock_codex_exchange(monkeypatch)
+
+    # No browser open records the state, so the listener echoes the one grid generated (handed to it
+    # as `expected_state`): proof the URL was still built and the callback still catches the redirect.
+    seen = {}
+
+    class _FakeListener:
+        port = codex_oauth.CALLBACK_PORT
+
+        def wait(self, *, deadline):
+            return f"http://localhost:1455/auth/callback?code=AUTHCODE-1&state={seen['state']}"
+
+    @contextlib.contextmanager
+    def fake_listen(port, *, expected_state):
+        seen["state"] = expected_state
+        yield _FakeListener()
+
+    monkeypatch.setattr(codex_callback, "listen", fake_listen)
+    monkeypatch.setattr(
+        webbrowser, "open",
+        lambda url: pytest.fail("GRID_OAUTH_NO_OPEN must not open a browser"),
+    )
+    monkeypatch.setenv("GRID_OAUTH_NO_OPEN", "1")
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    out = capsys.readouterr().out
+    assert _authorize_url_from(out)  # the URL is still printed for the front-end to open
+    assert api_keys.load_codex_bundle() is not None  # the seat landed from the redirect
+
+
 def test_remote_join_api_codex_no_browser_flow_takes_a_pasted_redirect(monkeypatch, tmp_path, capsys):
     """User story 2 — a headless box. Grid prints the URL, the operator approves it on a machine that
     has a browser, and brings the redirect back by hand. Nothing opens and nothing binds.
