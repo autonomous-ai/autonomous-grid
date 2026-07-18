@@ -44,7 +44,13 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
         with os.fdopen(fd, "wb") as fh:  # takes ownership of fd; closes it on exit
-            os.fchmod(fh.fileno(), mode)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fh.fileno(), mode)  # POSIX: defeat umask before any bytes land
+            else:
+                # Windows has no fchmod/umask; os.chmod only toggles the read-only bit,
+                # but per-user ACLs already keep %USERPROFILE%\.grid private. Best-effort.
+                with contextlib.suppress(OSError):
+                    os.chmod(tmp, mode)
             fh.write(data)
     except BaseException:
         with contextlib.suppress(OSError):
