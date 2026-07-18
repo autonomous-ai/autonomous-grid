@@ -309,6 +309,7 @@ def _bring_up_engines(
             # caps for all of them — shared with the hot-reload path (`_reload_once`) so the two can't drift.
             caps = _probe_spec_caps(
                 llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
+                plan_type=spec.get("plan_type"),
             )
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
@@ -520,11 +521,15 @@ def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dic
     return adapted
 
 
-def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
+def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None = None) -> dict[str, Any]:
     """An API engine's caps envelope from the static whitelist — API engines are never live-probed
     or benchmarked (ADR 0012); the vendor sees no traffic until a real job forwards. A model missing
     from the whitelist (catalog edited between join and respawn) degrades like a failed probe: an
-    all-False entry, never a crash."""
+    all-False entry, never a crash.
+
+    ``plan_type`` (codex only) is the seat's stored subscription tier — the row ``vendor_rank`` is
+    read from (issue 03). ``None`` degrades to the minimal row via ``codex_vendor_rank``; it is
+    ignored for every other kind."""
     no_features = dict.fromkeys(
         ("vision", "tools", "parallel_tool_calls", "json_object", "json_schema"), False
     )
@@ -540,8 +545,20 @@ def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
             )
         if api_kind == api_catalog.CODEX_KIND:
             # The honest responses-only entry (issue 05): endpoints ["responses"], no chat-dialect
-            # flags, no output cap — a codex envelope must never look like a chat model's.
-            caps_models[advertised_model] = probe.codex_capability_entry(entry)
+            # flags, no output cap — a codex envelope must never look like a chat model's. plus the
+            # join-time vendor_rank (issue 03): the model's position in the seat's tier row, or None
+            # when it isn't in that row (guard so the entry=None degrade never dereferences it).
+            rank = api_catalog.codex_vendor_rank(plan_type, entry.vendor_name) if entry else None
+            if entry is not None and rank is None:
+                # Resolves in the flat whitelist union but has no slot in THIS seat's tier row: the
+                # tier table was edited between join and respawn (drift), the same class as the
+                # entry-is-None warn above. Advertise it, just without a rank — but leave a trail, or
+                # an absent rank looks identical to "this seat simply doesn't rank this model".
+                _warn(
+                    f"{advertised_model!r} has no rank in this codex seat's tier row "
+                    "(catalog changed since join) — advertising it without a capability rank"
+                )
+            caps_models[advertised_model] = probe.codex_capability_entry(entry, vendor_rank=rank)
             continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
@@ -554,7 +571,7 @@ def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
 
 def _probe_spec_caps(
     llm_url: str, advertised: list[str], upstream: list[str], ctx_size: Any,
-    api_kind: str | None = None,
+    api_kind: str | None = None, plan_type: str | None = None,
 ) -> dict[str, Any]:
     """Probe EVERY model a spec serves into one caps envelope — keyed by the advertised name, probed by
     the upstream name (Ollama/vLLM only know that). Shared by startup (`_bring_up_engines`) and the
@@ -566,7 +583,7 @@ def _probe_spec_caps(
     instead — no probe ever targets the vendor — via the same seam so startup and reload can't drift.
     """
     if api_kind:
-        return _static_api_caps(api_kind, advertised)
+        return _static_api_caps(api_kind, advertised, plan_type=plan_type)
     caps_models: dict[str, Any] = {}
     for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
         env = probe.capabilities(
@@ -1288,7 +1305,8 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             # newly-appended multi-model `--at` advertises caps for all of them, exactly like startup
             # (`_probe_spec_caps` is the shared site, so startup and reload can't drift — ADR 0009 C2).
             caps = (
-                _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind)
+                _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind,
+                                 plan_type=spec.get("plan_type"))
                 if models else {}
             )
             reassembled.append((url, advertised, upstream, caps))

@@ -333,6 +333,11 @@ def _resolve_codex_targets(
         "models": served,
         "engine_label": api_keys.CODEX_KIND,
         "api_kind": api_keys.CODEX_KIND,
+        # The seat's tier, so serve can recompute each model's vendor_rank from the SAME tier row
+        # the advertised set was picked from (issue 03). A short plan-label string (the seat's raw
+        # tier claim), never a secret; `None` (vendor said nothing) rides through and degrades to
+        # the minimal row at serve time.
+        "plan_type": bundle.plan_type,
     }], fresh
 
 
@@ -633,6 +638,13 @@ def _merge_engines(
         if added:
             existing["models"] = list(existing.get("models") or []) + added
             changed = True
+        # A re-join re-resolves the seat's scalar facts too: refresh plan_type (the codex tier —
+        # issue 03) from the incoming spec, or the engine ranks against the tier it FIRST joined at
+        # forever (serve reads vendor_rank off this stored field). A same-key engine is the same
+        # seat, so the freshly-resolved value is authoritative. Key-guarded so a non-codex spec,
+        # which never carries plan_type, stays byte-identical.
+        if "plan_type" in spec:
+            existing["plan_type"] = spec["plan_type"]
     return merged, changed
 
 

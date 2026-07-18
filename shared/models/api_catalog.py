@@ -261,6 +261,23 @@ def codex_tier_entries(plan_type: str | None) -> tuple[ApiModelEntry, ...]:
     return CODEX_TIER_MODELS[codex_effective_tier(plan_type)]
 
 
+def codex_vendor_rank(plan_type: str | None, vendor_name: str) -> int | None:
+    """The 1-based capability rank of ``vendor_name`` within the seat's effective tier row
+    (``codex_tier_entries``): 1 = the row's most-capable head, the curated order we own (ADR 0016).
+    ``None`` when the model is absent from that row — a drifted model omits the fact rather than
+    fabricating a position, so the master renders nothing for it and ordering degrades gracefully.
+
+    The tier ROW, not the flat ``entries`` union, is the authority: two tiers may order the same
+    model differently, and a seat advertises exactly one tier's row (``codex_tier_entries`` applies
+    the same D-f degrade the join used to pick that row). Positions are contiguous ``1..N`` because
+    each row is duplicate-free (pinned by ``test_codex_tier_whitelist_integrity``). Sourced from
+    the whitelist order, never the vendor's unverified ``priority`` field (ADR 0016)."""
+    for index, entry in enumerate(codex_tier_entries(plan_type)):
+        if entry.vendor_name == vendor_name:
+            return index + 1
+    return None
+
+
 def probed_features(entry: ApiModelEntry) -> dict[str, bool]:
     """The entry's capabilities in the probed-dict shape ``remote.probe.capability_entry``
     consumes — API engines register these statically, never via a live probe."""

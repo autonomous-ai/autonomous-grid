@@ -451,7 +451,9 @@ def envelope(
     }
 
 
-def codex_capability_entry(entry: "api_catalog.ApiModelEntry | None") -> dict[str, Any]:
+def codex_capability_entry(
+    entry: "api_catalog.ApiModelEntry | None", *, vendor_rank: int | None = None
+) -> dict[str, Any]:
     """One codex model's capability entry — ONLY what a Responses passthrough can honestly claim
     (issue 05), which is why this is a sibling of ``capability_entry`` rather than a parameter set
     on it. Omitted outright, never False:
@@ -468,6 +470,9 @@ def codex_capability_entry(entry: "api_catalog.ApiModelEntry | None") -> dict[st
     wire contract with grid-src's per-model ``provider_supports`` filter: absent means chat-only
     there, so old CLIs fail closed. ``entry=None`` is the stale-catalog degrade (model no longer
     in the whitelist between join and respawn): still ``responses``-only, zero feature claims.
+
+    ``vendor_rank`` (issue 03 / ADR 0016) is the seat's tier-row position, attached top-level when
+    the caller supplies it — never for the ``entry=None`` degrade, which has no row position.
     """
     codex_endpoints = list(api_catalog.WHITELISTS[api_catalog.CODEX_KIND].endpoints)
     if entry is None:
@@ -478,11 +483,17 @@ def codex_capability_entry(entry: "api_catalog.ApiModelEntry | None") -> dict[st
             "features": {},
         }
     features = api_catalog.codex_features(entry)
+    # vendor_rank (1 = most capable) is a TOP-LEVEL capability fact, a sibling of context_window —
+    # NOT a feature. The grid-src auto-router reads it there (relay._read_bounded_positive_int) to
+    # tie-break a codex pool. Included only when the model has a tier-row position; omitted for a
+    # model outside the seat's row — the same conditional-key idiom `capability_entry` uses for an
+    # unknown context_window.
     return {
         "endpoints": codex_endpoints,
         "input_modalities": ["text", "image"] if features["vision"] else ["text"],
         "output_modalities": ["text"],
         "context_window": int(entry.context_window),
+        **({"vendor_rank": vendor_rank} if vendor_rank is not None else {}),
         "features": features,
     }
 

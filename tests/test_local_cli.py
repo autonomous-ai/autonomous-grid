@@ -836,6 +836,10 @@ def test_codex_tier_whitelist_integrity():
         assert names, f"tier {tier!r} must not be an empty row (absent means unverified)"
         assert all(names) and len(set(names)) == len(names), f"tier {tier!r} rows must be unique"
         assert set(names) <= union, f"tier {tier!r} names something the flat union lacks"
+        # issue 03: each row is a valid, gap-free vendor_rank source — positions are exactly 1..N
+        # (no gaps, no duplicate slots), so codex_vendor_rank is a total order over the row.
+        ranks = [api_catalog.codex_vendor_rank(tier, name) for name in names]
+        assert ranks == list(range(1, len(names) + 1)), f"tier {tier!r} is not a gap-free 1..N ranking"
         for entry in entries:
             # A vendor_name shared across tiers must be the SAME entry: the flat union keeps the
             # first occurrence (`_codex_tier_union` setdefault), so a colliding second-tier entry
@@ -874,6 +878,37 @@ def test_codex_tier_entries_selects_row_or_minimal():
     assert api_catalog.codex_tier_entries("banana") == minimal  # outside the vendor vocabulary
     assert api_catalog.codex_tier_entries("plus") == minimal    # known tier, row unverified
     assert "plus" in api_catalog.CODEX_PLAN_TYPES  # pin: "plus" IS known — its degrade differs from banana's only in wording
+
+
+def test_codex_vendor_rank_from_tier_row(monkeypatch):
+    """The join-time capability rank (issue 03 / ADR 0016): a codex model's 1-based position within
+    the seat's EFFECTIVE tier row — 1 = the row's most-capable head, the curated order we own. A
+    model absent from that row has no rank (None): drift omits the fact, never fabricates a
+    position. The source is the tier ROW, not the flat union — proven by a synthetic second tier
+    whose order differs from the free row's."""
+    # The live free row, in curated order: terra, luna, gpt-5.5, gpt-5.4-mini.
+    assert api_catalog.codex_vendor_rank("free", "gpt-5.6-terra") == 1
+    assert api_catalog.codex_vendor_rank("free", "gpt-5.6-luna") == 2
+    assert api_catalog.codex_vendor_rank("free", "gpt-5.5") == 3
+    assert api_catalog.codex_vendor_rank("free", "gpt-5.4-mini") == 4
+    # Absent from the row → no rank (a drifted/unknown model omits the fact, never invents one).
+    assert api_catalog.codex_vendor_rank("free", "gpt-5.6-nonesuch") is None
+    # The tier degrade is codex_tier_entries': None (vendor silent), unrecognized ("banana"), and
+    # known-but-unverified ("plus") all fall to the minimal (free) row, so the rank is computed
+    # against the row the seat actually advertises.
+    assert api_catalog.codex_vendor_rank(None, "gpt-5.6-terra") == 1
+    assert api_catalog.codex_vendor_rank("banana", "gpt-5.6-terra") == 1
+    assert api_catalog.codex_vendor_rank("plus", "gpt-5.6-terra") == 1  # known, unverified → free
+
+    # Rank follows the SEAT'S TIER ROW, not the flat union. Synthetic second tier (the real table
+    # has only `free`): a `plus` row that REVERSES the capability order must rank by ITS OWN order.
+    # Built from REAL entries so the frozen union/whitelist still resolves the names.
+    free = api_catalog.CODEX_TIER_MODELS["free"]
+    terra, luna, big, mini = free  # by curated order
+    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free, "plus": (mini, big, luna, terra)})
+    assert api_catalog.codex_vendor_rank("plus", mini.vendor_name) == 1   # head of the plus row
+    assert api_catalog.codex_vendor_rank("plus", terra.vendor_name) == 4  # tail of the plus row
+    assert api_catalog.codex_vendor_rank("free", terra.vendor_name) == 1  # free row unchanged
 
 
 def test_api_whitelist_endpoints_per_kind():
@@ -4273,6 +4308,7 @@ def test_remote_join_api_codex_stored_seat_probes_and_serves_the_tier_set(monkey
         "models": ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna", "codex:gpt-5.5", "codex:gpt-5.4-mini"],
         "engine_label": "codex",
         "api_kind": "codex",
+        "plan_type": "free",  # issue 03: the seat's tier — the row serve reads vendor_rank from
     }]
     assert record["models"] == record["engines"][0]["models"]
     assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
@@ -4318,6 +4354,9 @@ def test_remote_join_api_codex_tier_selects_the_row_and_warns_per_degrade_case(m
 
         record = cli.provider._read_records("n1")["remote"]
         assert len(record["models"]) == expected_count, f"plan={plan!r}"
+        # The seat's tier rides the spec verbatim (issue 03) — even None (vendor silent): serve
+        # reads each model's vendor_rank from the row this plan_type selects.
+        assert record["engines"][0].get("plan_type") == plan, f"plan={plan!r}"
         errs[plan] = capsys.readouterr().err
 
     assert "Warning" not in errs["plus"] and "isn't verified" not in errs["plus"]
@@ -4425,6 +4464,33 @@ def test_remote_join_api_codex_adding_a_model_probes_once_and_hot_reloads(monkey
     assert record["models"] == ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna"]
     assert (4242, _sig.SIGHUP) in spawned["signals"]  # hot-reloaded, zero-drop
     assert terminated == []
+
+
+def test_merge_engines_refreshes_codex_plan_type_on_rejoin():
+    """Re-joining a live codex engine (same base URL → the `existing` branch) must carry the FRESH
+    plan_type onto the stored spec, not keep the first join's tier (issue 03 — code + silent-failure
+    review). serve reads plan_type off the persisted spec to compute vendor_rank, so a write-once
+    plan_type would rank every model against a stale tier row the moment a second tier ships.
+    Non-codex specs (no plan_type key) stay byte-identical — the refresh is key-guarded."""
+    codex = "https://chatgpt.com/backend-api/codex"
+    base = [{"endpoint_url": codex, "models": ["codex:a"],
+             "engine_label": "codex", "api_kind": "codex", "plan_type": "free"}]
+    incoming = [{"endpoint_url": codex, "models": ["codex:a", "codex:b"],
+                 "engine_label": "codex", "api_kind": "codex", "plan_type": "plus"}]
+    merged, changed = cli.remote_provider._merge_engines(base, incoming)
+    assert changed
+    assert merged[0]["models"] == ["codex:a", "codex:b"]  # union preserved
+    assert merged[0]["plan_type"] == "plus"               # the fresh tier wins, not stored "free"
+
+    # A seat whose tier claim went silent (None) refreshes too — None is a real value, not "keep old".
+    q_merged, _ = cli.remote_provider._merge_engines(base, [{**incoming[0], "plan_type": None}])
+    assert q_merged[0]["plan_type"] is None
+
+    # A hardware spec never carries plan_type → the merge adds no such key (byte-identical).
+    hw_base = [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": None}]
+    hw_incoming = [{"endpoint_url": "http://h:11434/v1", "models": ["llama3", "qwen"], "engine_label": None}]
+    hw_merged, _ = cli.remote_provider._merge_engines(hw_base, hw_incoming)
+    assert "plan_type" not in hw_merged[0]
 
 
 def test_remote_join_api_codex_fresh_signin_onto_live_seat_respawns(monkeypatch, tmp_path, capsys):
@@ -8192,17 +8258,21 @@ def test_remote_join_codex_onto_api_only_respawns_for_concurrency_flip(monkeypat
     assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
 
 
-def _codex_serve_skeleton(monkeypatch, tmp_path, models):
+def _codex_serve_skeleton(monkeypatch, tmp_path, models, *, plan_type=None):
     """The register-capture skeleton (:api_only_defaults_to_eight_workers pattern) for a
-    codex-only record serving ``models``. Returns the kwargs register_node saw."""
+    codex-only record serving ``models``. ``plan_type`` (when given) rides the engine spec exactly
+    as the CLI writes it — the tier row serve reads vendor_rank from. Returns the kwargs
+    register_node saw."""
     from remote import api_keys, relay, serve
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     api_keys.store_codex_bundle(_codex_bundle())
+    spec = {"endpoint_url": "https://chatgpt.com/backend-api/codex",
+            "models": list(models), "engine_label": "codex", "api_kind": "codex"}
+    if plan_type is not None:
+        spec["plan_type"] = plan_type
     record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
-              "engines": [{"endpoint_url": "https://chatgpt.com/backend-api/codex",
-                           "models": list(models),
-                           "engine_label": "codex", "api_kind": "codex"}]}
+              "engines": [spec]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
     monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
@@ -8219,11 +8289,12 @@ def _codex_serve_skeleton(monkeypatch, tmp_path, models):
 def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch, tmp_path):
     """The codex capability envelope carries ONLY what passthrough can honestly claim (issue 05):
     `endpoints: ["responses"]` (the wire literal grid-src's per-model filter reads — absent means
-    chat-only there, so old CLIs fail closed), the verified context window, and features
-    {vision, tools, parallel_tool_calls}. It OMITS — not False — the chat-dialect flags
-    (json_object/json_schema), `max_output_tokens` and the `limits` block (facts #1: the backend
-    has no output cap under any name; a fabricated 64000 would be a provider-written limit the
-    relay might act on), and audio/logprobs."""
+    chat-only there, so old CLIs fail closed), the verified context window, features
+    {vision, tools, parallel_tool_calls}, and the join-time `vendor_rank` (issue 03 / ADR 0016 —
+    a top-level int sibling of context_window, the seat's tier-row position, 1 = most capable). It
+    OMITS — not False — the chat-dialect flags (json_object/json_schema), `max_output_tokens` and
+    the `limits` block (facts #1: the backend has no output cap under any name; a fabricated 64000
+    would be a provider-written limit the relay might act on), and audio/logprobs."""
     seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:gpt-5.5"])
 
     caps = seen["capabilities"]
@@ -8233,6 +8304,9 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
     assert entry["input_modalities"] == ["text", "image"]
     assert entry["output_modalities"] == ["text"]
     assert entry["context_window"] == 272_000
+    # vendor_rank rides top-level (NOT inside features — the grid-src reader takes it there). gpt-5.5
+    # is index 2 in the free tier row [terra, luna, gpt-5.5, gpt-5.4-mini] → rank 3.
+    assert entry["vendor_rank"] == 3
     assert entry["features"] == {"vision": True, "tools": True, "parallel_tool_calls": True}
     assert "max_output_tokens" not in entry
     assert "limits" not in entry
@@ -8242,7 +8316,8 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
 def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeypatch, tmp_path, capsys):
     """The stale-catalog degrade (catalog edited between join and respawn) stays honest for
     codex: a warn plus an entry that still says `responses`-only with NO feature claims — never
-    the chat-dialect all-False shape, and never a fabricated output cap."""
+    the chat-dialect all-False shape, and never a fabricated output cap. A model gone from the
+    whitelist has no tier-row position either, so `vendor_rank` is omitted (issue 03)."""
     seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"])
 
     entry = seen["capabilities"]["models"]["codex:ghost"]
@@ -8250,7 +8325,34 @@ def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeyp
     assert entry["features"] == {}
     assert "max_output_tokens" not in entry and "limits" not in entry
     assert "context_window" not in entry  # unknown is omitted, never invented
+    assert "vendor_rank" not in entry  # absent from the row → omit the fact, never rank 0/None
     assert "no longer in the codex whitelist" in capsys.readouterr().err
+
+
+def test_remote_engine_codex_vendor_rank_follows_the_seats_tier_row(monkeypatch, tmp_path, capsys):
+    """vendor_rank is sourced from the SEAT'S tier row, not the flat union (issue 03 / ADR 0016).
+    A synthetic `plus` tier (the real table has only `free`) REVERSES the free order and drops one
+    model; a seat whose stored plan_type is `plus` must advertise ranks in the plus order. A model
+    advertised but OUTSIDE the seat's row carries no rank — the frozen union resolves its entry, but
+    the row has no position for it, so the fact is omitted (graceful drift) AND an operator warn
+    fires (silent-failure review: a silent no-rank is indistinguishable from tier-table drift).
+    Rows are built from REAL entries so `find_advertised` (frozen union) still resolves every name."""
+    free = api_catalog.CODEX_TIER_MODELS["free"]
+    terra, luna, big, mini = free  # curated free order: terra 1, luna 2, gpt-5.5 3, gpt-5.4-mini 4
+    # plus row: reversed + gpt-5.5 dropped → mini 1, luna 2, terra 3; gpt-5.5 is off-row.
+    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free, "plus": (mini, luna, terra)})
+
+    advertised = [f"codex:{e.vendor_name}" for e in (mini, luna, terra, big)]
+    models = _codex_serve_skeleton(monkeypatch, tmp_path, advertised, plan_type="plus")["capabilities"]["models"]
+
+    assert models[f"codex:{mini.vendor_name}"]["vendor_rank"] == 1
+    assert models[f"codex:{luna.vendor_name}"]["vendor_rank"] == 2
+    assert models[f"codex:{terra.vendor_name}"]["vendor_rank"] == 3
+    # gpt-5.5 resolves in the frozen union but has no position in the plus row → no rank, and a warn.
+    assert "vendor_rank" not in models[f"codex:{big.vendor_name}"]
+    err = capsys.readouterr().err
+    assert f"codex:{big.vendor_name}" in err and "rank" in err  # off-row model flagged (not silent)
+    assert f"codex:{mini.vendor_name}" not in err               # a ranked model is not flagged
 
 
 def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path):
