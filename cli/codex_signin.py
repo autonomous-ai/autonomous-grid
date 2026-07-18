@@ -17,6 +17,7 @@ imported lazily inside the functions.
 
 from __future__ import annotations
 
+import os
 import secrets
 import sys
 import time
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
 # the vendor's own lifetime rather than a number of our own (the clamp `cli/auth.py` applies to the
 # control plane's `expires_in`). It bounds both flows: the browser wait, and how stale a paste may be.
 _SIGNIN_DEADLINE_S = 600
+
+# A GUI front-end (the grid app) opens the authorize URL itself — the way it already drives
+# `grid login` — and sets this so the browser flow prints the URL but does NOT open a second tab.
+# Unset (normal terminal use) is unchanged: the CLI opens the browser. Only the browser flow reads
+# it; the paste flow never opens anything anyway.
+_NO_AUTO_OPEN_ENV = "GRID_OAUTH_NO_OPEN"
 
 
 def resolve_seat(*, no_browser: bool) -> tuple[CodexBundle, bool]:
@@ -85,9 +92,14 @@ def _browser_flow(authorize_url: str, state: str) -> str:
         # Bound BEFORE the browser opens: the reverse order races the redirect against our own
         # startup. The bind is also the port check — see `remote/codex_callback.py`.
         with codex_callback.listen(codex_oauth.CALLBACK_PORT, expected_state=state) as listener:
-            _open_browser(authorize_url)
-            print("Approve the sign-in in your browser to connect your codex subscription.")
-            print(f"  {authorize_url}")  # printed too: the browser may not have opened
+            if os.environ.get(_NO_AUTO_OPEN_ENV):
+                # A front-end opens the URL itself (mirrors `grid login`, where the app opens the
+                # browser and the CLI only prints the URL) — don't open a second tab.
+                print("Open this URL to approve the sign-in and connect your codex subscription:")
+            else:
+                _open_browser(authorize_url)
+                print("Approve the sign-in in your browser to connect your codex subscription.")
+            print(f"  {authorize_url}")  # printed either way: the browser may not have opened
             redirect = listener.wait(deadline=time.monotonic() + _SIGNIN_DEADLINE_S)
     except codex_callback.PortInUse:
         return _port_in_use_fallback(authorize_url)
