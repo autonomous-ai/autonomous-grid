@@ -550,8 +550,9 @@ the consumer's); the served request bills the consumer as the chosen model.
 not); the response `model` and the `X-Grid-Routed-Model` header carry the real model, and
 `X-Grid-Router` is `ranked` or `fallback`. `auto` appears in `/v1/models` (as `owned_by:
 "grid-router"`) only while routing is enabled; disabled → a clear "auto routing is not enabled" error.
-`auto` is chat-only — the legacy `completions` endpoint and an `X-Target-Provider` header each reject
-it, and media models are never candidates.
+`auto` works on `chat/completions` and, for codex API engines, the Responses endpoint (see
+[ADR 0016](./adr/0016-auto-routing-responses-dialect.md)); the legacy `completions` endpoint and an
+`X-Target-Provider` header each reject it, and media models are never candidates.
 
 ### Auto-routing transparency
 

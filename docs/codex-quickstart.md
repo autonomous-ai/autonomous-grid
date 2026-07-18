@@ -157,3 +157,41 @@ want to change the app's default provider.)
   — `grid models` is the authoritative set. Editing `config.toml` (or `-m`) is the reliable switch.
 - A vendor error (401/429/5xx) surfaces as that job's error with the upstream status — it never
   touches your grid sign-in and never unregisters the engine.
+
+## Let the grid pick the model — `model = "auto"`
+
+If the grid **owner** has enabled auto-routing (`grid router enable`, with at least one advisor
+set), a consumer can hand the model choice to the grid instead of naming a slug. Use the **same**
+provider block as above with one line changed — `model = "auto"`:
+
+```toml
+model = "auto"                          # the grid picks among the codex models your seat serves
+model_provider = "grid"
+model_context_window = 272000           # pin it — the served model can differ from any one slug,
+                                        # and the Codex CLI falls back to this on an unknown slug
+
+[model_providers.grid]
+name = "Autonomous Grid"
+base_url = "https://<your relay>/relay/v1"   # OPENAI_BASE_URL from `grid info --env`
+env_key = "GRID_API_KEY"                     # the env var the app reads your api key from
+wire_api = "responses"                       # mandatory — codex engines speak the responses endpoint
+supports_websockets = false                  # the grid relay streams HTTP SSE, not WebSocket
+```
+
+What the grid does with `auto`:
+
+- It picks among the codex models your seat actually serves — a trivial prompt routes to a small
+  model, a demanding one to the flagship, and an image request only considers vision-capable models.
+- The response's `model` field names the model that **actually served** (never `auto`), and two
+  response headers report the pick: `X-Grid-Routed-Model: <real model>` and `X-Grid-Router: ranked`
+  (an advisor ordered the candidates) or `fallback` (a deterministic local pick, because no advisor
+  was reachable). Billing records the chosen model, at that model's rates.
+- Because the served model can differ from any single slug, **pin `model_context_window`** — the
+  Codex CLI keeps working across picks by using it as fallback metadata for a slug it doesn't know.
+- Send bare `auto`, not `codex:auto` (the latter returns a 400 that tells you the name is `auto`).
+  If the owner hasn't enabled routing, an `auto` request returns a clear *"auto routing is not
+  enabled on this grid"* error — name a `codex:*` model instead, or ask the owner to enable it.
+
+Auto-routing is the grid owner's switch, the same one that governs the chat path; see
+[ADR 0016](./adr/0016-auto-routing-responses-dialect.md) and the `Router` section of
+[cli.md](./cli.md#router).
