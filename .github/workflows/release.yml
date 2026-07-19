@@ -51,9 +51,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The release notes are read off the annotated tag object below, so it has to
-          # be here in full. 0 is the setting that guarantees that; the default depth
-          # might well suffice, but a release is a poor place to find out.
+          # Full history so any git lookup here is complete. The annotated tag object
+          # itself is re-fetched in the notes step below — actions/checkout lightweight-
+          # ifies the pushed tag even at depth 0, so depth alone does NOT preserve it.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v5
         with:
@@ -84,6 +84,11 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
+          # actions/checkout replaces the pushed annotated tag with a LIGHTWEIGHT local
+          # ref (even at fetch-depth: 0), so `git cat-file -t` below would see "commit"
+          # and this step would wrongly reject a properly-annotated tag. Re-fetch the tag
+          # object from origin to restore the annotation before reading it.
+          git fetch --force origin tag "$REF_NAME"
           # A lightweight tag has no message of its own, and %(contents) would quietly
           # fall through to the commit's — publishing "chore(release): vX.Y.Z" as the notes.
           if [ "$(git cat-file -t "$REF_NAME")" != tag ]; then
