@@ -26,3 +26,18 @@ def native_machine() -> str:
     except OSError:
         return platform.machine()
     return "arm64" if result.stdout.strip() == "1" else platform.machine()
+
+
+def normalized_machine() -> str:
+    """The hardware architecture as a release-artifact tag: ``x86_64`` or ``aarch64``.
+
+    Vendors name their downloads with these two spellings, but the OS reports the CPU under many
+    aliases — Windows says ``AMD64``/``ARM64``, macOS says ``arm64``, Linux says ``x86_64``. Fold
+    them all so installers pick the right build regardless of platform.
+    """
+    machine = native_machine().lower()
+    if machine in ("x86_64", "amd64", "x64"):
+        return "x86_64"
+    if machine in ("arm64", "aarch64"):
+        return "aarch64"
+    return machine
