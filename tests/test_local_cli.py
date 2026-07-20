@@ -28,6 +28,7 @@ from local import config
 from shared import paths
 from shared import state
 from local import runtime
+from shared.agent import codex_installer
 from shared.agent import installer as agent_installer
 from shared.engine import comfyui, installer, launcher
 from shared.system import arch
@@ -2293,16 +2294,45 @@ def test_native_machine_reports_a_real_intel_mac_as_intel(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("machine", "label"),
-    [("arm64", "aarch64-apple-darwin"), ("x86_64", "x86_64-apple-darwin")],
+    ("system", "machine", "target"),
+    [
+        ("Darwin", "arm64", "aarch64-apple-darwin"),
+        ("Darwin", "x86_64", "x86_64-apple-darwin"),
+        ("Windows", "AMD64", "x86_64-pc-windows-msvc"),
+        ("Windows", "ARM64", "aarch64-pc-windows-msvc"),
+        ("Linux", "x86_64", "x86_64-unknown-linux-gnu"),
+        ("Linux", "aarch64", "aarch64-unknown-linux-gnu"),
+    ],
 )
-def test_pick_uv_build_follows_the_architecture(machine, label):
-    assert agent_installer.pick_uv_build(machine).label == label
+def test_pick_uv_build_follows_os_and_architecture(monkeypatch, system, machine, target):
+    monkeypatch.setattr(agent_installer.platform, "system", lambda: system)
+    monkeypatch.setattr(agent_installer.arch, "native_machine", lambda: machine)
+    build = agent_installer.pick_uv_build()
+    assert build.target == target
+    assert f"uv-{target}." in build.url
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "asset"),
+    [
+        ("Darwin", "arm64", "codex-aarch64-apple-darwin.tar.gz"),
+        ("Darwin", "x86_64", "codex-x86_64-apple-darwin.tar.gz"),
+        ("Windows", "AMD64", "codex-x86_64-pc-windows-msvc.exe.zip"),
+        ("Windows", "ARM64", "codex-aarch64-pc-windows-msvc.exe.zip"),
+        ("Linux", "x86_64", "codex-x86_64-unknown-linux-musl.tar.gz"),
+        ("Linux", "aarch64", "codex-aarch64-unknown-linux-musl.tar.gz"),
+    ],
+)
+def test_pick_codex_build_follows_os_and_architecture(monkeypatch, system, machine, asset):
+    monkeypatch.setattr(codex_installer.platform, "system", lambda: system)
+    monkeypatch.setattr(codex_installer.arch, "native_machine", lambda: machine)
+    build = codex_installer.pick_codex_build()
+    assert build.url.endswith(asset)
 
 
 def test_agent_install_is_a_no_op_when_hermes_is_already_there(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    hermes = tmp_path / "bin" / "hermes"
+    hermes = agent_installer.hermes_bin()
     hermes.parent.mkdir(parents=True)
     hermes.write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -2319,7 +2349,7 @@ def test_agent_install_is_a_no_op_when_hermes_is_already_there(monkeypatch, tmp_
 
 def test_agent_install_forces_a_reinstall_when_asked(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    hermes = tmp_path / "bin" / "hermes"
+    hermes = agent_installer.hermes_bin()
     hermes.parent.mkdir(parents=True)
     hermes.write_text("#!/bin/sh\n", encoding="utf-8")
     calls = []
@@ -2330,6 +2360,28 @@ def test_agent_install_forces_a_reinstall_when_asked(monkeypatch, tmp_path):
 
     assert rc == 0
     assert calls == ["install"]
+
+
+def test_agent_install_is_a_no_op_when_codex_is_already_there(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    codex = codex_installer.codex_bin()
+    codex.parent.mkdir(parents=True)
+    codex.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("must not reinstall when codex is present")
+
+    monkeypatch.setattr(codex_installer, "install_codex", fail)
+
+    rc = cli.cmd_agent_install(argparse.Namespace(name="codex", force=False))
+
+    assert rc == 0
+    assert "already installed" in capsys.readouterr().out
+
+
+def test_agent_install_rejects_an_unknown_agent():
+    with pytest.raises(SystemExit):
+        cli.cmd_agent_install(argparse.Namespace(name="openclaw", force=False))
 
 
 def test_engine_install_on_macos_uses_the_prebuilt_by_default(monkeypatch):

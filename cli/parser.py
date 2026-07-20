@@ -515,11 +515,11 @@ def _add_engine_setup(sub) -> None:
         engine_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
         engine_list.set_defaults(handler=cmd_engine_list)
 
-    agent = sub.add_parser("agent", help="Set up the agent that runs tools in chat (hermes)")
+    agent = sub.add_parser("agent", help="Set up the agents that run tools in chat (hermes, codex)")
     agent_sub = agent.add_subparsers(dest="subcommand", required=True)
 
-    agent_install = agent_sub.add_parser("install", help="Install the agent (no Homebrew, no admin rights)")
-    agent_install.add_argument("name", choices=("hermes",))
+    agent_install = agent_sub.add_parser("install", help="Install an agent (no Homebrew, no admin rights)")
+    agent_install.add_argument("name", choices=("hermes", "codex"))
     agent_install.add_argument(
         "--force",
         action="store_true",
