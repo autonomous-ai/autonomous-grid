@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -1567,23 +1567,85 @@ def _warn_codex_upstream(status: int, headers: Any) -> None:
         _warn_api_auth_failure(api_catalog.CODEX_KIND, status)
 
 
-def _forward_codex(
-    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
-    target_url: str,
-) -> None:
-    """Forward one responses job to the seat and stream the reply back as whole event blocks.
+@dataclass(frozen=True)
+class _UpstreamFailure:
+    """One engine's non-200 on the responses path, drained and bound so it outlives the response
+    context. `headers` is carried alongside `status` because the operator taxonomy needs it — a
+    Cloudflare-challenge 403 and an auth 403 demand OPPOSITE actions and cannot be told apart from
+    the status int alone (ADR 0015 D-f).
 
-    Always the streaming path, whatever the job's stream flag says — the upstream only speaks SSE
-    (ADR 0015 D-e). The bearer is resolved from the seat holder PER ATTEMPT (D-d: outside the
-    routing snapshot, so a rotation needs no reload), and an upstream 401 refreshes and retries
-    exactly once, codex-scoped — openai keeps ADR 0012's job-error-only. The refresh runs OUTSIDE
-    the response context: the non-200 is drained and (status, headers, text) bound first, so no
-    vendor connection is held through a ≤15s token exchange, and the warning path sees the
-    response headers (CF-403 vs auth-403), not just the status int.
+    `headers` is typed structurally rather than as `httpx.Headers`: a lookup is all any reader does,
+    and this record is meant to stay kind-agnostic, so it does not take a dependency on the client
+    library. It holds a live mapping and so is NOT hashable — never put one in a set or dict key."""
+
+    status: int
+    headers: Mapping[str, str]
+    text: str
+
+
+def _forward_responses_stream(
+    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
+    target_url: str, headers: dict[str, str],
+) -> _UpstreamFailure | None:
+    """Forward one responses job and stream the reply back as whole event blocks.
+
+    The dialect's streaming submission, with NO engine-kind knowledge — any kind that serves
+    `responses` can call it (PRD §5 / ADR 0018). Block alignment is the point, and it is a property
+    of the dialect rather than of any one backend (ADR 0015 D-e, kept verbatim): one submitted chunk
+    is one whole `event:`+`data:` block, so the terminal event that carries the usage is never torn
+    across two submissions, and an engine dying mid-stream strands only complete events at the relay.
+
+    Credentials are the CALLER's business — whatever `headers` says is what goes on the wire, so a
+    seat resolving a rotating bearer per attempt and an API engine carrying a static key are the
+    same code here. A streamed 401 from the RELAY re-raises out of `_submit_response` and
+    `handle_job`'s guard reports it — the same terminal-signal guarantee `_forward_stream` has.
+
+    Returns None once a 200 has been submitted. A non-200 is drained inside the response context and
+    returned, with BOTH contexts closed first: how to answer it differs by kind (the seat refreshes
+    and retries once, D-d; an API engine does not, ADR 0012), and deciding out here means no vendor
+    connection is held open through a ≤15s token exchange.
+
+    **The caller MUST answer a non-None return with a terminal signal** — `_try_submit_error`, or a
+    retry that reaches one. Nothing has been submitted for the job at that point, and a dropped
+    return is invisible to `handle_job`'s `except Exception` guard, so the consumer would hang until
+    it timed out: exactly the outcome `_submit_response` and `_try_submit_error` exist to prevent.
     """
     import httpx
 
     timeout = httpx.Timeout(connect=10, read=read_timeout, write=None, pool=10)
+    with httpx.Client(timeout=timeout) as client:
+        with client.stream(
+            "POST", f"{target_url}/{endpoint}", json=body, headers=headers,
+        ) as resp:
+            if resp.status_code == 200:
+                _submit_response(
+                    state, txn, stream=True,
+                    content=_traced_stream(txn, _iter_event_blocks(resp.iter_bytes())),
+                )
+                return None
+            resp.read()  # drain inside the context so .text is readable after it closes
+            return _UpstreamFailure(resp.status_code, resp.headers, resp.text)
+
+
+def _forward_codex(
+    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
+    target_url: str,
+) -> None:
+    """Forward one responses job to the seat — the seat's own credential behaviour, wrapped around
+    the shared responses forward.
+
+    Always the streaming path, whatever the job's stream flag says — the upstream only speaks SSE
+    (ADR 0015 D-e). What is genuinely the SEAT's and stays here: the bearer is resolved from the
+    seat holder PER ATTEMPT (D-d: outside the routing snapshot, so a rotation needs no reload), an
+    upstream 401 refreshes and retries exactly once, codex-scoped — openai keeps ADR 0012's
+    job-error-only — and the CF-403-vs-auth-403 operator taxonomy (D-f). Block alignment is NOT a
+    seat concern and lives in `_forward_responses_stream`, where any kind can reach it.
+
+    The refresh still runs OUTSIDE the response context — now by construction rather than by care:
+    the shared forward returns a failure only after draining it and closing both contexts, so no
+    vendor connection is held through a ≤15s token exchange, and the warning path still sees the
+    response headers (CF-403 vs auth-403), not just the status int.
+    """
     for attempt in (1, 2):
         try:
             bundle = state.codex_seat.bundle()  # bind once per attempt, like a snapshot
@@ -1606,25 +1668,16 @@ def _forward_codex(
                 "to re-create it",
             )
             return
-        with httpx.Client(timeout=timeout) as client:
-            with client.stream(
-                "POST", f"{target_url}/{endpoint}", json=body, headers=_codex_headers(bundle),
-            ) as resp:
-                if resp.status_code == 200:
-                    # Whole event blocks per submitted chunk (D-e); a streamed 401 from the RELAY
-                    # re-raises out of _submit_response and handle_job's guard reports it — same
-                    # terminal-signal guarantees as _forward_stream.
-                    _submit_response(
-                        state, txn, stream=True,
-                        content=_traced_stream(txn, _iter_event_blocks(resp.iter_bytes())),
-                    )
-                    return
-                resp.read()  # drain inside the context so .text is readable after it closes
-                status, resp_headers, text = resp.status_code, resp.headers, resp.text
-        if status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
+        failure = _forward_responses_stream(
+            state, txn, endpoint, body, read_timeout, target_url,
+            headers=_codex_headers(bundle),
+        )
+        if failure is None:
+            return  # submitted — the shared path already gave the job its terminal signal
+        if failure.status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
             continue  # rotated — retry once with the fresh bearer (reactive D-d)
-        _warn_codex_upstream(status, resp_headers)
-        _try_submit_error(state, txn, f"engine error {status}: {text[:200]}")
+        _warn_codex_upstream(failure.status, failure.headers)
+        _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
         return
 
 

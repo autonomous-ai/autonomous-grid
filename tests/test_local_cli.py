@@ -9194,6 +9194,119 @@ def test_iter_event_blocks_never_flushes_a_partial_block_on_error():
     assert out == [b"event: a\ndata: {}\n\n"]  # exactly the complete block; the torn half never left
 
 
+# A plain bearer header set — what a non-seat kind's `_forward_headers` produces. Deliberately NOT
+# the seat's five (`_codex_headers`): the shared responses forward must not know a seat exists.
+_NON_SEAT_HEADERS = {"Content-Type": "application/json", "Authorization": "Bearer k-plain"}
+
+
+def test_forward_responses_stream_submits_whole_event_blocks_for_any_kind(monkeypatch, tmp_path):
+    """PRD §5 / ADR 0018: block alignment is a property of the DIALECT, not of the subscription
+    seat — so the streaming submission is a path any engine kind can take.
+
+    Exercised here with no seat anywhere in the call: a plain `_serve_state` (whose codex holder is
+    created but never primed) and a plain bearer header set. It still submits one whole
+    `event:`+`data:` block per chunk. `test_serve_handle_job_codex_submits_the_fixture_as_whole_
+    event_blocks` asserts the same invariants THROUGH the seat; that overlap is deliberate, and
+    what is unique here is the seat's ABSENCE — if this path ever reached for `state.codex_seat`,
+    the unprimed holder would raise `CodexNotSignedIn` and this test would fail loudly rather than
+    let the two concerns quietly re-couple."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    fixture = _codex_fixture_bytes()
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, chunks=list(content))  # keep the chunk boundaries
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+
+    def engine(request):
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        # Awkward 7-byte chunking: block boundaries land mid-line, mid-JSON, everywhere.
+        return httpx.Response(200, content=iter([fixture[i:i + 7] for i in range(0, len(fixture), 7)]))
+
+    _mock_serve_engine(monkeypatch, engine)
+
+    failure = serve._forward_responses_stream(
+        state, "t1", "responses", {"model": "m"}, 600.0, "http://engine.example/v1",
+        headers=dict(_NON_SEAT_HEADERS),
+    )
+
+    assert failure is None  # a submitted 200 reports nothing back to the caller
+    assert captured["url"] == "http://engine.example/v1/responses"  # {target}/{endpoint}
+    assert captured["headers"]["authorization"] == "Bearer k-plain"  # the CALLER's headers, verbatim
+    assert "chatgpt-account-id" not in captured["headers"]  # nothing seat-shaped was added
+    assert captured["stream"] is True
+    assert len(captured["chunks"]) == 47
+    assert all(chunk.endswith(b"\n\n") for chunk in captured["chunks"])
+    assert b"".join(captured["chunks"]) == fixture  # byte-for-byte, whatever the socket chunking
+    assert b"[DONE]" not in b"".join(captured["chunks"])
+
+
+def test_forward_responses_stream_returns_the_drained_failure_without_submitting(monkeypatch, tmp_path):
+    """A non-200 is reported back to the CALLER rather than answered here, because the right answer
+    differs by kind: the seat refreshes a rotated bearer and retries once (ADR 0015 D-d), an API
+    engine does not (ADR 0012 keeps it job-error-only). Two properties make that split safe.
+
+    The body is drained INSIDE the response context and bound before both contexts close — so a
+    caller that then runs a token exchange holds no vendor connection open through it, and the
+    `Cf-Mitigated` header that the CF-403-vs-auth-403 taxonomy keys on (`_warn_codex_upstream`,
+    D-f) is still readable afterwards, not just the status int. And nothing is submitted: the job
+    has had NO terminal signal yet, which is precisely why a non-None return OBLIGES its caller to
+    send one — dropping it would hang the consumer."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    submissions = []
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda *a, **k: submissions.append("response"))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda *a, **k: submissions.append("error"))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(
+        403, headers={"Cf-Mitigated": "challenge"}, json={"detail": "blocked"}))
+
+    failure = serve._forward_responses_stream(
+        state, "t1", "responses", {"model": "m"}, 600.0, "http://engine.example/v1",
+        headers=dict(_NON_SEAT_HEADERS),
+    )
+
+    assert submissions == []  # the caller owns the terminal signal — nothing was sent for it
+    assert failure is not None
+    assert failure.status == 403
+    assert failure.headers.get("cf-mitigated") == "challenge"  # readable after the contexts closed
+    assert "blocked" in failure.text
+
+
+def test_forward_responses_stream_flushes_a_final_block_with_no_trailing_blank_line(monkeypatch, tmp_path):
+    """An engine that ends its stream without a trailing blank line must still have its last block
+    submitted — that block is the `response.completed` carrying the usage, so swallowing it would
+    under-bill whoever served the request while looking exactly like a clean stream.
+
+    `_iter_event_blocks` already guarantees this and is tested directly above; what this pins is the
+    WIRING — that the grouper is genuinely in the shared submission path, so a later change that
+    forwarded raw bytes here (as the chat path legitimately does) could not silently drop the tail."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    tail = b'event: response.completed\ndata: {"usage":{"total_tokens":7}}'  # no trailing blank line
+    stream = b"event: response.created\ndata: {}\n\n" + tail
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(chunks=list(content)))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(200, content=iter([stream])))
+
+    failure = serve._forward_responses_stream(
+        state, "t1", "responses", {"model": "m"}, 600.0, "http://engine.example/v1",
+        headers=dict(_NON_SEAT_HEADERS),
+    )
+
+    assert failure is None
+    assert captured["chunks"][-1] == tail  # flushed verbatim, terminator or not
+    assert b"".join(captured["chunks"]) == stream
+
+
 def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypatch, tmp_path):
     """AC 1: URL = the kind's base URL + the job's endpoint path; headers are the real client's
     set, built fresh from the live bundle (bearer + account id + originator/user-agent + SSE
