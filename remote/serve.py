@@ -574,6 +574,12 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
     # from the catalog between join and respawn degrades to chat-only, matching `_served_endpoints`.
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     kind_endpoints = list(whitelist.endpoints) if whitelist else ["chat/completions"]
+    # Loop-invariant per-kind fact, hoisted beside kind_endpoints (issue 06b): whether this kind honours
+    # a Responses output cap. Sourced from the SAME catalog fact the engine gate refuses on
+    # (`unsupported_params`) via `kind_honours_output_cap`, so the auto-router filter (layer 2) and the
+    # per-kind engine gate (layer 3, issue 04) can never disagree — openai True, any future can't-cap kind
+    # False for free. Gated per-MODEL on `entry is not None` at the call below (a stale model fails closed).
+    kind_can_cap = api_catalog.kind_honours_output_cap(api_kind)
     for advertised_model in advertised:
         entry = api_catalog.find_advertised(api_kind, advertised_model)
         if entry is None:
@@ -604,7 +610,15 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
         ctx = entry.context_window if entry else None
         # Endpoints come from the kind's row (above), never legacy `completions` — an API engine never
         # serves it, and the handle_job gate refuses it anyway (honest advertisement, ADR 0012).
-        env = probe.envelope(advertised_model, probed, ctx, endpoints=kind_endpoints)
+        # `honours_output_cap` is gated on `entry is not None`: a model gone from the whitelist degrades
+        # to an all-False FEATURES dict (like a failed probe), so its `output_cap` is False too — a capped
+        # `auto` request then excludes the anomaly rather than routing to a likely-broken model, the
+        # fail-closed posture the whole filter relies on. `endpoints` stays per-KIND (outside features)
+        # because it is what makes the gate refuse a wrong dialect at all.
+        env = probe.envelope(
+            advertised_model, probed, ctx, endpoints=kind_endpoints,
+            honours_output_cap=entry is not None and kind_can_cap,
+        )
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
 

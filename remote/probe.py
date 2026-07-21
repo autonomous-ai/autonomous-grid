@@ -404,7 +404,7 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
 
 def capability_entry(
     probed: dict[str, bool], context_window: int | None = None,
-    endpoints: list[str] | None = None,
+    endpoints: list[str] | None = None, honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` is
     included ONLY when actually known (the engine's ``--ctx-size`` or an API whitelist entry) — an
@@ -412,7 +412,17 @@ def capability_entry(
     absence as "unknown" rather than trusting a fabricated 128000. ``endpoints`` defaults to the
     hardware-engine pair; an API engine passes its catalog row's endpoints (issue 03) — chat plus
     ``responses`` for a kind whose vendor serves the dialect (openai) — but never legacy completions
-    (ADR 0012)."""
+    (ADR 0012).
+
+    ``honours_output_cap`` advertises the ``output_cap`` FEATURE — the engine honours a Responses
+    ``max_output_tokens`` cap. It is a hand-duplicated wire literal grid-src's auto-router filters on
+    (issue 06b): a capped ``auto`` request excludes engines that lack it, so it never lands on a seat
+    that would 400 the cap post-queue. Defaults ``False`` so every current caller — every Phase-1
+    hardware probe — is unchanged; the openai kind passes ``True`` via ``_static_api_caps``, and
+    Phase 2's hardware probe (issue 08) flips this default on. Distinct from the numeric
+    ``max_output_tokens`` LIMIT below: that is issue 09's enforcement ceiling, this is the routing
+    boolean. The codex seat uses ``codex_capability_entry`` and never reaches here, so it never
+    advertises the feature — the fail-closed omission this filter relies on."""
     input_modalities = ["text", "image"] if probed["vision"] else ["text"]
     ctx = int(context_window) if context_window else None
     return {
@@ -430,6 +440,8 @@ def capability_entry(
             "audio": False,
             "logprobs": False,
             "top_logprobs": False,
+            # Appended last so the existing feature order is undisturbed. issue 06b wire literal.
+            "output_cap": honours_output_cap,
         },
         "limits": {
             **({"max_context_tokens": ctx} if ctx is not None else {}),
@@ -443,12 +455,14 @@ def capability_entry(
 
 def envelope(
     model_name: str, probed: dict[str, bool], context_window: int | None = None,
-    endpoints: list[str] | None = None,
+    endpoints: list[str] | None = None, honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """Wrap a probed-features dict in the ``{schema_version, models}`` envelope the relay requires."""
     return {
         "schema_version": 1,
-        "models": {model_name: capability_entry(probed, context_window, endpoints=endpoints)},
+        "models": {model_name: capability_entry(
+            probed, context_window, endpoints=endpoints, honours_output_cap=honours_output_cap,
+        )},
     }
 
 

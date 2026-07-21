@@ -867,6 +867,27 @@ def test_codex_whitelist_has_no_env_var_and_no_output_cap():
     assert codex.entries  # issue 05: populated from the tier table
 
 
+def test_kind_honours_output_cap_reads_unsupported_params():
+    """The single source of truth for issue 06b's auto-router cap filter: a kind honours a Responses
+    output-token cap IFF `max_output_tokens` is NOT among its `unsupported_params` — the SAME catalog
+    fact the engine-side gate (`_api_unsupported_params`, issue 04) refuses on, so layer 2 (the auto
+    router) and layer 3 (the engine gate) can never disagree about a kind. An unknown kind fails
+    closed (not-cap-capable), matching how `_static_api_caps`/`_served_endpoints` degrade one."""
+    assert api_catalog.kind_honours_output_cap("openai") is True
+    assert api_catalog.kind_honours_output_cap("codex") is False
+    assert api_catalog.kind_honours_output_cap("nonexistent-kind") is False
+    # Read from the fact, never a second declaration: the helper's answer must track the rows.
+    assert api_catalog.RESPONSES_OUTPUT_CAP_PARAM == "max_output_tokens"
+    assert (
+        api_catalog.RESPONSES_OUTPUT_CAP_PARAM
+        not in api_catalog.WHITELISTS["openai"].unsupported_params
+    )
+    assert (
+        api_catalog.RESPONSES_OUTPUT_CAP_PARAM
+        in api_catalog.WHITELISTS["codex"].unsupported_params
+    )
+
+
 def test_codex_tier_whitelist_integrity():
     """The per-tier codex table (issue 05). Guards the D-f data rules: every populated tier is
     real vendor `PlanType` vocabulary; rows are non-empty, duplicate-free, and inside the flat
@@ -9244,6 +9265,48 @@ def test_static_api_caps_openai_advertises_both_endpoints():
     assert entry["endpoints"] == ["chat/completions", "responses"]
 
 
+def test_static_api_caps_openai_advertises_output_cap_feature():
+    """Issue 06b: the openai caps envelope advertises the `output_cap` routing FEATURE — the engine
+    honours a Responses `max_output_tokens` cap — sourced from the kind's `unsupported_params` via
+    `kind_honours_output_cap`. This is the CLI half of the hand-duplicated wire literal grid-src's
+    auto-router filters on; absent here, a capped `auto` request would wrongly exclude the openai
+    engine that can in fact cap. Distinct from the numeric `max_output_tokens` limit already in the
+    envelope — this is the boolean the responses auto-branch keys on."""
+    from remote import serve
+
+    entry = serve._static_api_caps("openai", ["openai:gpt-5.5"])["models"]["openai:gpt-5.5"]
+    assert entry["features"]["output_cap"] is True
+
+
+def test_static_api_caps_codex_omits_output_cap_feature():
+    """The codex seat cannot honour an output cap under any name (facts.md #1), so its envelope must
+    NOT advertise `output_cap` — a capped `auto` request then excludes it (fail closed). Guards the
+    layer-2/layer-3 agreement: the routing feature and the engine gate read the same catalog fact,
+    so codex omitting the param means codex omitting the feature."""
+    from remote import serve
+
+    caps = serve._static_api_caps("codex", ["codex:gpt-5.5"], plan_type="free")
+    entry = caps["models"]["codex:gpt-5.5"]
+    assert "output_cap" not in entry["features"]
+
+
+def test_static_api_caps_stale_openai_model_fails_closed_on_output_cap():
+    """Fail-closed on degrade (issue 06b): a model gone from the whitelist between join and respawn
+    degrades to an all-False features dict — so even though the `openai` KIND honours the cap, the stale
+    model advertises `output_cap: False` and a capped `auto` request excludes the anomaly rather than
+    routing to a likely-broken model. Pins the `entry is not None and kind_honours_output_cap(...)`
+    short-circuit DIRECTLY at the unit layer: a future 'simplification' that drops the entry guard
+    (advertising True for a model we cannot resolve) fails here, not only through the slower
+    `_bring_up_engines` integration path (test_bring_up_engines_api_model_gone_from_whitelist_...)."""
+    from remote import serve
+
+    # KIND-level: openai honours the cap...
+    assert api_catalog.kind_honours_output_cap("openai") is True
+    # ...but a model absent from the whitelist degrades all-False, so its advertised feature is False.
+    entry = serve._static_api_caps("openai", ["openai:not-a-real-model"])["models"]["openai:not-a-real-model"]
+    assert entry["features"]["output_cap"] is False
+
+
 def test_serve_codex_seat_holder_primes_from_the_store_and_self_heals(monkeypatch, tmp_path):
     """ADR 0015 D-d: the codex credential lives OUTSIDE the routing snapshot, in a per-kind holder
     on the serve state — a rotation must not rebuild routing or race a hot-reload swap. The holder
@@ -10941,6 +11004,10 @@ def test_bring_up_engines_api_model_gone_from_whitelist_warns_and_degrades(monke
     assert upstream == ["gpt-5.5", "gpt-legacy"]  # prefix-strip fallback still rewrites sanely
     legacy = caps["models"]["openai:gpt-legacy"]
     assert all(v is False for v in legacy["features"].values())  # degraded, not crashed
+    # issue 06b: `output_cap` is a per-KIND fact, but a model gone from the whitelist fails CLOSED —
+    # its degraded features are all-False, so a capped `auto` request excludes the anomaly rather than
+    # routing to a likely-broken model. (`endpoints` stays per-kind; the features dict does not.)
+    assert legacy["features"]["output_cap"] is False
     err = capsys.readouterr().err
     assert "openai:gpt-legacy" in err and "whitelist" in err  # ...and the degrade is observable
 

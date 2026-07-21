@@ -332,6 +332,29 @@ def responses_only_kind(model: str) -> str | None:
     return kind
 
 
+# The Responses-dialect output-token cap parameter. A kind honours a cap IFF this is NOT among its
+# `unsupported_params` — the exact fact remote/serve.py `_api_unsupported_params` refuses on — so the
+# auto-router's cap filter (issue 06b) and the per-kind engine gate (issue 04) read ONE source and can
+# never disagree. This is the dialect's OWN spelling (`max_tokens`/`max_completion_tokens` are the
+# chat-dialect spellings the relay refuses on `responses` outright).
+RESPONSES_OUTPUT_CAP_PARAM = "max_output_tokens"
+
+
+def kind_honours_output_cap(kind: str) -> bool:
+    """True iff an API engine of ``kind`` honours a Responses output-token cap (``max_output_tokens``).
+
+    Read from the SAME catalog fact issue 04's engine-side gate reads (``unsupported_params``), so the
+    auto-router's candidate filter (issue 06b, layer 2) and the engine gate (issue 04, layer 3) can
+    never disagree about a kind: ``openai`` honours it, the ``codex`` seat cannot cap under any name.
+    An unknown kind is not-cap-capable — fail closed, matching how ``_static_api_caps`` and
+    ``_served_endpoints`` degrade an unknown kind to the conservative answer.
+    """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return False
+    return RESPONSES_OUTPUT_CAP_PARAM not in whitelist.unsupported_params
+
+
 def format_api_entry(kind: str, entry: ApiModelEntry, endpoints: tuple[str, ...]) -> str:
     """The human-readable catalog line for one model: ``kind``/``entry`` name and size it, while
     ``endpoints`` (the whitelist row's — a per-KIND fact, not a per-model boolean) says which relay
