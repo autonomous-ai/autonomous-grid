@@ -500,6 +500,24 @@ def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, 
     _try_submit_error(state, txn, f"engine error 400: {payload}")
 
 
+def _refuse_stream_only_seat(state: _ServeState, txn: str) -> None:
+    """Refuse a non-stream responses job for the stream-only subscription seat (issue 05, AC7).
+
+    The seat's backend speaks SSE only. The relay lifted its global stream-mandatory rule so that every
+    other engine may serve a non-stream responses request; this per-kind gate — the layer that knows
+    the kind — re-homes the seat's refusal, wearing the same `engine error 400: {…}` string the other
+    per-kind gates use. The relay's `_terminal_error` extracts (400, "Stream must be set to true") and
+    renders this dialect's `{"detail": "Stream must be set to true"}` + 400 — byte-identical to the old
+    pre-queue refusal, so the seat's observable behaviour is unchanged (user story 16)."""
+    payload = json.dumps({"error": {
+        "message": "Stream must be set to true",
+        "type": "invalid_request_error",
+        "param": "stream",
+        "code": "unsupported_parameter",
+    }})
+    _try_submit_error(state, txn, f"engine error 400: {payload}")
+
+
 def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None, endpoint: str) -> dict[str, Any]:
     """Rename the output-token cap to the vendor's CHAT parameter when forwarding a chat job to an
     API engine.
@@ -1461,6 +1479,12 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         if unsupported:
             _refuse_unsupported_api_params(state, txn, api_kind, unsupported)
             return
+        # The subscription seat is SSE-only, so a non-stream responses job is refused here (issue 05,
+        # AC7) — the relay lifted its global stream rule precisely so this kind-aware gate answers it.
+        # Every other kind serves a non-stream responses request (the forward block's whole-body arm).
+        if api_kind == api_catalog.CODEX_KIND and endpoint == "responses" and not is_stream:
+            _refuse_stream_only_seat(state, txn)
+            return
 
     # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
     # only knows its real name, so rewrite the body's model before forwarding (a new dict — never
@@ -1478,14 +1502,12 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             # streaming forward, submitting whole event blocks (ADR 0015 D-e); headers come from
             # the live seat holder, never the snapshot (D-d).
             _forward_codex(state, txn, endpoint, forward_body, read_timeout, target)
-        elif endpoint == "responses":
-            # A responses job served by a non-seat engine (openai, Phase 1). The shared block-aligned
-            # forward RETURNS a non-200 rather than reporting it; unlike the seat's D-d refresh an
-            # openai engine does NOT retry (ADR 0012, job-error-only) — so answer a failure here with a
-            # terminal signal, or the consumer hangs (issue 02 handoff: the toolchain enforces nothing,
-            # not even `ruff --select ALL`). Not guarding on `is_stream` mirrors the codex arm and keeps
-            # a responses job out of the chat forwards, which lack block alignment; non-streaming
-            # responses is issue 05, and the relay enforces stream=True for the dialect today.
+        elif endpoint == "responses" and is_stream:
+            # A STREAMING responses job served by a non-seat engine (openai, Phase 1). The shared
+            # block-aligned forward RETURNS a non-200 rather than reporting it; unlike the seat's D-d
+            # refresh an openai engine does NOT retry (ADR 0012, job-error-only) — so answer a failure
+            # here with a terminal signal, or the consumer hangs. Kept off the chat forwards below,
+            # which lack block alignment (the terminal event carrying usage would tear).
             failure = _forward_responses_stream(
                 state, txn, endpoint, forward_body, read_timeout, target,
                 headers=_forward_headers(state, target, snap),
@@ -1493,6 +1515,14 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             if failure is not None:
                 _warn_api_auth_failure(api_kind, failure.status)
                 _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
+        elif endpoint == "responses":
+            # A NON-streaming responses job (issue 05). The vendor returns ONE whole response object,
+            # so the dialect-agnostic whole-body forward serves it — block alignment is a streaming
+            # concern and there is no stream here. `_forward_whole` already answers a non-200 with a
+            # terminal signal, so the same caller obligation is met. The codex seat never reaches this
+            # arm: it is stream-only and refuses a non-stream job at the per-kind gate above.
+            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
+                           headers=_forward_headers(state, target, snap), api_kind=api_kind)
         elif is_stream:
             _forward_stream(state, txn, endpoint, forward_body, read_timeout, target,
                             headers=_forward_headers(state, target, snap), api_kind=api_kind)

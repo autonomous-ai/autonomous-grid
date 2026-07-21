@@ -8995,6 +8995,42 @@ def test_serve_handle_job_openai_responses_streams_through(monkeypatch, tmp_path
     assert b"".join(captured["chunks"]) == sse
 
 
+def test_serve_handle_job_openai_responses_non_stream_forwards_whole(monkeypatch, tmp_path):
+    """Issue 05 (AC1): a NON-stream Responses job to an ``openai:*`` engine takes the whole-body
+    forward (``_forward_whole``), not the block-aligned stream. The vendor is called once,
+    non-streaming, and its whole JSON response object is submitted with ``stream=False`` — the same
+    non-stream arm chat has always had, reused because it is dialect-agnostic. Streaming (is_stream=True)
+    still goes through ``_forward_responses_stream`` (test_serve_handle_job_openai_responses_streams_through)."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(content=content, stream=stream))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    vendor_obj = (b'{"id":"resp_x","object":"response","status":"completed","model":"gpt-5.5",'
+                  b'"output":[],"usage":{"input_tokens":3,"output_tokens":5}}')
+
+    def vendor(request):
+        assert str(request.url) == "https://api.openai.com/v1/responses"   # {base}/{endpoint}
+        assert request.headers["authorization"] == "Bearer sk-test-123"    # the stored vendor key
+        sent = json.loads(request.content)
+        assert sent["model"] == "gpt-5.5"                                  # advertised → vendor rewrite
+        assert sent.get("stream") in (None, False)                        # NOT forced to stream
+        return httpx.Response(200, content=vendor_obj)
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t5", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": False})
+
+    assert "error" not in captured
+    assert captured["stream"] is False        # the whole-body arm, not the block-aligned stream
+    assert captured["content"] == vendor_obj  # submitted verbatim — no block realignment on this path
+
+
 def test_serve_handle_job_openai_responses_honours_output_cap(monkeypatch, tmp_path):
     """AC1 (issue 04): an app sets an output ceiling on a Responses request to an ``openai`` engine
     and the value REACHES the vendor. The relay's responses contract is a passthrough that lifted its
@@ -9546,10 +9582,41 @@ def test_serve_handle_job_codex_responses_refuses_unsupported_param_before_the_s
     assert inner["code"] == "unsupported_parameter"
 
 
+def test_serve_handle_job_codex_refuses_a_non_stream_responses_job(monkeypatch, tmp_path):
+    """AC7 (issue 05): the subscription seat is SSE-only, so a NON-stream responses job is refused by
+    its per-kind ENGINE gate. The relay lifted its global stream-mandatory rule for every other engine,
+    so the kind-aware layer — the only one that knows this backend cannot stream off — is where the
+    seat's refusal now lives. Refused BEFORE any seat call, riding the same ``engine error 400: {…}``
+    string the other per-kind gates use; the relay re-renders it into the responses ``{"detail": …}``
+    envelope, byte-identical to the old pre-queue ``Stream must be set to true`` (user story 16)."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the seat"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini",
+                                      "input": [{"role": "user", "content": "hi"}], "stream": False},
+                             "is_stream": False})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == "stream"
+    assert inner["code"] == "unsupported_parameter"
+    assert "Stream must be set to true" in inner["message"]
+
+
 def test_serve_handle_job_codex_streams_regardless_of_the_job_flag(monkeypatch, tmp_path):
-    """D-e: the upstream only speaks SSE, so a codex job takes the streaming forward whatever the
-    job's `is_stream` says (the relay always marks responses jobs streaming; this pins our side
-    against relay drift)."""
+    """D-e: the upstream only speaks SSE, so a codex job takes the streaming forward whatever a
+    STREAMING job's transport says. A NON-stream codex responses job is a different case — the seat
+    refuses it at its per-kind gate (test_serve_handle_job_codex_refuses_a_non_stream_responses_job) —
+    so this pins that once a job IS streaming, the forward stays streaming regardless of drift."""
     from remote import api_keys, relay, serve
 
     state = _codex_serve_state(monkeypatch, tmp_path)
@@ -9565,7 +9632,7 @@ def test_serve_handle_job_codex_streams_regardless_of_the_job_flag(monkeypatch, 
         200, content=b"event: response.created\ndata: {}\n\n"))
 
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
-                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": False})
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
 
     assert captured["stream"] is True  # forced — the flag cannot demote a responses job
 
