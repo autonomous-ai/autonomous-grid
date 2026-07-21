@@ -663,6 +663,30 @@ def test_catalog_api_openai_prints_whitelist(monkeypatch, capsys):
     assert "leave the grid" in out
 
 
+def test_catalog_api_openai_shows_responses_capability(monkeypatch, capsys):
+    """AC1 (issue 06): the human-readable `grid catalog --api openai` listing shows the Responses
+    dialect among each model's capabilities. The openai kind serves it (its whitelist row carries
+    `responses` in `endpoints` since issue 03), so a person picking a model reads it here instead of
+    learning by trial and error. Asserted on the model's OWN line — the per-model capability tag,
+    not incidental prose elsewhere in the output."""
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [ln for ln in out.splitlines() if "openai:gpt-5.5" in ln]
+    assert lines, "the gpt-5.5 model line must be printed"
+    # The dialect joins the model's capability list, alongside the content caps already shown.
+    assert "responses" in lines[0]
+    assert "tools" in lines[0] and "vision" in lines[0]
+
+
 def test_catalog_api_unknown_kind_errors():
     with pytest.raises(SystemExit) as exc:
         cli.cmd_catalog(argparse.Namespace(api="anthropic", json=False))
@@ -702,6 +726,11 @@ def test_api_whitelist_integrity():
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
         assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
         assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
+        # Every kind must serve at least one endpoint. An empty tuple would make both the catalog
+        # display (issue 06) and the relay's `_served_endpoints` gate silently treat the kind as an
+        # ordinary chat-only model while it actually serves nothing. The dataclass default is
+        # non-empty; this pins that no row may override it to `()`.
+        assert whitelist.endpoints, f"{kind} must serve at least one endpoint"
 
 
 def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
@@ -736,6 +765,30 @@ def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
     assert "grid chat" in out  # ...and what NOT to point at it
     assert "leave the grid" in out  # provenance disclosure (openai parity)
     assert "allowance" in out  # flat-rate seat: jobs spend the provider's own allowance
+
+
+def test_catalog_api_codex_shows_responses_per_entry(monkeypatch, capsys):
+    """AC2 (issue 06): the subscription-seat listing shows the dialect too — every codex model
+    serves `responses` (its row is `endpoints=("responses",)`), so the same data-driven cap tag
+    appears on each per-tier entry line, beside the tools/vision it already showed. Asserted on the
+    model's OWN line: distinct from the trailing prose that also says "responses", this witnesses the
+    per-model capability tag. The per-tier GROUPING is unchanged — that is pinned separately by
+    test_catalog_api_codex_prints_per_tier_whitelist's `\nfree:\n` assertion."""
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [ln for ln in out.splitlines() if "codex:gpt-5.6-terra" in ln]
+    assert lines, "the gpt-5.6-terra model line must be printed"
+    assert "responses" in lines[0]  # the per-model dialect tag, not merely the trailing prose
+    assert "tools" in lines[0] and "vision" in lines[0]  # alongside the caps it already showed
 
 
 def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
@@ -971,6 +1024,49 @@ def test_api_catalog_find_advertised_and_probed_features():
     assert features["json_schema"] is entry.supports_structured_outputs
 
 
+def test_format_api_entry_shows_responses_dialect():
+    """AC3/AC4/AC6 (issue 06), exercised on the formatter directly because no real catalog kind
+    reaches these states: every listed API kind serves `responses` and every listed model has
+    content caps, so the chat-only and zero-caps cases have no witness through the `grid catalog`
+    command. This unit test is therefore the ONLY coverage for AC3 and AC4 — do not trim it.
+
+    The rule is data-driven off the kind's `endpoints` tuple, exactly as `responses_only_kind`
+    reads it: `responses` shows iff the tuple carries it, and `chat/completions` is the assumed
+    baseline that is never shown."""
+    plain = api_catalog.ApiModelEntry(
+        vendor_name="m", context_window=1000,
+        supports_tools=False, supports_vision=False,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+    toolful = api_catalog.ApiModelEntry(
+        vendor_name="m", context_window=1000,
+        supports_tools=True, supports_vision=False,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+
+    def caps(line: str) -> str:
+        # The capability field is everything after the fixed `... ctx   ` prefix.
+        return line.split(" ctx   ", 1)[1]
+
+    serves_responses = ("chat/completions", "responses")
+    chat_only = ("chat/completions",)
+
+    # Serves responses + content caps → the dialect is appended AFTER the content caps.
+    assert caps(api_catalog.format_api_entry("openai", toolful, serves_responses)) == "tools, responses"
+    # AC4: serves responses + NO content caps → `responses`, never an empty field and never the
+    # contradictory `text only, responses` (the whole reason it joins the SAME list before the fallback).
+    assert caps(api_catalog.format_api_entry("openai", plain, serves_responses)) == "responses"
+    # AC3: a chat/completions-only kind shows no such capability...
+    assert caps(api_catalog.format_api_entry("openai", toolful, chat_only)) == "tools"
+    # ...and a bare chat-only model with no caps still reads as `text only`.
+    assert caps(api_catalog.format_api_entry("openai", plain, chat_only)) == "text only"
+
+    # AC6: the name/ctx columns are undisturbed — the change touches only the trailing caps field.
+    line = api_catalog.format_api_entry("openai", toolful, serves_responses)
+    assert line.startswith("  openai:m")
+    assert " ctx   " in line
+
+
 def test_catalog_api_json_roundtrips(capsys):
     rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=True))
 
@@ -986,6 +1082,19 @@ def test_catalog_api_json_roundtrips(capsys):
     assert first["context_window"] == first_entry.context_window
     assert first["supports_tools"] is first_entry.supports_tools
     assert first["supports_vision"] is first_entry.supports_vision
+
+
+def test_catalog_api_openai_json_emits_endpoints(capsys):
+    """AC5 (issue 06): the machine-readable listing emits the endpoint list for EVERY API kind, not
+    just the codex seat. Before issue 06 the generic `_catalog_api` JSON omitted `endpoints`, so a
+    script could read it for codex (test_catalog_api_codex_json_emits_per_tier_contract) but not for
+    openai — the asymmetry this closes. The value is the whole tuple, so a script checks
+    `"responses" in endpoints` the same way for any kind."""
+    rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["endpoints"] == ["chat/completions", "responses"]
 
 
 # ---------------------------------------------------------------------------

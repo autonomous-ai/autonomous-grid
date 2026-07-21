@@ -332,7 +332,16 @@ def responses_only_kind(model: str) -> str | None:
     return kind
 
 
-def format_api_entry(kind: str, entry: ApiModelEntry) -> str:
+def format_api_entry(kind: str, entry: ApiModelEntry, endpoints: tuple[str, ...]) -> str:
+    """The human-readable catalog line for one model: ``kind``/``entry`` name and size it, while
+    ``endpoints`` (the whitelist row's — a per-KIND fact, not a per-model boolean) says which relay
+    dialects the kind serves.
+
+    Only the notable dialect — ``responses`` — is surfaced as a capability; ``chat/completions`` is
+    never rendered as one, so a kind that serves only chat shows no endpoint tag at all (issue 06
+    AC3). Reads the same ``endpoints`` tuple the relay filter and ``responses_only_kind`` read, so a
+    new responses-serving kind lights up here for free.
+    """
     caps = ", ".join(
         name
         for name, supported in (
@@ -340,6 +349,11 @@ def format_api_entry(kind: str, entry: ApiModelEntry) -> str:
             ("vision", entry.supports_vision),
             ("json", entry.supports_json_mode),
             ("structured", entry.supports_structured_outputs),
+            # Appended last so the existing caps order and the fixed-width columns are undisturbed;
+            # folding it into the SAME list (not a separate suffix after `caps or 'text only'`) is
+            # what keeps a model whose only capability is the dialect rendering `responses`, never
+            # the contradictory `text only, responses` (issue 06 AC4).
+            ("responses", "responses" in endpoints),
         )
         if supported
     )

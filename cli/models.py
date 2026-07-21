@@ -71,6 +71,10 @@ def _catalog_api(args: argparse.Namespace) -> int:
         print(json.dumps({
             "kind": kind,
             "last_verified": whitelist.last_verified,
+            # The endpoint list every API kind serves — now emitted for the generic path too, not
+            # only the codex seat (issue 06 AC5), so a script reads `"responses" in endpoints` the
+            # same way for any kind. Mirrors the codex JSON's placement in `_catalog_codex`.
+            "endpoints": list(whitelist.endpoints),
             "models": [
                 {
                     "advertised": api_catalog.advertised_name(kind, entry),
@@ -103,7 +107,7 @@ def _catalog_api(args: argparse.Namespace) -> int:
         f"(verified {whitelist.last_verified}):"
     )
     for entry in whitelist.entries:
-        print(api_catalog.format_api_entry(kind, entry))
+        print(api_catalog.format_api_entry(kind, entry, whitelist.endpoints))
     print()
     print(f"No key needed to view. Requests to {kind}:* models leave the grid for the vendor.")
     return 0
@@ -154,7 +158,7 @@ def _catalog_codex(kind: str, whitelist: api_catalog.ApiWhitelist, as_json: bool
         print()
         print(f"{tier}:")
         for entry in entries:
-            print(api_catalog.format_api_entry(kind, entry))
+            print(api_catalog.format_api_entry(kind, entry, whitelist.endpoints))
     print()
     print(
         "Tiers not listed are unverified in this release — a seat on one advertises the "
