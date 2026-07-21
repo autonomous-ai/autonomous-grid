@@ -64,6 +64,12 @@ _MAX_RELOAD_REGISTER_RETRIES = 5
 # Text goes to the LLM engine; media goes to this box's media server, each with its own fixed
 # allowlist (the media paths are NOT under `_ALLOWED_ENDPOINTS` — they route to a different URL).
 _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
+# The Responses dialect's endpoint literal, authored HERE — never taken from the wire. Kept OUT of the
+# closed `_ALLOWED_ENDPOINTS` frozenset and composed onto a hardware engine's served set only when its
+# join-time probe found the route (issue 08 / ADR 0018 decision 3): the probe decides WHETHER this
+# authored literal is included, never WHAT it is, so nothing discovered over the network reaches URL
+# construction. Must match grid-src's `endpoint_path` byte-for-byte (CLAUDE.md lockstep).
+_RESPONSES_ENDPOINT = "responses"
 _MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
 
 # The proactive rotation's due-conditions (ADR 0015 D-d), evaluated on the heartbeat tick so an
@@ -638,10 +644,24 @@ def _probe_spec_caps(
     """
     if api_kind:
         return _static_api_caps(api_kind, advertised, plan_type=plan_type)
+    if not advertised:
+        return {}  # no models → nothing to advertise; skip the route probe's network round-trip (loop was a no-op)
+    # Discover the Responses dialect ONCE per engine (issue 08 / ADR 0018): the route is a property of
+    # the server, not of a model, so probe here — OUTSIDE the per-model loop — and stamp the one answer
+    # onto every model. A capable engine advertises `responses` in its endpoints and (PRD §3 — every
+    # non-seat engine accepts an output cap) the `output_cap` routing FEATURE too, so a capped `auto`
+    # request can land on it; a failed/absent probe leaves the pre-Phase-2 chat pair untouched (fail
+    # closed). The API-kind branch returned above is never probed — seat/openai caps are static data.
+    serves_responses = probe.probe_responses_endpoint(llm_url)
+    # Opt-in breadcrumb (GRID_ENGINE_DEBUG): the one lever an operator has to answer "why didn't my
+    # engine pick up Responses" — the probe verdict is otherwise silent, and a False sticks until re-join.
+    _debug(f"responses probe {llm_url!r}: {'serves' if serves_responses else 'does not serve'} /responses")
+    endpoints = ["chat/completions", "completions"] + (["responses"] if serves_responses else [])
     caps_models: dict[str, Any] = {}
     for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
         env = probe.capabilities(
             llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
+            endpoints=endpoints, honours_output_cap=serves_responses,
         )
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
@@ -1406,13 +1426,49 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             state._reload_register_fails = 0
 
 
-def _served_endpoints(api_kind: str | None) -> tuple[str, ...] | frozenset[str]:
-    """The relay endpoints the routed engine's KIND serves — ADR 0015 D-b's matrix, one row per
-    kind: hardware (``None``) keeps the legacy chat pair, an API kind serves exactly its whitelist
-    row's endpoints (openai ⇒ chat/completions, codex ⇒ responses). A kind no longer in the
-    catalog (edited between join and respawn) degrades to the ``ApiWhitelist`` default — chat-only,
-    never the hardware pair — the same posture as ``_static_api_caps``."""
+def _hardware_serves_responses(snap: _Snapshot, model: str | None, target: str) -> bool:
+    """Whether the hardware engine at ``target`` serves the Responses dialect — read from the per-model
+    ``endpoints`` list the probe wrote into the caps envelope (issue 08), so the engine-side gate and the
+    relay's candidate filter can never disagree about who serves the dialect.
+
+    The capability is a property of the ENGINE, not the model (ADR 0018 — probed once per engine, stamped
+    on every model it advertises). Normally ``model`` matches an advertised name and its entry answers
+    directly. But ``route_and_kind``'s single-engine fallback resolves an unmatched/missing ``model`` onto
+    the sole engine (as chat does), and that model has no caps entry — so on a miss, resolve the answer
+    from ANY model routed to the same ``target`` (all carry the identical per-engine answer). Without this
+    a single-engine grid would refuse a responses job with "unsupported endpoint" even though its one
+    engine serves the dialect — the misleading-error class ADR 0017/0018 exist to prevent.
+
+    Defensive: a non-dict entry or a non-list ``endpoints`` reads as "no" (fail closed), never raises."""
+    models = snap.capabilities.get("models") or {}
+    entry = models.get(model)
+    if not isinstance(entry, dict):
+        # The routed model has no caps entry (single-engine fallback on an unmatched/missing model):
+        # consult the ENGINE via any model routed to the same target — the probe stamped one answer on all.
+        for advertised_model, url in snap.routes.items():
+            if url == target and isinstance(models.get(advertised_model), dict):
+                entry = models[advertised_model]
+                break
+    endpoints = entry.get("endpoints") if isinstance(entry, dict) else None
+    return isinstance(endpoints, list) and _RESPONSES_ENDPOINT in endpoints
+
+
+def _served_endpoints(
+    api_kind: str | None, *, hardware_serves_responses: bool = False,
+) -> tuple[str, ...] | frozenset[str]:
+    """The relay endpoints the routed engine serves. An API kind keeps ADR 0015 D-b's per-KIND matrix:
+    it serves exactly its whitelist row's endpoints (openai ⇒ chat/completions, codex ⇒ responses),
+    degrading to the ``ApiWhitelist`` default — chat-only, never the hardware pair — for a kind edited
+    out of the catalog between join and respawn (the same posture as ``_static_api_caps``).
+
+    Hardware (``api_kind`` is None) is now per-ENGINE, not a fixed property of being hardware (ADR 0018
+    decision 1): the closed ``_ALLOWED_ENDPOINTS`` chat pair, plus the authored ``responses`` literal
+    composed on ONLY when this engine's join-time probe found the route (``hardware_serves_responses``).
+    ``_ALLOWED_ENDPOINTS`` itself is never widened — the served set stays a closed set of fixed literals
+    checked before any URL is built (decision 3)."""
     if not api_kind:
+        if hardware_serves_responses:
+            return _ALLOWED_ENDPOINTS | {_RESPONSES_ENDPOINT}  # frozenset | set → frozenset; the closed set is unchanged
         return _ALLOWED_ENDPOINTS
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     return whitelist.endpoints if whitelist else ("chat/completions",)
@@ -1459,14 +1515,24 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     if target is None:
         _try_submit_error(state, txn, f"no engine serves model {model!r}")
         return
-    # Per-kind endpoint matrix (ADR 0015 D-b): which endpoint an engine serves is a property of its
-    # KIND, so the gate runs AFTER routing, where the kind is known — codex ⇒ responses only,
-    # openai ⇒ chat/completions only, hardware ⇒ the chat pair. A mismatch — including a job that
-    # arrived via the single-URL fallback above — is refused with a structured error, never
-    # translated and never blind-forwarded. The global allow-list is deliberately NOT widened:
-    # `responses` never enters `_ALLOWED_ENDPOINTS`, so the anti-traversal property is unchanged —
-    # only a literal that matched this matrix ever reaches `f"{target_url}/{endpoint}"`.
-    served = _served_endpoints(api_kind)
+    # Endpoint gate, AFTER routing where the engine is known. API kinds keep ADR 0015 D-b's per-KIND
+    # matrix (codex ⇒ responses only, openai ⇒ chat/completions); HARDWARE is now per-ENGINE (ADR 0018
+    # decision 1) — the chat pair plus `responses` iff this engine's join-time probe found the route,
+    # read from the caps the probe stamped. A mismatch — including a job that arrived via the single-URL
+    # fallback above — is refused with a structured error, never translated and never blind-forwarded.
+    #
+    # ADR 0018 decision 3 deliberately NARROWS the old anti-traversal statement (which read "`responses`
+    # never enters `_ALLOWED_ENDPOINTS`, so the property is unchanged"): the literal now DOES enter the
+    # set the gate consults for a capable hardware engine. This is not a loosening. The safety was never
+    # that `responses` was absent — it is that the endpoint is checked against a CLOSED set of fixed
+    # literals before it is used to build `f"{target_url}/{endpoint}"`. `_ALLOWED_ENDPOINTS` stays a
+    # frozenset untouched; the `responses` composed onto the hardware set is a literal authored in this
+    # repo, and the probe decides only WHETHER it is included, never WHAT it is — so nothing from the
+    # relay or the engine's wire answer reaches URL construction.
+    served = _served_endpoints(
+        api_kind,
+        hardware_serves_responses=api_kind is None and _hardware_serves_responses(snap, model, target),
+    )
     if endpoint not in served:
         if api_kind:
             _try_submit_error(

@@ -25,6 +25,7 @@ _PROBE_TIMEOUT = 15.0
 _PROPS_TIMEOUT = 5.0
 _SHOW_TIMEOUT = 5.0
 _BENCHMARK_TIMEOUT = 60.0
+_RESPONSES_PROBE_TIMEOUT = 5.0
 
 # A minimal valid image for the live vision probe — we only test whether the engine ACCEPTS image
 # input, not the answer, so any decodable pixel works. Bump the size if a specific engine rejects
@@ -47,6 +48,8 @@ def capabilities(
     *,
     advertise_as: str | None = None,
     context_window: int | None = None,
+    endpoints: list[str] | None = None,
+    honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """One-call public API: live-probe ``llm_url`` for ``model`` and return the register envelope.
 
@@ -56,8 +59,45 @@ def capabilities(
     answers to) yet register under the alias (what consumers ask for).
 
     ``context_window`` (the engine's ``--ctx-size``) is advertised so the master can catalog it.
+
+    ``endpoints`` and ``honours_output_cap`` carry the once-per-engine Responses discovery (issue 08):
+    the caller runs ``probe_responses_endpoint`` ONCE for the engine's server and passes the same
+    answer here for every model it advertises — the dialect is a property of the server, not a model.
+    Both default to the pre-Phase-2 hardware posture (chat pair, no cap feature), so a caller that has
+    not probed the route is unchanged.
     """
-    return envelope(advertise_as or model, probe_llama_capabilities(llm_url, model), context_window)
+    return envelope(
+        advertise_as or model, probe_llama_capabilities(llm_url, model), context_window,
+        endpoints=endpoints, honours_output_cap=honours_output_cap,
+    )
+
+
+def probe_responses_endpoint(llm_url: str, *, timeout: float = _RESPONSES_PROBE_TIMEOUT) -> bool:
+    """Discover whether the engine's server serves the Responses dialect at ``/responses`` (ADR 0018).
+
+    A route-existence probe, NOT an inference: POST a deliberately-invalid (empty) body and read the
+    status. A *bad-request* (400/422) means the route exists and rejected the payload → ``True``; a
+    *route-missing* status (404), *method-not-allowed* (405), a catch-all ``200`` page, any other
+    status, and any transport failure / timeout all mean "does not serve it" → ``False``. **Fail
+    closed**: over-advertising makes the relay's candidate filter lie (the ADR 0017 error class),
+    while under-advertising only keeps the engine on the chat traffic it already serves.
+
+    The dialect is a property of the engine's SERVER, not of a model, so callers run this ONCE per
+    engine and stamp the answer onto every model it advertises — never once per model.
+
+    No tokens are spent and no inference runs: an empty body is *expected* to fail request validation
+    before any forward pass. That "the probe is free" premise is unverified per engine (decisions.md
+    §5 item 4) and — unlike the 404-vs-400 ambiguity, which the fail-closed rule above already makes
+    safe — has no fail-closed backstop; if issue 11's live gate finds an engine doing real work on an
+    empty body, this probe must change shape (a structurally-invalid but still-cheap body), not merely
+    keep failing closed.
+    """
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(f"{llm_url.rstrip('/')}/responses", json={})
+    except httpx.HTTPError:
+        return False
+    return resp.status_code in (400, 422)
 
 
 # --- HTTP (routed through httpx.Client so tests can inject a MockTransport) ---
