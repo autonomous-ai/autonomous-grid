@@ -107,6 +107,25 @@ Choices a future reader will otherwise re-litigate:
   strongest reason this ADR exists: a future reader who finds a security statement silently relaxed
   cannot tell whether it was deliberate, and would be right to assume the worst.
 
+- **The auto-router filters `/responses` candidates on the output cap, so `auto` never routes a capped
+  request to an engine that cannot honour one.** Moving the cap refusal to the engine-side per-kind
+  gate (this feature's decision above / PRD §3) is right for a *named* model, where the app chose the
+  engine. But `auto` picks *for* the app, and the auto-branch candidate filter keys only on the dialect
+  endpoint, vision, and tools — not the cap. On a grid serving both an `openai` engine and a codex
+  seat, a capped `auto` request could therefore be ranked onto the seat and refused *after* queueing:
+  the same request succeeding or failing on where routing lands, which is precisely what user story 21
+  ("`auto` never picks an engine that will fail") forbids. So "honours an output cap" becomes a hard
+  routing filter — sourced from the **same** catalog fact the engine gate reads
+  (`max_output_tokens ∈ unsupported_params`, so the two layers can never disagree), advertised in the
+  capability envelope, and required by the auto deriver only when the body carries a cap. This makes
+  the request-contract split **three** layers, not two: the relay normalizer refuses the universal
+  facts; the **auto-router excludes cap-incapable engines**; the engine-side gate refuses a *named*
+  seat pick. It extends ADR 0016's auto-branch hard filter by one axis, reusing the existing `features`
+  subset check — not `special_params`, which that deriver deliberately avoids. Rejected **accept the
+  asymmetry and only document it**: cheaper (no wire change) and the post-queue failure is loud and
+  actionable, but it leaves `auto` non-deterministic against its own contract, and the config that
+  triggers it — both kinds on one grid, `auto`, a cap — is real, not a straw man.
+
 Deliberately unchanged, so the widening is not read as wider than it is: **local mode** stays
 chat-only (it forwards blind by design and has never probed *any* text capability — not vision, not
 tools — so a Responses probe there would be the first of its kind; the exclusion is the absent
