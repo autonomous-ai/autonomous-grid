@@ -479,9 +479,17 @@ def _api_unsupported_params(api_kind: str, body: dict[str, Any]) -> list[str]:
 
 
 def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, params: list[str]) -> None:
-    """Refuse the job wearing the vendor's own error shape — byte-for-byte what forwarding would
-    have earned ("engine error 400: {openai-style json}"), so consumers and the relay's
-    terminal-error mapper see no difference, minus the vendor round-trip."""
+    """Refuse the job with an openai-style `engine error 400: {"error": {...}}`. For the openai/chat
+    case this is byte-for-byte what forwarding would have earned, so consumers and the relay's
+    terminal-error mapper see no difference, minus the vendor round-trip. For a kind whose real 400
+    wears a different shape — the codex seat answers `{"detail": ...}` (facts.md #7) — it is NOT
+    byte-identical, but the relay's `_terminal_error` keys on `["error"]["message"]`, so this shape
+    yields a CLEANER extracted message than the raw seat body would, and the relay re-renders it per
+    dialect (chat json / responses `response.failed`) either way.
+
+    Only the first unsupported param is named, mirroring the relay's own pre-queue denylist (which
+    raises on the first `param in body` match): a multi-violation body is corrected one param per
+    round-trip, consistently across both layers."""
     param = params[0]
     payload = json.dumps({"error": {
         "message": f"Unsupported parameter: '{param}' is not supported with this model.",
@@ -492,19 +500,27 @@ def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, 
     _try_submit_error(state, txn, f"engine error 400: {payload}")
 
 
-def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dict[str, Any]:
-    """Rename the output-token cap to the vendor's parameter when forwarding to an API engine.
+def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None, endpoint: str) -> dict[str, Any]:
+    """Rename the output-token cap to the vendor's CHAT parameter when forwarding a chat job to an
+    API engine.
 
-    The relay's contract layer normalises every request to ``max_tokens`` — the only name hardware
-    engines understand — including rewriting a consumer's ``max_completion_tokens`` into it. A vendor
-    that renamed the parameter (OpenAI's GPT-5.x) then 400s on every job, so translate on the way
-    out. ``max_tokens`` holds the value the relay validated against its cap, so it wins over any
-    ``max_completion_tokens`` left beside it by that rewrite; only one name may go upstream.
+    The relay's chat normaliser rewrites every request to ``max_tokens`` — the only name hardware
+    engines understand — including a consumer's ``max_completion_tokens``. A vendor that renamed the
+    parameter (OpenAI's GPT-5.x) then 400s on every job, so translate on the way out. ``max_tokens``
+    holds the value the relay validated against its cap, so it wins over any ``max_completion_tokens``
+    left beside it by that rewrite; only one name may go upstream.
 
-    Returns ``body`` unchanged for hardware engines, for vendors that still take ``max_tokens``, and
-    for vendors that take no output cap at all.
+    Scoped to ``chat/completions`` (issue 04). The relay's responses contract is a PASSTHROUGH — it
+    does not normalise to ``max_tokens``; it lets the dialect's own cap ``max_output_tokens`` through
+    byte-for-byte, already the name the vendor's responses endpoint wants. So on responses there is
+    nothing to translate, and applying the chat rename would MIS-name a stray ``max_tokens`` as the
+    chat spelling that endpoint rejects. (The relay also refuses ``max_tokens`` on responses, so a real
+    body never carries it there — but this guard does not lean on that cross-repo rule.)
+
+    Returns ``body`` unchanged for the responses dialect, for hardware engines, for vendors that still
+    take ``max_tokens``, and for vendors that take no output cap at all.
     """
-    if not api_kind:
+    if not api_kind or endpoint != "chat/completions":
         return body
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     param = whitelist.max_output_param if whitelist else "max_tokens"
@@ -1428,13 +1444,19 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         else:  # don't forward an unknown path to the local engine (the pre-matrix behavior, kept verbatim)
             _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")
         return
-    # Params the vendor is known to reject (e.g. GPT-5.x and `stop`): refuse now, with the vendor's
-    # own error shape, instead of forwarding to learn a static catalog fact. A CHAT-dialect gate —
-    # the fabricated refusal wears the chat `{"error": ...}` envelope — so it runs only on the chat
-    # forward: provably inert for a responses job, whose contract violations are the vendor's to
-    # answer in its own `{"detail": ...}` shape (facts.md #7; the codex whitelist row's
-    # `unsupported_params` is thereby advisory catalog data, not an executable gate).
-    if api_kind and endpoint == "chat/completions":
+    # Params the vendor is known to reject (GPT-5.x rejects `stop`; the codex seat rejects every
+    # output-cap spelling and `temperature` — facts.md #7): refuse now, with the vendor's own error
+    # shape, instead of forwarding to learn a static catalog fact. Runs on EVERY dialect an API kind
+    # serves (issue 04), so the codex row's `unsupported_params` is an executable per-kind gate, not
+    # advisory data — this is the layer that knows the seat's kind, which the relay (normalising
+    # before it selects an engine) cannot. The refusal is the same `engine error 400: {"error": ...}`
+    # string on both dialects; the relay renders it PER-DIALECT — chat's `{"error"/"detail": ...}`, or
+    # a `response.failed` block for responses (`relay._responses_failure_block`, which lifts the
+    # message that names the param) — so an app's error handling never forks on which layer caught it.
+    # The relay still refuses the chat-dialect cap spellings on `responses` pre-queue (they are the
+    # wrong dialect for every engine), so what this gate newly answers there is the seat's
+    # `max_output_tokens` and `temperature`.
+    if api_kind:
         unsupported = _api_unsupported_params(api_kind, body)
         if unsupported:
             _refuse_unsupported_api_params(state, txn, api_kind, unsupported)
@@ -1445,8 +1467,9 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     # mutate the job). No mapping / already-equal → forward unchanged (built-in + single-engine paths).
     upstream_model = state.upstream_model(model, snap)
     forward_body = {**body, "model": upstream_model} if upstream_model and upstream_model != model else body
-    # ... and an API vendor may spell the output-token cap differently from the grid's internal name.
-    forward_body = _adapt_output_token_param(forward_body, api_kind)
+    # ... and an API vendor may spell the output-token cap differently from the grid's internal name
+    # on the CHAT dialect (the responses dialect passes its own cap through — see the function).
+    forward_body = _adapt_output_token_param(forward_body, api_kind, endpoint)
 
     state.enter_inference()
     try:

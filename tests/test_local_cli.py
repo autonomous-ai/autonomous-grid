@@ -8718,11 +8718,34 @@ def test_adapt_output_token_param_leaves_a_kind_with_no_cap_parameter_alone():
     for value in (None, 16):  # the null is what slipped through; a real value must not re-key either
         body = {"model": "codex:gpt-5.4-mini", "max_tokens": value, "messages": []}
 
-        adapted = _adapt_output_token_param(body, "codex")
+        adapted = _adapt_output_token_param(body, "codex", "chat/completions")
 
         assert adapted == body
         assert None not in adapted  # `adapted[None] = ...` — not a JSON key
         assert '"null"' not in json.dumps(adapted)
+
+
+def test_adapt_output_token_param_leaves_the_responses_dialect_cap_alone():
+    """Defense-in-depth (issue 04): the adapter is a CHAT-dialect translator. On `chat/completions`
+    the grid-internal `max_tokens` is renamed to the vendor's chat spelling (openai →
+    `max_completion_tokens`); on `responses` the dialect's OWN cap `max_output_tokens` is already the
+    name the vendor wants — the relay passes it through byte-for-byte — so nothing is renamed.
+
+    The relay refuses `max_tokens` on `responses` (its wrong-dialect spelling), so a responses body
+    can never really carry it — but the guard must not DEPEND on that cross-repo invariant: a stray
+    `max_tokens` on a responses job is left alone, NOT mis-renamed to the chat spelling the vendor's
+    responses endpoint would reject."""
+    from remote.serve import _adapt_output_token_param
+
+    # the real path: the responses-dialect cap reaches openai untouched
+    body = {"model": "openai:gpt-5.5", "input": [], "max_output_tokens": 256}
+    assert _adapt_output_token_param(body, "openai", "responses") == body
+
+    # defense-in-depth: a stray chat-spelling on a responses job is left alone, not rewritten
+    stray = {"model": "openai:gpt-5.5", "input": [], "max_tokens": 256}
+    adapted = _adapt_output_token_param(stray, "openai", "responses")
+    assert adapted == stray
+    assert "max_completion_tokens" not in adapted
 
 
 def test_serve_handle_job_hardware_keeps_stop(monkeypatch, tmp_path):
@@ -8970,6 +8993,65 @@ def test_serve_handle_job_openai_responses_streams_through(monkeypatch, tmp_path
         b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n',
     ]  # two whole blocks, realigned from the 7-byte socket chunking
     assert b"".join(captured["chunks"]) == sse
+
+
+def test_serve_handle_job_openai_responses_honours_output_cap(monkeypatch, tmp_path):
+    """AC1 (issue 04): an app sets an output ceiling on a Responses request to an ``openai`` engine
+    and the value REACHES the vendor. The relay's responses contract is a passthrough that lifted its
+    blanket cap refusal, so the dialect's own ``max_output_tokens`` arrives here byte-for-byte; the
+    per-kind gate admits it (not in openai's ``unsupported_params``) and the chat-only cap adapter
+    leaves it untouched — so the vendor sees the ceiling the app asked for, under the dialect's own
+    name, never mis-translated to the chat spelling."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: list(content))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def vendor(request):
+        captured.update(sent=json.loads(request.content))
+        return httpx.Response(200, content=b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n')
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5",
+                                      "input": [{"role": "user", "content": "hi"}],
+                                      "stream": True, "max_output_tokens": 256}, "is_stream": True})
+
+    assert "error" not in captured
+    assert captured["sent"]["max_output_tokens"] == 256      # the ceiling reached the vendor, dialect-named
+    assert "max_completion_tokens" not in captured["sent"]   # not mis-translated to the chat spelling
+    assert captured["sent"]["model"] == "gpt-5.5"            # advertised → vendor rewrite still applies
+
+
+def test_serve_handle_job_openai_responses_refuses_stop_before_the_vendor(monkeypatch, tmp_path):
+    """A consequence of the per-kind gate now running on the responses dialect (issue 04): openai's
+    `unsupported_params` (`stop`, verified against the CHAT API on 2026-07-14) is refused up-front on
+    `/responses` too, before any vendor call. This is a fail-closed EXTRAPOLATION — the responses
+    endpoint does not document `stop`, so the vendor would reject it, and refusing here saves the
+    round-trip (the gate's whole purpose). Pinned so the behavior is deliberate, not accidental: if
+    openai is ever found to accept `stop` on `/responses`, that is a catalog-data fix, not a code
+    change."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the vendor"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5",
+                                      "input": [{"role": "user", "content": "hi"}],
+                                      "stream": True, "stop": ["\n"]}, "is_stream": True})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == "stop"                          # names the param the vendor rejects
 
 
 def test_serve_handle_job_openai_responses_non200_submits_terminal_error(monkeypatch, tmp_path):
@@ -9384,13 +9466,13 @@ def test_forward_responses_stream_flushes_a_final_block_with_no_trailing_blank_l
 
 
 def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypatch, tmp_path):
-    """AC 1: URL = the kind's base URL + the job's endpoint path; headers are the real client's
-    set, built fresh from the live bundle (bearer + account id + originator/user-agent + SSE
+    """AC 1 (issue 03): URL = the kind's base URL + the job's endpoint path; headers are the real
+    client's set, built fresh from the live bundle (bearer + account id + originator/user-agent + SSE
     accept + json content-type — and NO OpenAI-Beta); the body goes verbatim except the
-    advertised→vendor model rewrite (the one existing alias mechanism). `temperature` — which IS
-    in the codex whitelist's `unsupported_params` — and a null `max_tokens` both pass through
-    untouched: the chat-dialect refusal and the output-param rename are provably inert on the
-    responses path (contract violations are the vendor's to answer, in its own shape)."""
+    advertised→vendor model rewrite (the one existing alias mechanism). A null `max_tokens` passes
+    through untouched: the per-kind gate refuses only a REAL value (issue 04), so a null is neither
+    refused nor renamed. (A real cap spelling or `temperature` IS now refused up-front on this path —
+    see ``test_serve_handle_job_codex_responses_refuses_unsupported_param_before_the_seat``.)"""
     from remote import api_keys, relay, serve
 
     state = _codex_serve_state(monkeypatch, tmp_path)
@@ -9405,7 +9487,7 @@ def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypa
     monkeypatch.setattr(relay, "submit_error",
                         lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
     job_body = {"model": "codex:gpt-5.4-mini", "input": [{"role": "user", "content": "hi"}],
-                "stream": True, "temperature": 0.5, "max_tokens": None}
+                "stream": True, "max_tokens": None}
 
     def vendor(request):
         assert str(request.url) == f"{_CODEX_BASE}/responses"
@@ -9427,6 +9509,41 @@ def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypa
     assert "error" not in captured
     assert captured["stream"] is True
     assert captured["body"] == b"event: response.created\ndata: {}\n\n"
+
+
+@pytest.mark.parametrize("param,value", [
+    ("max_output_tokens", 256),   # the responses-dialect cap the relay now lets through (issue 04)
+    ("temperature", 0.5),         # a chat-era knob the seat's allowlist backend denies (facts.md #7)
+])
+def test_serve_handle_job_codex_responses_refuses_unsupported_param_before_the_seat(
+        monkeypatch, tmp_path, param, value):
+    """AC2/AC7 (issue 04): the codex row's ``unsupported_params`` is now an EXECUTABLE per-kind gate
+    on the responses dialect, not advisory catalog data. The relay lifted its blanket
+    ``max_output_tokens`` refusal precisely so the kind-aware engine — the only layer that knows the
+    seat cannot set a cap under any name — answers it; and the seat genuinely 400s both of these
+    (facts.md #7). So a responses job carrying one is refused BEFORE any seat call, riding the same
+    ``engine error 400: {…}`` string the chat gate uses. The relay re-renders that into the responses
+    ``response.failed`` envelope, so the app's error handling does not fork on which layer caught it."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the seat"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini",
+                                      "input": [{"role": "user", "content": "hi"}],
+                                      "stream": True, param: value}, "is_stream": True})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == param                    # names the parameter (AC6)
+    assert inner["code"] == "unsupported_parameter"
 
 
 def test_serve_handle_job_codex_streams_regardless_of_the_job_flag(monkeypatch, tmp_path):
