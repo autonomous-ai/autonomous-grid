@@ -916,7 +916,7 @@ def test_api_whitelist_endpoints_per_kind():
     values are hand-duplicated with grid-src's `provider_supports` filter (absent ⇒ chat-only,
     old CLIs fail closed); the literal `"responses"` must match its `endpoint_path` byte-for-byte
     (CLAUDE.local.md lockstep rule)."""
-    assert api_catalog.WHITELISTS["openai"].endpoints == ("chat/completions",)
+    assert api_catalog.WHITELISTS["openai"].endpoints == ("chat/completions", "responses")
     assert api_catalog.WHITELISTS["codex"].endpoints == ("responses",)
 
 
@@ -932,14 +932,16 @@ def test_codex_kind_constant_is_defined_in_shared_and_reexported():
     assert api_keys.CODEX_KIND == api_catalog.CODEX_KIND
 
 
-def test_responses_only_kind_flags_codex_models_only():
+def test_responses_only_kind_flags_only_kinds_that_cannot_serve_chat():
     """The `grid chat` pre-flight asks one question — "is this model namespaced under a kind that
-    cannot serve chat/completions?" — and the answer is data-driven from the whitelist's
-    `endpoints`, never a hardcoded kind name. Anything that isn't such a namespace (openai's chat
-    kind, a hardware model whose NAME merely contains a colon, no namespace at all) is None."""
-    assert api_catalog.responses_only_kind("codex:gpt-5.5") == "codex"
+    cannot serve chat/completions?" — data-driven from the whitelist's `endpoints`, never a hardcoded
+    kind name. openai now serves `responses` TOO (issue 03), but is still NOT flagged: it is
+    responses-*capable*, not responses-*only*, because it also serves chat — so `grid chat` still
+    works against it. Only a kind with no chat endpoint at all (codex) is flagged. Anything that isn't
+    an API namespace (a hardware model whose NAME merely contains a colon, no namespace at all) is None."""
+    assert api_catalog.responses_only_kind("codex:gpt-5.5") == "codex"  # responses-only → refuse chat
     assert api_catalog.responses_only_kind("codex:") == "codex"  # still a codex-namespaced request
-    assert api_catalog.responses_only_kind("openai:gpt-5.5") is None  # serves chat/completions
+    assert api_catalog.responses_only_kind("openai:gpt-5.5") is None  # serves responses AND chat → not flagged
     assert api_catalog.responses_only_kind("llama3:8b") is None  # colon, but not an API kind
     assert api_catalog.responses_only_kind("gpt-5.5") is None  # no namespace
     assert api_catalog.responses_only_kind("") is None
@@ -8158,9 +8160,10 @@ def test_remote_engine_api_record_registers_static_caps_and_kind(monkeypatch, tm
     assert seen["node"] == "node-1" and seen["models"] == ["openai:gpt-5.5"]
     entry = seen["capabilities"]["models"]["openai:gpt-5.5"]
     assert entry["context_window"] == 1_050_000 and entry["features"]["tools"] is True
-    # Honest advertisement: an API engine never serves the legacy completions endpoint, so the
-    # relay must not be told it does (the serve-side gate stays as defense in depth).
-    assert entry["endpoints"] == ["chat/completions"]
+    # Honest advertisement: openai serves both dialects now (issue 03) but never the legacy
+    # completions endpoint, so the relay is told exactly that (the serve-side gate stays as defense
+    # in depth). Sourced from the kind's catalog row, not a hardcoded list.
+    assert entry["endpoints"] == ["chat/completions", "responses"]
     assert seen["meta"]["engine"] == "openai"  # the grid page shows the API engine's kind
     assert state_seen["bearer_by_url"] == {"https://api.openai.com/v1": "sk-test-123"}
 
@@ -8924,21 +8927,94 @@ def test_serve_handle_job_responses_never_reaches_a_hardware_engine(monkeypatch,
     assert "'responses'" in captured["error"]
 
 
-def test_serve_handle_job_responses_never_reaches_an_openai_engine(monkeypatch, tmp_path):
-    """openai stays chat-only under the matrix — its refusal message is byte-compatible with the
-    pre-matrix one, so consumers and the relay's terminal-error mapper see no difference."""
+def test_serve_handle_job_openai_responses_streams_through(monkeypatch, tmp_path):
+    """The tracer bullet (issue 03): an app streams a Responses request naming an ``openai:*`` model
+    and gets the vendor's reply back through the grid. ``openai`` now serves the dialect (its catalog
+    row lists ``responses``), so the per-kind gate admits the job and it forwards through the SHARED
+    block-aligned responses path — the same one the seat uses — with the vendor key attached and the
+    advertised name rewritten to the vendor name.
+
+    This is the inverse of the deleted ``responses_never_reaches_an_openai_engine``: that openai is
+    chat-only is exactly the invariant this slice overturns. The 7-byte vendor chunking proves the
+    grouper realigns whole ``event:``+``data:`` blocks (a chat raw-passthrough forward would leak the
+    socket's 7-byte chunks instead), so the usage-bearing terminal event is never torn."""
     from remote import relay, serve
 
     state = _api_serve_state(monkeypatch, tmp_path)
     captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, chunks=list(content))  # keep the block boundaries
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
     monkeypatch.setattr(relay, "submit_error",
                         lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
-    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("responses must never reach the openai vendor"))
+    sse = (b'event: response.created\ndata: {}\n\n'
+           b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n')
+
+    def vendor(request):
+        assert str(request.url) == "https://api.openai.com/v1/responses"  # {base}/{endpoint}
+        assert request.headers["authorization"] == "Bearer sk-test-123"   # the stored vendor key
+        assert json.loads(request.content)["model"] == "gpt-5.5"          # advertised → vendor rewrite
+        return httpx.Response(200, content=iter([sse[i:i + 7] for i in range(0, len(sse), 7)]))
+
+    _mock_serve_engine(monkeypatch, vendor)
 
     serve.handle_job(state, {"transaction_id": "t4", "endpoint_path": "responses",
                              "body": {"model": "openai:gpt-5.5"}, "is_stream": True})
 
-    assert "API engine 'openai' serves chat/completions only" in captured["error"]
+    assert "error" not in captured
+    assert captured["stream"] is True
+    assert captured["chunks"] == [
+        b'event: response.created\ndata: {}\n\n',
+        b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n',
+    ]  # two whole blocks, realigned from the 7-byte socket chunking
+    assert b"".join(captured["chunks"]) == sse
+
+
+def test_serve_handle_job_openai_responses_non200_submits_terminal_error(monkeypatch, tmp_path):
+    """The caller obligation issue 02 handed to issue 03: ``_forward_responses_stream`` RETURNS a
+    non-200 (``_UpstreamFailure``) rather than reporting it, so this second caller — unlike the seat's
+    D-d refresh — must answer it with a terminal signal and does NOT retry (ADR 0012 job-error-only).
+    NOTHING in the toolchain catches a dropped return (issue 02's as-built: not even ``ruff --select
+    ALL``), so this test is what pins it: a vendor non-200 reaches the consumer as a ``submit_error``,
+    nothing is streamed, and the vendor is hit exactly once. Modelled on
+    ``test_forward_responses_stream_returns_the_drained_failure_without_submitting``, one layer up."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    submissions = []
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: submissions.append("response"))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: submissions.append(("error", message)))
+    calls = []
+
+    def vendor(request):
+        calls.append(str(request.url))
+        return httpx.Response(429, json={"error": {"message": "rate limited"}})
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t5", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": True})
+
+    assert calls == ["https://api.openai.com/v1/responses"]   # hit once — no retry (unlike the seat)
+    assert "response" not in submissions                      # nothing was streamed back
+    errors = [s for s in submissions if isinstance(s, tuple)]
+    assert len(errors) == 1 and "429" in errors[0][1]         # the terminal signal carries the status
+
+
+def test_static_api_caps_openai_advertises_both_endpoints():
+    """Change #2 in isolation: the advertised caps envelope sources its ``endpoints`` from the kind's
+    catalog row rather than a hardcoded chat-only list. This list is exactly what grid-src's per-model
+    ``provider_supports`` filter reads to decide the openai engine can serve ``responses`` — so if it
+    stayed hardcoded, the row change would never reach the relay and nothing would route. The
+    startup-path cousin ``test_remote_engine_api_record_registers_static_caps_and_kind`` proves the
+    same value through the full registration path; this pins the source at the unit layer."""
+    from remote import serve
+
+    entry = serve._static_api_caps("openai", ["openai:gpt-5.5"])["models"]["openai:gpt-5.5"]
+    assert entry["endpoints"] == ["chat/completions", "responses"]
 
 
 def test_serve_codex_seat_holder_primes_from_the_store_and_self_heals(monkeypatch, tmp_path):

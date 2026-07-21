@@ -534,6 +534,12 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
         ("vision", "tools", "parallel_tool_calls", "json_object", "json_schema"), False
     )
     caps_models: dict[str, Any] = {}
+    # Which relay endpoint(s) this kind serves comes from its catalog row (issue 03) — NOT a hardcoded
+    # chat-only list. This is the wire contract grid-src's per-model `provider_supports` filter reads,
+    # so a kind that serves `responses` (openai) must advertise it here or nothing routes. A kind gone
+    # from the catalog between join and respawn degrades to chat-only, matching `_served_endpoints`.
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    kind_endpoints = list(whitelist.endpoints) if whitelist else ["chat/completions"]
     for advertised_model in advertised:
         entry = api_catalog.find_advertised(api_kind, advertised_model)
         if entry is None:
@@ -562,9 +568,9 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
             continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
-        # chat/completions only: the gate in handle_job refuses legacy completions, so the relay
-        # must not be told this model serves it (honest advertisement, ADR 0012).
-        env = probe.envelope(advertised_model, probed, ctx, endpoints=["chat/completions"])
+        # Endpoints come from the kind's row (above), never legacy `completions` — an API engine never
+        # serves it, and the handle_job gate refuses it anyway (honest advertisement, ADR 0012).
+        env = probe.envelope(advertised_model, probed, ctx, endpoints=kind_endpoints)
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
 
@@ -1449,6 +1455,21 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             # streaming forward, submitting whole event blocks (ADR 0015 D-e); headers come from
             # the live seat holder, never the snapshot (D-d).
             _forward_codex(state, txn, endpoint, forward_body, read_timeout, target)
+        elif endpoint == "responses":
+            # A responses job served by a non-seat engine (openai, Phase 1). The shared block-aligned
+            # forward RETURNS a non-200 rather than reporting it; unlike the seat's D-d refresh an
+            # openai engine does NOT retry (ADR 0012, job-error-only) — so answer a failure here with a
+            # terminal signal, or the consumer hangs (issue 02 handoff: the toolchain enforces nothing,
+            # not even `ruff --select ALL`). Not guarding on `is_stream` mirrors the codex arm and keeps
+            # a responses job out of the chat forwards, which lack block alignment; non-streaming
+            # responses is issue 05, and the relay enforces stream=True for the dialect today.
+            failure = _forward_responses_stream(
+                state, txn, endpoint, forward_body, read_timeout, target,
+                headers=_forward_headers(state, target, snap),
+            )
+            if failure is not None:
+                _warn_api_auth_failure(api_kind, failure.status)
+                _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
         elif is_stream:
             _forward_stream(state, txn, endpoint, forward_body, read_timeout, target,
                             headers=_forward_headers(state, target, snap), api_kind=api_kind)

@@ -410,8 +410,9 @@ def capability_entry(
     included ONLY when actually known (the engine's ``--ctx-size`` or an API whitelist entry) — an
     unknown window is omitted, never defaulted, so the master (and the auto-router Advisor) treats
     absence as "unknown" rather than trusting a fabricated 128000. ``endpoints`` defaults to the
-    hardware-engine pair; an API engine passes ``["chat/completions"]`` — it never serves legacy
-    completions (ADR 0012)."""
+    hardware-engine pair; an API engine passes its catalog row's endpoints (issue 03) — chat plus
+    ``responses`` for a kind whose vendor serves the dialect (openai) — but never legacy completions
+    (ADR 0012)."""
     input_modalities = ["text", "image"] if probed["vision"] else ["text"]
     ctx = int(context_window) if context_window else None
     return {

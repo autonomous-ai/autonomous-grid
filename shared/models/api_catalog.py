@@ -200,6 +200,11 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # All four whitelist models reject `stop` ("Unsupported parameter: 'stop' is not supported
         # with this model.") — verified against the live API on 2026-07-14. `stop: null` is accepted.
         unsupported_params=("stop",),
+        # ADR 0018 (issue 03): the openai vendor serves the Responses dialect natively, so this kind
+        # serves BOTH endpoints. `responses` is hand-duplicated with grid-src's per-model
+        # `provider_supports` filter and must match its `endpoint_path` byte-for-byte (absent there ⇒
+        # chat-only, so old CLIs fail closed) — CLAUDE.local.md lockstep rule. Never `completions`.
+        endpoints=("chat/completions", "responses"),
     ),
     "codex": ApiWhitelist(
         last_verified=CODEX_LAST_VERIFIED,
