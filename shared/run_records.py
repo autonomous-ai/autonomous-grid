@@ -16,15 +16,25 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from shared import jsonio, paths
+from shared.models import api_catalog
+
+_IS_WINDOWS = sys.platform == "win32"
 
 
 # How long ``stop_engine`` waits for a SIGTERM'd child to exit before SIGKILLing its group.
-_STOP_GRACE_SECONDS = 8
+# SIGTERM → SIGKILL escalation budget for a detached engine child. 25 = the serve loop's worker
+# drain (5s) + a codex token exchange caught mid-flight (its 15s vendor timeout — remote/serve.py
+# waits that exchange out rather than losing a journaled rotation, ADR 0015 D-d) + unregister/
+# teardown margin. Costs nothing on healthy exits — the wait below polls `pid_alive` every 0.2s
+# and returns the moment the child dies; only a genuinely wedged child feels the longer fuse.
+_STOP_GRACE_SECONDS = 25
 
 
 def record_path(grid_id: str, engine_id: str) -> Path:
@@ -122,21 +132,51 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
 
     An explicit ``--max-concurrency`` (stored truthy on the record) always wins; otherwise the
     default is derived from the union: 8 when every engine spec is an API engine and the identity
-    serves no media, else 1. Like ``media_signature``, this is the ONE definition shared by the
-    CLI's hot-reload-vs-respawn choice and the serve loop's startup, so the two can never desync
-    (ADR 0010 C3). A legacy flat record (no ``engines`` field) keeps the default of 1.
+    serves no media — **unless the union contains a codex engine, which pins the default to 1**
+    (ADR 0015 D-f: a codex seat is a flat-rate subscription; eight workers would drain the
+    operator's personal monthly allowance eight-wide by default) — else 1. Like
+    ``media_signature``, this is the ONE definition shared by the CLI's hot-reload-vs-respawn
+    choice and the serve loop's startup, so the two can never desync (ADR 0010 C3). A legacy flat
+    record (no ``engines`` field) keeps the default of 1.
     """
     explicit = record.get("max_concurrency")
     if explicit:
         return int(explicit)
     engines = record.get("engines") or []
+    if any(spec.get("api_kind") == api_catalog.CODEX_KIND for spec in engines):
+        return 1  # a flat-rate seat is never hammered eight-wide by default (ADR 0015)
     api_only = bool(engines) and all(spec.get("api_kind") for spec in engines)
     return API_ONLY_DEFAULT_CONCURRENCY if api_only and not record.get("media") else 1
+
+
+def _win_pid_alive(pid: int) -> bool:
+    """Windows liveness probe. POSIX's ``os.kill(pid, 0)`` is unusable here: on Windows signal 0 is
+    ``CTRL_C_EVENT``, so ``os.kill(pid, 0)`` tries to signal a console group rather than test for
+    existence — it never reports "alive", so ``terminate_pid`` would skip the kill and orphan the
+    child. Query the process's exit code instead: ``STILL_ACTIVE`` (259) means it's running."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False  # no such pid (OpenProcess fails with ERROR_INVALID_PARAMETER)
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def pid_alive(pid: int) -> bool:
     if not pid:
         return False
+    if _IS_WINDOWS:
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
@@ -150,6 +190,16 @@ def pid_alive(pid: int) -> bool:
 
 
 def kill_group(pid: int) -> None:
+    if _IS_WINDOWS:
+        # No process groups or SIGKILL on Windows. `taskkill /T` tears down the whole child tree
+        # (the uv launcher shim → the real interpreter that holds the callback port), which is what
+        # `killpg` achieves on POSIX. `/F` forces; a dead pid just yields a non-zero exit we ignore.
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
     try:
         if hasattr(os, "killpg"):
             os.killpg(pid, signal.SIGKILL)
@@ -172,6 +222,13 @@ def terminate_pid(pid: int) -> bool:
     """
     if not (pid and pid_alive(pid)):
         return True
+    if _IS_WINDOWS:
+        # No process groups and no deliverable SIGTERM to a detached, console-less child on Windows,
+        # so a graceful term-then-escalate has nothing to escalate from — and killing only `pid`
+        # would orphan the interpreter child that actually holds the callback port. `taskkill /T`
+        # tears the whole tree down at once, the outcome the POSIX path reaches via SIGTERM→killpg.
+        kill_group(pid)
+        return not pid_alive(pid)
     # SIGTERM the detached engine so it unregisters and stops anything it started.
     try:
         os.kill(pid, signal.SIGTERM)

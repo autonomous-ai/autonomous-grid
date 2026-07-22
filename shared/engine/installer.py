@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from pathlib import Path
 import httpx
 
 from shared import paths
-from shared.system import gpu
+from shared.system import arch, gpu
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,33 @@ class TarballPin:
     url: str
     sha256: str
     supports_sm: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MacosBuild:
+    """A pinned official llama.cpp release build for macOS. Pinning the release (rather than
+    tracking `latest`) keeps the download reproducible and lets us check it against a known
+    SHA-256 — the binaries are fetched over the network, so they are verified before they run."""
+
+    label: str
+    url: str
+    sha256: str
+
+
+LLAMA_RELEASE = "b9985"
+
+MACOS_BUILDS: dict[str, MacosBuild] = {
+    "arm64": MacosBuild(
+        label="macos-arm64",
+        url=f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}/llama-{LLAMA_RELEASE}-bin-macos-arm64.tar.gz",
+        sha256="7ac3076397fd7e7cb0d757ec3dc0eb2d876d37aa3021906baa4d197b31758038",
+    ),
+    "x86_64": MacosBuild(
+        label="macos-x64",
+        url=f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}/llama-{LLAMA_RELEASE}-bin-macos-x64.tar.gz",
+        sha256="e601fb2ae9b1976fbe1cf32aa22382d2a69acc74af8d70c0e2e81a8f08aaeb10",
+    ),
+}
 
 
 TARBALLS: tuple[TarballPin, ...] = (
@@ -62,14 +90,7 @@ def install_pinned(tarball: TarballPin) -> Path:
     paths.ensure_all()
     with tempfile.TemporaryDirectory(prefix="grid-engine-") as tmpdir:
         tmp = Path(tmpdir)
-        archive = tmp / Path(tarball.url).name
-        print(f"Downloading {tarball.label} from {tarball.url} ...")
-        _download(tarball.url, archive)
-        got = _sha256(archive)
-        if got != tarball.sha256:
-            raise SystemExit(f"SHA-256 mismatch for {tarball.label}: expected {tarball.sha256}, got {got}")
-        extracted = tmp / "extract"
-        _extract(archive, extracted)
+        extracted = fetch_and_extract(tarball.label, tarball.url, tarball.sha256, tmp)
         found = _locate_llama_server(extracted)
         if not found:
             raise SystemExit(f"Extracted archive did not contain llama-server: {tarball.label}")
@@ -84,41 +105,66 @@ def install_pinned(tarball: TarballPin) -> Path:
         return target
 
 
-def install_macos_homebrew() -> Path:
+def pick_macos_build(machine: str) -> MacosBuild:
+    """The official build for this Mac's architecture. `aarch64` is an alias some Pythons report
+    for Apple Silicon."""
+    key = "arm64" if machine in ("arm64", "aarch64") else machine
+    build = MACOS_BUILDS.get(key)
+    if not build:
+        raise SystemExit(
+            f"No prebuilt llama.cpp for macOS {machine!r}. Re-run with --from-source to build it."
+        )
+    return build
+
+
+def install_macos_prebuilt() -> Path:
+    """Install llama.cpp on macOS from the project's official release tarball.
+
+    Deliberately does NOT use Homebrew: installing Homebrew needs an interactive `sudo`, which a
+    GUI app cannot drive, so it dead-ended the app's hands-off setup. The tarball needs no package
+    manager and no admin rights — it is unpacked under the user's own `~/.grid`."""
     paths.ensure_all()
-    brew = shutil.which("brew")
-    if not brew:
-        raise SystemExit(
-            "Homebrew is required for the Apple Silicon prebuilt llama.cpp install. "
-            "Install Homebrew from https://brew.sh/ or re-run with --from-source."
-        )
+    build = pick_macos_build(arch.native_machine())
+    with tempfile.TemporaryDirectory(prefix="grid-engine-") as tmpdir:
+        extracted = fetch_and_extract(build.label, build.url, build.sha256, Path(tmpdir))
+        server = _locate_llama_server(extracted)
+        if not server:
+            raise SystemExit(f"Extracted archive did not contain llama-server: {build.label}")
+        return _install_prefix(server.parent)
 
-    installed = subprocess.run(
-        [brew, "list", "--formula", "llama.cpp"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0
-    if installed:
-        print("Upgrading Homebrew formula llama.cpp ...")
-        subprocess.check_call([brew, "upgrade", "llama.cpp"])
-    else:
-        print("Installing Homebrew formula llama.cpp ...")
-        subprocess.check_call([brew, "install", "llama.cpp"])
 
-    source = _homebrew_llama_server_path(brew)
-    if not source:
-        raise SystemExit(
-            "Homebrew completed, but llama-server was not found in the llama.cpp formula. "
-            "Ensure Homebrew's bin directory is on PATH or set LLAMA_SERVER."
-        )
+def _install_prefix(source: Path) -> Path:
+    """Place `llama-server` and the shared libraries it loads into their own directory, then point
+    `~/.grid/bin/llama-server` at it. The binary resolves its libraries via `@loader_path`, so they
+    must sit beside it — copying the binary alone yields one that cannot start."""
+    prefix = paths.llama_prefix_dir()
+    if prefix.exists():
+        shutil.rmtree(prefix)
+    prefix.mkdir(parents=True, exist_ok=True)
 
+    shutil.copy2(source / "llama-server", prefix / "llama-server")
+    for lib in source.glob("*.dylib"):
+        target = prefix / lib.name
+        # Keep the release's versioned aliases as links; following them would copy each library
+        # several times over.
+        if lib.is_symlink():
+            target.symlink_to(os.readlink(lib))
+            continue
+        shutil.copy2(lib, target)
+
+    server = prefix / "llama-server"
+    server.chmod(0o755)
+    return _link_bin(server)
+
+
+def _link_bin(source: Path) -> Path:
+    """Expose [source] as `~/.grid/bin/llama-server`, the one path the rest of Grid looks for."""
     target = paths.llama_server_bin()
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() or target.is_symlink():
-        if target.is_dir():
-            raise SystemExit(f"Cannot install llama-server because {target} is a directory.")
+    if target.is_symlink() or target.is_file():
         target.unlink()
+    elif target.is_dir():
+        raise SystemExit(f"Cannot install llama-server because {target} is a directory.")
     target.symlink_to(source)
     return target
 
@@ -190,8 +236,8 @@ def install_metal_from_source() -> Path:
     return target
 
 
-def is_apple_silicon() -> bool:
-    return platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
+def is_macos() -> bool:
+    return platform.system() == "Darwin"
 
 
 def require_toolchain() -> None:
@@ -240,6 +286,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def fetch_and_extract(label: str, url: str, sha256: str, tmp: Path) -> Path:
+    """Download a pinned archive into [tmp], check it against its SHA-256, and unpack it. The hash
+    is the only thing standing between a network fetch and code we execute, so a mismatch aborts."""
+    archive = tmp / Path(url).name
+    print(f"Downloading {label} from {url} ...")
+    _download(url, archive)
+    got = _sha256(archive)
+    if got != sha256:
+        raise SystemExit(f"SHA-256 mismatch for {label}: expected {sha256}, got {got}")
+    extracted = tmp / "extract"
+    _extract(archive, extracted)
+    return extracted
+
+
 def _download(url: str, dest: Path) -> None:
     with httpx.stream("GET", url, timeout=httpx.Timeout(30, read=None), follow_redirects=True) as resp:
         if resp.status_code != 200:
@@ -250,16 +310,19 @@ def _download(url: str, dest: Path) -> None:
 
 
 def _extract(archive: Path, dest: Path) -> None:
+    """Unpack a downloaded archive. Tars are extracted with the `data` filter so a member cannot
+    write outside [dest] (absolute paths, `..`, escaping symlinks) — this unpacks a file fetched
+    over the network."""
     dest.mkdir(parents=True, exist_ok=True)
     if archive.suffix == ".zip":
         with zipfile.ZipFile(archive) as zf:
             zf.extractall(dest)
     elif archive.suffixes[-2:] == [".tar", ".gz"] or archive.suffix == ".tgz":
         with tarfile.open(archive, "r:gz") as tf:
-            tf.extractall(dest)
+            tf.extractall(dest, filter="data")
     elif archive.suffix == ".tar":
         with tarfile.open(archive, "r:") as tf:
-            tf.extractall(dest)
+            tf.extractall(dest, filter="data")
     else:
         raise SystemExit(f"Unsupported archive type: {archive.name}")
 
@@ -271,36 +334,6 @@ def _locate_llama_server(root: Path) -> Path | None:
     return None
 
 
-def _homebrew_llama_server_path(brew: str) -> Path | None:
-    candidates: list[Path] = []
-    formula_prefix = _brew_prefix(brew, "llama.cpp")
-    if formula_prefix:
-        candidates.append(formula_prefix / "bin" / "llama-server")
-    brew_prefix = _brew_prefix(brew)
-    if brew_prefix:
-        candidates.append(brew_prefix / "bin" / "llama-server")
-
-    on_path = shutil.which("llama-server")
-    if on_path:
-        path = Path(on_path)
-        if path != paths.llama_server_bin():
-            candidates.append(path)
-
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _brew_prefix(brew: str, formula: str | None = None) -> Path | None:
-    args = [brew, "--prefix"]
-    if formula:
-        args.append(formula)
-    try:
-        output = subprocess.check_output(args, text=True).strip()
-    except subprocess.CalledProcessError:
-        return None
-    return Path(output) if output else None
 
 
 def _ensure_llama_cpp_source() -> Path:

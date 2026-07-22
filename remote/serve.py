@@ -25,7 +25,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from remote import api_keys, control_plane, credentials, probe, relay
+from remote import api_keys, control_plane, credentials, probe, relay, codex_auth, codex_oauth
 from remote.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
@@ -43,6 +43,14 @@ _DEFAULT_INFERENCE_TIMEOUT = 600.0
 # caps teardown regardless of how many workers are parked.
 _DRAIN_TIMEOUT = 5.0
 
+# How long the teardown waits out a codex token exchange caught mid-flight (ADR 0015 D-d): the
+# exchange's own vendor timeout (codex_oauth._REFRESH_TIMEOUT) is the true bound — the persist
+# after it is milliseconds. Separate from _DRAIN_TIMEOUT: workers parked in long-polls are
+# abandonable, a journaled exchange is not (dying mid-exchange loses a rotation the journal can
+# then only diagnose). run_records._STOP_GRACE_SECONDS accommodates drain + this wait, or the
+# parent's SIGKILL would cut the wait short and make it fiction.
+_CODEX_EXCHANGE_DRAIN = 15.0
+
 # Sanity ceiling on max_concurrency: each slot is a real OS thread holding a long-poll, so an absurd
 # value (a typo like 200000) would exhaust threads/sockets and crash the process. 256 is at/above any
 # realistic single-node batch width (e.g. vLLM max_num_seqs) while keeping a mistyped flag survivable.
@@ -58,6 +66,26 @@ _MAX_RELOAD_REGISTER_RETRIES = 5
 # allowlist (the media paths are NOT under `_ALLOWED_ENDPOINTS` — they route to a different URL).
 _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
 _MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
+
+# The proactive rotation's due-conditions (ADR 0015 D-d), evaluated on the heartbeat tick so an
+# idle grid still rotates. BOTH are conservative picks — the vendor's real rotation window is
+# UNVERIFIED (facts.md #6) and untestable without risking a live seat:
+# * margin 10 min: ≫ the 30s tick (≈20 attempts survive even a transient-failure gate before real
+#   expiry), small enough not to raise rotation frequency — every rotation is one more crash
+#   window, so we do NOT rotate earlier than needed;
+# * window 24h: err short. Too short costs one cheap exchange per day per box; too long risks an
+#   unknown server-side idle-expiry bricking a quiet seat (the "quiet fortnight", PRD story 12).
+#   facts.md B6's 43200-minute figure is the QUOTA window, not evidence of token TTL.
+_CODEX_EXPIRY_MARGIN = 600.0
+_CODEX_ROTATION_WINDOW = 86_400.0
+
+# Failure gates on the codex seat's rotation (ADR 0015 D-d): a definitively refused seat gets one
+# polite vendor 4xx per window per process — never one per 30s heartbeat tick plus one per 401ing
+# job — while a transient failure retries quickly (jobs are erroring for exactly that long). The
+# lock-free store peek in `_CodexSeatHolder.refresh` keeps a cross-process re-sign-in adoptable
+# instantly even while gated.
+_CODEX_REFUSED_COOLDOWN = 600.0
+_CODEX_UNAVAILABLE_COOLDOWN = 60.0
 
 # Opt-in poll/heartbeat tracing. Off by default so a healthy engine's log stays quiet — only errors
 # and job failures are recorded (a successful long-poll and a served job are otherwise silent).
@@ -192,6 +220,10 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             api_kind_by_url=_api_kinds_by_url(record),
             handlers=handlers,
         )
+        # The codex fail-fast, after the state exists and before anything advertises: a codex spec
+        # with no stored seat dies HERE naming the fix (still inside the try, so the record is
+        # reaped like any died-before-registering engine), never as N per-job 401s.
+        _prime_codex_seat(state, record)
         register_once(state)
         registered = True
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
@@ -287,6 +319,7 @@ def _bring_up_engines(
             # caps for all of them — shared with the hot-reload path (`_reload_once`) so the two can't drift.
             caps = _probe_spec_caps(
                 llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
+                plan_type=spec.get("plan_type"),
             )
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
@@ -383,28 +416,43 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
 
 
 def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
-    """{vendor base URL: API key} for every API spec in the record — the machine-local key store
-    first (the join validated and stored the key pre-spawn, so the store is the resolved truth),
-    each kind's env var as fallback (a pre-store record respawned in a key-bearing environment).
+    """{vendor base URL: Bearer} for every API spec in the record.
 
-    A key missing from BOTH is terminal: better to die naming the fix than to serve models whose
-    every job errors upstream. The key never appears in the message.
+    A kind's credential SHAPE lives in `api_keys.require_bearer` — one metered key for openai, an
+    OAuth bundle's access token for codex — so this stays shape-blind and never consults the
+    whitelist's env var (ADR 0015 D-c: an OAuth kind has no env-var input path, and a name guessed
+    here would hand a stray `CODEX_API_KEY` the seat's job).
+
+    A credential missing everywhere is terminal: better to die naming the fix than to serve models
+    whose every job errors upstream. The credential never appears in the message.
     """
     bearers: dict[str, str] = {}
     for spec in record.get("engines") or []:
         kind = spec.get("api_kind")
         if not kind:
             continue
-        whitelist = api_catalog.WHITELISTS.get(kind)
-        env_var = whitelist.env_var if whitelist else f"{kind.upper()}_API_KEY"
-        key = api_keys.load_key(kind) or os.environ.get(env_var)
-        if not key:
-            raise SystemExit(
-                f"This engine serves --api {kind} models but no key is stored and {env_var} is "
-                f"not set. Re-run `grid join --api {kind}` to store a key (or export {env_var})."
-            )
-        bearers[(spec.get("endpoint_url") or "").rstrip("/")] = key
+        if str(kind) == api_catalog.CODEX_KIND:
+            # ADR 0015 D-d: the codex seat lives in `_CodexSeatHolder`, resolved at forward time —
+            # a copy in the snapshot would go stale at the first rotation. The die-before-advertise
+            # gate moves with it (`_prime_codex_seat`), so a not-signed-in respawn still dies here
+            # at startup, not per job.
+            continue
+        bearers[(spec.get("endpoint_url") or "").rstrip("/")] = api_keys.require_bearer(str(kind))
     return bearers
+
+
+def _prime_codex_seat(state: _ServeState, record: dict[str, Any]) -> None:
+    """Prime the seat holder when ``record`` serves a codex engine — the die-before-advertise gate
+    that used to live in ``_api_bearers`` for every kind, moved with the credential (ADR 0015 D-d).
+
+    ONE derivation for startup and the hot-reload so the two can't drift: at startup a missing
+    seat is terminal before anything advertises; at reload the same ``SystemExit`` is absorbed by
+    ``_reload_loop``'s catch, refusing the reload with ``last_reload_error`` set and the old
+    routing intact. A record with no codex spec never touches the store at all — an unprimed
+    holder is inert, and a hardware-only engine must not go near a seat another grid may own.
+    """
+    if any(spec.get("api_kind") == api_catalog.CODEX_KIND for spec in record.get("engines") or []):
+        state.codex_seat.prime_from_store()
 
 
 def _api_kinds_by_url(record: dict[str, Any]) -> dict[str, str]:
@@ -431,11 +479,67 @@ def _api_upstream_name(api_kind: str, advertised: str) -> str:
     return advertised.partition(":")[2] or advertised
 
 
-def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
+def _api_unsupported_params(api_kind: str, body: dict[str, Any]) -> list[str]:
+    """Params in ``body`` the vendor is known to reject (catalog fact), null values excluded —
+    the vendors accept an explicit null, so only a real value earns a refusal."""
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    if whitelist is None:
+        return []
+    return [p for p in whitelist.unsupported_params if body.get(p) is not None]
+
+
+def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, params: list[str]) -> None:
+    """Refuse the job wearing the vendor's own error shape — byte-for-byte what forwarding would
+    have earned ("engine error 400: {openai-style json}"), so consumers and the relay's
+    terminal-error mapper see no difference, minus the vendor round-trip."""
+    param = params[0]
+    payload = json.dumps({"error": {
+        "message": f"Unsupported parameter: '{param}' is not supported with this model.",
+        "type": "invalid_request_error",
+        "param": param,
+        "code": "unsupported_parameter",
+    }})
+    _try_submit_error(state, txn, f"engine error 400: {payload}")
+
+
+def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dict[str, Any]:
+    """Rename the output-token cap to the vendor's parameter when forwarding to an API engine.
+
+    The relay's contract layer normalises every request to ``max_tokens`` — the only name hardware
+    engines understand — including rewriting a consumer's ``max_completion_tokens`` into it. A vendor
+    that renamed the parameter (OpenAI's GPT-5.x) then 400s on every job, so translate on the way
+    out. ``max_tokens`` holds the value the relay validated against its cap, so it wins over any
+    ``max_completion_tokens`` left beside it by that rewrite; only one name may go upstream.
+
+    Returns ``body`` unchanged for hardware engines, for vendors that still take ``max_tokens``, and
+    for vendors that take no output cap at all.
+    """
+    if not api_kind:
+        return body
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    param = whitelist.max_output_param if whitelist else "max_tokens"
+    # `param is None` means the vendor has no output-cap parameter under ANY name (codex — facts.md
+    # #1), so there is nothing to rename to and the body is left alone; `unsupported_params` refuses
+    # a real value before the round-trip. It must be tested FIRST and on its own: the `"max_tokens"
+    # not in body` disjunct below is a key-PRESENCE check, so `max_tokens: null` — which
+    # `_api_unsupported_params` deliberately lets through — would otherwise reach `adapted[param]`
+    # and write `adapted[None] = None`, i.e. a literal `{"null": null}` on the wire.
+    if param is None or param == "max_tokens" or "max_tokens" not in body:
+        return body
+    adapted = {k: v for k, v in body.items() if k not in ("max_tokens", param)}
+    adapted[param] = body["max_tokens"]
+    return adapted
+
+
+def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None = None) -> dict[str, Any]:
     """An API engine's caps envelope from the static whitelist — API engines are never live-probed
     or benchmarked (ADR 0012); the vendor sees no traffic until a real job forwards. A model missing
     from the whitelist (catalog edited between join and respawn) degrades like a failed probe: an
-    all-False entry, never a crash."""
+    all-False entry, never a crash.
+
+    ``plan_type`` (codex only) is the seat's stored subscription tier — the row ``vendor_rank`` is
+    read from (issue 03). ``None`` degrades to the minimal row via ``codex_vendor_rank``; it is
+    ignored for every other kind."""
     no_features = dict.fromkeys(
         ("vision", "tools", "parallel_tool_calls", "json_object", "json_schema"), False
     )
@@ -449,6 +553,23 @@ def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
                 f"{advertised_model!r} is no longer in the {api_kind} whitelist "
                 "(catalog changed since join) — advertising it with no capabilities"
             )
+        if api_kind == api_catalog.CODEX_KIND:
+            # The honest responses-only entry (issue 05): endpoints ["responses"], no chat-dialect
+            # flags, no output cap — a codex envelope must never look like a chat model's. plus the
+            # join-time vendor_rank (issue 03): the model's position in the seat's tier row, or None
+            # when it isn't in that row (guard so the entry=None degrade never dereferences it).
+            rank = api_catalog.codex_vendor_rank(plan_type, entry.vendor_name) if entry else None
+            if entry is not None and rank is None:
+                # Resolves in the flat whitelist union but has no slot in THIS seat's tier row: the
+                # tier table was edited between join and respawn (drift), the same class as the
+                # entry-is-None warn above. Advertise it, just without a rank — but leave a trail, or
+                # an absent rank looks identical to "this seat simply doesn't rank this model".
+                _warn(
+                    f"{advertised_model!r} has no rank in this codex seat's tier row "
+                    "(catalog changed since join) — advertising it without a capability rank"
+                )
+            caps_models[advertised_model] = probe.codex_capability_entry(entry, vendor_rank=rank)
+            continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
         # Media API engines (e.g. Doggi) advertise media endpoints; text API engines advertise
@@ -461,7 +582,7 @@ def _static_api_caps(api_kind: str, advertised: list[str]) -> dict[str, Any]:
 
 def _probe_spec_caps(
     llm_url: str, advertised: list[str], upstream: list[str], ctx_size: Any,
-    api_kind: str | None = None,
+    api_kind: str | None = None, plan_type: str | None = None,
 ) -> dict[str, Any]:
     """Probe EVERY model a spec serves into one caps envelope — keyed by the advertised name, probed by
     the upstream name (Ollama/vLLM only know that). Shared by startup (`_bring_up_engines`) and the
@@ -473,7 +594,7 @@ def _probe_spec_caps(
     instead — no probe ever targets the vendor — via the same seam so startup and reload can't drift.
     """
     if api_kind:
-        return _static_api_caps(api_kind, advertised)
+        return _static_api_caps(api_kind, advertised, plan_type=plan_type)
     caps_models: dict[str, Any] = {}
     for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
         env = probe.capabilities(
@@ -691,6 +812,163 @@ class _Snapshot:
         )
 
 
+class _CodexSeatHolder:
+    """The codex seat's live credential, OUTSIDE the routing snapshot (ADR 0015 D-d).
+
+    A rotation must not rebuild routing or race a hot-reload swap, so unlike the openai bearer —
+    which rides `_Snapshot.bearer_by_url` and is happily immutable — the codex bundle lives here
+    and is resolved at forward time. One holder per serve state, created unconditionally (no None
+    state to branch on): an identity that serves no codex engine simply never primes it, and every
+    due-check no-ops on the unprimed holder.
+
+    Thread model mirrors `_ServeState`: `_lock` is a leaf guarding the bundle swap; `_refresh_lock`
+    serializes refreshers within this process (N poll workers + the heartbeat can 401 together)
+    so they collapse to one store visit; the cross-PROCESS serialization is the store's file lock,
+    inside `api_keys.rotate_codex_bundle`. Lock order is `_refresh_lock → file_lock`, `_lock`
+    strictly leaf — acyclic.
+    """
+
+    def __init__(self, *, stop: threading.Event) -> None:
+        self._stop = stop
+        self._lock = threading.Lock()  # guards bundle/expires_at/not_before (leaf — no calls out)
+        self._refresh_lock = threading.Lock()  # serializes refreshers WITHOUT blocking bundle() readers
+        # Set for exactly the CAS's adopt-check→journal→exchange→persist window (the CAS itself
+        # publishes/clears it) — the shutdown drain waits on this, never on a thread.
+        self._exchange = threading.Event()
+        self._bundle: codex_oauth.CodexBundle | None = None
+        self._expires_at: int | None = None  # decoded ONCE per rotation, never per job
+        self._not_before = 0.0  # monotonic gate after a failed rotation (no hammering a dead seat)
+
+    def prime_from_store(self) -> None:
+        """Load the stored seat, or die naming the fix (the die-before-advertise startup gate —
+        better than advertising models whose every job would 401 upstream)."""
+        self._adopt(api_keys.require_codex_bundle())
+
+    def bundle(self) -> codex_oauth.CodexBundle:
+        """The live bundle for one forward attempt — bind once per attempt, like a snapshot.
+
+        Unprimed (a reload raced us, or wiring missed a path) it self-heals from the store rather
+        than erroring a servable job; only a store with no seat at all refuses, typed, for the
+        forward path to turn into a job error.
+        """
+        with self._lock:
+            if self._bundle is not None:
+                return self._bundle
+        stored = api_keys.load_codex_bundle()
+        if stored is None:
+            raise api_keys.CodexNotSignedIn("this machine is not signed in to a codex subscription")
+        self._adopt(stored)
+        return stored
+
+    def exchange_in_flight(self) -> bool:
+        """Whether a rotation is inside its journal→exchange→persist window (the drain's signal)."""
+        return self._exchange.is_set()
+
+    def refresh(self, stale_access_token: str) -> bool:
+        """Rotate the seat past ``stale_access_token`` — the ONE entry for the reactive 401 path
+        and the proactive heartbeat tick. True means ``bundle()`` now yields a token that advanced
+        past the stale one (own exchange, a sibling thread's, or another process's, adopted).
+
+        Layered like ``_ServeState.refresh``, cheapest first: an in-memory compare collapses N
+        401ing workers to one store visit; the failure cooldown stops a dead seat being hammered
+        every tick+job (with a lock-free store peek first, so a re-sign-in from ANOTHER process
+        heals instantly instead of waiting the gate out); the stop check never STARTS spending
+        mid-shutdown; and only then the cross-process CAS, which may run the vendor exchange.
+        Failures warn — with the journal-aware diagnosis for a refused seat — and gate; they never
+        raise, so a refresh can never kill a poll worker.
+        """
+        with self._refresh_lock:
+            with self._lock:
+                live, not_before = self._bundle, self._not_before
+            if live is not None and live.access_token != stale_access_token:
+                return True  # a sibling thread already rotated; the live bundle is good
+            if self._stop.is_set():
+                return False  # shutting down — nothing new may be spent (D8's drain invariant)
+            if time.monotonic() < not_before:
+                stored = api_keys.load_codex_bundle()  # lock-free peek: reads never take the lock
+                if stored is not None and stored.access_token != stale_access_token:
+                    self._adopt(stored)  # another process rotated or re-signed-in — free heal
+                    return True
+                return False
+            try:
+                fresh = api_keys.rotate_codex_bundle(
+                    stale_access_token, exchange_in_flight=self._exchange, abandon=self._stop,
+                )
+            except api_keys.RotationAbandoned:
+                return False  # shutdown won the race to the lock; the drain reports what matters
+            except api_keys.CodexNotSignedIn:
+                _warn("codex token refresh failed: this machine is no longer signed in to a codex "
+                      "subscription — re-run `grid join --api codex`. Jobs will keep erroring; "
+                      "the engine stays registered.")
+                return False
+            except api_keys.CodexRotationRefused as exc:
+                if exc.interrupted:
+                    # AC 6: the journal left by a killed exchange turns "the vendor said no" into
+                    # the real diagnosis — the rotation was lost, not merely rejected.
+                    _warn(f"a previous codex token rotation was interrupted before it could be "
+                          f"saved, and the vendor now refuses the stored refresh token "
+                          f"({exc}) — the rotation was lost. Jobs will keep erroring; re-run "
+                          f"`grid join --api codex` to sign in again (the engine stays registered).")
+                else:
+                    _warn(f"the vendor refused the codex seat's refresh token ({exc}) — revoked, "
+                          f"or signed out elsewhere? Jobs will keep erroring; re-run "
+                          f"`grid join --api codex` to sign in again (the engine stays registered).")
+                with self._lock:
+                    self._not_before = time.monotonic() + _CODEX_REFUSED_COOLDOWN
+                return False
+            except codex_oauth.RefreshUnavailable as exc:
+                _warn(f"codex token refresh could not be concluded ({exc}); will retry.")
+                with self._lock:
+                    self._not_before = time.monotonic() + _CODEX_UNAVAILABLE_COOLDOWN
+                return False
+            except (Exception, SystemExit) as exc:
+                # The "never raise" contract, made mechanical (python + silent-failure reviews):
+                # the store peek and the CAS both read api_keys.toml, whose loader raises
+                # SystemExit for a corrupt file — which skips every `except Exception` between a
+                # poll worker and `_supervise`, turning one kind's store hiccup into a WHOLE
+                # engine stop with no terminal signal to the consumer. Unlike credentials.toml
+                # (fatal by documented design — the engine cannot outlive its relay tokens), this
+                # store only feeds the codex forward, so: warn, gate like a transient, fail the
+                # one job. The same hazard on the proactive path is guarded in
+                # `_maybe_refresh_codex`.
+                _warn(f"codex token refresh failed unexpectedly ({exc!r}); will retry.")
+                with self._lock:
+                    self._not_before = time.monotonic() + _CODEX_UNAVAILABLE_COOLDOWN
+                return False
+            self._adopt(fresh)
+            return True
+
+    def maybe_refresh(self, now: int) -> None:
+        """The proactive trigger (heartbeat tick — D-d): rotate when the token's own expiry is
+        inside `_CODEX_EXPIRY_MARGIN` (including already past), or when the last rotation is older
+        than `_CODEX_ROTATION_WINDOW` — so an idle grid still rotates. An UNPRIMED holder never
+        fires: this identity serves no codex engine, and the seat in the store may belong to
+        another grid on this box. A `last_refresh` of 0 (a legacy bundle that never recorded one)
+        is beyond any window → one immediate rotation establishes a real baseline. Failure
+        handling, gating, and cross-process adoption all live in `refresh`."""
+        with self._lock:
+            bundle, expires_at = self._bundle, self._expires_at
+        if bundle is None:
+            return
+        if (expires_at is not None and expires_at - now <= _CODEX_EXPIRY_MARGIN) or (
+            now - bundle.last_refresh >= _CODEX_ROTATION_WINDOW
+        ):
+            self.refresh(bundle.access_token)
+
+    def _adopt(self, bundle: codex_oauth.CodexBundle) -> None:
+        """Swap in a bundle + its decoded expiry, and clear the failure gate — an adopted rotation
+        is fresh evidence the seat works. `CodexTokenError` → no expiry (the rotation window rules
+        the proactive refresh instead); never raises past that, so adopting can't kill a worker."""
+        try:
+            expires_at = codex_auth.decode_seat(bundle.access_token).expires_at
+        except codex_auth.CodexTokenError:
+            expires_at = None
+        with self._lock:
+            self._bundle = bundle
+            self._expires_at = expires_at
+            self._not_before = 0.0
+
+
 class _ServeState:
     def __init__(
         self,
@@ -756,6 +1034,10 @@ class _ServeState:
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._inflight = 0
+        # The codex seat's credential holder — OUTSIDE the snapshot (ADR 0015 D-d): a token
+        # rotation must not rebuild routing. Unconditional; primed only when the record has a
+        # codex spec (startup + reload), unprimed otherwise and inert.
+        self.codex_seat = _CodexSeatHolder(stop=self.stop)
 
     @property
     def models(self) -> list[str]:
@@ -1039,12 +1321,19 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             # newly-appended multi-model `--at` advertises caps for all of them, exactly like startup
             # (`_probe_spec_caps` is the shared site, so startup and reload can't drift — ADR 0009 C2).
             caps = (
-                _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind)
+                _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind,
+                                 plan_type=spec.get("plan_type"))
                 if models else {}
             )
             reassembled.append((url, advertised, upstream, caps))
 
     snapshot = _assemble_snapshot(reassembled, state.media_models, record, engine_id, state.max_concurrency)
+    # Prime the codex seat BEFORE the swap (one derivation with startup — `_prime_codex_seat`): a
+    # hot-appended codex engine must never be routable while the holder has no seat, and a box
+    # with no stored seat refuses the whole reload here (the raise lands in `_reload_loop`'s
+    # catch → warn + last_reload_error), old routing intact. Re-reading the store also adopts a
+    # rotation another process performed while we served.
+    _prime_codex_seat(state, record)
     state.apply(snapshot, reassembled)  # atomic swap; in-flight requests were unaffected until here
     if record.get("last_reload_error"):
         _set_last_reload_error(state, engine_id, None)  # the union applied — a previous failure healed
@@ -1077,6 +1366,18 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             _warn(f"reload: re-register still failing after {_MAX_RELOAD_REGISTER_RETRIES} tries "
                   f"({exc!r}); giving up until the next join/leave")
             state._reload_register_fails = 0
+
+
+def _served_endpoints(api_kind: str | None) -> tuple[str, ...] | frozenset[str]:
+    """The relay endpoints the routed engine's KIND serves — ADR 0015 D-b's matrix, one row per
+    kind: hardware (``None``) keeps the legacy chat pair, an API kind serves exactly its whitelist
+    row's endpoints (openai ⇒ chat/completions, codex ⇒ responses). A kind no longer in the
+    catalog (edited between join and respawn) degrades to the ``ApiWhitelist`` default — chat-only,
+    never the hardware pair — the same posture as ``_static_api_caps``."""
+    if not api_kind:
+        return _ALLOWED_ENDPOINTS
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    return whitelist.endpoints if whitelist else ("chat/completions",)
 
 
 def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
@@ -1129,10 +1430,6 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     if endpoint.startswith("media/"):  # a media path we don't serve — never blind-forward it
         _try_submit_error(state, txn, f"unsupported media endpoint: {endpoint!r}")
         return
-    if endpoint not in _ALLOWED_ENDPOINTS:  # don't forward an unknown path to the local engine
-        _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")
-        return
-
     # Bind ONE routing snapshot for this whole job: route + kind + upstream + bearer all come from the
     # same union, so a concurrent leave/append hot-reload swap is all-or-nothing per job — never a route
     # from one union paired with a bearer from another (ADR 0010 D4 F4 — bind once; issue 05).
@@ -1142,31 +1439,56 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     if target is None:
         _try_submit_error(state, txn, f"no engine serves model {model!r}")
         return
-    # Endpoint gating per kind (ADR 0012): an API engine serves chat/completions ONLY. A legacy
-    # `completions` job routed to it — including via the single-URL fallback above — is refused
-    # with a structured error BEFORE any upstream call, never blind-forwarded to the vendor.
-    if api_kind and endpoint != "chat/completions":
-        _try_submit_error(
-            state, txn,
-            f"API engine {api_kind!r} serves chat/completions only (endpoint {endpoint!r} not served)",
-        )
+    # Per-kind endpoint matrix (ADR 0015 D-b): which endpoint an engine serves is a property of its
+    # KIND, so the gate runs AFTER routing, where the kind is known — codex ⇒ responses only,
+    # openai ⇒ chat/completions only, hardware ⇒ the chat pair. A mismatch — including a job that
+    # arrived via the single-URL fallback above — is refused with a structured error, never
+    # translated and never blind-forwarded. The global allow-list is deliberately NOT widened:
+    # `responses` never enters `_ALLOWED_ENDPOINTS`, so the anti-traversal property is unchanged —
+    # only a literal that matched this matrix ever reaches `f"{target_url}/{endpoint}"`.
+    served = _served_endpoints(api_kind)
+    if endpoint not in served:
+        if api_kind:
+            _try_submit_error(
+                state, txn,
+                f"API engine {api_kind!r} serves {', '.join(served)} only (endpoint {endpoint!r} not served)",
+            )
+        else:  # don't forward an unknown path to the local engine (the pre-matrix behavior, kept verbatim)
+            _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")
         return
+    # Params the vendor is known to reject (e.g. GPT-5.x and `stop`): refuse now, with the vendor's
+    # own error shape, instead of forwarding to learn a static catalog fact. A CHAT-dialect gate —
+    # the fabricated refusal wears the chat `{"error": ...}` envelope — so it runs only on the chat
+    # forward: provably inert for a responses job, whose contract violations are the vendor's to
+    # answer in its own `{"detail": ...}` shape (facts.md #7; the codex whitelist row's
+    # `unsupported_params` is thereby advisory catalog data, not an executable gate).
+    if api_kind and endpoint == "chat/completions":
+        unsupported = _api_unsupported_params(api_kind, body)
+        if unsupported:
+            _refuse_unsupported_api_params(state, txn, api_kind, unsupported)
+            return
 
     # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
     # only knows its real name, so rewrite the body's model before forwarding (a new dict — never
     # mutate the job). No mapping / already-equal → forward unchanged (built-in + single-engine paths).
     upstream_model = state.upstream_model(model, snap)
     forward_body = {**body, "model": upstream_model} if upstream_model and upstream_model != model else body
+    # ... and an API vendor may spell the output-token cap differently from the grid's internal name.
+    forward_body = _adapt_output_token_param(forward_body, api_kind)
 
     state.enter_inference()
     try:
-        headers = _forward_headers(state, target, snap)
-        if is_stream:
-            _forward_stream(state, txn, endpoint, forward_body, read_timeout, target, headers=headers,
-                            api_kind=api_kind)
+        if api_kind == api_catalog.CODEX_KIND:
+            # The seat speaks SSE only, so the job's stream flag is ignored — always the
+            # streaming forward, submitting whole event blocks (ADR 0015 D-e); headers come from
+            # the live seat holder, never the snapshot (D-d).
+            _forward_codex(state, txn, endpoint, forward_body, read_timeout, target)
+        elif is_stream:
+            _forward_stream(state, txn, endpoint, forward_body, read_timeout, target,
+                            headers=_forward_headers(state, target, snap), api_kind=api_kind)
         else:
-            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target, headers=headers,
-                           api_kind=api_kind)
+            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
+                           headers=_forward_headers(state, target, snap), api_kind=api_kind)
     except Exception as exc:  # one bad job must not kill the loop
         print(f"\nJob {txn} failed: {exc!r}", file=sys.stderr)
         _try_submit_error(state, txn, str(exc))
@@ -1238,6 +1560,108 @@ def _forward_headers(state: _ServeState, target_url: str, snap: _Snapshot | None
     return headers
 
 
+def _codex_headers(bundle: codex_oauth.CodexBundle) -> dict[str, str]:
+    """The real Codex client's request header set, built fresh per attempt from the live bundle
+    (spike probe.py `headers_for`, verified on the wire 2026-07-15) — bearer, the account-id
+    header derived from the token's own claim, the fixed originator/user-agent pair, SSE accept,
+    JSON content-type. Deliberately NO `OpenAI-Beta`: this is not the platform API. `account_id`
+    is CRLF-safe by the STORE's shape guard (facts.md B5b) — httpx would send an injected header
+    verbatim, so that property must hold before a bundle ever reaches here."""
+    return {
+        "Authorization": f"Bearer {bundle.access_token}",
+        "Chatgpt-Account-Id": bundle.account_id,
+        "Originator": codex_oauth.ORIGINATOR,
+        "User-Agent": codex_oauth.ORIGINATOR,
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+
+def _warn_codex_upstream(status: int, headers: Any) -> None:
+    """The operator's serve-time taxonomy for a codex upstream failure (ADR 0015 D-f): the two
+    403s demand OPPOSITE actions, so they must not share wording — Cloudflare-challenge means
+    "move the egress IP" (re-signing in cannot fix an IP), auth means "sign in again". Detection
+    keys on 403 + `Cf-Mitigated`, NEVER on CF-RAY, which rides every response including 200s
+    (facts.md B4). 429 keeps the existing quota warning; 5xx stays silent, as for every kind
+    (it says nothing about the seat). The loop stays alive and the engine stays registered —
+    jobs error, nothing auto-ejects."""
+    if status == 403 and headers.get("cf-mitigated") is not None:
+        _warn(
+            "codex upstream returned 403 with a Cloudflare challenge — this machine's egress IP "
+            "is blocked (datacenter/VPS addresses typically are). Serve the seat from a "
+            "residential connection or change the egress IP; signing in again will not help. "
+            "Jobs will keep erroring; the engine stays registered."
+        )
+    elif status in (401, 403):
+        _warn(
+            f"codex upstream returned {status} — check your seat: re-run `grid join --api codex` "
+            "to sign in again. Jobs will keep erroring; the engine stays registered."
+        )
+    else:
+        _warn_api_auth_failure(api_catalog.CODEX_KIND, status)
+
+
+def _forward_codex(
+    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
+    target_url: str,
+) -> None:
+    """Forward one responses job to the seat and stream the reply back as whole event blocks.
+
+    Always the streaming path, whatever the job's stream flag says — the upstream only speaks SSE
+    (ADR 0015 D-e). The bearer is resolved from the seat holder PER ATTEMPT (D-d: outside the
+    routing snapshot, so a rotation needs no reload), and an upstream 401 refreshes and retries
+    exactly once, codex-scoped — openai keeps ADR 0012's job-error-only. The refresh runs OUTSIDE
+    the response context: the non-200 is drained and (status, headers, text) bound first, so no
+    vendor connection is held through a ≤15s token exchange, and the warning path sees the
+    response headers (CF-403 vs auth-403), not just the status int.
+    """
+    import httpx
+
+    timeout = httpx.Timeout(connect=10, read=read_timeout, write=None, pool=10)
+    for attempt in (1, 2):
+        try:
+            bundle = state.codex_seat.bundle()  # bind once per attempt, like a snapshot
+        except api_keys.CodexNotSignedIn:
+            _try_submit_error(
+                state, txn,
+                "this engine's codex seat is not signed in — re-run `grid join --api codex` to "
+                "sign in again",
+            )
+            return
+        except SystemExit as exc:
+            # The unprimed holder's self-heal reads api_keys.toml, whose loader raises SystemExit
+            # for a corrupt file — that must stay ONE job's error (see the matching guard in
+            # `_CodexSeatHolder.refresh`), never sail past handle_job's `except Exception` into a
+            # whole-engine stop.
+            _warn(f"codex seat store unreadable ({exc}); failing this job only")
+            _try_submit_error(
+                state, txn,
+                "this engine's codex seat store is unreadable — re-run `grid join --api codex` "
+                "to re-create it",
+            )
+            return
+        with httpx.Client(timeout=timeout) as client:
+            with client.stream(
+                "POST", f"{target_url}/{endpoint}", json=body, headers=_codex_headers(bundle),
+            ) as resp:
+                if resp.status_code == 200:
+                    # Whole event blocks per submitted chunk (D-e); a streamed 401 from the RELAY
+                    # re-raises out of _submit_response and handle_job's guard reports it — same
+                    # terminal-signal guarantees as _forward_stream.
+                    _submit_response(
+                        state, txn, stream=True,
+                        content=_traced_stream(txn, _iter_event_blocks(resp.iter_bytes())),
+                    )
+                    return
+                resp.read()  # drain inside the context so .text is readable after it closes
+                status, resp_headers, text = resp.status_code, resp.headers, resp.text
+        if status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
+            continue  # rotated — retry once with the fresh bearer (reactive D-d)
+        _warn_codex_upstream(status, resp_headers)
+        _try_submit_error(state, txn, f"engine error {status}: {text[:200]}")
+        return
+
+
 def _forward_whole(
     state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float, target_url: str,
     headers: dict[str, str], api_kind: str | None = None,
@@ -1275,6 +1699,41 @@ def _forward_stream(
             # `_try_submit_error` so the consumer still gets a terminal signal.
             _submit_response(state, txn, content=_traced_stream(txn, engine_resp.iter_bytes()), stream=True)
             _debug(f"stream txn={txn} submit_response returned (relay accepted the full stream) t={time.time():.3f}")
+
+
+# Defensive bound on one buffered SSE event block: the real stream's largest block is ~1.4 KB of
+# 47 (the shared fixture), so 8 MiB is absurd headroom — but a vendor that stopped sending blank
+# lines must not buffer unboundedly. Past the cap the grouper degrades to passthrough: block
+# ALIGNMENT is lost for that stretch, bytes never are (the relay re-splits on `\n` itself, so
+# alignment is a fidelity nicety there, not a parsing requirement).
+_MAX_EVENT_BLOCK = 8 * 1024 * 1024
+
+
+def _iter_event_blocks(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    """Regroup vendor SSE bytes into whole event blocks — the streaming unit for a responses job
+    (ADR 0015 D-e): one yielded chunk = one `event:`+`data:` block INCLUDING its terminating blank
+    line, so each HTTP chunk submitted to the relay is a whole event and a provider death
+    mid-stream strands only complete events there, never a torn half-block (the buffered partial
+    is deliberately dropped when the source raises — do not "rescue" it in a finally).
+
+    Bytes are passed through verbatim: no strip, no decode, no injected `[DONE]`, and no CR
+    repair — the relay refuses bare-CR smuggling (`bare_cr_in_sse_line`), and a provider that
+    re-framed CR would mask exactly what that sanitiser exists to catch. Invariant, whatever the
+    input chunking: ``b"".join(output) == b"".join(input)``. A final block with no trailing blank
+    line is flushed verbatim (the relay flushes its own last block the same way — losing it here
+    would eat the `response.completed` that carries the usage).
+    """
+    buf = b""
+    for chunk in chunks:
+        buf += chunk
+        while (i := buf.find(b"\n\n")) != -1:
+            yield buf[: i + 2]
+            buf = buf[i + 2:]
+        if len(buf) > _MAX_EVENT_BLOCK:
+            yield buf  # degrade to passthrough — never buffer unboundedly, never die mid-stream
+            buf = b""
+    if buf:
+        yield buf
 
 
 def _traced_stream(txn: str, chunks: Iterable[bytes]) -> Iterator[bytes]:
@@ -1321,6 +1780,17 @@ def _poll_loop(state: _ServeState) -> None:
                 _debug(f"poll: job txn={txn} model={model!r} handled in {time.monotonic() - started:.2f}s")
 
 
+def _maybe_refresh_codex(state: _ServeState) -> None:
+    """The heartbeat's proactive-rotation hook (ADR 0015 D-d). NEVER raises: `_heartbeat_loop`
+    runs under `_supervise`, which stops the WHOLE engine on any escaping exception — a refresh
+    bug must degrade to a warn, not an engine stop. `SystemExit` included: the store's TOML loader
+    raises it for a corrupt file (the house daemon-thread hazard, same as `_reload_loop`)."""
+    try:
+        state.codex_seat.maybe_refresh(int(time.time()))
+    except (Exception, SystemExit) as exc:
+        _warn(f"codex proactive refresh failed unexpectedly (engine unaffected): {exc!r}")
+
+
 def _heartbeat_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
         try:
@@ -1335,6 +1805,9 @@ def _heartbeat_loop(state: _ServeState) -> None:
             print(f"\nHeartbeat error: {exc}", file=sys.stderr)
         else:
             _debug(f"heartbeat: ok ({result})")
+        # On EVERY surviving tick — including a failed relay call (the relay being unreachable
+        # says nothing about the vendor), so an idle grid behind a flaky relay still rotates.
+        _maybe_refresh_codex(state)
         state.stop.wait(relay.HEARTBEAT_INTERVAL)
 
 
@@ -1410,6 +1883,22 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
         # land after the unregister and resurrect a node we're tearing down (ADR 0010 C5).
         if reload_thread is not None:
             reload_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A codex rotation caught mid-exchange must not be abandoned with the workers (ADR 0015
+        # D-d): its journal is on disk and the vendor may already be rotating — daemon-death now
+        # loses a rotation the journal can then only DIAGNOSE ("sign in again"). Wait on the FLAG
+        # (published before the journal, cleared after the persist), never on a thread: flag-unset
+        # means nothing was spent AND nothing will be (the holder refuses to start once stop is
+        # set, and the CAS re-checks under the store lock), and once it clears, whatever remains
+        # of that worker is only relay submit work — abandonable like any straggler.
+        if state.codex_seat.exchange_in_flight():
+            _warn("waiting for an in-flight codex token exchange to persist — killing it now "
+                  "could lose the seat's rotation")
+            exchange_deadline = time.monotonic() + _CODEX_EXCHANGE_DRAIN
+            while state.codex_seat.exchange_in_flight() and time.monotonic() < exchange_deadline:
+                time.sleep(0.1)
+            if state.codex_seat.exchange_in_flight():
+                _warn("codex token exchange still unfinished at exit — if the next refresh "
+                      "fails, re-run `grid join --api codex` to sign in again")
         stragglers = [worker.name for worker in workers if worker.is_alive()]
         if stragglers:
             print(

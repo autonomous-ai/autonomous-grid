@@ -10,9 +10,30 @@ import httpx
 
 from local import config
 from shared import paths
+from shared.models import api_catalog
 from local import runtime
 
 from . import media_io
+
+
+def reject_responses_only_model(model: str) -> None:
+    """Refuse a chat request to a model whose kind cannot serve chat/completions (issue 05).
+
+    `codex:*` models speak the vendor's `responses` endpoint and codex traffic is never
+    translated (ADR 0015 D-b), so a `grid chat` against one can only ever end in a refusal —
+    this one is client-side, before any network call, and says which client to use instead.
+    Shared by both modes' chat handlers; data-driven from the whitelist's `endpoints`, so a
+    future responses-only kind inherits it.
+    """
+    kind = api_catalog.responses_only_kind(model)
+    if kind is None:
+        return
+    raise SystemExit(
+        f"'{model}' is a {kind} subscription model: it serves the vendor's `responses` endpoint, "
+        f"which `grid chat` (chat/completions) cannot call — {kind} traffic is never translated. "
+        "Point a Codex-compatible app (Codex CLI/Desktop) at this grid instead; `grid info --env` "
+        "prints the base URL and key to configure it with."
+    )
 
 
 # Remote-only request-routing flags (DECISIONS D16): rejected in local mode, where the concept doesn't
@@ -32,6 +53,7 @@ def _reject_remote_only_flags(args: argparse.Namespace) -> None:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    reject_responses_only_model(args.model)  # before any lookup or network (issue 05)
     _reject_remote_only_flags(args)
     cfg = config.select_grid(getattr(args, "grid", None))
     try:

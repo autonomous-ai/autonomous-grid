@@ -1,12 +1,23 @@
-"""Regression tests for install.sh's post-install PATH hint (macOS wheel path).
+"""Regression tests for install.sh.
 
-install_macos_wheel exports ~/.local/bin into the script's own PATH, so the
-post-install "Add <dir> to PATH" check must test the invoking shell's PATH
-(ORIG_PATH), not the augmented one — otherwise the hint is dead code on macOS
-and users get a success banner with `grid` unreachable in their shell.
+install.sh is served from raw `main` by the grid.autonomous.ai worker, so it goes
+live the moment `main` is pushed: no release carries it, no tag rolls it back, and
+nothing stands between the push and the next user's `curl … | bash`. Its invariants
+are therefore pinned here, where CI checks them on every push and PR.
 
-The installer runs against a throwaway HOME with `uv`, `uname`, and `curl`
-stubbed out, so the tests are deterministic and never touch the network.
+Two classes of test live in this file:
+
+1. Behaviour, driven through the real script. install_macos_wheel exports
+   ~/.local/bin into the script's own PATH, so the post-install "Add <dir> to PATH"
+   check must test the invoking shell's PATH (ORIG_PATH), not the augmented one —
+   otherwise the hint is dead code on macOS and users get a success banner with
+   `grid` unreachable in their shell. The installer runs against a throwaway HOME
+   with `uv`, `uname`, and `curl` stubbed out, so it never touches the network.
+
+2. Static invariants (valid bash; never calls api.github.com). These were previously
+   enforced only by a grep inside the release-grid-cli skill — a guard that holds
+   only while a human remembers to run it, on the one path nobody exercises until
+   it is already release day.
 """
 
 import stat
@@ -85,4 +96,38 @@ def test_no_hint_when_local_bin_already_on_users_path(tmp_path):
     assert res.returncode == 0, f"installer failed:\n{res.stdout}\n{res.stderr}"
     assert "to PATH" not in res.stdout, (
         f"no hint expected when ~/.local/bin is already on PATH; output was:\n{res.stdout}"
+    )
+
+
+def _code_lines(text: str) -> list[tuple[int, str]]:
+    """(lineno, code) for each line, with comments stripped.
+
+    Mirrors the `^[^#]*` guard this check replaces. Truncating at a `#` inside a
+    quoted string could only ever *hide* a violation sitting after it, never invent
+    one — and on these lines anything past a `#` is prose.
+    """
+    return [(n, line.split("#", 1)[0]) for n, line in enumerate(text.splitlines(), 1)]
+
+
+def test_installer_is_valid_bash():
+    """A syntax error here reaches users directly, with no release in between."""
+    res = subprocess.run(["bash", "-n", str(INSTALL_SH)], capture_output=True, text=True)
+    assert res.returncode == 0, f"install.sh is not valid bash:\n{res.stderr}"
+
+
+def test_installer_never_calls_the_github_api():
+    """api.github.com's 60 req/hr/IP cap 403s every install behind a shared NAT.
+
+    install.sh must resolve releases through github.com itself — the /releases/latest
+    redirect, falling back to the releases.atom feed — neither of which is rate
+    limited. See the rationale block above latest_release_tag().
+    """
+    offenders = [
+        (n, code.strip())
+        for n, code in _code_lines(INSTALL_SH.read_text())
+        if "api.github.com" in code
+    ]
+    assert not offenders, (
+        "install.sh must never call api.github.com: shared-NAT IPs exhaust its "
+        f"60 req/hr limit and every install behind them 403s. Offending lines: {offenders}"
     )

@@ -71,6 +71,12 @@ def _consumer_headers(args: argparse.Namespace) -> dict[str, str]:
 def cmd_remote_chat(args: argparse.Namespace) -> int:
     from remote import relay
 
+    from .request import reject_responses_only_model
+
+    # Before `_resolve`: that gate starts with the sign-in check and then calls the control
+    # plane, and a codex:* request must get THIS refusal — not "not signed in", not a network
+    # round-trip (issue 05).
+    reject_responses_only_model(args.model)
     base, token, _label = _resolve(args)
     body = {"model": args.model, "messages": [{"role": "user", "content": args.message}]}
     headers = _consumer_headers(args)

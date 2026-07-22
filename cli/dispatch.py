@@ -33,6 +33,7 @@ AGNOSTIC = frozenset({
     "remove",
     "ctx",
     "engine",
+    "agent",
     "mode",
     "use",
 })
@@ -89,7 +90,7 @@ REMOTE_HANDLERS = {
 
 # Remote-only commands: they run their real handlers in remote mode and are gated with
 # guidance in local mode — the mirror image of ``remote_stub`` for the GATED commands.
-REMOTE_ONLY = frozenset({"login", "logout", "members", "sync", "price"})
+REMOTE_ONLY = frozenset({"login", "logout", "members", "sync", "price", "router"})
 
 
 def local_stub(command: str | None) -> NoReturn:
