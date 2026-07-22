@@ -70,7 +70,6 @@ def _reject_api_conflicts(args: argparse.Namespace) -> None:
         supported = ", ".join(api_catalog.supported_kinds())
         raise SystemExit(f"Unknown API kind {kind!r}. Supported: {supported}")
     conflicts = (
-        ("at", "--at"),
         ("serve", "--serve"),
         ("advertise_as", "--advertise-as"),
         ("media", "--media"),
@@ -495,11 +494,11 @@ def _resolve_key_api_targets(
 
     from . import provider
 
-    # A kind reaching the KEY path must name the env var its key is read from — that IS the first
-    # step of the precedence below. Without this, `os.environ.get(None)` is a TypeError, i.e. a
-    # traceback rather than this repo's clean-SystemExit contract, and the two f-strings below would
-    # tell the operator to `export None=...`. Unreachable while codex is the only env-var-less kind
-    # (it routes to `_resolve_codex_targets` above), so this is the landmine guard for the next one —
+    # A kind reaching the KEY path must name the env var its key is read from — that IS a step of
+    # the precedence below. This guard stays FIRST: `os.environ.get(None)` is a TypeError, i.e. a
+    # traceback rather than this repo's clean-SystemExit contract, and the messages below would tell
+    # the operator to `export None=...`. Unreachable while codex is the only env-var-less kind (it
+    # routes to `_resolve_codex_targets` above), so this is the landmine guard for the next one —
     # `api_keys.require_bearer` holds the same line on the serve side.
     env_var = whitelist.env_var
     if not env_var:
@@ -507,30 +506,55 @@ def _resolve_key_api_targets(
             f"--api {kind} has no API-key sign-in path in this version of grid. "
             f"This is a bug: {kind} needs its own credential resolution."
         )
-    # Key precedence (ADR 0012): env var, else the machine-local key store, else a hidden
-    # interactive prompt. Never a flag — a key on the command line leaks into shell history.
-    # The env value is stripped like the prompt's, so accidental whitespace can't make an
-    # identical key look rotated on the `key != stored` check below.
+
     stored = api_keys.load_key(kind)
-    key = (os.environ.get(env_var) or "").strip() or stored
+
+    flag_key = getattr(args, "api_key", None)
+    if flag_key:
+        print(
+            f"Warning: --api-key is visible in shell history. "
+            f"Consider exporting {env_var} instead.",
+            file=sys.stderr,
+        )
+
+    # Key precedence: --api-key flag, else the env var, else the machine-local key store, else a
+    # hidden interactive prompt. Values are stripped so accidental whitespace can't make an
+    # identical key look rotated on the `key != stored` check below.
+    key = (flag_key or os.environ.get(env_var) or "").strip() or stored
+
     if not key and provider._interactive():
         key = _prompt_api_key(kind, env_var)
         if not key:
             raise SystemExit(f"No {kind} API key entered.")
+
     if not key:
         raise SystemExit(
-            f"--api {kind} needs your API key in {env_var} "
-            f"(export {env_var}=... and re-run), or run interactively to be prompted."
+            f"--api {kind} needs your API key. Pass --api-key <key>, "
+            f"export {env_var}=..., or run interactively to be prompted."
         )
-    visible = _list_vendor_models(kind, whitelist.base_url, key)
-    # The listing call above proved the key valid — only now persist it to the machine-local key
+
+    # Resolve the endpoint URL: --at overrides the whitelist default (required when whitelist has no base_url).
+    endpoint_url = getattr(args, "at", None) or whitelist.base_url
+    if not endpoint_url:
+        raise SystemExit(
+            f"--api {kind} needs an endpoint URL. Pass --at <url> (e.g. --at https://your-doggi-endpoint)."
+        )
+    # Validate the key: text APIs via /models, media APIs via a lightweight probe.
+    if whitelist.supports_model_listing:
+        visible = _list_vendor_models(kind, endpoint_url, key)
+        served = [model for model in chosen if valid[model].vendor_name in visible]
+    else:
+        # Media APIs (e.g. Doggi) don't expose GET /models — probe the endpoint to validate the key.
+        _probe_media_api(kind, endpoint_url, key)
+        visible = {entry.vendor_name for entry in whitelist.entries}
+        served = list(chosen)
+    # The validation call above proved the key valid — only now persist it to the machine-local key
     # store, so a mistyped/revoked key is never stored for later joins (and the detached serve
     # process) to reuse silently. A reused stored key skips the no-op rewrite; any NEW key (env or
     # prompted) counts as a rotation the caller must deliver to a live identity via respawn.
     key_rotated = key != stored
     if key_rotated:
         api_keys.store_key(kind, key)
-    served = [model for model in chosen if valid[model].vendor_name in visible]
     skipped = [model for model in chosen if model not in served]
     if not served:
         # Wording must fit both the -m subset and the no--m default (nothing was "requested" then),
@@ -541,7 +565,7 @@ def _resolve_key_api_targets(
     if skipped:
         print(f"Skipping (not available to this {kind} key): {', '.join(skipped)}", file=sys.stderr)
     return [{
-        "endpoint_url": whitelist.base_url,
+        "endpoint_url": endpoint_url,
         "models": served,
         "engine_label": kind,
         "api_kind": kind,
@@ -552,6 +576,58 @@ def _prompt_api_key(kind: str, env_var: str) -> str:
     """Hidden interactive prompt for one kind's API key — input is never echoed (getpass). Split
     out so the CLI-seam tests can monkeypatch it (getpass reads the controlling tty)."""
     return getpass.getpass(f"Enter your {kind} API key (input hidden; or export {env_var}): ").strip()
+
+
+# A request id that cannot exist, used to make the probe below a pure auth check: the lookup is
+# rejected before it is resolved when the key is bad, and 404s when the key is good.
+_PROBE_REQUEST_ID = "grid-key-probe-does-not-exist"
+
+
+def _probe_media_api(kind: str, base_url: str, key: str) -> None:
+    """Free URL + key check for media APIs that lack `GET /models`. Terminal on either failure —
+    nothing is spawned. Never echoes the key.
+
+    Two unauthenticated-cheap GETs instead of one submit:
+
+    1. ``GET /health`` proves ``--at`` really points at a gateway. This is what catches a typo'd
+       URL: step 2 alone cannot, because a wrong path 404s exactly like a missing task does.
+    2. ``GET /media/generations/<id that cannot exist>`` proves the key. The gateway authenticates
+       before it resolves the id, so a bad key is 401/403 and a good one is 404.
+
+    Deliberately NOT a submitted generation: that would bill a real run on **every** join (verified
+    against a live gateway — an accepted probe body queues and runs the model for ~30s of GPU) and
+    would hardcode a model name that silently breaks the probe the day it is retired.
+    """
+    import httpx  # lazy: only stdlib + shared.* at module top (see module docstring)
+
+    def _get(path: str, *, auth: bool) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {key}"} if auth else {}
+        try:
+            with httpx.Client(timeout=_VENDOR_LIST_TIMEOUT) as client:
+                return client.get(f"{base_url}{path}", headers=headers)
+        except httpx.HTTPError as exc:
+            raise SystemExit(f"Could not reach {kind} at {base_url}: {exc}") from None
+
+    health = _get("/health", auth=False)
+    if health.status_code != 200:
+        raise SystemExit(
+            f"{base_url} does not look like a {kind} gateway: GET /health returned "
+            f"HTTP {health.status_code}. Check the --at URL."
+        )
+
+    resp = _get(f"/media/generations/{_PROBE_REQUEST_ID}", auth=True)
+    if resp.status_code in (401, 403):
+        raise SystemExit(
+            f"{kind} rejected the API key (HTTP {resp.status_code}): {resp.text[:200]}"
+        )
+    # 404 is the expected success shape (authenticated, then no such task); 200 would mean the id
+    # somehow exists — still proof the key works. Anything else means the endpoint answers /health
+    # but not the media API, so refuse rather than advertise models we cannot serve.
+    if resp.status_code not in (200, 404):
+        raise SystemExit(
+            f"{kind} at {base_url} did not answer the key check as expected "
+            f"(HTTP {resp.status_code}): {resp.text[:200]}"
+        )
 
 
 def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:

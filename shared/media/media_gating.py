@@ -40,6 +40,42 @@ GATES: tuple[MediaGate, ...] = (
 )
 
 
+# Media route -> the built-in (ComfyUI) model that serves it. Media has no body `model` field to
+# route on the way text does; the ROUTE names the task, so this is the map from one to the other.
+# ONE definition, read by every layer that needs it — the local proxy's route table, the local
+# engine's own model check, and the remote serve loop's — so a fourth media task cannot be added
+# to some of them and forgotten in the others.
+#
+# `comfyui:*` names are the built-ins only. A request may legitimately name a different model for
+# the same route (an API media engine such as `doggi:*`, remote-only); use `is_builtin_model` to
+# ask "is this OUR model", never `model != endpoint_model(...)` to mean "invalid".
+ENDPOINT_MODELS: dict[str, str] = {
+    "media/image/generate": "comfyui:image_generation",
+    "media/image/edit": "comfyui:image_editing",
+    "media/video/i2v": "comfyui:i2v",
+}
+
+BUILTIN_MODELS: frozenset[str] = frozenset(ENDPOINT_MODELS.values())
+
+
+def endpoint_model(endpoint_path: str) -> str | None:
+    """The built-in model serving ``endpoint_path`` (``None`` for a non-media route)."""
+    return ENDPOINT_MODELS.get(endpoint_path.strip("/"))
+
+
+def is_builtin_model(model: str) -> bool:
+    """Whether ``model`` is one of the built-in ComfyUI media models."""
+    return model in BUILTIN_MODELS
+
+
+def endpoint_for_model(model: str) -> str | None:
+    """The media route ``model`` is served on (``None`` if it is not a built-in media model)."""
+    for endpoint, name in ENDPOINT_MODELS.items():
+        if name == model:
+            return endpoint
+    return None
+
+
 def is_apple_silicon() -> bool:
     return platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
 
