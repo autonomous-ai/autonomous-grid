@@ -38,7 +38,7 @@ DEFAULT_T2I_MODEL = "hunyuan-image-3-t2i"
 DEFAULT_I2I_MODEL = "hunyuan-image-3-i2i"
 DEFAULT_I2V_MODEL = "Wan-AI/Wan2.2-I2V-A14B-Lightning"
 
-DEFAULT_BASE_URL = os.environ.get("DOGGI_BASE_URL", "https://2x4090-9091.eternalai.org")
+DEFAULT_BASE_URL = os.environ.get("DOGGI_BASE_URL", "http://localhost:8080")
 DEFAULT_API_KEY = os.environ.get("DOGGI_API_KEY", "YOUR_API_KEY")
 
 # Aspect ratios (w/h) for the image_size enum accepted by t2i.
