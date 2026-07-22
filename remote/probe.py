@@ -530,12 +530,19 @@ def codex_capability_entry(
     the caller supplies it — never for the ``entry=None`` degrade, which has no row position.
     """
     codex_endpoints = list(api_catalog.WHITELISTS[api_catalog.CODEX_KIND].endpoints)
+    # issue 06c: the seat advertises the NEGATIVE `stream_only` routing trait on BOTH branches (its
+    # backend is SSE-only, stale-catalog or not). Sourced from the predicate the engine-side stream gate
+    # also reads (`kind_is_stream_only`), NOT a literal True, so advertise and gate can't disagree.
+    stream_only = api_catalog.kind_is_stream_only(api_catalog.CODEX_KIND)
     if entry is None:
         return {
             "endpoints": codex_endpoints,
             "input_modalities": ["text"],
             "output_modalities": ["text"],
-            "features": {},
+            # No capability claims for an unresolved model — but the seat's backend is still SSE-only, so
+            # the `stream_only` routing trait stays (issue 06c). Fail-closed: a non-streaming `auto`
+            # request is still routed away from a stale seat, the opposite polarity to a capability.
+            "features": {"stream_only": stream_only},
         }
     features = api_catalog.codex_features(entry)
     # vendor_rank (1 = most capable) is a TOP-LEVEL capability fact, a sibling of context_window —
@@ -549,7 +556,9 @@ def codex_capability_entry(
         "output_modalities": ["text"],
         "context_window": int(entry.context_window),
         **({"vendor_rank": vendor_rank} if vendor_rank is not None else {}),
-        "features": features,
+        # A routing trait folded in beside the honest capabilities — NOT added to `codex_features`,
+        # which also feeds `grid catalog --api codex --json` and must stay capability-only.
+        "features": {**features, "stream_only": stream_only},
     }
 
 

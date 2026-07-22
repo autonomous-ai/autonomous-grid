@@ -52,6 +52,17 @@ class ApiWhitelist:
     # rule). Default = the API-engine chat single: an API kind never serves legacy `completions`
     # (ADR 0012); hardware's chat pair is remote/probe.py's own default, not a whitelist row's.
     endpoints: tuple[str, ...] = ("chat/completions",)
+    # This kind's backend speaks SSE only, so it cannot serve a NON-streaming Responses request — the
+    # codex subscription seat (ADR 0018 / issue 06c). Advertised to the relay as the NEGATIVE
+    # `stream_only` capability-feature (remote/probe.codex_capability_entry) and forbidden by a
+    # non-streaming `auto` request, so the auto-router never lands one on a seat that would 400 it
+    # post-queue. Read by BOTH that advertise path and the engine-side stream gate (remote/serve.py) via
+    # `kind_is_stream_only`, so the two can't disagree. Hand-duplicated with grid-src's
+    # KNOWN_FEATURE_KEYS (CLAUDE.md lockstep): only the seat ever sets this True, and an old CLI / master
+    # that doesn't know the literal simply doesn't exclude the seat — the pre-06c behaviour, never a NEW
+    # failure (master-before-CLI rollout, ADR 0018 §11). Default False: every other API kind and every
+    # hardware engine (never in this table) serves non-streaming.
+    stream_only: bool = False
 
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
@@ -220,6 +231,9 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         unsupported_params=("max_tokens", "max_output_tokens", "max_completion_tokens", "temperature"),
         # ADR 0015 D-b: a codex seat serves the `responses` endpoint ONLY.
         endpoints=("responses",),
+        # ADR 0018 / issue 06c: the seat's backend is SSE-only, so it cannot serve a non-streaming
+        # Responses request. The ONLY row that sets this — see `kind_is_stream_only`.
+        stream_only=True,
     ),
 }
 
@@ -353,6 +367,27 @@ def kind_honours_output_cap(kind: str) -> bool:
     if whitelist is None:
         return False
     return RESPONSES_OUTPUT_CAP_PARAM not in whitelist.unsupported_params
+
+
+def kind_is_stream_only(kind: str) -> bool:
+    """True iff an API engine of ``kind`` can serve ONLY streaming Responses requests — the codex
+    subscription seat, whose backend speaks SSE only (ADR 0018 / issue 06c).
+
+    Read from the whitelist row's ``stream_only`` field by BOTH the engine-side stream gate
+    (``remote/serve.py``, which refuses a non-stream job for such a kind) and the advertised envelope
+    (``remote/probe.codex_capability_entry``, which emits the negative ``stream_only`` trait the
+    auto-router forbids on a non-streaming request), so the layer that refuses and the layer that routes
+    around it can never disagree about which kind is stream-only.
+
+    An unknown kind — and every hardware engine, which is never in ``WHITELISTS`` — is NOT stream-only:
+    absence is the safe default (never excluded), the OPPOSITE fail-direction from
+    ``kind_honours_output_cap`` and the reason a non-streaming request stays backward-compatible against
+    an old CLI that advertises nothing.
+    """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return False
+    return whitelist.stream_only
 
 
 def format_api_entry(kind: str, entry: ApiModelEntry, endpoints: tuple[str, ...]) -> str:

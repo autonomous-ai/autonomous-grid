@@ -24,6 +24,25 @@ Choices a future reader will otherwise re-litigate:
   status is already parsed. Concession: state stays **in-memory** (reset on respawn) and **reuses** the
   existing failure threshold/window/penalty, re-keyed — a persisted or escalating variant is a follow-up,
   not a prerequisite.
+  **Amendment (2026-07-22, issue 05):** a **third** class sits above both — an engine-reported
+  *client-shape* `4xx` (status 400/422: `invalid_request_error` / `unsupported_parameter`) is the
+  *request's* fault, not provider ill-health, so it is exempt from the **normal** demote/prune — checked
+  *after* the model-level classifier (a model-missing body an engine wraps in a 400/422 rather than a 404
+  still prunes; a media job still takes the box path) and gated `not is_media`. Because the failure
+  `reason` is provider-forgeable (the POST `/error` body), the exemption is **not unconditional**: a
+  per-node tally of exempted client-shape failures still trips a box-level demotion at a **much higher**
+  threshold (`provider_client_shape_failure_threshold`, default 50), cleared by any success — so a healthy
+  low-volume seat is never demoted, while a node claiming a 400/422 on *every* job (forged or badly
+  misconfigured) still is. (The naive "exempt entirely" of the first cut was hardened here after a security
+  review flagged the forge-a-400-forever evasion; the narrower per-model always-model-level spoof stays a
+  documented follow-up below.) Surfaced when a non-streaming `auto` request reached a
+  stream-only codex seat (extend-responses-api) and its `400 "Stream must be set to true"` — having no
+  model-level marker and not being a 404 — took the box-level path and demoted the whole *unioned* node:
+  a grid-wide outage from a healthy provider correctly refusing a malformed request. This is the same
+  fault attribution the § Failover design already applies (a request 4xx is *terminal* — another
+  provider would fail identically), extended from re-dispatch to the health classifier. The broader
+  *union blast-radius on a genuine failure* — one engine's real 5xx still demoting its siblings under a
+  shared `node_id` — is a pre-existing property left as a separate follow-up, not closed here.
 
 - **An empty candidate pool returns one of three answers, by cause — a demotion-emptied pool is now a
   503, not a 400.** No live model → 503 `no_providers_available`; otherwise-capable providers all

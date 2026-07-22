@@ -126,6 +126,37 @@ Choices a future reader will otherwise re-litigate:
   actionable, but it leaves `auto` non-deterministic against its own contract, and the config that
   triggers it — both kinds on one grid, `auto`, a cap — is real, not a straw man.
 
+- **The auto-router excludes a stream-only engine from a NON-streaming `/responses` request — the
+  filter's first *forbidden-feature* axis.** (Added after Phase-2 E2E surfaced the interaction live;
+  issue 06c.) Lifting mandatory streaming (§4 / issue 05) made a non-streaming Responses request valid
+  for every engine **except** the subscription seat, whose backend is stream-only and refuses one at
+  its per-kind gate. But that gate runs **after** routing, so `auto` — which picks *for* the app — can
+  still rank a non-streaming request onto the seat and have it refused post-queue: the same
+  succeed-or-fail-on-where-it-lands asymmetry user story 21 forbids, now on the *stream* axis rather
+  than the cap axis. Issue 05 opened the non-streaming path but never added the matching auto-router
+  exclusion, exactly as the cap gap sat open until the axis above. The fix mirrors that axis with one
+  difference that is the reason it is recorded separately. The cap axis is a **positive** capability —
+  an engine advertises it **can** honour a cap and a capped request requires it
+  (`requirements.features <= candidate.features`). Streaming inverts: a non-streaming request is the
+  SDK **default** and the common case, so requiring a positive `nonstream` capability would exclude
+  every engine that does not advertise it — including hardware engines on an **older CLI** that serve
+  non-streaming perfectly well — during the master-before-CLI window, a regression on the common path.
+  So the seat advertises a **negative** trait (`stream_only`) and the filter gains an **exclusion**
+  axis: a non-streaming request *forbids* `stream_only`, and only an engine that advertises it — the
+  seat, nothing else — is dropped. Absence is the safe default (an old CLI advertises nothing → is
+  never excluded), the same fail-closed direction the positive axes rely on, reached by the opposite
+  polarity. The trait is sourced from `kind_is_stream_only`, the sibling of the cap source, read by
+  **both** the engine-side gate and the advertised envelope, so the layer that refuses and the layer
+  that routes can never disagree about which kind is stream-only. Rejected **hardcoding `codex` in the
+  routing path** (drop the kind for a non-streaming `auto`): it reintroduces an engine *name* into
+  candidate selection — the exact coupling this ADR's per-engine model removes — and a future
+  stream-only kind would not be caught for free. Rejected the **positive `nonstream` capability**, for
+  the rollout regression above. This makes the auto-branch filter's axes **three** — endpoint, output
+  cap, stream-only — and its polarities **two**: a request both requires positive capabilities and
+  forbids negative ones. The `stream_only` literal joins the endpoint list and `output_cap` as a
+  hand-duplicated CLI ↔ relay wire value; an old CLI never advertising it fails closed (its engine is
+  simply never excluded), so the master-before-CLI order this ADR already fixes covers it too.
+
 Deliberately unchanged, so the widening is not read as wider than it is: **local mode** stays
 chat-only (it forwards blind by design and has never probed *any* text capability — not vision, not
 tools — so a Responses probe there would be the first of its kind; the exclusion is the absent

@@ -888,6 +888,21 @@ def test_kind_honours_output_cap_reads_unsupported_params():
     )
 
 
+def test_kind_is_stream_only_reads_the_stream_only_field():
+    """Issue 06c's single source of truth for the auto-router's forbidden-feature axis: a kind is
+    stream-only IFF its whitelist row says so (`stream_only`). Read by BOTH the engine-side stream
+    gate (`remote/serve.py`) and the advertised envelope (`codex_capability_entry`), so the layer that
+    refuses a non-stream seat request and the layer that routes around it can never disagree. Unknown
+    kind → False: the OPPOSITE fail-direction from `kind_honours_output_cap` — absence means "never
+    excluded", so an old CLI / any hardware engine (never in WHITELISTS) is backward-compatible."""
+    assert api_catalog.kind_is_stream_only("codex") is True
+    assert api_catalog.kind_is_stream_only("openai") is False
+    assert api_catalog.kind_is_stream_only("nonexistent-kind") is False
+    # The predicate tracks the row, never a second declaration: only the seat carries the trait.
+    assert api_catalog.WHITELISTS["codex"].stream_only is True
+    assert api_catalog.WHITELISTS["openai"].stream_only is False
+
+
 def test_codex_tier_whitelist_integrity():
     """The per-tier codex table (issue 05). Guards the D-f data rules: every populated tier is
     real vendor `PlanType` vocabulary; rows are non-empty, duplicate-free, and inside the flat
@@ -8541,7 +8556,8 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
     """The codex capability envelope carries ONLY what passthrough can honestly claim (issue 05):
     `endpoints: ["responses"]` (the wire literal grid-src's per-model filter reads — absent means
     chat-only there, so old CLIs fail closed), the verified context window, features
-    {vision, tools, parallel_tool_calls}, and the join-time `vendor_rank` (issue 03 / ADR 0016 —
+    {vision, tools, parallel_tool_calls, stream_only} (the last a NEGATIVE routing trait, issue 06c —
+    the SSE-only seat, sourced from `kind_is_stream_only`), and the join-time `vendor_rank` (issue 03 / ADR 0016 —
     a top-level int sibling of context_window, the seat's tier-row position, 1 = most capable). It
     OMITS — not False — the chat-dialect flags (json_object/json_schema), `max_output_tokens` and
     the `limits` block (facts #1: the backend has no output cap under any name; a fabricated 64000
@@ -8558,7 +8574,12 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
     # vendor_rank rides top-level (NOT inside features — the grid-src reader takes it there). gpt-5.5
     # is index 2 in the free tier row [terra, luna, gpt-5.5, gpt-5.4-mini] → rank 3.
     assert entry["vendor_rank"] == 3
-    assert entry["features"] == {"vision": True, "tools": True, "parallel_tool_calls": True}
+    # issue 06c: the seat also advertises the NEGATIVE `stream_only` routing trait — its backend is
+    # SSE-only — sourced from `kind_is_stream_only`, so a non-streaming `auto` request forbids it and is
+    # never routed here. A routing trait, not a model capability (kept out of `codex_features`).
+    assert entry["features"] == {
+        "vision": True, "tools": True, "parallel_tool_calls": True, "stream_only": True,
+    }
     assert "max_output_tokens" not in entry
     assert "limits" not in entry
     assert "json_object" not in entry["features"] and "json_schema" not in entry["features"]
@@ -8566,14 +8587,18 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
 
 def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeypatch, tmp_path, capsys):
     """The stale-catalog degrade (catalog edited between join and respawn) stays honest for
-    codex: a warn plus an entry that still says `responses`-only with NO feature claims — never
+    codex: a warn plus an entry that still says `responses`-only with NO capability claims — never
     the chat-dialect all-False shape, and never a fabricated output cap. A model gone from the
-    whitelist has no tier-row position either, so `vendor_rank` is omitted (issue 03)."""
+    whitelist has no tier-row position either, so `vendor_rank` is omitted (issue 03).
+
+    issue 06c: the degrade still advertises the `stream_only` routing trait — a stale seat's backend
+    is still SSE-only, so a non-streaming `auto` request must still be routed away from it (fail-closed,
+    the opposite polarity to a capability, which degrades OFF)."""
     seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"])
 
     entry = seen["capabilities"]["models"]["codex:ghost"]
     assert entry["endpoints"] == ["responses"]
-    assert entry["features"] == {}
+    assert entry["features"] == {"stream_only": True}
     assert "max_output_tokens" not in entry and "limits" not in entry
     assert "context_window" not in entry  # unknown is omitted, never invented
     assert "vendor_rank" not in entry  # absent from the row → omit the fact, never rank 0/None

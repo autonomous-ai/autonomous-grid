@@ -1559,10 +1559,13 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         if unsupported:
             _refuse_unsupported_api_params(state, txn, api_kind, unsupported)
             return
-        # The subscription seat is SSE-only, so a non-stream responses job is refused here (issue 05,
-        # AC7) — the relay lifted its global stream rule precisely so this kind-aware gate answers it.
-        # Every other kind serves a non-stream responses request (the forward block's whole-body arm).
-        if api_kind == api_catalog.CODEX_KIND and endpoint == "responses" and not is_stream:
+        # A stream-only seat is SSE-only, so a non-stream responses job is refused here (issue 05 AC7)
+        # — the relay lifted its global stream rule precisely so this kind-aware gate answers it. Gated
+        # on `kind_is_stream_only` (issue 06c), the SAME predicate the advertised `stream_only` trait is
+        # sourced from, so the layer that refuses and the auto-router that routes around it can't
+        # disagree, and a future stream-only kind inherits this refusal for free. Every other kind
+        # serves a non-stream responses request (the forward block's whole-body arm).
+        if api_catalog.kind_is_stream_only(api_kind) and endpoint == "responses" and not is_stream:
             _refuse_stream_only_seat(state, txn)
             return
 
