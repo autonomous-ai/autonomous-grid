@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from remote import api_keys, control_plane, credentials, probe, relay, codex_auth, codex_oauth
-from remote.handlers import HANDLERS
+from shared.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
 from shared.media import media_gating  # stdlib-only module; safe to import eagerly

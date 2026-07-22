@@ -8,7 +8,7 @@ Adding a new vendor: implement the handler, then add it to HANDLERS below.
 """
 from __future__ import annotations
 
-from remote.handlers.doggi import DoggiHandler
+from shared.handlers.doggi import DoggiHandler
 
 HANDLERS: dict[str, type] = {
     "doggi": DoggiHandler,

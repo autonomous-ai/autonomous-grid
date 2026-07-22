@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from remote.handlers.doggi import (
+from shared.handlers.doggi import (
     DoggiHandler,
     _dimensions_to_image_size,
     _duration_to_seconds,
@@ -102,7 +102,7 @@ def test_i2v_submits_translated_duration_and_aspect(monkeypatch):
 
     import doggi
     monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
-    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: "eA==")
+    monkeypatch.setattr("shared.handlers.doggi._download_as_base64", lambda url: "eA==")
 
     handler = DoggiHandler(base_url="http://fake", api_key="fake")
     list(handler.forward({
@@ -159,7 +159,7 @@ def test_sse_progress_event():
 def test_handler_events_are_consumable_by_media_io(monkeypatch, tmp_path):
     """The handler's SSE must round-trip through the real consumer and land a file on disk.
 
-    This is the end-to-end contract between `remote/handlers/doggi.py` and `cli/media_io.py`:
+    This is the end-to-end contract between `shared/handlers/doggi.py` and `cli/media_io.py`:
     a shape the consumer can't dispatch is silently a zero-file success on the engine and a
     non-zero exit with no output for the user.
     """
@@ -183,7 +183,7 @@ def test_handler_events_are_consumable_by_media_io(monkeypatch, tmp_path):
     import doggi
     monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
     payload = base64.b64encode(b"not-really-a-png").decode("ascii")
-    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: payload)
+    monkeypatch.setattr("shared.handlers.doggi._download_as_base64", lambda url: payload)
 
     handler = DoggiHandler(base_url="http://fake", api_key="fake")
     body = {"model": "doggi:hunyuan-image-3-t2i", "prompt": "a red bicycle",
@@ -221,7 +221,7 @@ def test_handler_forwards_every_result_file(monkeypatch):
 
     import doggi
     monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
-    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: "eA==")
+    monkeypatch.setattr("shared.handlers.doggi._download_as_base64", lambda url: "eA==")
 
     handler = DoggiHandler(base_url="http://fake", api_key="fake")
     lines = list(handler.forward({"model": "doggi:m", "prompt": "p"}, "media/image/generate"))
@@ -273,7 +273,7 @@ def test_handler_forward_strips_doggi_prefix(monkeypatch, tmp_path):
     import doggi
     monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
     # Stub _download_as_base64 to avoid network calls
-    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: "ZmFrZS1pbWFnZS1kYXRh")
+    monkeypatch.setattr("shared.handlers.doggi._download_as_base64", lambda url: "ZmFrZS1pbWFnZS1kYXRh")
 
     handler = DoggiHandler(base_url="http://fake", api_key="fake")
     body = {

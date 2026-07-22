@@ -108,8 +108,8 @@ def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
         if req.role in ("engine", "both") and not req.models:
             raise HTTPException(status_code=400, detail="at least one model is required for engines")
         if req.role in ("engine", "both"):
-            text_models = [model for model in req.models if not model.startswith("comfyui:")]
-            media_models = [model for model in req.models if model.startswith("comfyui:")]
+            media_models = [model for model in req.models if _is_media_model(model, req.capabilities)]
+            text_models = [model for model in req.models if model not in set(media_models)]
             if text_models and not req.endpoint_url:
                 raise HTTPException(status_code=400, detail="endpoint_url is required for text engines")
             if media_models and not req.media_url:
@@ -281,11 +281,12 @@ async def _proxy_media(
             "invalid_request",
         )
 
-    engine = _choose_engine(app, model)
+    # media=True: only engines that actually advertise a media URL are candidates, so a text-only
+    # or stale registration of the same model can never win the pick and 503 a healthy grid.
+    engine = _choose_engine(app, model, media=True)
+
     if not engine:
         return _openai_error(503, f"No active local media engine for {model!r}", "engine_unavailable")
-    if not engine.media_url:
-        return _openai_error(503, f"Engine {engine.node_id} did not advertise a media URL", "engine_unavailable")
 
     client = httpx.AsyncClient(timeout=httpx.Timeout(ENGINE_TIMEOUT_SECONDS, read=None))
     media_request = client.build_request(
@@ -313,6 +314,22 @@ async def _proxy_media(
         status_code=engine_response.status_code,
         media_type=engine_response.headers.get("content-type", "text/event-stream"),
     )
+
+
+def _is_media_model(model: str, capabilities: dict[str, Any]) -> bool:
+    """Whether an advertised model is served over the media routes rather than `/v1/chat`.
+
+    The engine's own capability envelope decides (``endpoints: ["media"]``) — that is what the
+    engine advertises for BOTH built-in and API media models, and it is what the relay uses in
+    remote mode. The `comfyui:` prefix is the fallback for an engine that sent no capabilities,
+    which is every pre-existing local media engine; keying off the prefix ALONE would classify a
+    vendor media model (`doggi:*`) as a text engine and demand an `endpoint_url` it has no use for.
+    """
+    entry = ((capabilities or {}).get("models") or {}).get(model) or {}
+    endpoints = entry.get("endpoints")
+    if isinstance(endpoints, list) and endpoints:
+        return "media" in endpoints
+    return media_gating.is_builtin_model(model)
 
 
 def _grid_info(app: FastAPI) -> dict[str, Any]:
@@ -350,8 +367,17 @@ def _active_engines(app: FastAPI, model: str | None = None) -> list[Node]:
     return engines
 
 
-def _choose_engine(app: FastAPI, model: str) -> Node | None:
+def _choose_engine(app: FastAPI, model: str, *, media: bool = False) -> Node | None:
+    """The least-loaded live engine serving ``model``.
+
+    ``media=True`` additionally requires an advertised ``media_url``. Without that filter, an engine
+    that lists a media model but cannot serve it — a text-only registration, or a stale node left by
+    an older/hand-rolled registration — can win the pick purely on load and turn a working grid into
+    a hard 503, even while a healthy media engine sits right beside it.
+    """
     engines = _active_engines(app, model)
+    if media:
+        engines = [engine for engine in engines if engine.media_url]
     return engines[0] if engines else None
 
 

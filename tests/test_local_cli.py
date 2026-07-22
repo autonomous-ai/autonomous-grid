@@ -235,6 +235,73 @@ def test_media_route_without_a_model_falls_back_to_the_route_builtin():
     assert "comfyui:i2v" in other.json()["error"]["message"]
 
 
+def test_media_route_skips_an_engine_that_cannot_serve_media():
+    """An engine advertising the model without a media_url must not win the pick.
+
+    Load-only selection would let a text-only or stale registration 503 the whole route while a
+    healthy media engine sits beside it.
+    """
+    app = create_app(grid_id="ag-test", grid_name="test")
+    client = TestClient(app)
+    # A text-shaped registration of a media model (what a hand-rolled PUT produces)...
+    client.put("/nodes/node-text", json={
+        "role": "engine", "models": ["doggi:t2i"], "endpoint_url": "http://127.0.0.1:9/v1",
+    })
+    # ...alongside a real media engine for the same model.
+    client.put("/nodes/node-media", json={
+        "role": "engine", "models": ["doggi:t2i"], "media_url": "http://127.0.0.1:9",
+        "endpoint_url": "http://127.0.0.1:9/v1",
+    })
+
+    resp = client.post("/v1/media/image/generate", json={"model": "doggi:t2i", "prompt": "x"})
+
+    # 502 (reached the media engine, which is a closed port) — NOT 503 "did not advertise a media URL".
+    assert resp.status_code == 502, resp.text
+
+
+def test_media_route_reports_no_engine_when_none_can_serve_media():
+    app = create_app(grid_id="ag-test", grid_name="test")
+    client = TestClient(app)
+    client.put("/nodes/node-text", json={
+        "role": "engine", "models": ["doggi:t2i"], "endpoint_url": "http://127.0.0.1:9/v1",
+    })
+
+    resp = client.post("/v1/media/image/generate", json={"model": "doggi:t2i", "prompt": "x"})
+
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "engine_unavailable"
+
+
+def test_registry_accepts_a_media_only_api_engine_without_endpoint_url():
+    """A vendor media model (`doggi:*`) declaring `endpoints: ["media"]` is a media engine.
+
+    Classifying purely on the `comfyui:` prefix would call it a text engine and demand an
+    `endpoint_url` it has no use for.
+    """
+    app = create_app(grid_id="ag-test", grid_name="test")
+    client = TestClient(app)
+
+    resp = client.put("/nodes/node-doggi", json={
+        "role": "engine",
+        "models": ["doggi:hunyuan-image-3-t2i"],
+        "media_url": "http://127.0.0.1:8190",
+        "capabilities": {"schema_version": 1, "models": {
+            "doggi:hunyuan-image-3-t2i": {"endpoints": ["media"]},
+        }},
+    })
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["node"]["media_url"] == "http://127.0.0.1:8190"
+
+
+def test_registry_still_requires_endpoint_url_for_a_text_engine():
+    app = create_app(grid_id="ag-test", grid_name="test")
+    client = TestClient(app)
+    resp = client.put("/nodes/node-text", json={"role": "engine", "models": ["qwen"]})
+    assert resp.status_code == 400
+    assert "endpoint_url" in resp.json()["detail"]
+
+
 def test_media_route_rejects_a_non_string_model():
     client = _media_engine_app("comfyui:image_generation")
     resp = client.post("/v1/media/image/generate", json={"model": 7, "prompt": "x"})

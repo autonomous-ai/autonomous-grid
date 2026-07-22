@@ -23,6 +23,7 @@ import httpx
 
 from local import config
 from shared import logging_setup, paths, run_records
+from shared.handlers import HANDLERS
 from local import runtime
 
 
@@ -33,7 +34,6 @@ from local import runtime
 # Remote-only `grid join` flags (DECISIONS D6/D8): rejected in local mode, where the concept
 # doesn't exist. (attr on args, surface flag) — kept here next to the local handler that guards them.
 _REMOTE_ONLY_JOIN_FLAGS = (
-    ("api", "--api"),
     ("engine_label", "--engine-label"),
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
@@ -47,6 +47,17 @@ def _reject_remote_only_flags(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"{', '.join(used)} only applies in remote mode. "
             "Switch with `grid mode remote` (or pass --remote)."
+        )
+    # `--api` is no longer remote-only wholesale, but it is still remote-only for TEXT kinds: a text
+    # API engine is served by the relay's poll loop, which local mode has no equivalent of. A MEDIA
+    # kind is different — the local proxy already forwards media to an engine-local URL, so the
+    # vendor bridge slots in exactly where ComfyUI does (`local/api_media_server.py`).
+    kind = getattr(args, "api", None)
+    if kind is not None and kind not in HANDLERS:
+        supported = ", ".join(sorted(HANDLERS)) or "none"
+        raise SystemExit(
+            f"`--api {kind}` only applies in remote mode. Switch with `grid mode remote` "
+            f"(or pass --remote). Locally, --api supports media gateways only: {supported}."
         )
 
 
@@ -93,6 +104,12 @@ def cmd_join(args: argparse.Namespace) -> int:
 
     if args.at and args.serve:
         raise SystemExit("Use either --at (point at an existing engine) or --serve, not both.")
+
+    # An API media engine is resolved before the --at/--serve branches: `--at` names the VENDOR
+    # gateway here (not a local OpenAI-compatible engine), so it must not fall through to the
+    # generic text-engine path below.
+    if getattr(args, "api", None):
+        return _spawn_api_media_engine(cfg, args)
 
     if args.at:
         if not args.models:
@@ -148,6 +165,86 @@ def cmd_join(args: argparse.Namespace) -> int:
     return rc
 
 
+def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int:
+    """`grid join --api <media kind>` in local mode: serve a vendor media gateway to this grid.
+
+    Resolves the gateway URL and key here, in the foreground, so a bad value is a clean error at the
+    prompt rather than a detached process that dies into a log. The key is NOT written to the run
+    record (records are plain JSON under ~/.grid/run); it is handed to the detached engine through
+    the environment, which is also how that engine passes it to the bridge.
+    """
+    from shared.models import api_catalog
+
+    kind = args.api
+    whitelist = api_catalog.WHITELISTS.get(kind)
+    if whitelist is None:
+        raise SystemExit(f"Unknown API kind {kind!r}.")
+
+    base_url = (getattr(args, "at", None) or whitelist.base_url or "").rstrip("/")
+    if not base_url:
+        raise SystemExit(
+            f"--api {kind} needs the gateway URL. Pass --at <url> "
+            f"(e.g. --at https://your-{kind}-endpoint)."
+        )
+
+    key = _resolve_api_media_key(kind, whitelist, args)
+
+    # With no -m, serve the whole whitelist for this kind — same default as the remote join.
+    advertised = [api_catalog.advertised_name(kind, entry) for entry in whitelist.entries]
+    requested = list(getattr(args, "models", None) or [])
+    if requested:
+        unknown = [model for model in requested if model not in advertised]
+        if unknown:
+            raise SystemExit(
+                f"Not {kind} models: {', '.join(unknown)}. "
+                f"Available: {', '.join(advertised)}"
+            )
+        advertised = requested
+
+    print(
+        f"Warning: the local grid is unauthenticated and LAN-reachable, so anyone who can reach "
+        f"{runtime.grid_url(cfg)} can spend this {kind} key. Use remote mode for an authenticated grid.",
+        file=sys.stderr,
+    )
+    return _spawn_engine(
+        cfg, args, endpoint_url=None, models=advertised, media=False,
+        api_kind=kind, api_base_url=base_url, api_key=key,
+    )
+
+
+def _resolve_api_media_key(kind: str, whitelist: Any, args: argparse.Namespace) -> str:
+    """Key precedence for a local API media join: --api-key, else the env var, else a hidden prompt.
+
+    Deliberately does NOT read or write the machine-local key store: that store lives under
+    `remote/` and belongs to the signed-in remote flow, and `local/` must not depend on `remote/`
+    (ARCHITECTURE.md layering). One less place a key is persisted is the right trade here.
+    """
+    import getpass
+
+    env_var = whitelist.env_var
+    flag_key = getattr(args, "api_key", None)
+    if flag_key:
+        print(
+            "Warning: --api-key is visible in shell history."
+            + (f" Consider exporting {env_var} instead." if env_var else ""),
+            file=sys.stderr,
+        )
+    key = (flag_key or (os.environ.get(env_var) if env_var else None) or "").strip()
+    if not key and _interactive():
+        key = getpass.getpass(
+            f"Enter your {kind} API key (input hidden"
+            + (f"; or export {env_var}" if env_var else "")
+            + "): "
+        ).strip()
+    if not key:
+        hint = f"export {env_var}=..., " if env_var else ""
+        raise SystemExit(
+            f"--api {kind} needs an API key. Pass --api-key <key>, {hint}"
+            "or run interactively to be prompted."
+        )
+    return key
+
+
 def _spawn_engine(
     cfg: dict[str, Any],
     args: argparse.Namespace,
@@ -156,6 +253,9 @@ def _spawn_engine(
     models: list[str],
     engine_id: str | None = None,
     media: bool = False,
+    api_kind: str | None = None,
+    api_base_url: str | None = None,
+    api_key: str | None = None,
 ) -> int:
     grid_id = cfg["grid_id"]
     engine_id = engine_id or getattr(args, "name", None) or f"engine-{uuid.uuid4().hex[:8]}"
@@ -183,18 +283,27 @@ def _spawn_engine(
         "flash_attn": getattr(args, "flash_attn", None),
         "temp": getattr(args, "temp", None),
         "reasoning_budget": getattr(args, "reasoning_budget", None),
+        # API media engine (`--api <kind>`): the vendor gateway this engine bridges to. The KEY is
+        # deliberately absent — the record is plain JSON on disk; the key travels in the child's
+        # environment instead (see below).
+        "api_kind": api_kind,
+        "api_base_url": api_base_url,
+        "api_media_port": getattr(args, "media_port", 8190),
         "started_at": runtime.utc_now(),
     }
     _write_record(grid_id, engine_id, record)
 
     log_path = paths.engines_dir(grid_id) / f"{engine_id}.log"
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
+    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    if api_key:
+        child_env["GRID_API_MEDIA_KEY"] = api_key
     proc = subprocess.Popen(
         runtime.cli_command() + ["__engine", grid_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env=child_env,
     )
     record["pid"] = proc.pid
     _write_record(grid_id, engine_id, record)
@@ -452,6 +561,9 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         flash_attn=record.get("flash_attn"),
         temp=record.get("temp"),
         reasoning_budget=record.get("reasoning_budget"),
+        api_kind=record.get("api_kind"),
+        api_base_url=record.get("api_base_url"),
+        api_media_port=record.get("api_media_port", 8190),
     )
 
     def _on_term(_signum, _frame):  # noqa: ANN001
@@ -472,6 +584,10 @@ def _run_engine(args: SimpleNamespace) -> int:
     registered = False
     launcher = None
     try:
+        # An API media engine short-circuits the text/ComfyUI bring-up entirely: its models are
+        # served by the vendor bridge on loopback, and it has no local endpoint_url at all.
+        if getattr(args, "api_kind", None):
+            return _run_api_media_engine(args, cfg, grid_url, node_id)
         if not args.models and not args.enable_media:
             raise SystemExit("Provide a model for a text engine or --media for a media-only engine.")
         text_advertised_models = _advertised_text_models(args.models, args.advertise_as)
@@ -629,6 +745,83 @@ def _advertised_text_models(models: list[str], aliases: list[str]) -> list[str]:
     if len(set(cleaned)) != len(cleaned):
         raise SystemExit("--advertise-as values must be unique.")
     return cleaned
+
+
+def _run_api_media_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: str, node_id: str) -> int:
+    """The detached loop for `grid join --api <media kind>` (local mode).
+
+    Brings up the vendor bridge on loopback, advertises its models with `endpoints: ["media"]`
+    (which is what tells the registry these are media models and not text ones), then heartbeats.
+    Structurally the media half of `_run_engine`, minus every ComfyUI/llama-server concern.
+    """
+    from local import media_runtime
+
+    api_key = os.environ.get("GRID_API_MEDIA_KEY", "").strip()
+    if not api_key:
+        raise SystemExit(
+            "GRID_API_MEDIA_KEY is not set for this engine. The key is passed from `grid join` "
+            "through the environment and is not stored, so re-run `grid join --api "
+            f"{args.api_kind} …` to restart it."
+        )
+    port = int(getattr(args, "api_media_port", 8190) or 8190)
+    proc = media_runtime.start_api_media_server(
+        port=port, api_kind=args.api_kind, base_url=args.api_base_url, api_key=api_key,
+    )
+    print(f"Spawned {args.api_kind} media bridge pid={proc.pid}, url=http://127.0.0.1:{port}")
+
+    models = list(args.models)
+    payload = {
+        "role": "engine",
+        "models": models,
+        "endpoint_url": None,
+        # Loopback on purpose: the grid proxy runs on this box and is the only thing that should
+        # reach the process holding the vendor credential.
+        "media_url": f"http://127.0.0.1:{port}",
+        "name": args.name,
+        "pricing": {},
+        "capabilities": _api_media_capabilities(models),
+        "load": {"active_tasks": 0},
+        "upstream": {},
+    }
+    registered = False
+    try:
+        _register_engine(grid_url, node_id, payload)
+        registered = True
+        print(f"Engine {node_id} advertised on {grid_url}")
+        print(f"models={','.join(models)}")
+        print(f"media_url={payload['media_url']} ({args.api_kind} -> {args.api_base_url})")
+        print("Send SIGTERM (grid leave) to unregister.")
+        while True:
+            time.sleep(max(1.0, float(args.heartbeat_interval)))
+            try:
+                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
+            except httpx.RequestError as exc:
+                print(f"Heartbeat failed: {exc}", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("\nEngine unregistered.")
+        return 0
+    finally:
+        if registered:
+            try:
+                httpx.delete(f"{grid_url}/nodes/{node_id}", timeout=5)
+            except Exception as exc:
+                print(f"Unregister failed (ignoring): {exc}", file=sys.stderr)
+        media_runtime.stop_media_server(proc)
+        print(f"Stopped {args.api_kind} media bridge.")
+        if not registered:
+            # Mirrors _run_engine: an engine that died before registering must not leave a ghost
+            # record behind for `grid leave --all` to clean up.
+            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
+
+
+def _api_media_capabilities(models: list[str]) -> dict[str, Any]:
+    """Advertise every model as media-only, the same envelope the remote path builds."""
+    from shared.media import media_gating
+
+    return {
+        "schema_version": 1,
+        "models": {model: media_gating.capability_entry() for model in models},
+    }
 
 
 def _prepare_media_engine(args: SimpleNamespace) -> dict[str, Any]:
