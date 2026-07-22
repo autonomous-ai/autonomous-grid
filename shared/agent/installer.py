@@ -10,6 +10,7 @@ admin rights, and uninstalling is a directory removal.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from shared import paths
-from shared.engine.installer import fetch_and_extract, is_macos
+from shared.engine.installer import fetch_and_extract
 from shared.system import arch
 
 # Hermes requires >=3.11,<3.14. Pin the interpreter so an install never silently drifts onto a
@@ -33,52 +34,90 @@ class UvBuild:
     """A pinned `uv` release build. Verified against its published SHA-256 before it is run — it is
     a binary we download and then execute."""
 
-    label: str
+    target: str
     url: str
     sha256: str
 
 
-def _uv_build(release: str, target: str, sha256: str) -> UvBuild:
+def _uv_build(target: str, sha256: str) -> UvBuild:
+    # uv ships Windows as a .zip and every other platform as a .tar.gz.
+    ext = "zip" if "windows" in target else "tar.gz"
     return UvBuild(
-        label=target,
-        url=f"https://github.com/astral-sh/uv/releases/download/{release}/uv-{target}.tar.gz",
+        target=target,
+        url=f"https://github.com/astral-sh/uv/releases/download/{UV_RELEASE}/uv-{target}.{ext}",
         sha256=sha256,
     )
 
 
+# Pinned per OS+arch. Getting the arch wrong is not cosmetic: an x86_64 `uv` installs an x86_64
+# CPython, and everything downstream then believes the machine is x86_64.
 UV_BUILDS: dict[str, UvBuild] = {
-    "arm64": _uv_build(
-        UV_RELEASE,
+    "aarch64-apple-darwin": _uv_build(
         "aarch64-apple-darwin",
         "33540eb7c883ab857eff79bd5ac2aa31fe27b595abecb4a9c003a2c998447232",
     ),
-    "x86_64": _uv_build(
-        UV_RELEASE,
+    "x86_64-apple-darwin": _uv_build(
         "x86_64-apple-darwin",
         "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
+    ),
+    "x86_64-pc-windows-msvc": _uv_build(
+        "x86_64-pc-windows-msvc",
+        "0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b",
+    ),
+    "aarch64-pc-windows-msvc": _uv_build(
+        "aarch64-pc-windows-msvc",
+        "3248109afad3ec59baad299d324ff53de17e2d9a3b3e21580ffd26744b11e036",
+    ),
+    "x86_64-unknown-linux-gnu": _uv_build(
+        "x86_64-unknown-linux-gnu",
+        "e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224",
+    ),
+    "aarch64-unknown-linux-gnu": _uv_build(
+        "aarch64-unknown-linux-gnu",
+        "03e9fe0a81b0718d0bc84625de3885df6cc3f89a8b6af6121d6b9f6113fb6533",
     ),
 }
 
 
-def pick_uv_build(machine: str) -> UvBuild:
-    """The `uv` build for this Mac's architecture.
+def _is_windows() -> bool:
+    return platform.system() == "Windows"
 
-    Getting this wrong is not cosmetic: an x86_64 `uv` under Rosetta installs an x86_64 CPython,
-    and everything downstream then believes the machine is an Intel Mac.
-    """
-    key = "arm64" if machine in ("arm64", "aarch64") else machine
-    build = UV_BUILDS.get(key)
+
+def _exe(name: str) -> str:
+    """The executable's on-disk name — `.exe`-suffixed on Windows, bare elsewhere."""
+    return f"{name}.exe" if _is_windows() else name
+
+
+def platform_target() -> str:
+    """The `<arch>-<os>` triple uv (and Hermes' private CPython) build for this machine."""
+    machine = arch.normalized_machine()
+    system = platform.system()
+    if system == "Darwin":
+        os_part = "apple-darwin"
+    elif system == "Windows":
+        os_part = "pc-windows-msvc"
+    elif system == "Linux":
+        os_part = "unknown-linux-gnu"
+    else:
+        raise SystemExit(f"Hermes cannot be installed on {system!r}: no uv build for it.")
+    return f"{machine}-{os_part}"
+
+
+def pick_uv_build() -> UvBuild:
+    """The `uv` build for this machine's OS and architecture."""
+    target = platform_target()
+    build = UV_BUILDS.get(target)
     if not build:
-        raise SystemExit(f"No uv build for macOS {machine!r}, so Hermes cannot be installed here.")
+        raise SystemExit(f"No uv build for {target!r}, so Hermes cannot be installed here.")
     return build
 
 
 def hermes_bin() -> Path:
-    return paths.bin_dir() / "hermes"
+    return paths.bin_dir() / _exe("hermes")
 
 
 def uv_bin() -> Path:
-    return paths.bin_dir() / "uv"
+    return paths.bin_dir() / _exe("uv")
 
 
 def is_installed() -> bool:
@@ -91,23 +130,23 @@ def ensure_uv() -> Path:
     if target.is_file():
         return target
 
-    build = pick_uv_build(arch.native_machine())
+    build = pick_uv_build()
     paths.bin_dir().mkdir(parents=True, exist_ok=True)
+    uv_name = _exe("uv")
     with tempfile.TemporaryDirectory(prefix="grid-agent-") as tmpdir:
-        extracted = fetch_and_extract(build.label, build.url, build.sha256, Path(tmpdir))
-        found = next((path for path in extracted.rglob("uv") if path.is_file()), None)
+        extracted = fetch_and_extract(build.target, build.url, build.sha256, Path(tmpdir))
+        found = next((path for path in extracted.rglob(uv_name) if path.is_file()), None)
         if not found:
-            raise SystemExit(f"Extracted archive did not contain uv: {build.label}")
+            raise SystemExit(f"Extracted archive did not contain {uv_name}: {build.target}")
         shutil.copy2(found, target)
-    target.chmod(0o755)
+    if not _is_windows():
+        target.chmod(0o755)
     return target
 
 
 def install_hermes() -> Path:
     """Install (or upgrade) Hermes into ~/.grid/bin. Streams uv's own progress to the console, so a
     caller watching stdout can show what is happening during a slow first install."""
-    if not is_macos():
-        raise SystemExit("Hermes auto-install is macOS-only for now. Install it yourself, then re-run.")
     paths.ensure_all()
     uv = ensure_uv()
 

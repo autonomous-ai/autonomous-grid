@@ -25,32 +25,12 @@ class ApiModelEntry:
 @dataclass(frozen=True)
 class ApiWhitelist:
     last_verified: str  # ISO date the table was last checked against the vendor's docs
-    base_url: str  # the vendor endpoint jobs forward to, no trailing slash
+    base_url: str | None  # default vendor endpoint (no trailing slash); None means user must supply --at
     entries: tuple[ApiModelEntry, ...]
-    # The environment variable the provider's key is read from — the first step of ADR 0012 D-c's
-    # env → stored → prompt precedence. **None for a kind with no env-var input path**: a `codex`
-    # seat is a rotating OAuth bundle, which cannot be an env var, and ADR 0015 D-c bars the path
-    # outright so that a stray `CODEX_API_KEY` can never masquerade as a signed-in subscription.
-    # Ordered after `entries` because it is now optional and `entries` is not.
     env_var: str | None = None
-    # The vendor's name for the output-token cap. The grid speaks `max_tokens` internally — the only
-    # name hardware engines know — so a vendor that renamed it needs the value translated on the way
-    # out, or every job 400s. See `_adapt_output_token_param` in remote/serve.py.
-    # **None when the vendor has no such parameter under any name** — verified for codex, whose
-    # backend rejects every candidate rather than ignoring it (facts.md #1). None means "do not
-    # translate", which is not the same as "translate to the default name".
+    supports_model_listing: bool = True  # whether the vendor exposes GET /models (media APIs like Doggi don't)
     max_output_param: str | None = "max_tokens"
-    # Request parameters the vendor rejects outright (no translation exists). A job carrying one is
-    # refused by the provider before any upstream call, wearing the vendor's own error shape — same
-    # outcome as forwarding, minus the round-trip. Null values are NOT refused (the vendor accepts
-    # them). See `_api_unsupported_params` in remote/serve.py.
     unsupported_params: tuple[str, ...] = ()
-    # Which relay endpoint(s) this kind's models serve — the wire half of ADR 0015 D-b's per-kind
-    # matrix, copied into every advertised model's capability envelope. Hand-duplicated with
-    # grid-src's per-model `endpoints` filter (absent there ⇒ chat-only, so old CLIs fail closed);
-    # the literal "responses" must match its endpoint_path byte-for-byte (CLAUDE.local.md lockstep
-    # rule). Default = the API-engine chat single: an API kind never serves legacy `completions`
-    # (ADR 0012); hardware's chat pair is remote/probe.py's own default, not a whitelist row's.
     endpoints: tuple[str, ...] = ("chat/completions",)
     # This kind's backend speaks SSE only, so it cannot serve a NON-streaming Responses request — the
     # codex subscription seat (ADR 0018 / issue 06c). Advertised to the relay as the NEGATIVE
@@ -63,7 +43,6 @@ class ApiWhitelist:
     # failure (master-before-CLI rollout, ADR 0018 §11). Default False: every other API kind and every
     # hardware engine (never in this table) serves non-streaming.
     stream_only: bool = False
-
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
 # https://developers.openai.com/api/docs/models) on 2026-07-08.
@@ -111,6 +90,41 @@ OPENAI_WHITELIST: tuple[ApiModelEntry, ...] = (
         supports_json_mode=True,
         supports_structured_outputs=True,
         notes="Cheapest GPT-5.4-class model for simple tasks.",
+    ),
+)
+
+DOGGI_LAST_VERIFIED = "2026-07-09"
+
+DOGGI_WHITELIST: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="hunyuan-image-3-t2i",
+        context_window=0,
+        supports_tools=False,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Text-to-image. Aspect ratios: square_hd, square, portrait_4_3, "
+              "portrait_16_9, landscape_4_3, landscape_16_9.",
+    ),
+    ApiModelEntry(
+        vendor_name="hunyuan-image-3-i2i",
+        context_window=0,
+        supports_tools=False,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Image-to-image. Aspect ratios: auto, 21:9, 16:9, 3:2, 4:3, 5:4, "
+              "1:1, 4:5, 3:4, 2:3, 9:16, 4:1, 1:4, 8:1, 1:8.",
+    ),
+    ApiModelEntry(
+        vendor_name="Wan-AI/Wan2.2-I2V-A14B-Lightning",
+        context_window=0,
+        supports_tools=False,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Image-to-video. Resolutions: 480p, 580p, 720p. "
+              "Aspect ratios: auto, 21:9, 16:9, 4:3, 1:1, 3:4, 9:16.",
     ),
 )
 
@@ -234,6 +248,13 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # ADR 0018 / issue 06c: the seat's backend is SSE-only, so it cannot serve a non-streaming
         # Responses request. The ONLY row that sets this — see `kind_is_stream_only`.
         stream_only=True,
+    ),
+    "doggi": ApiWhitelist(
+        last_verified=DOGGI_LAST_VERIFIED,
+        base_url=None,  # user supplies endpoint via --at
+        env_var="DOGGI_API_KEY",
+        entries=DOGGI_WHITELIST,
+        supports_model_listing=False,  # Doggi has no /models endpoint
     ),
 }
 

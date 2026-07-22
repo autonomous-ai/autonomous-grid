@@ -149,6 +149,12 @@ def _add_engines(sub) -> None:
         help="For `--api codex` on a headless machine: print the sign-in URL instead of opening a "
              "browser, and take the redirect URL back by paste.",
     )
+    choose.add_argument(
+        "--api-key",
+        default=None,
+        help="API key for the --api engine. Overrides env var and key store. "
+             "Warning: visible in shell history; prefer exporting the env var.",
+    )
 
     naming = join.add_argument_group("Name & display")
     naming.add_argument("--name", default=None,
@@ -260,6 +266,11 @@ def _add_use(sub) -> None:
     image = sub.add_parser("image", help="Generate an image")
     _add_media_common(image)
     image.add_argument("prompt")
+    image.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Model to use (e.g. doggi:hunyuan-image-3-t2i).",
+    )
     image.add_argument("--width", type=int, default=720)
     image.add_argument("--height", type=int, default=720)
     image.add_argument("--steps", type=int, default=4)
@@ -269,6 +280,11 @@ def _add_use(sub) -> None:
     edit = sub.add_parser("edit", help="Edit one to three images")
     _add_media_common(edit)
     edit.add_argument("prompt")
+    edit.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Model to use (e.g. doggi:hunyuan-image-3-i2i).",
+    )
     edit.add_argument(
         "-i",
         "--image",
@@ -284,6 +300,11 @@ def _add_use(sub) -> None:
     video = sub.add_parser("video", help="Generate a short video from an image")
     _add_media_common(video)
     video.add_argument("prompt")
+    video.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Model to use (e.g. doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning).",
+    )
     video.add_argument("-i", "--image", required=True, help="Input image path.")
     video.add_argument("--duration", choices=VALID_I2V_DURATIONS, default="5s")
     video.add_argument("--aspect-ratio", choices=VALID_I2V_ASPECT_RATIOS, default="2:3")
@@ -515,11 +536,11 @@ def _add_engine_setup(sub) -> None:
         engine_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
         engine_list.set_defaults(handler=cmd_engine_list)
 
-    agent = sub.add_parser("agent", help="Set up the agent that runs tools in chat (hermes)")
+    agent = sub.add_parser("agent", help="Set up the agents that run tools in chat (hermes, codex)")
     agent_sub = agent.add_subparsers(dest="subcommand", required=True)
 
-    agent_install = agent_sub.add_parser("install", help="Install the agent (no Homebrew, no admin rights)")
-    agent_install.add_argument("name", choices=("hermes",))
+    agent_install = agent_sub.add_parser("install", help="Install an agent (no Homebrew, no admin rights)")
+    agent_install.add_argument("name", choices=("hermes", "codex"))
     agent_install.add_argument(
         "--force",
         action="store_true",

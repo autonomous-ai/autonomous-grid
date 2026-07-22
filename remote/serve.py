@@ -25,9 +25,11 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from remote import api_keys, codex_auth, codex_oauth, control_plane, credentials, probe, relay
+from remote import api_keys, control_plane, credentials, probe, relay, codex_auth, codex_oauth
+from shared.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
+from shared.media import media_gating  # stdlib-only module; safe to import eagerly
 from shared.models import api_catalog
 
 # One engine's probe result: (normalized llm_url, advertised models, upstream models, caps envelope).
@@ -161,6 +163,14 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # a key. Inside the try so this death reaps the record like any died-before-registering
         # engine (the `finally` below).
         bearer_by_url = _api_bearers(record)
+        # Build vendor handlers for every API engine in the record. These handle
+        # media endpoints (and could handle text endpoints in the future) without
+        # going through ComfyUI or a local engine.
+        handlers = {}
+        for url, kind in _api_kinds_by_url(record).items():
+            key = bearer_by_url.get(url)
+            if key and kind in HANDLERS:
+                handlers[kind] = HANDLERS[kind](base_url=url, api_key=key)
         # Bring up text engines only when the record names some — a media-only join (`grid join
         # --media`) has no text spec, and `_bring_up_engines` would otherwise error on the empty spec.
         has_text = bool(record.get("engines")) or bool(record.get("models")) or bool(record.get("endpoint_url"))
@@ -215,6 +225,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             media_url=media_url,
             bearer_by_url=bearer_by_url,
             api_kind_by_url=_api_kinds_by_url(record),
+            handlers=handlers,
         )
         # The codex fail-fast, after the state exists and before anything advertises: a codex spec
         # with no stored seat dies HERE naming the fix (still inside the try, so the record is
@@ -614,17 +625,23 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
             continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
-        # Endpoints come from the kind's row (above), never legacy `completions` — an API engine never
-        # serves it, and the handle_job gate refuses it anyway (honest advertisement, ADR 0012).
+        # Media API engines (e.g. Doggi) advertise media endpoints — their jobs run through
+        # HANDLERS, not the text relay dialects, so the per-kind text contract below does not
+        # apply to them. Text API engines advertise the kind's catalog row (above), never legacy
+        # `completions` — an API engine never serves it, and the handle_job gate refuses it anyway
+        # (honest advertisement, ADR 0012).
         # `honours_output_cap` is gated on `entry is not None`: a model gone from the whitelist degrades
         # to an all-False FEATURES dict (like a failed probe), so its `output_cap` is False too — a capped
         # `auto` request then excludes the anomaly rather than routing to a likely-broken model, the
         # fail-closed posture the whole filter relies on. `endpoints` stays per-KIND (outside features)
         # because it is what makes the gate refuse a wrong dialect at all.
-        env = probe.envelope(
-            advertised_model, probed, ctx, endpoints=kind_endpoints,
-            honours_output_cap=entry is not None and kind_can_cap,
-        )
+        if api_kind in HANDLERS:
+            env = probe.envelope(advertised_model, probed, ctx, endpoints=["media"])
+        else:
+            env = probe.envelope(
+                advertised_model, probed, ctx, endpoints=kind_endpoints,
+                honours_output_cap=entry is not None and kind_can_cap,
+            )
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
 
@@ -1052,6 +1069,7 @@ class _ServeState:
         media_url: str | None = None,
         bearer_by_url: dict[str, str] | None = None,
         api_kind_by_url: dict[str, str] | None = None,
+        handlers: dict[str, Any] | None = None,
     ) -> None:
         self.signaling_url = signaling_url
         self.node_id = node_id
@@ -1065,6 +1083,10 @@ class _ServeState:
         # media, else None. `media/*` jobs forward here instead of an LLM engine; all media models
         # share the one server, so a single URL (not a per-model route) is enough.
         self.media_url = media_url.rstrip("/") if media_url else None
+        # Vendor handlers for API engines (e.g. Doggi) that serve media endpoints directly without
+        # ComfyUI. Built at startup from the record's api_kind entries; not reload-swappable because
+        # a handler's config (base_url, api_key) can't change without a respawn.
+        self.handlers: dict[str, Any] = handlers or {}
         # The reload-swappable routing (routes/upstream/models/caps/meta/pricing/concurrency) lives in
         # one immutable snapshot so a hot-reload can swap it atomically (ADR 0010 D4). Several engines
         # may serve under one identity (DECISIONS D9); for the single-engine case the route map is
@@ -1489,9 +1511,59 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     is_stream = bool(job.get("is_stream", False))
     read_timeout = float(job.get("inference_timeout_seconds") or _DEFAULT_INFERENCE_TIMEOUT)
 
-    if endpoint in _MEDIA_ENDPOINTS:  # media → this box's media server; always SSE, so always stream
+    if endpoint in _MEDIA_ENDPOINTS:
+        # Try a media API handler first (e.g. Doggi). These models are routed by
+        # the standard model→URL map, so route_and_kind works the same as for text.
+        snap = state.snapshot()
+        model = body.get("model")
+        target, api_kind = state.route_and_kind(model, snap)
+        handler = state.handlers.get(api_kind) if api_kind else None
+        if handler is not None:
+            state.enter_inference()
+            try:
+                # ONE submit per transaction, like every other forward path (`_forward_stream` /
+                # `_forward_whole`): the relay's mailbox for a txn is written once, so submitting
+                # per SSE line would drop everything after the first. The events are drained here
+                # rather than handed over as a lazy iterator so a mid-generation failure (gateway
+                # error, no result files) is still reportable via `_try_submit_error` — nothing has
+                # been POSTed yet. Media results are fully buffered anyway (base64 in one event),
+                # so nothing is lost by materialising them.
+                sse_bytes = b"".join(
+                    line.encode() if isinstance(line, str) else line
+                    for line in handler.forward(body, endpoint)
+                )
+                _submit_response(state, txn, content=sse_bytes, stream=True)
+            except Exception as exc:  # one bad media job must not kill the loop
+                print(f"\nMedia API job {txn} failed: {exc!r}", file=sys.stderr)
+                _try_submit_error(state, txn, str(exc))
+            finally:
+                state.exit_inference()
+            return
+        # No API handler — fall through to the local ComfyUI media server.
         if not state.media_url:
             _try_submit_error(state, txn, f"this engine does not serve media (endpoint {endpoint!r})")
+            return
+        # Refuse a media model this engine does not serve, BEFORE forwarding. The engine-side
+        # handler dispatches on the route alone (`shared/media/media_handler.handle_request`), so a
+        # model naming a different task — or one whose bundle this host's VRAM gated out — would
+        # otherwise be silently served as whatever the route means. Mirrors the per-kind endpoint
+        # matrix below: routing decides WHERE, this decides WHETHER we serve it at all.
+        if model is not None and not isinstance(model, str):
+            _try_submit_error(state, txn, f"model must be a string, got {type(model).__name__}")
+            return
+        if model and model not in state.media_models:
+            _try_submit_error(
+                state, txn,
+                f"this engine does not serve media model {model!r} "
+                f"(serving: {', '.join(sorted(state.media_models)) or 'none'})",
+            )
+            return
+        expected = media_gating.endpoint_model(endpoint)
+        if model and expected and model != expected:
+            _try_submit_error(
+                state, txn,
+                f"media model {model!r} does not serve endpoint {endpoint!r} (that is {expected!r})",
+            )
             return
         state.enter_inference()
         try:

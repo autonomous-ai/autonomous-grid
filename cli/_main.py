@@ -75,6 +75,27 @@ def cmd_internal_media_server(port: int, comfyui_url: str) -> int:
     return 0
 
 
+def cmd_internal_api_media_server(port: int, api_kind: str, base_url: str) -> int:
+    """The API media bridge (`grid join --api <kind>` in local mode).
+
+    Binds LOOPBACK, unlike `__media-server`: this process holds the vendor credential, so the only
+    thing that should be able to reach it is the grid proxy on this same box. The key arrives in the
+    environment (`GRID_API_MEDIA_KEY`) rather than argv, which `ps` exposes to every local user.
+    """
+    import uvicorn
+
+    from local.api_media_server import create_app
+
+    api_key = os.environ.get("GRID_API_MEDIA_KEY", "")
+    if not api_key:
+        raise SystemExit(
+            "GRID_API_MEDIA_KEY is not set; the API media bridge has no credential to serve with."
+        )
+    app = create_app(api_kind=api_kind, base_url=base_url, api_key=api_key)
+    uvicorn.run(app, host="127.0.0.1", port=int(port))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     internal = _maybe_internal(raw_argv)
@@ -100,6 +121,13 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--comfyui-url", required=True)
         args = parser.parse_args(argv[1:])
         return cmd_internal_media_server(args.port, args.comfyui_url)
+    if argv[0] == "__api-media-server":
+        parser = argparse.ArgumentParser(prog="grid __api-media-server")
+        parser.add_argument("--port", type=int, required=True)
+        parser.add_argument("--api-kind", required=True)
+        parser.add_argument("--base-url", required=True)
+        args = parser.parse_args(argv[1:])
+        return cmd_internal_api_media_server(args.port, args.api_kind, args.base_url)
     if argv[0] == "__engine":
         from .provider import run_engine_from_record
 

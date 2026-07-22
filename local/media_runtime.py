@@ -35,6 +35,34 @@ def start_media_server(*, port: int, comfyui_url: str) -> subprocess.Popen:
     return proc
 
 
+def start_api_media_server(*, port: int, api_kind: str, base_url: str, api_key: str) -> subprocess.Popen:
+    """Start the vendor-gateway media bridge (`local/api_media_server.py`) on loopback.
+
+    Same contract as ``start_media_server`` — a healthy `/health` before returning — so the caller
+    treats a ComfyUI media engine and an API media engine identically. The key is passed through the
+    child's ENVIRONMENT, never argv: argv is world-readable via `ps`.
+    """
+    if _tcp_port_in_use("127.0.0.1", port):
+        raise SystemExit(f"Port {port} is already in use; cannot start the {api_kind} media bridge.")
+    paths.ensure_all()
+    log_path = paths.logs_dir() / f"media_api_{api_kind}_{port}.log"
+    log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
+    proc = subprocess.Popen(
+        _cli_subprocess_command() + [
+            "__api-media-server",
+            "--port", str(port),
+            "--api-kind", api_kind,
+            "--base-url", base_url.rstrip("/"),
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env={**os.environ, "GRID_API_MEDIA_KEY": api_key, "PYTHONUNBUFFERED": "1"},
+    )
+    wait_for_media_server(proc, port, log_path)
+    return proc
+
+
 def wait_for_media_server(proc: subprocess.Popen, port: int, log_path: Path, timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
