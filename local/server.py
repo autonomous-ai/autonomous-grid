@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from local.runtime import GRID_TYPE
+from shared.media import media_gating
 
 
 NODE_TTL_SECONDS = 60
@@ -171,15 +172,18 @@ def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
 
     @app.post("/v1/media/image/generate")
     async def media_image_generate(request: Request):
-        return await _proxy_media(app, "media/image/generate", "comfyui:image_generation", request)
+        path = "media/image/generate"
+        return await _proxy_media(app, path, media_gating.ENDPOINT_MODELS[path], request)
 
     @app.post("/v1/media/image/edit")
     async def media_image_edit(request: Request):
-        return await _proxy_media(app, "media/image/edit", "comfyui:image_editing", request)
+        path = "media/image/edit"
+        return await _proxy_media(app, path, media_gating.ENDPOINT_MODELS[path], request)
 
     @app.post("/v1/media/video/i2v")
     async def media_i2v(request: Request):
-        return await _proxy_media(app, "media/video/i2v", "comfyui:i2v", request)
+        path = "media/video/i2v"
+        return await _proxy_media(app, path, media_gating.ENDPOINT_MODELS[path], request)
 
     return app
 
@@ -250,10 +254,33 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
 async def _proxy_media(
     app: FastAPI,
     endpoint_path: str,
-    model: str,
+    default_model: str,
     request: Request,
 ) -> Response:
     raw_body = await request.body()
+
+    try:
+        body = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError:
+        return _openai_error(400, "Request body is not valid JSON", "invalid_json")
+
+    if not isinstance(body, dict):
+        return _openai_error(400, "Request body must be a JSON object", "invalid_request")
+
+    model = body.get("model") or default_model
+    if not isinstance(model, str):
+        return _openai_error(400, "model must be a string", "invalid_request")
+
+    # Only a built-in name can be checked against the route; a non-builtin (an API media model) is
+    # not this proxy's to validate — it either resolves to an engine below or 503s.
+    if media_gating.is_builtin_model(model) and media_gating.endpoint_for_model(model) != endpoint_path:
+        return _openai_error(
+            400,
+            f"Model {model!r} does not serve this endpoint. "
+            f"/v1/{endpoint_path} serves {default_model!r}.",
+            "invalid_request",
+        )
+
     engine = _choose_engine(app, model)
     if not engine:
         return _openai_error(503, f"No active local media engine for {model!r}", "engine_unavailable")

@@ -178,6 +178,70 @@ def test_server_exposes_media_routes_without_auth():
     assert resp.json()["error"]["code"] == "engine_unavailable"
 
 
+def _media_engine_app(*models):
+    """A grid with one media engine advertising ``models``.
+
+    The media URL is a closed loopback port on purpose: these tests assert routing/validation, which
+    all happens BEFORE the forward, so the forward must fail instantly (connection refused) rather
+    than stall on ENGINE_TIMEOUT_SECONDS against an unroutable address.
+    """
+    app = create_app(grid_id="ag-test", grid_name="test")
+    client = TestClient(app)
+    client.put("/nodes/node-media", json={
+        "role": "engine", "models": list(models), "media_url": "http://127.0.0.1:9",
+    })
+    return client
+
+
+def test_media_route_selects_engine_by_body_model():
+    """`body["model"]` picks the engine, so one grid can serve several models per media task."""
+    client = _media_engine_app("comfyui:image_generation")
+
+    # The engine advertises image_generation only: a body naming it resolves (and fails later, at
+    # the unreachable engine), while a body naming an unserved model is a clean 503.
+    unserved = client.post("/v1/media/image/generate",
+                           json={"model": "doggi:hunyuan-image-3-t2i", "prompt": "desk"})
+    assert unserved.status_code == 503
+    assert "doggi:hunyuan-image-3-t2i" in unserved.json()["error"]["message"]
+
+
+def test_media_route_rejects_a_model_belonging_to_another_task():
+    """An i2v model on the image route must be refused, not silently run as image generation.
+
+    The engine-side handler dispatches on the ROUTE alone, so forwarding this would run the wrong
+    workflow and return an image for a video request.
+    """
+    client = _media_engine_app("comfyui:image_generation", "comfyui:i2v")
+
+    resp = client.post("/v1/media/image/generate", json={"model": "comfyui:i2v", "prompt": "x"})
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_request"
+    assert "comfyui:image_generation" in resp.json()["error"]["message"]
+
+
+def test_media_route_without_a_model_falls_back_to_the_route_builtin():
+    """Older clients send no `model`; the route's built-in must still resolve."""
+    client = _media_engine_app("comfyui:image_editing")
+
+    # No model in the body -> defaults to comfyui:image_editing, which this engine serves, so it
+    # gets past selection (503 would mean the fallback failed to resolve).
+    resp = client.post("/v1/media/image/edit", json={"prompt": "x"})
+    assert resp.status_code != 503
+
+    # ...and the same body on a route whose built-in is NOT advertised is a clean 503.
+    other = client.post("/v1/media/video/i2v", json={"prompt": "x"})
+    assert other.status_code == 503
+    assert "comfyui:i2v" in other.json()["error"]["message"]
+
+
+def test_media_route_rejects_a_non_string_model():
+    client = _media_engine_app("comfyui:image_generation")
+    resp = client.post("/v1/media/image/generate", json={"model": 7, "prompt": "x"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_request"
+
+
 def test_server_accepts_media_only_provider_without_endpoint_url():
     app = create_app(grid_id="ag-test", grid_name="test")
     client = TestClient(app)
@@ -3862,8 +3926,12 @@ def test_remote_join_api_invalid_key_media_api_is_terminal_no_spawn(monkeypatch,
     monkeypatch.setenv("DOGGI_API_KEY", "invalid-key-123")
 
     def mock_probe(request):
-        # Doggi probe hits /media/generations (the actual Doggi API endpoint)
-        assert "/media/generations" in str(request.url)
+        # A free check: READ only, never POST a generation (a submit-based probe would bill a real
+        # run on every join). /health first proves the URL, then the task read proves the key.
+        assert request.method == "GET", "the key probe must not submit a generation"
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        assert "/media/generations/" in str(request.url)
         assert request.headers.get("authorization") == "Bearer invalid-key-123"
         return httpx.Response(401, text="invalid api key")
 
@@ -3881,6 +3949,55 @@ def test_remote_join_api_invalid_key_media_api_is_terminal_no_spawn(monkeypatch,
     # A key the vendor rejected is never persisted.
     from remote import api_keys
     assert api_keys.load_key("doggi") is None
+
+
+def test_remote_join_media_api_valid_key_probe_is_a_free_read(monkeypatch, tmp_path):
+    """A good key answers the probe with 404 (authenticated, no such task) and the join proceeds."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("DOGGI_API_KEY", "good-key")
+    calls: list[tuple[str, str]] = []
+
+    def mock_probe(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404, json={"detail": "Task not found"})
+
+    _mock_vendor(monkeypatch, mock_probe)
+
+    assert cli.main([
+        "join", "--api", "doggi", "--at", "https://doggi.example.com",
+        "-m", "doggi:hunyuan-image-3-t2i",
+    ]) == 0
+    assert [method for method, _ in calls] == ["GET", "GET"], "reads only, no generation submitted"
+    assert [path for _, path in calls][0] == "/health"
+    assert "cmd" in spawned
+    from remote import api_keys
+    assert api_keys.load_key("doggi") == "good-key"
+
+
+def test_remote_join_media_api_wrong_url_is_refused_before_the_key_check(monkeypatch, tmp_path):
+    """A typo'd --at 404s the same way a missing task does, so /health is what catches it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("DOGGI_API_KEY", "good-key")
+    paths: list[str] = []
+
+    def mock_probe(request):
+        paths.append(request.url.path)
+        return httpx.Response(404, json={"detail": "Not Found"})  # what a wrong base returns
+
+    _mock_vendor(monkeypatch, mock_probe)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "join", "--api", "doggi", "--at", "https://doggi.example.com/typo",
+            "-m", "doggi:hunyuan-image-3-t2i",
+        ])
+    assert "--at" in str(exc.value)
+    assert paths == ["/typo/health"], "refused on /health; the key check never runs"
+    assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
 
 
 def test_remote_join_api_writes_kind_generic_record_and_spawns(monkeypatch, tmp_path, capsys):
@@ -8606,6 +8723,136 @@ def test_serve_handle_job_non_stream_forwards_then_submits(monkeypatch, tmp_path
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "chat/completions", "body": {"model": "m"}, "is_stream": False})
     assert captured["stream"] is False and captured["txn"] == "t1"
     assert b'"hi"' in captured["content"] and "error" not in captured
+
+
+def test_serve_handle_job_media_api_submits_once_with_every_event(monkeypatch, tmp_path):
+    """A media API job (e.g. doggi) is ONE submit_response carrying the whole SSE stream.
+
+    The relay's mailbox for a transaction is written once, so submitting per SSE line would
+    deliver the first event and silently drop the result — the consumer would then exit
+    non-zero having written nothing.
+    """
+    from remote import relay, serve
+
+    class FakeHandler:
+        def forward(self, body, endpoint):
+            assert body["model"] == "doggi:t2i" and endpoint == "media/image/generate"
+            yield 'data: {"type": "progress", "progress": 0.0}\n\n'
+            yield 'data: {"type": "result", "output_files": []}\n\n'
+            yield "data: [DONE]\n\n"
+
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        llm_url="https://gw.example", models=["doggi:t2i"],
+        api_kind_by_url={"https://gw.example": "doggi"},
+        handlers={"doggi": FakeHandler()},
+    )
+    submits: list[dict] = []
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: submits.append(
+                            {"txn": txn, "content": content, "stream": stream}))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: submits.append({"error": message}))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate",
+                             "body": {"model": "doggi:t2i", "prompt": "p"}, "is_stream": True})
+
+    assert len(submits) == 1, f"expected exactly one submit per transaction, got {len(submits)}"
+    assert submits[0]["txn"] == "t1" and submits[0]["stream"] is True
+    content = submits[0]["content"]
+    assert isinstance(content, bytes)
+    assert b'"progress"' in content and b'"result"' in content and b"[DONE]" in content
+
+
+def test_serve_handle_job_rejects_media_model_this_engine_does_not_serve(monkeypatch, tmp_path):
+    """A media model outside this engine's advertised set is refused before any forward.
+
+    The engine-side handler dispatches on the route alone, so an unserved model (e.g. a bundle this
+    host's VRAM gated out) would otherwise be served as whatever the route means.
+    """
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, media_url="http://127.0.0.1:8190")
+    state.media_models = ["comfyui:image_generation"]
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(forwarded=True))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/edit",
+                             "body": {"model": "comfyui:image_editing"}, "is_stream": True})
+
+    assert "forwarded" not in captured, "an unserved media model must never reach the engine"
+    assert "comfyui:image_editing" in captured["error"]
+    assert "comfyui:image_generation" in captured["error"], "the error names what IS served"
+
+
+def test_serve_handle_job_rejects_media_model_from_another_task(monkeypatch, tmp_path):
+    """A served model on the wrong route is refused: routing decides where, this decides whether."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, media_url="http://127.0.0.1:8190")
+    state.media_models = ["comfyui:image_generation", "comfyui:i2v"]
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(forwarded=True))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    # i2v IS advertised by this engine, but not on the image/generate route.
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate",
+                             "body": {"model": "comfyui:i2v"}, "is_stream": True})
+
+    assert "forwarded" not in captured
+    assert "comfyui:i2v" in captured["error"] and "comfyui:image_generation" in captured["error"]
+
+
+def test_serve_handle_job_media_without_a_model_still_forwards(monkeypatch, tmp_path):
+    """Older consumers send no `model`; the job must still reach the media server."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, media_url="http://127.0.0.1:8190")
+    state.media_models = ["comfyui:image_generation"]
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(forwarded=True))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(200, content=b"data: [DONE]\n\n"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate",
+                             "body": {"prompt": "x"}, "is_stream": True})
+
+    assert captured.get("forwarded") and "error" not in captured
+
+
+def test_serve_handle_job_media_api_failure_reports_error_not_a_torn_stream(monkeypatch, tmp_path):
+    """A handler that raises mid-generation submits an error, never a partial response."""
+    from remote import relay, serve
+
+    class BoomHandler:
+        def forward(self, body, endpoint):
+            yield 'data: {"type": "progress", "progress": 0.0}\n\n'
+            raise RuntimeError("gateway attached no result files")
+
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        llm_url="https://gw.example", models=["doggi:t2i"],
+        api_kind_by_url={"https://gw.example": "doggi"},
+        handlers={"doggi": BoomHandler()},
+    )
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(submitted=True))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "media/image/generate",
+                             "body": {"model": "doggi:t2i"}, "is_stream": True})
+
+    assert "submitted" not in captured, "nothing may be POSTed once the generation failed"
+    assert "no result files" in captured["error"]
 
 
 def test_serve_handle_job_stream_passes_sse_through(monkeypatch, tmp_path):

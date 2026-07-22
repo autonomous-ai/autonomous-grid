@@ -578,39 +578,56 @@ def _prompt_api_key(kind: str, env_var: str) -> str:
     return getpass.getpass(f"Enter your {kind} API key (input hidden; or export {env_var}): ").strip()
 
 
+# A request id that cannot exist, used to make the probe below a pure auth check: the lookup is
+# rejected before it is resolved when the key is bad, and 404s when the key is good.
+_PROBE_REQUEST_ID = "grid-key-probe-does-not-exist"
+
+
 def _probe_media_api(kind: str, base_url: str, key: str) -> None:
-    """Lightweight probe for media APIs that lack GET /models. Sends a minimal request to validate
-    the key without actually generating media. A rejected key (401/403) is a terminal error —
-    nothing is spawned. Never echoes the key."""
+    """Free URL + key check for media APIs that lack `GET /models`. Terminal on either failure —
+    nothing is spawned. Never echoes the key.
+
+    Two unauthenticated-cheap GETs instead of one submit:
+
+    1. ``GET /health`` proves ``--at`` really points at a gateway. This is what catches a typo'd
+       URL: step 2 alone cannot, because a wrong path 404s exactly like a missing task does.
+    2. ``GET /media/generations/<id that cannot exist>`` proves the key. The gateway authenticates
+       before it resolves the id, so a bad key is 401/403 and a good one is 404.
+
+    Deliberately NOT a submitted generation: that would bill a real run on **every** join (verified
+    against a live gateway — an accepted probe body queues and runs the model for ~30s of GPU) and
+    would hardcode a model name that silently breaks the probe the day it is retired.
+    """
     import httpx  # lazy: only stdlib + shared.* at module top (see module docstring)
 
-    # Try a minimal t2i request with a tiny prompt — Doggi will validate the key before processing.
-    # Doggi's API endpoint is /media/generations (not /media/image/generate which is the grid's internal route).
-    probe_body = {
-        "model": "hunyuan-image-3-t2i",  # smallest/cheapest model
-        "type": "text-to-image",
-        "prompt": "test",
-        "image_size": "square_hd",
-        "num_inference_steps": 1,
-    }
-    try:
-        with httpx.Client(timeout=_VENDOR_LIST_TIMEOUT) as client:
-            resp = client.post(
-                f"{base_url}/media/generations",
-                json=probe_body,
-                headers={"Authorization": f"Bearer {key}"},
-            )
-    except httpx.HTTPError as exc:
-        raise SystemExit(f"Could not reach {kind} at {base_url}: {exc}") from None
+    def _get(path: str, *, auth: bool) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {key}"} if auth else {}
+        try:
+            with httpx.Client(timeout=_VENDOR_LIST_TIMEOUT) as client:
+                return client.get(f"{base_url}{path}", headers=headers)
+        except httpx.HTTPError as exc:
+            raise SystemExit(f"Could not reach {kind} at {base_url}: {exc}") from None
+
+    health = _get("/health", auth=False)
+    if health.status_code != 200:
+        raise SystemExit(
+            f"{base_url} does not look like a {kind} gateway: GET /health returned "
+            f"HTTP {health.status_code}. Check the --at URL."
+        )
+
+    resp = _get(f"/media/generations/{_PROBE_REQUEST_ID}", auth=True)
     if resp.status_code in (401, 403):
         raise SystemExit(
             f"{kind} rejected the API key (HTTP {resp.status_code}): {resp.text[:200]}"
         )
-    # 400/422 means the key is valid but the request was malformed (expected for a probe).
-    # 500+ means the endpoint is up but had an internal error (not a key problem).
-    # 200 means the probe actually succeeded (unlikely for a 64x64 test, but handle it).
-    if resp.status_code not in (200, 400, 422, 500, 502, 503):
-        raise SystemExit(f"{kind} returned HTTP {resp.status_code}: {resp.text[:200]}")
+    # 404 is the expected success shape (authenticated, then no such task); 200 would mean the id
+    # somehow exists — still proof the key works. Anything else means the endpoint answers /health
+    # but not the media API, so refuse rather than advertise models we cannot serve.
+    if resp.status_code not in (200, 404):
+        raise SystemExit(
+            f"{kind} at {base_url} did not answer the key check as expected "
+            f"(HTTP {resp.status_code}): {resp.text[:200]}"
+        )
 
 
 def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:

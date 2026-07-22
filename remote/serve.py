@@ -29,6 +29,7 @@ from remote import api_keys, control_plane, credentials, probe, relay, codex_aut
 from remote.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
+from shared.media import media_gating  # stdlib-only module; safe to import eagerly
 from shared.models import api_catalog
 
 # One engine's probe result: (normalized llm_url, advertised models, upstream models, caps envelope).
@@ -1426,6 +1427,28 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         # No API handler — fall through to the local ComfyUI media server.
         if not state.media_url:
             _try_submit_error(state, txn, f"this engine does not serve media (endpoint {endpoint!r})")
+            return
+        # Refuse a media model this engine does not serve, BEFORE forwarding. The engine-side
+        # handler dispatches on the route alone (`shared/media/media_handler.handle_request`), so a
+        # model naming a different task — or one whose bundle this host's VRAM gated out — would
+        # otherwise be silently served as whatever the route means. Mirrors the per-kind endpoint
+        # matrix below: routing decides WHERE, this decides WHETHER we serve it at all.
+        if model is not None and not isinstance(model, str):
+            _try_submit_error(state, txn, f"model must be a string, got {type(model).__name__}")
+            return
+        if model and model not in state.media_models:
+            _try_submit_error(
+                state, txn,
+                f"this engine does not serve media model {model!r} "
+                f"(serving: {', '.join(sorted(state.media_models)) or 'none'})",
+            )
+            return
+        expected = media_gating.endpoint_model(endpoint)
+        if model and expected and model != expected:
+            _try_submit_error(
+                state, txn,
+                f"media model {model!r} does not serve endpoint {endpoint!r} (that is {expected!r})",
+            )
             return
         state.enter_inference()
         try:

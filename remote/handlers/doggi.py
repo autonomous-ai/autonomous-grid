@@ -35,6 +35,15 @@ _MIME_BY_EXT = {
 }
 
 # Aspect ratios (w/h) for mapping (width, height) → Doggi's image_size enum.
+_VIDEO_ASPECTS = {
+    "21:9": 21.0 / 9.0,
+    "16:9": 16.0 / 9.0,
+    "4:3": 4.0 / 3.0,
+    "1:1": 1.0,
+    "3:4": 3.0 / 4.0,
+    "9:16": 9.0 / 16.0,
+}
+
 _IMAGE_SIZE_ASPECTS = {
     "square_hd": 1.0,
     "square": 1.0,
@@ -132,12 +141,16 @@ class DoggiHandler:
         ext = os.path.splitext(filename)[1].lower()
         mime = _MIME_BY_EXT.get(ext, "image/png")
         image_url = f"data:{mime};base64,{content_b64}"
+        # `duration` / `aspect_ratio` arrive in the GRID's vocabulary (`--duration 5s`,
+        # `--aspect-ratio 2:3`), which is the built-in ComfyUI engine's. Doggi wants an integer
+        # count of seconds and its own ratio set, so translate here — untranslated, `duration="5s"`
+        # is a ValueError inside the client and `2:3`/`3:2` are not ratios its i2v accepts.
         return self.client.i2v.submit(
             model,
             image_url=image_url,
             prompt=body.get("prompt", ""),
-            duration=body.get("duration", 5),
-            aspect_ratio=body.get("aspect_ratio", "auto"),
+            duration=_duration_to_seconds(body.get("duration", 5)),
+            aspect_ratio=_to_video_aspect_ratio(body.get("aspect_ratio")),
         )
 
 
@@ -154,6 +167,43 @@ def _dimensions_to_image_size(w, h):
         if best_dist is None or d < best_dist:
             best, best_dist = name, d
     return best
+
+
+def _duration_to_seconds(value):
+    """Grid's ``--duration`` ("5s" / "8s") -> the integer seconds Doggi expects.
+
+    The client does ``str(int(duration))``, so an unconverted "5s" raises deep inside the payload
+    builder rather than here, where the message can name the offending value.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; a bool duration is a caller bug
+        raise ValueError(f"invalid duration {value!r}: expected seconds, e.g. '5s'")
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().lower().removesuffix("s")
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError(f"invalid duration {value!r}: expected seconds, e.g. '5s'") from None
+
+
+def _to_video_aspect_ratio(value):
+    """Grid's ``--aspect-ratio`` -> the nearest ratio Doggi's i2v accepts.
+
+    Grid offers the built-in engine's set (2:3 / 3:2 / 1:1); Doggi's video set is
+    ``auto, 21:9, 16:9, 4:3, 1:1, 3:4, 9:16``. Only 1:1 is common to both, so 2:3 and 3:2 are
+    snapped to the closest supported ratio (the same nearest-match rule as
+    `_dimensions_to_image_size`) instead of being passed through and rejected.
+    """
+    if not value or value == "auto":
+        return "auto"
+    if value in _VIDEO_ASPECTS:
+        return value
+    try:
+        width, height = (float(part) for part in str(value).split(":", 1))
+        target = width / height
+    except (ValueError, ZeroDivisionError):
+        return "auto"
+    return min(_VIDEO_ASPECTS, key=lambda name: abs(_VIDEO_ASPECTS[name] - target))
 
 
 def _download_as_base64(url):

@@ -14,8 +14,10 @@ import pytest
 from remote.handlers.doggi import (
     DoggiHandler,
     _dimensions_to_image_size,
+    _duration_to_seconds,
     _infer_media_type,
     _sse,
+    _to_video_aspect_ratio,
 )
 
 
@@ -47,6 +49,71 @@ def test_dimensions_to_image_size_zero_returns_auto():
     assert _dimensions_to_image_size(0, 0) == "auto"
     assert _dimensions_to_image_size(0, 720) == "auto"
     assert _dimensions_to_image_size(720, 0) == "auto"
+
+
+# ---------------------------------------------------------------------------
+# i2v: grid's duration/aspect vocabulary → Doggi's
+# ---------------------------------------------------------------------------
+
+def test_duration_accepts_the_cli_suffixed_form():
+    """`grid video --duration` yields "5s"/"8s"; the client does str(int(...)) and would raise."""
+    assert _duration_to_seconds("5s") == 5
+    assert _duration_to_seconds("8s") == 8
+    assert _duration_to_seconds(5) == 5
+
+
+def test_duration_rejects_nonsense_with_a_message_naming_the_value():
+    with pytest.raises(ValueError, match="banana"):
+        _duration_to_seconds("banana")
+
+
+@pytest.mark.parametrize("grid_ratio,expected", [
+    ("1:1", "1:1"),    # the only ratio common to both vocabularies
+    ("2:3", "3:4"),    # portrait -> nearest portrait Doggi accepts
+    ("3:2", "4:3"),    # landscape -> nearest landscape Doggi accepts
+])
+def test_cli_aspect_ratios_map_onto_doggis_video_set(grid_ratio, expected):
+    """Every `grid video --aspect-ratio` choice must land on a ratio Doggi's i2v accepts."""
+    assert _to_video_aspect_ratio(grid_ratio) == expected
+
+
+def test_aspect_ratio_defaults_and_passthrough():
+    assert _to_video_aspect_ratio(None) == "auto"
+    assert _to_video_aspect_ratio("auto") == "auto"
+    assert _to_video_aspect_ratio("16:9") == "16:9"  # already a Doggi ratio
+    assert _to_video_aspect_ratio("nonsense") == "auto"
+
+
+def test_i2v_submits_translated_duration_and_aspect(monkeypatch):
+    """End-to-end through the handler: the CLI's own values reach the client already converted."""
+    captured = {}
+
+    class FakeI2v:
+        def submit(self, model, **kwargs):
+            captured.update(kwargs)
+            return type("R", (), {"wait": lambda self, *a, **k: {
+                "request_id": "req-v", "status": "completed",
+                "result_files": [{"filename": "v.mp4", "content_type": "video/mp4",
+                                  "file_url": "https://x/v.mp4"}]}})()
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            self.i2v = FakeI2v()
+
+    import doggi
+    monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
+    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: "eA==")
+
+    handler = DoggiHandler(base_url="http://fake", api_key="fake")
+    list(handler.forward({
+        "model": "doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning", "prompt": "pan",
+        "duration": "5s", "aspect_ratio": "2:3",
+        "input_image": {"filename": "in.jpeg", "content_base64": "eA=="},
+    }, "media/video/i2v"))
+
+    assert captured["duration"] == 5, "must be an int; the client does str(int(duration))"
+    assert captured["aspect_ratio"] == "3:4"
+    assert captured["image_url"].startswith("data:image/jpeg;base64,")
 
 
 # ---------------------------------------------------------------------------
