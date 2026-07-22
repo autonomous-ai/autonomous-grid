@@ -87,6 +87,17 @@ def _node_models(node: dict[str, Any]) -> list[str]:
     return [str(model) for model in models]
 
 
+def _node_responses_models(node: dict[str, Any]) -> set[str]:
+    """The subset of a node's served models that serve the Responses dialect (issue 10), read from
+    the overview's ``responses_models`` and str-coerced to match ``_node_models``' ids. Defends
+    against a non-list field, non-string items, and an older master that omits it entirely — each
+    yields an empty set, so a capability is never falsely shown (graceful degradation, fail-closed)."""
+    models = node.get("responses_models")
+    if not isinstance(models, list):
+        return set()
+    return {str(model) for model in models}
+
+
 def cmd_remote_engines(args: argparse.Namespace) -> int:
     """`grid engines` (remote): the live engines (nodes) joined to the active grid."""
     nodes = _nodes(args)
@@ -121,25 +132,34 @@ def cmd_remote_engines(args: argparse.Namespace) -> int:
 
 def cmd_remote_models(args: argparse.Namespace) -> int:
     """`grid models` (remote): the models served across the active grid's live engines, plus the
-    reserved ``auto`` model when the grid has auto-routing enabled (mirrors ``GET /relay/v1/models``)."""
+    reserved ``auto`` model when the grid has auto-routing enabled (mirrors ``GET /relay/v1/models``).
+
+    Each engine row carries whether it serves the model via the Responses dialect (issue 10), read
+    per-engine from the overview's ``responses_models``; shown in ``-v`` and ``--json`` (an older
+    master omits the field → nothing shown). The plain listing stays bare model ids for scripting."""
     overview = _fetch_overview(args)
     nodes = _nodes_from(overview)
-    rows = [
-        (model, str(node.get("engine") or ""), str(node.get("name") or ""))
-        for node in nodes
-        for model in _node_models(node)
-    ]
+    rows: list[tuple[str, str, str, bool]] = []
+    for node in nodes:
+        engine = str(node.get("engine") or "")
+        name = str(node.get("name") or "")
+        capable = _node_responses_models(node)  # resolved once per node, not per served model
+        for model in _node_models(node):
+            rows.append((model, engine, name, model in capable))
     # When auto routing is enabled, advertise the reserved `auto` model FIRST — same as the relay's
     # /relay/v1/models endpoint (owner `grid-router`), so it shows even when zero engines are joined.
     # An older master whose overview lacks the field reports falsy → no auto row (graceful degradation).
+    # `responses` is False for `auto`: dialect-reachability is a per-request routing outcome, not a
+    # static property of the reserved model (no AC covers it) — a real model's badge is its engine's.
     if overview.get("router_enabled"):
-        rows.insert(0, ("auto", "grid-router", ""))
+        rows.insert(0, ("auto", "grid-router", "", False))
 
     if getattr(args, "json", False):
         # Derived view (not a raw passthrough like engines): new API fields on a model entry
-        # won't surface here.
+        # won't surface here. `responses` is this engine's dialect capability (issue 10).
         print(json.dumps(
-            [{"model": model, "engine": engine, "node": node} for model, engine, node in rows],
+            [{"model": model, "engine": engine, "node": node, "responses": serves}
+             for model, engine, node, serves in rows],
             indent=2,
         ))
         return 0
@@ -149,13 +169,17 @@ def cmd_remote_models(args: argparse.Namespace) -> int:
         return 0
 
     if getattr(args, "verbose", False):
-        mwidth = max(len("MODEL"), *(len(model) for model, _, _ in rows))
-        ewidth = max(len("ENGINE"), *(len(engine) for _, engine, _ in rows))
+        mwidth = max(len("MODEL"), *(len(model) for model, _, _, _ in rows))
+        ewidth = max(len("ENGINE"), *(len(engine) for _, engine, _, _ in rows))
         print(f"{'MODEL':<{mwidth}}  {'ENGINE':<{ewidth}}  NODE")
-        for model, engine, node in rows:
-            print(f"{model:<{mwidth}}  {engine:<{ewidth}}  {node}")
+        for model, engine, node, serves in rows:
+            # `responses` joins the line as a trailing capability field — issue 06's intent (annotate
+            # the line, not add a column); shown only when this engine serves the dialect, else the
+            # row ends at NODE.
+            trailer = "  responses" if serves else ""
+            print(f"{model:<{mwidth}}  {engine:<{ewidth}}  {node}{trailer}")
         return 0
 
-    for model in dict.fromkeys(model for model, _, _ in rows):  # order-preserving dedup
+    for model in dict.fromkeys(model for model, *_ in rows):  # order-preserving dedup
         print(model)
     return 0

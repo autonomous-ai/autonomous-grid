@@ -12560,9 +12560,11 @@ def test_remote_models_json_maps_name_to_node_key(monkeypatch, tmp_path, capsys)
     _mock_overview(monkeypatch, _OVERVIEW_2NODES)
     assert cli.main(["models", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio"} in payload
-    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio"} in payload
-    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box"} in payload
+    # `responses` joins every entry (issue 10); this overview omits `responses_models`, so an older
+    # master degrades to False everywhere rather than crashing.
+    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
+    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
+    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
 
 
 def test_remote_models_empty_when_no_nodes(monkeypatch, tmp_path, capsys):
@@ -12610,7 +12612,7 @@ def test_remote_models_json_includes_auto_first_when_router_enabled(monkeypatch,
     _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
     assert cli.main(["models", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload[0] == {"model": "auto", "engine": "grid-router", "node": ""}
+    assert payload[0] == {"model": "auto", "engine": "grid-router", "node": "", "responses": False}
 
 
 def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch, tmp_path, capsys):
@@ -12620,6 +12622,74 @@ def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch,
     assert cli.main(["models"]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
     assert lines == ["auto"]
+
+
+# ── responses dialect annotation on the live listing (issue 10) ──
+
+# Two engines both serve `glm-5.2`, but only the MLX one serves the Responses dialect; `qwen-3` serves
+# it nowhere. Exercises AC1 (capable shows), AC2 (incapable omits), AC4 (same id, per-engine truth).
+_OVERVIEW_RESPONSES = {
+    "nodes": [
+        {"name": "mac-studio", "engine": "MLX", "models": ["glm-5.2", "qwen-3"],
+         "responses_models": ["glm-5.2"], "online": True},
+        {"name": "ollama-box", "engine": "ollama", "models": ["glm-5.2"],
+         "responses_models": [], "online": True},
+    ],
+}
+
+
+def test_remote_models_verbose_annotates_a_responses_capable_row(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models", "--verbose"]) == 0
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if "glm-5.2" in ln and "mac-studio" in ln]
+    assert rows and "responses" in rows[0]  # glm-5.2 on the MLX engine serves the dialect
+
+
+def test_remote_models_verbose_omits_responses_per_engine(monkeypatch, tmp_path, capsys):
+    # Per-engine truth (AC2/AC4): glm-5.2 serves the dialect on MLX but NOT on ollama; qwen-3 nowhere.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models", "--verbose"]) == 0
+    by_row: dict[str, str] = {}
+    for ln in capsys.readouterr().out.splitlines():
+        if "glm-5.2" in ln and "mac-studio" in ln:
+            by_row["mac_glm"] = ln
+        if "glm-5.2" in ln and "ollama-box" in ln:
+            by_row["ollama_glm"] = ln
+        if "qwen-3" in ln:
+            by_row["qwen"] = ln
+    assert "responses" in by_row["mac_glm"]         # capable engine shows it
+    assert "responses" not in by_row["ollama_glm"]  # same id, incapable engine → omitted
+    assert "responses" not in by_row["qwen"]        # not served via the dialect anywhere
+
+
+def test_remote_models_json_carries_per_engine_responses_flag(monkeypatch, tmp_path, capsys):
+    # AC6: the machine-readable form carries the same per-engine fact, true and false alike.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio", "responses": True} in payload
+    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
+    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
+
+
+def test_remote_models_verbose_degrades_when_responses_field_absent(monkeypatch, tmp_path, capsys):
+    # An older master's overview omits responses_models entirely → nothing annotated, no crash.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models", "--verbose"]) == 0
+    assert "responses" not in capsys.readouterr().out
+
+
+def test_remote_models_plain_listing_stays_bare_names(monkeypatch, tmp_path, capsys):
+    # The default (non-verbose) output is unchanged — bare deduped ids for scripting, no annotation.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == ["glm-5.2", "qwen-3"]  # deduped, first-seen order, no `responses` suffix
 
 
 def test_remote_engines_requires_grid_up(monkeypatch, tmp_path):
