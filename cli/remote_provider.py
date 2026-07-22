@@ -494,24 +494,33 @@ def _resolve_key_api_targets(
 
     from . import provider
 
-    stored = api_keys.load_key(kind)
-
-    flag_key = getattr(args, "api_key", None)
-    if flag_key:
-        print(
-            f"Warning: --api-key is visible in shell history. "
-            f"Consider exporting {whitelist.env_var} instead.",
-            file=sys.stderr,
-        )
-
-    key = (flag_key or os.environ.get(whitelist.env_var) or "").strip() or stored
-
+    # A kind reaching the KEY path must name the env var its key is read from — that IS a step of
+    # the precedence below. This guard stays FIRST: `os.environ.get(None)` is a TypeError, i.e. a
+    # traceback rather than this repo's clean-SystemExit contract, and the messages below would tell
+    # the operator to `export None=...`. Unreachable while codex is the only env-var-less kind (it
+    # routes to `_resolve_codex_targets` above), so this is the landmine guard for the next one —
+    # `api_keys.require_bearer` holds the same line on the serve side.
     env_var = whitelist.env_var
     if not env_var:
         raise SystemExit(
             f"--api {kind} has no API-key sign-in path in this version of grid. "
             f"This is a bug: {kind} needs its own credential resolution."
         )
+
+    stored = api_keys.load_key(kind)
+
+    flag_key = getattr(args, "api_key", None)
+    if flag_key:
+        print(
+            f"Warning: --api-key is visible in shell history. "
+            f"Consider exporting {env_var} instead.",
+            file=sys.stderr,
+        )
+
+    # Key precedence: --api-key flag, else the env var, else the machine-local key store, else a
+    # hidden interactive prompt. Values are stripped so accidental whitespace can't make an
+    # identical key look rotated on the `key != stored` check below.
+    key = (flag_key or os.environ.get(env_var) or "").strip() or stored
 
     if not key and provider._interactive():
         key = _prompt_api_key(kind, env_var)
@@ -521,7 +530,7 @@ def _resolve_key_api_targets(
     if not key:
         raise SystemExit(
             f"--api {kind} needs your API key. Pass --api-key <key>, "
-            f"export {whitelist.env_var}=..., or run interactively to be prompted."
+            f"export {env_var}=..., or run interactively to be prompted."
         )
 
     # Resolve the endpoint URL: --at overrides the whitelist default (required when whitelist has no base_url).

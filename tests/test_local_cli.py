@@ -3867,7 +3867,7 @@ def test_remote_join_api_invalid_key_media_api_is_terminal_no_spawn(monkeypatch,
         assert request.headers.get("authorization") == "Bearer invalid-key-123"
         return httpx.Response(401, text="invalid api key")
 
-    seen = _mock_vendor(monkeypatch, mock_probe)
+    _mock_vendor(monkeypatch, mock_probe)
 
     with pytest.raises(SystemExit) as exc:
         cli.main([
@@ -11931,6 +11931,39 @@ def test_remote_image_streams_and_saves_output(monkeypatch, tmp_path, capsys):
     assert seen["path"] == "/relay/v1/media/image/generate"
     saved = list(outdir.glob("*.png"))
     assert saved and saved[0].read_bytes() == b"PNGDATA"
+
+
+def test_remote_media_sends_model_in_the_body(monkeypatch, tmp_path):
+    """`-m` must reach the wire in remote mode, for all three media verbs.
+
+    Remote is the only mode API media engines (e.g. doggi) run in, and the provider routes media
+    jobs by `body["model"]` exactly like text. A payload built without it makes the flag a no-op
+    and every job fails at the vendor handler with "model is required".
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    img = tmp_path / "a.png"
+    img.write_bytes(b"x")
+    b64 = base64.b64encode(b"OUT").decode("ascii")
+    seen = {}
+
+    def handler(request):
+        seen[request.url.path] = json.loads(request.content)["model"]
+        result = json.dumps({"type": "result",
+                             "output_files": [{"filename": "out.png", "content_base64": b64}]})
+        return httpx.Response(200, content=f"data: {result}\n\ndata: [DONE]\n\n".encode())
+
+    _mock_relay(monkeypatch, handler)
+    outdir = tmp_path / "out"
+    assert cli.main(["image", "a cat", "-m", "doggi:hunyuan-image-3-t2i", "-o", str(outdir)]) == 0
+    assert cli.main(["edit", "fix", "-m", "doggi:hunyuan-image-3-i2i", "-i", str(img),
+                     "-o", str(outdir)]) == 0
+    assert cli.main(["video", "pan", "-m", "doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning",
+                     "-i", str(img), "-o", str(outdir)]) == 0
+    assert seen == {
+        "/relay/v1/media/image/generate": "doggi:hunyuan-image-3-t2i",
+        "/relay/v1/media/image/edit": "doggi:hunyuan-image-3-i2i",
+        "/relay/v1/media/video/i2v": "doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning",
+    }
 
 
 def test_remote_edit_posts_to_image_edit_with_routing_headers(monkeypatch, tmp_path):

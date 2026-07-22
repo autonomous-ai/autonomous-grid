@@ -28,7 +28,6 @@ This is a manual smoke test — not automated in CI.
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 import httpx
@@ -96,7 +95,7 @@ def test_t2i():
     """Submit a text-to-image request and verify we get a result."""
     print("\n=== Testing text-to-image ===")
     client = get_consumer_client()
-    print(f"  Submitting: doggi:hunyuan-image-3-t2i, prompt='a photo of a cat'")
+    print("  Submitting: doggi:hunyuan-image-3-t2i, prompt='a photo of a cat'")
     resp = client.post(
         "/relay/v1/media/image/generate",
         json={
@@ -122,11 +121,10 @@ def test_i2i():
     """Submit an image-to-image request (requires a local image file)."""
     print("\n=== Testing image-to-image ===")
     # Create a tiny test image
-    import base64
     # 1x1 PNG (smallest valid PNG)
     png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     client = get_consumer_client()
-    print(f"  Submitting: doggi:hunyuan-image-3-i2i")
+    print("  Submitting: doggi:hunyuan-image-3-i2i")
     resp = client.post(
         "/relay/v1/media/image/edit",
         json={
@@ -154,11 +152,10 @@ def test_i2i():
 def test_i2v():
     """Submit an image-to-video request."""
     print("\n=== Testing image-to-video ===")
-    import base64
     # 1x1 PNG
     png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     client = get_consumer_client()
-    print(f"  Submitting: doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning (this may take minutes)")
+    print("  Submitting: doggi:Wan-AI/Wan2.2-I2V-A14B-Lightning (this may take minutes)")
     resp = client.post(
         "/relay/v1/media/video/i2v",
         json={

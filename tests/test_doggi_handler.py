@@ -8,8 +8,6 @@ No network calls, no API key required. Tests the pure logic:
 """
 import base64
 import json
-import os
-from pathlib import Path
 
 import pytest
 
@@ -78,13 +76,108 @@ def test_sse_event_format():
     assert line.endswith("\n\n")
     parsed = json.loads(line.split("data: ", 1)[1].strip())
     assert parsed["output_files"][0]["filename"] == "out.png"
+    # `type` is what media_io.consume_media_sse dispatches on — without it the consumer's
+    # result branch never fires and nothing is written to disk.
+    assert parsed["type"] == "result"
 
 
 def test_sse_progress_event():
     line = _sse("progress", {"progress": 50.0, "status": "running"})
     parsed = json.loads(line.split("data: ", 1)[1].strip())
+    assert parsed["type"] == "progress"
     assert parsed["progress"] == 50.0
     assert parsed["status"] == "running"
+
+
+def test_handler_events_are_consumable_by_media_io(monkeypatch, tmp_path):
+    """The handler's SSE must round-trip through the real consumer and land a file on disk.
+
+    This is the end-to-end contract between `remote/handlers/doggi.py` and `cli/media_io.py`:
+    a shape the consumer can't dispatch is silently a zero-file success on the engine and a
+    non-zero exit with no output for the user.
+    """
+    from cli import media_io
+
+    class FakeReceipt:
+        def wait(self, *a, **kw):
+            return {"request_id": "req-1", "status": "completed", "result_files": [
+                {"filename": "bike.png", "content_type": "image/png",
+                 "file_url": "https://example.com/bike.png"},
+            ]}
+
+    class FakeT2i:
+        def submit(self, model, **kwargs):
+            return FakeReceipt()
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.t2i = FakeT2i()
+
+    import doggi
+    monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
+    payload = base64.b64encode(b"not-really-a-png").decode("ascii")
+    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: payload)
+
+    handler = DoggiHandler(base_url="http://fake", api_key="fake")
+    body = {"model": "doggi:hunyuan-image-3-t2i", "prompt": "a red bicycle",
+            "width": 720, "height": 720}
+
+    class FakeResponse:
+        """Minimal stand-in for the httpx streamed response media_io reads."""
+        def __init__(self, text):
+            self._text = text
+
+        def iter_lines(self):
+            return iter(self._text.splitlines())
+
+    sse = "".join(handler.forward(body, "media/image/generate"))
+    exit_code = media_io.consume_media_sse(FakeResponse(sse), tmp_path)
+
+    assert exit_code == 0, "the consumer must accept the handler's own SSE"
+    written = list(tmp_path.iterdir())
+    assert [p.name for p in written] == ["bike.png"]
+    assert written[0].read_bytes() == b"not-really-a-png"
+
+
+def test_handler_forwards_every_result_file(monkeypatch):
+    """num_images > 1 returns several files; dropping all but the first loses paid work."""
+    class FakeReceipt:
+        def wait(self, *a, **kw):
+            return {"request_id": "req-2", "status": "completed", "result_files": [
+                {"filename": "a.png", "content_type": "image/png", "file_url": "https://x/a.png"},
+                {"filename": "b.png", "content_type": "image/png", "file_url": "https://x/b.png"},
+            ]}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            self.t2i = type("T", (), {"submit": lambda self, model, **kw: FakeReceipt()})()
+
+    import doggi
+    monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
+    monkeypatch.setattr("remote.handlers.doggi._download_as_base64", lambda url: "eA==")
+
+    handler = DoggiHandler(base_url="http://fake", api_key="fake")
+    lines = list(handler.forward({"model": "doggi:m", "prompt": "p"}, "media/image/generate"))
+    result = json.loads(lines[1].split("data: ", 1)[1].strip())
+    assert [f["filename"] for f in result["output_files"]] == ["a.png", "b.png"]
+
+
+def test_handler_raises_when_gateway_attaches_no_files(monkeypatch):
+    """A completed task with result_files=null is a gateway fault — fail loudly, naming the id."""
+    class FakeReceipt:
+        def wait(self, *a, **kw):
+            return {"request_id": "req-3", "status": "completed", "result_files": None}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            self.t2i = type("T", (), {"submit": lambda self, model, **kw: FakeReceipt()})()
+
+    import doggi
+    monkeypatch.setattr(doggi, "DoggiClient", FakeClient)
+
+    handler = DoggiHandler(base_url="http://fake", api_key="fake")
+    with pytest.raises(RuntimeError, match="req-3"):
+        list(handler.forward({"model": "doggi:m", "prompt": "p"}, "media/image/generate"))
 
 
 # ---------------------------------------------------------------------------

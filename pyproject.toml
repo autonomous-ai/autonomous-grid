@@ -13,8 +13,9 @@ dependencies = [
     "tomli-w>=1.0",
     "uvicorn>=0.34",
     "websocket-client>=1.7",
+    # `doggi/` is vendored in-tree (first-party package, not a PyPI dep) — see its module
+    # docstring. `requests` is its transport; the rest of the CLI uses httpx.
     "requests>=2.25",
-    "doggi @ file:libs/doggi"
 ]
 
 [project.optional-dependencies]
@@ -27,11 +28,8 @@ dev = [
 grid = "cli:main"
 agrid = "cli:main"
 
-[tool.setuptools.package-dir]
-"cli" = "cli"
-"shared" = "shared"
-"local" = "local"
-"remote" = "remote"
+[tool.setuptools.packages.find]
+include = ["cli*", "shared*", "local*", "remote*", "doggi*"]
 
 [tool.setuptools.package-data]
 "shared.engine" = ["*.txt"]
@@ -39,6 +37,10 @@ agrid = "cli:main"
 
 [tool.ruff]
 target-version = "py311"
+# `doggi/` is vendored from the upstream doggi client (see its module docstrings). Keeping it
+# byte-identical makes a re-sync a straight copy, so it is not linted to this repo's rules —
+# the same "keep vendored edits bracketed and minimal" principle as shared/media and shared/engine.
+extend-exclude = ["doggi"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

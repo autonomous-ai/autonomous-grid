@@ -71,19 +71,28 @@ class DoggiHandler:
         result = receipt.wait()
         files = result.get("result_files") or result.get("files") or []
         if not files:
-            raise RuntimeError(f"Doggi returned no result files: {result}")
-        # Use the first file; Doggi may return multiple for num_images > 1.
-        first = files[0]
-        url = first.get("file_url") or first.get("url")
-        if not url:
-            raise RuntimeError(f"Doggi result file has no URL: {first}")
-        media_type = _infer_media_type(url, endpoint)
-        content = _download_as_base64(url)
-        yield _sse("result", {"output_files": [{
-            "filename": os.path.basename(url.split("?", 1)[0]),
-            "content_base64": content,
-            "media_type": media_type,
-        }]})
+            # A completed task with no files is a gateway/worker fault, not a client bug: the
+            # worker never POSTed its content to `/hooks/{request_id}/webhooks/content`. Name the
+            # request id so the operator can chase it upstream instead of re-running blind.
+            raise RuntimeError(
+                f"Doggi task {result.get('request_id', '?')} finished with status "
+                f"{result.get('status', '?')!r} but attached no result files"
+            )
+        # Every file, not just the first: `num_images > 1` returns several and the consumer's
+        # `write_media_outputs` already handles a list (dropping the rest silently loses paid work).
+        output_files = []
+        for item in files:
+            url = item.get("file_url") or item.get("url")
+            if not url:
+                raise RuntimeError(f"Doggi result file has no URL: {item}")
+            # The gateway states `filename` and `content_type` on every ResultFile; trust those and
+            # fall back to URL/endpoint sniffing only when a field is absent.
+            output_files.append({
+                "filename": item.get("filename") or os.path.basename(url.split("?", 1)[0]),
+                "content_base64": _download_as_base64(url),
+                "media_type": item.get("content_type") or _infer_media_type(url, endpoint),
+            })
+        yield _sse("result", {"output_files": output_files})
         yield "data: [DONE]\n\n"
 
     def _submit_t2i(self, model, body):
@@ -163,5 +172,10 @@ def _infer_media_type(url, endpoint):
 
 
 def _sse(event_type, payload):
-    """Format a payload as an SSE data line."""
-    return f"data: {json.dumps(payload)}\n\n"
+    """Format a payload as an SSE data line.
+
+    ``type`` is what the consumer dispatches on (`cli/media_io.consume_media_sse`): an event
+    without it falls through to the raw-print branch, so a `result` would never be written to
+    disk. It is set here rather than by each caller so no future event can omit it.
+    """
+    return f"data: {json.dumps({'type': event_type, **payload})}\n\n"

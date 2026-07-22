@@ -1405,8 +1405,18 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         if handler is not None:
             state.enter_inference()
             try:
-                for sse_line in handler.forward(body, endpoint):
-                    _submit_response(state, txn, content=sse_line, stream=True)
+                # ONE submit per transaction, like every other forward path (`_forward_stream` /
+                # `_forward_whole`): the relay's mailbox for a txn is written once, so submitting
+                # per SSE line would drop everything after the first. The events are drained here
+                # rather than handed over as a lazy iterator so a mid-generation failure (gateway
+                # error, no result files) is still reportable via `_try_submit_error` — nothing has
+                # been POSTed yet. Media results are fully buffered anyway (base64 in one event),
+                # so nothing is lost by materialising them.
+                sse_bytes = b"".join(
+                    line.encode() if isinstance(line, str) else line
+                    for line in handler.forward(body, endpoint)
+                )
+                _submit_response(state, txn, content=sse_bytes, stream=True)
             except Exception as exc:  # one bad media job must not kill the loop
                 print(f"\nMedia API job {txn} failed: {exc!r}", file=sys.stderr)
                 _try_submit_error(state, txn, str(exc))
