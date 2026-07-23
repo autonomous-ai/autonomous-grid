@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -66,6 +66,12 @@ _MAX_RELOAD_REGISTER_RETRIES = 5
 # Text goes to the LLM engine; media goes to this box's media server, each with its own fixed
 # allowlist (the media paths are NOT under `_ALLOWED_ENDPOINTS` — they route to a different URL).
 _ALLOWED_ENDPOINTS = frozenset({"chat/completions", "completions"})
+# The Responses dialect's endpoint literal, authored HERE — never taken from the wire. Kept OUT of the
+# closed `_ALLOWED_ENDPOINTS` frozenset and composed onto a hardware engine's served set only when its
+# join-time probe found the route (issue 08 / ADR 0018 decision 3): the probe decides WHETHER this
+# authored literal is included, never WHAT it is, so nothing discovered over the network reaches URL
+# construction. Must match grid-src's `endpoint_path` byte-for-byte (CLAUDE.md lockstep).
+_RESPONSES_ENDPOINT = "responses"
 _MEDIA_ENDPOINTS = frozenset({"media/image/generate", "media/image/edit", "media/video/i2v"})
 
 # The proactive rotation's due-conditions (ADR 0015 D-d), evaluated on the heartbeat tick so an
@@ -490,9 +496,17 @@ def _api_unsupported_params(api_kind: str, body: dict[str, Any]) -> list[str]:
 
 
 def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, params: list[str]) -> None:
-    """Refuse the job wearing the vendor's own error shape — byte-for-byte what forwarding would
-    have earned ("engine error 400: {openai-style json}"), so consumers and the relay's
-    terminal-error mapper see no difference, minus the vendor round-trip."""
+    """Refuse the job with an openai-style `engine error 400: {"error": {...}}`. For the openai/chat
+    case this is byte-for-byte what forwarding would have earned, so consumers and the relay's
+    terminal-error mapper see no difference, minus the vendor round-trip. For a kind whose real 400
+    wears a different shape — the codex seat answers `{"detail": ...}` (facts.md #7) — it is NOT
+    byte-identical, but the relay's `_terminal_error` keys on `["error"]["message"]`, so this shape
+    yields a CLEANER extracted message than the raw seat body would, and the relay re-renders it per
+    dialect (chat json / responses `response.failed`) either way.
+
+    Only the first unsupported param is named, mirroring the relay's own pre-queue denylist (which
+    raises on the first `param in body` match): a multi-violation body is corrected one param per
+    round-trip, consistently across both layers."""
     param = params[0]
     payload = json.dumps({"error": {
         "message": f"Unsupported parameter: '{param}' is not supported with this model.",
@@ -503,19 +517,45 @@ def _refuse_unsupported_api_params(state: _ServeState, txn: str, api_kind: str, 
     _try_submit_error(state, txn, f"engine error 400: {payload}")
 
 
-def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None) -> dict[str, Any]:
-    """Rename the output-token cap to the vendor's parameter when forwarding to an API engine.
+def _refuse_stream_only_seat(state: _ServeState, txn: str) -> None:
+    """Refuse a non-stream responses job for the stream-only subscription seat (issue 05, AC7).
 
-    The relay's contract layer normalises every request to ``max_tokens`` — the only name hardware
-    engines understand — including rewriting a consumer's ``max_completion_tokens`` into it. A vendor
-    that renamed the parameter (OpenAI's GPT-5.x) then 400s on every job, so translate on the way
-    out. ``max_tokens`` holds the value the relay validated against its cap, so it wins over any
-    ``max_completion_tokens`` left beside it by that rewrite; only one name may go upstream.
+    The seat's backend speaks SSE only. The relay lifted its global stream-mandatory rule so that every
+    other engine may serve a non-stream responses request; this per-kind gate — the layer that knows
+    the kind — re-homes the seat's refusal, wearing the same `engine error 400: {…}` string the other
+    per-kind gates use. The relay's `_terminal_error` extracts (400, "Stream must be set to true") and
+    renders this dialect's `{"detail": "Stream must be set to true"}` + 400 — byte-identical to the old
+    pre-queue refusal, so the seat's observable behaviour is unchanged (user story 16)."""
+    payload = json.dumps({"error": {
+        "message": "Stream must be set to true",
+        "type": "invalid_request_error",
+        "param": "stream",
+        "code": "unsupported_parameter",
+    }})
+    _try_submit_error(state, txn, f"engine error 400: {payload}")
 
-    Returns ``body`` unchanged for hardware engines, for vendors that still take ``max_tokens``, and
-    for vendors that take no output cap at all.
+
+def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None, endpoint: str) -> dict[str, Any]:
+    """Rename the output-token cap to the vendor's CHAT parameter when forwarding a chat job to an
+    API engine.
+
+    The relay's chat normaliser rewrites every request to ``max_tokens`` — the only name hardware
+    engines understand — including a consumer's ``max_completion_tokens``. A vendor that renamed the
+    parameter (OpenAI's GPT-5.x) then 400s on every job, so translate on the way out. ``max_tokens``
+    holds the value the relay validated against its cap, so it wins over any ``max_completion_tokens``
+    left beside it by that rewrite; only one name may go upstream.
+
+    Scoped to ``chat/completions`` (issue 04). The relay's responses contract is a PASSTHROUGH — it
+    does not normalise to ``max_tokens``; it lets the dialect's own cap ``max_output_tokens`` through
+    byte-for-byte, already the name the vendor's responses endpoint wants. So on responses there is
+    nothing to translate, and applying the chat rename would MIS-name a stray ``max_tokens`` as the
+    chat spelling that endpoint rejects. (The relay also refuses ``max_tokens`` on responses, so a real
+    body never carries it there — but this guard does not lean on that cross-repo rule.)
+
+    Returns ``body`` unchanged for the responses dialect, for hardware engines, for vendors that still
+    take ``max_tokens``, and for vendors that take no output cap at all.
     """
-    if not api_kind:
+    if not api_kind or endpoint != "chat/completions":
         return body
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     param = whitelist.max_output_param if whitelist else "max_tokens"
@@ -545,6 +585,18 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
         ("vision", "tools", "parallel_tool_calls", "json_object", "json_schema"), False
     )
     caps_models: dict[str, Any] = {}
+    # Which relay endpoint(s) this kind serves comes from its catalog row (issue 03) — NOT a hardcoded
+    # chat-only list. This is the wire contract grid-src's per-model `provider_supports` filter reads,
+    # so a kind that serves `responses` (openai) must advertise it here or nothing routes. A kind gone
+    # from the catalog between join and respawn degrades to chat-only, matching `_served_endpoints`.
+    whitelist = api_catalog.WHITELISTS.get(api_kind)
+    kind_endpoints = list(whitelist.endpoints) if whitelist else ["chat/completions"]
+    # Loop-invariant per-kind fact, hoisted beside kind_endpoints (issue 06b): whether this kind honours
+    # a Responses output cap. Sourced from the SAME catalog fact the engine gate refuses on
+    # (`unsupported_params`) via `kind_honours_output_cap`, so the auto-router filter (layer 2) and the
+    # per-kind engine gate (layer 3, issue 04) can never disagree — openai True, any future can't-cap kind
+    # False for free. Gated per-MODEL on `entry is not None` at the call below (a stale model fails closed).
+    kind_can_cap = api_catalog.kind_honours_output_cap(api_kind)
     for advertised_model in advertised:
         entry = api_catalog.find_advertised(api_kind, advertised_model)
         if entry is None:
@@ -573,10 +625,23 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
             continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
-        # Media API engines (e.g. Doggi) advertise media endpoints; text API engines advertise
-        # chat/completions only (the gate in handle_job refuses legacy completions for text APIs).
-        endpoints = ["media"] if api_kind in HANDLERS else ["chat/completions"]
-        env = probe.envelope(advertised_model, probed, ctx, endpoints=endpoints)
+        # Media API engines (e.g. Doggi) advertise media endpoints — their jobs run through
+        # HANDLERS, not the text relay dialects, so the per-kind text contract below does not
+        # apply to them. Text API engines advertise the kind's catalog row (above), never legacy
+        # `completions` — an API engine never serves it, and the handle_job gate refuses it anyway
+        # (honest advertisement, ADR 0012).
+        # `honours_output_cap` is gated on `entry is not None`: a model gone from the whitelist degrades
+        # to an all-False FEATURES dict (like a failed probe), so its `output_cap` is False too — a capped
+        # `auto` request then excludes the anomaly rather than routing to a likely-broken model, the
+        # fail-closed posture the whole filter relies on. `endpoints` stays per-KIND (outside features)
+        # because it is what makes the gate refuse a wrong dialect at all.
+        if api_kind in HANDLERS:
+            env = probe.envelope(advertised_model, probed, ctx, endpoints=["media"])
+        else:
+            env = probe.envelope(
+                advertised_model, probed, ctx, endpoints=kind_endpoints,
+                honours_output_cap=entry is not None and kind_can_cap,
+            )
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
 
@@ -596,10 +661,24 @@ def _probe_spec_caps(
     """
     if api_kind:
         return _static_api_caps(api_kind, advertised, plan_type=plan_type)
+    if not advertised:
+        return {}  # no models → nothing to advertise; skip the route probe's network round-trip (loop was a no-op)
+    # Discover the Responses dialect ONCE per engine (issue 08 / ADR 0018): the route is a property of
+    # the server, not of a model, so probe here — OUTSIDE the per-model loop — and stamp the one answer
+    # onto every model. A capable engine advertises `responses` in its endpoints and (PRD §3 — every
+    # non-seat engine accepts an output cap) the `output_cap` routing FEATURE too, so a capped `auto`
+    # request can land on it; a failed/absent probe leaves the pre-Phase-2 chat pair untouched (fail
+    # closed). The API-kind branch returned above is never probed — seat/openai caps are static data.
+    serves_responses = probe.probe_responses_endpoint(llm_url)
+    # Opt-in breadcrumb (GRID_ENGINE_DEBUG): the one lever an operator has to answer "why didn't my
+    # engine pick up Responses" — the probe verdict is otherwise silent, and a False sticks until re-join.
+    _debug(f"responses probe {llm_url!r}: {'serves' if serves_responses else 'does not serve'} /responses")
+    endpoints = ["chat/completions", "completions"] + (["responses"] if serves_responses else [])
     caps_models: dict[str, Any] = {}
     for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
         env = probe.capabilities(
             llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
+            endpoints=endpoints, honours_output_cap=serves_responses,
         )
         caps_models.update((env or {}).get("models") or {})
     return {"schema_version": 1, "models": caps_models} if caps_models else {}
@@ -1369,13 +1448,49 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             state._reload_register_fails = 0
 
 
-def _served_endpoints(api_kind: str | None) -> tuple[str, ...] | frozenset[str]:
-    """The relay endpoints the routed engine's KIND serves — ADR 0015 D-b's matrix, one row per
-    kind: hardware (``None``) keeps the legacy chat pair, an API kind serves exactly its whitelist
-    row's endpoints (openai ⇒ chat/completions, codex ⇒ responses). A kind no longer in the
-    catalog (edited between join and respawn) degrades to the ``ApiWhitelist`` default — chat-only,
-    never the hardware pair — the same posture as ``_static_api_caps``."""
+def _hardware_serves_responses(snap: _Snapshot, model: str | None, target: str) -> bool:
+    """Whether the hardware engine at ``target`` serves the Responses dialect — read from the per-model
+    ``endpoints`` list the probe wrote into the caps envelope (issue 08), so the engine-side gate and the
+    relay's candidate filter can never disagree about who serves the dialect.
+
+    The capability is a property of the ENGINE, not the model (ADR 0018 — probed once per engine, stamped
+    on every model it advertises). Normally ``model`` matches an advertised name and its entry answers
+    directly. But ``route_and_kind``'s single-engine fallback resolves an unmatched/missing ``model`` onto
+    the sole engine (as chat does), and that model has no caps entry — so on a miss, resolve the answer
+    from ANY model routed to the same ``target`` (all carry the identical per-engine answer). Without this
+    a single-engine grid would refuse a responses job with "unsupported endpoint" even though its one
+    engine serves the dialect — the misleading-error class ADR 0017/0018 exist to prevent.
+
+    Defensive: a non-dict entry or a non-list ``endpoints`` reads as "no" (fail closed), never raises."""
+    models = snap.capabilities.get("models") or {}
+    entry = models.get(model)
+    if not isinstance(entry, dict):
+        # The routed model has no caps entry (single-engine fallback on an unmatched/missing model):
+        # consult the ENGINE via any model routed to the same target — the probe stamped one answer on all.
+        for advertised_model, url in snap.routes.items():
+            if url == target and isinstance(models.get(advertised_model), dict):
+                entry = models[advertised_model]
+                break
+    endpoints = entry.get("endpoints") if isinstance(entry, dict) else None
+    return isinstance(endpoints, list) and _RESPONSES_ENDPOINT in endpoints
+
+
+def _served_endpoints(
+    api_kind: str | None, *, hardware_serves_responses: bool = False,
+) -> tuple[str, ...] | frozenset[str]:
+    """The relay endpoints the routed engine serves. An API kind keeps ADR 0015 D-b's per-KIND matrix:
+    it serves exactly its whitelist row's endpoints (openai ⇒ chat/completions, codex ⇒ responses),
+    degrading to the ``ApiWhitelist`` default — chat-only, never the hardware pair — for a kind edited
+    out of the catalog between join and respawn (the same posture as ``_static_api_caps``).
+
+    Hardware (``api_kind`` is None) is now per-ENGINE, not a fixed property of being hardware (ADR 0018
+    decision 1): the closed ``_ALLOWED_ENDPOINTS`` chat pair, plus the authored ``responses`` literal
+    composed on ONLY when this engine's join-time probe found the route (``hardware_serves_responses``).
+    ``_ALLOWED_ENDPOINTS`` itself is never widened — the served set stays a closed set of fixed literals
+    checked before any URL is built (decision 3)."""
     if not api_kind:
+        if hardware_serves_responses:
+            return _ALLOWED_ENDPOINTS | {_RESPONSES_ENDPOINT}  # frozenset | set → frozenset; the closed set is unchanged
         return _ALLOWED_ENDPOINTS
     whitelist = api_catalog.WHITELISTS.get(api_kind)
     return whitelist.endpoints if whitelist else ("chat/completions",)
@@ -1472,14 +1587,24 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     if target is None:
         _try_submit_error(state, txn, f"no engine serves model {model!r}")
         return
-    # Per-kind endpoint matrix (ADR 0015 D-b): which endpoint an engine serves is a property of its
-    # KIND, so the gate runs AFTER routing, where the kind is known — codex ⇒ responses only,
-    # openai ⇒ chat/completions only, hardware ⇒ the chat pair. A mismatch — including a job that
-    # arrived via the single-URL fallback above — is refused with a structured error, never
-    # translated and never blind-forwarded. The global allow-list is deliberately NOT widened:
-    # `responses` never enters `_ALLOWED_ENDPOINTS`, so the anti-traversal property is unchanged —
-    # only a literal that matched this matrix ever reaches `f"{target_url}/{endpoint}"`.
-    served = _served_endpoints(api_kind)
+    # Endpoint gate, AFTER routing where the engine is known. API kinds keep ADR 0015 D-b's per-KIND
+    # matrix (codex ⇒ responses only, openai ⇒ chat/completions); HARDWARE is now per-ENGINE (ADR 0018
+    # decision 1) — the chat pair plus `responses` iff this engine's join-time probe found the route,
+    # read from the caps the probe stamped. A mismatch — including a job that arrived via the single-URL
+    # fallback above — is refused with a structured error, never translated and never blind-forwarded.
+    #
+    # ADR 0018 decision 3 deliberately NARROWS the old anti-traversal statement (which read "`responses`
+    # never enters `_ALLOWED_ENDPOINTS`, so the property is unchanged"): the literal now DOES enter the
+    # set the gate consults for a capable hardware engine. This is not a loosening. The safety was never
+    # that `responses` was absent — it is that the endpoint is checked against a CLOSED set of fixed
+    # literals before it is used to build `f"{target_url}/{endpoint}"`. `_ALLOWED_ENDPOINTS` stays a
+    # frozenset untouched; the `responses` composed onto the hardware set is a literal authored in this
+    # repo, and the probe decides only WHETHER it is included, never WHAT it is — so nothing from the
+    # relay or the engine's wire answer reaches URL construction.
+    served = _served_endpoints(
+        api_kind,
+        hardware_serves_responses=api_kind is None and _hardware_serves_responses(snap, model, target),
+    )
     if endpoint not in served:
         if api_kind:
             _try_submit_error(
@@ -1489,16 +1614,31 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         else:  # don't forward an unknown path to the local engine (the pre-matrix behavior, kept verbatim)
             _try_submit_error(state, txn, f"unsupported endpoint: {endpoint!r}")
         return
-    # Params the vendor is known to reject (e.g. GPT-5.x and `stop`): refuse now, with the vendor's
-    # own error shape, instead of forwarding to learn a static catalog fact. A CHAT-dialect gate —
-    # the fabricated refusal wears the chat `{"error": ...}` envelope — so it runs only on the chat
-    # forward: provably inert for a responses job, whose contract violations are the vendor's to
-    # answer in its own `{"detail": ...}` shape (facts.md #7; the codex whitelist row's
-    # `unsupported_params` is thereby advisory catalog data, not an executable gate).
-    if api_kind and endpoint == "chat/completions":
+    # Params the vendor is known to reject (GPT-5.x rejects `stop`; the codex seat rejects every
+    # output-cap spelling and `temperature` — facts.md #7): refuse now, with the vendor's own error
+    # shape, instead of forwarding to learn a static catalog fact. Runs on EVERY dialect an API kind
+    # serves (issue 04), so the codex row's `unsupported_params` is an executable per-kind gate, not
+    # advisory data — this is the layer that knows the seat's kind, which the relay (normalising
+    # before it selects an engine) cannot. The refusal is the same `engine error 400: {"error": ...}`
+    # string on both dialects; the relay renders it PER-DIALECT — chat's `{"error"/"detail": ...}`, or
+    # a `response.failed` block for responses (`relay._responses_failure_block`, which lifts the
+    # message that names the param) — so an app's error handling never forks on which layer caught it.
+    # The relay still refuses the chat-dialect cap spellings on `responses` pre-queue (they are the
+    # wrong dialect for every engine), so what this gate newly answers there is the seat's
+    # `max_output_tokens` and `temperature`.
+    if api_kind:
         unsupported = _api_unsupported_params(api_kind, body)
         if unsupported:
             _refuse_unsupported_api_params(state, txn, api_kind, unsupported)
+            return
+        # A stream-only seat is SSE-only, so a non-stream responses job is refused here (issue 05 AC7)
+        # — the relay lifted its global stream rule precisely so this kind-aware gate answers it. Gated
+        # on `kind_is_stream_only` (issue 06c), the SAME predicate the advertised `stream_only` trait is
+        # sourced from, so the layer that refuses and the auto-router that routes around it can't
+        # disagree, and a future stream-only kind inherits this refusal for free. Every other kind
+        # serves a non-stream responses request (the forward block's whole-body arm).
+        if api_catalog.kind_is_stream_only(api_kind) and endpoint == "responses" and not is_stream:
+            _refuse_stream_only_seat(state, txn)
             return
 
     # Consumers address the model by its advertised name; an external engine behind ``--advertise-as``
@@ -1506,8 +1646,9 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     # mutate the job). No mapping / already-equal → forward unchanged (built-in + single-engine paths).
     upstream_model = state.upstream_model(model, snap)
     forward_body = {**body, "model": upstream_model} if upstream_model and upstream_model != model else body
-    # ... and an API vendor may spell the output-token cap differently from the grid's internal name.
-    forward_body = _adapt_output_token_param(forward_body, api_kind)
+    # ... and an API vendor may spell the output-token cap differently from the grid's internal name
+    # on the CHAT dialect (the responses dialect passes its own cap through — see the function).
+    forward_body = _adapt_output_token_param(forward_body, api_kind, endpoint)
 
     state.enter_inference()
     try:
@@ -1516,6 +1657,27 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             # streaming forward, submitting whole event blocks (ADR 0015 D-e); headers come from
             # the live seat holder, never the snapshot (D-d).
             _forward_codex(state, txn, endpoint, forward_body, read_timeout, target)
+        elif endpoint == "responses" and is_stream:
+            # A STREAMING responses job served by a non-seat engine (openai, Phase 1). The shared
+            # block-aligned forward RETURNS a non-200 rather than reporting it; unlike the seat's D-d
+            # refresh an openai engine does NOT retry (ADR 0012, job-error-only) — so answer a failure
+            # here with a terminal signal, or the consumer hangs. Kept off the chat forwards below,
+            # which lack block alignment (the terminal event carrying usage would tear).
+            failure = _forward_responses_stream(
+                state, txn, endpoint, forward_body, read_timeout, target,
+                headers=_forward_headers(state, target, snap),
+            )
+            if failure is not None:
+                _warn_api_auth_failure(api_kind, failure.status)
+                _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
+        elif endpoint == "responses":
+            # A NON-streaming responses job (issue 05). The vendor returns ONE whole response object,
+            # so the dialect-agnostic whole-body forward serves it — block alignment is a streaming
+            # concern and there is no stream here. `_forward_whole` already answers a non-200 with a
+            # terminal signal, so the same caller obligation is met. The codex seat never reaches this
+            # arm: it is stream-only and refuses a non-stream job at the per-kind gate above.
+            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
+                           headers=_forward_headers(state, target, snap), api_kind=api_kind)
         elif is_stream:
             _forward_stream(state, txn, endpoint, forward_body, read_timeout, target,
                             headers=_forward_headers(state, target, snap), api_kind=api_kind)
@@ -1634,23 +1796,85 @@ def _warn_codex_upstream(status: int, headers: Any) -> None:
         _warn_api_auth_failure(api_catalog.CODEX_KIND, status)
 
 
-def _forward_codex(
-    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
-    target_url: str,
-) -> None:
-    """Forward one responses job to the seat and stream the reply back as whole event blocks.
+@dataclass(frozen=True)
+class _UpstreamFailure:
+    """One engine's non-200 on the responses path, drained and bound so it outlives the response
+    context. `headers` is carried alongside `status` because the operator taxonomy needs it — a
+    Cloudflare-challenge 403 and an auth 403 demand OPPOSITE actions and cannot be told apart from
+    the status int alone (ADR 0015 D-f).
 
-    Always the streaming path, whatever the job's stream flag says — the upstream only speaks SSE
-    (ADR 0015 D-e). The bearer is resolved from the seat holder PER ATTEMPT (D-d: outside the
-    routing snapshot, so a rotation needs no reload), and an upstream 401 refreshes and retries
-    exactly once, codex-scoped — openai keeps ADR 0012's job-error-only. The refresh runs OUTSIDE
-    the response context: the non-200 is drained and (status, headers, text) bound first, so no
-    vendor connection is held through a ≤15s token exchange, and the warning path sees the
-    response headers (CF-403 vs auth-403), not just the status int.
+    `headers` is typed structurally rather than as `httpx.Headers`: a lookup is all any reader does,
+    and this record is meant to stay kind-agnostic, so it does not take a dependency on the client
+    library. It holds a live mapping and so is NOT hashable — never put one in a set or dict key."""
+
+    status: int
+    headers: Mapping[str, str]
+    text: str
+
+
+def _forward_responses_stream(
+    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
+    target_url: str, headers: dict[str, str],
+) -> _UpstreamFailure | None:
+    """Forward one responses job and stream the reply back as whole event blocks.
+
+    The dialect's streaming submission, with NO engine-kind knowledge — any kind that serves
+    `responses` can call it (PRD §5 / ADR 0018). Block alignment is the point, and it is a property
+    of the dialect rather than of any one backend (ADR 0015 D-e, kept verbatim): one submitted chunk
+    is one whole `event:`+`data:` block, so the terminal event that carries the usage is never torn
+    across two submissions, and an engine dying mid-stream strands only complete events at the relay.
+
+    Credentials are the CALLER's business — whatever `headers` says is what goes on the wire, so a
+    seat resolving a rotating bearer per attempt and an API engine carrying a static key are the
+    same code here. A streamed 401 from the RELAY re-raises out of `_submit_response` and
+    `handle_job`'s guard reports it — the same terminal-signal guarantee `_forward_stream` has.
+
+    Returns None once a 200 has been submitted. A non-200 is drained inside the response context and
+    returned, with BOTH contexts closed first: how to answer it differs by kind (the seat refreshes
+    and retries once, D-d; an API engine does not, ADR 0012), and deciding out here means no vendor
+    connection is held open through a ≤15s token exchange.
+
+    **The caller MUST answer a non-None return with a terminal signal** — `_try_submit_error`, or a
+    retry that reaches one. Nothing has been submitted for the job at that point, and a dropped
+    return is invisible to `handle_job`'s `except Exception` guard, so the consumer would hang until
+    it timed out: exactly the outcome `_submit_response` and `_try_submit_error` exist to prevent.
     """
     import httpx
 
     timeout = httpx.Timeout(connect=10, read=read_timeout, write=None, pool=10)
+    with httpx.Client(timeout=timeout) as client:
+        with client.stream(
+            "POST", f"{target_url}/{endpoint}", json=body, headers=headers,
+        ) as resp:
+            if resp.status_code == 200:
+                _submit_response(
+                    state, txn, stream=True,
+                    content=_traced_stream(txn, _iter_event_blocks(resp.iter_bytes())),
+                )
+                return None
+            resp.read()  # drain inside the context so .text is readable after it closes
+            return _UpstreamFailure(resp.status_code, resp.headers, resp.text)
+
+
+def _forward_codex(
+    state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
+    target_url: str,
+) -> None:
+    """Forward one responses job to the seat — the seat's own credential behaviour, wrapped around
+    the shared responses forward.
+
+    Always the streaming path, whatever the job's stream flag says — the upstream only speaks SSE
+    (ADR 0015 D-e). What is genuinely the SEAT's and stays here: the bearer is resolved from the
+    seat holder PER ATTEMPT (D-d: outside the routing snapshot, so a rotation needs no reload), an
+    upstream 401 refreshes and retries exactly once, codex-scoped — openai keeps ADR 0012's
+    job-error-only — and the CF-403-vs-auth-403 operator taxonomy (D-f). Block alignment is NOT a
+    seat concern and lives in `_forward_responses_stream`, where any kind can reach it.
+
+    The refresh still runs OUTSIDE the response context — now by construction rather than by care:
+    the shared forward returns a failure only after draining it and closing both contexts, so no
+    vendor connection is held through a ≤15s token exchange, and the warning path still sees the
+    response headers (CF-403 vs auth-403), not just the status int.
+    """
     for attempt in (1, 2):
         try:
             bundle = state.codex_seat.bundle()  # bind once per attempt, like a snapshot
@@ -1673,25 +1897,16 @@ def _forward_codex(
                 "to re-create it",
             )
             return
-        with httpx.Client(timeout=timeout) as client:
-            with client.stream(
-                "POST", f"{target_url}/{endpoint}", json=body, headers=_codex_headers(bundle),
-            ) as resp:
-                if resp.status_code == 200:
-                    # Whole event blocks per submitted chunk (D-e); a streamed 401 from the RELAY
-                    # re-raises out of _submit_response and handle_job's guard reports it — same
-                    # terminal-signal guarantees as _forward_stream.
-                    _submit_response(
-                        state, txn, stream=True,
-                        content=_traced_stream(txn, _iter_event_blocks(resp.iter_bytes())),
-                    )
-                    return
-                resp.read()  # drain inside the context so .text is readable after it closes
-                status, resp_headers, text = resp.status_code, resp.headers, resp.text
-        if status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
+        failure = _forward_responses_stream(
+            state, txn, endpoint, body, read_timeout, target_url,
+            headers=_codex_headers(bundle),
+        )
+        if failure is None:
+            return  # submitted — the shared path already gave the job its terminal signal
+        if failure.status == 401 and attempt == 1 and state.codex_seat.refresh(bundle.access_token):
             continue  # rotated — retry once with the fresh bearer (reactive D-d)
-        _warn_codex_upstream(status, resp_headers)
-        _try_submit_error(state, txn, f"engine error {status}: {text[:200]}")
+        _warn_codex_upstream(failure.status, failure.headers)
+        _try_submit_error(state, txn, f"engine error {failure.status}: {failure.text[:200]}")
         return
 
 

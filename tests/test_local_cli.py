@@ -796,6 +796,30 @@ def test_catalog_api_openai_prints_whitelist(monkeypatch, capsys):
     assert "leave the grid" in out
 
 
+def test_catalog_api_openai_shows_responses_capability(monkeypatch, capsys):
+    """AC1 (issue 06): the human-readable `grid catalog --api openai` listing shows the Responses
+    dialect among each model's capabilities. The openai kind serves it (its whitelist row carries
+    `responses` in `endpoints` since issue 03), so a person picking a model reads it here instead of
+    learning by trial and error. Asserted on the model's OWN line — the per-model capability tag,
+    not incidental prose elsewhere in the output."""
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [ln for ln in out.splitlines() if "openai:gpt-5.5" in ln]
+    assert lines, "the gpt-5.5 model line must be printed"
+    # The dialect joins the model's capability list, alongside the content caps already shown.
+    assert "responses" in lines[0]
+    assert "tools" in lines[0] and "vision" in lines[0]
+
+
 def test_catalog_api_unknown_kind_errors():
     with pytest.raises(SystemExit) as exc:
         cli.cmd_catalog(argparse.Namespace(api="anthropic", json=False))
@@ -843,6 +867,11 @@ def test_api_whitelist_integrity():
         if whitelist.base_url is not None:
             assert whitelist.base_url.startswith("https://"), f"{kind} needs a vendor base URL"
             assert not whitelist.base_url.endswith("/"), f"{kind} base URL must not end with '/'"
+        # Every kind must serve at least one endpoint. An empty tuple would make both the catalog
+        # display (issue 06) and the relay's `_served_endpoints` gate silently treat the kind as an
+        # ordinary chat-only model while it actually serves nothing. The dataclass default is
+        # non-empty; this pins that no row may override it to `()`.
+        assert whitelist.endpoints, f"{kind} must serve at least one endpoint"
 
 
 def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
@@ -877,6 +906,30 @@ def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
     assert "grid chat" in out  # ...and what NOT to point at it
     assert "leave the grid" in out  # provenance disclosure (openai parity)
     assert "allowance" in out  # flat-rate seat: jobs spend the provider's own allowance
+
+
+def test_catalog_api_codex_shows_responses_per_entry(monkeypatch, capsys):
+    """AC2 (issue 06): the subscription-seat listing shows the dialect too — every codex model
+    serves `responses` (its row is `endpoints=("responses",)`), so the same data-driven cap tag
+    appears on each per-tier entry line, beside the tools/vision it already showed. Asserted on the
+    model's OWN line: distinct from the trailing prose that also says "responses", this witnesses the
+    per-model capability tag. The per-tier GROUPING is unchanged — that is pinned separately by
+    test_catalog_api_codex_prints_per_tier_whitelist's `\nfree:\n` assertion."""
+    def _no_network(*args, **kwargs):
+        raise AssertionError("`grid catalog --api` must not touch the network")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "request", _no_network)
+    monkeypatch.setattr(httpx, "stream", _no_network)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [ln for ln in out.splitlines() if "codex:gpt-5.6-terra" in ln]
+    assert lines, "the gpt-5.6-terra model line must be printed"
+    assert "responses" in lines[0]  # the per-model dialect tag, not merely the trailing prose
+    assert "tools" in lines[0] and "vision" in lines[0]  # alongside the caps it already showed
 
 
 def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
@@ -953,6 +1006,42 @@ def test_codex_whitelist_has_no_env_var_and_no_output_cap():
         "max_tokens", "max_output_tokens", "max_completion_tokens", "temperature",
     }
     assert codex.entries  # issue 05: populated from the tier table
+
+
+def test_kind_honours_output_cap_reads_unsupported_params():
+    """The single source of truth for issue 06b's auto-router cap filter: a kind honours a Responses
+    output-token cap IFF `max_output_tokens` is NOT among its `unsupported_params` — the SAME catalog
+    fact the engine-side gate (`_api_unsupported_params`, issue 04) refuses on, so layer 2 (the auto
+    router) and layer 3 (the engine gate) can never disagree about a kind. An unknown kind fails
+    closed (not-cap-capable), matching how `_static_api_caps`/`_served_endpoints` degrade one."""
+    assert api_catalog.kind_honours_output_cap("openai") is True
+    assert api_catalog.kind_honours_output_cap("codex") is False
+    assert api_catalog.kind_honours_output_cap("nonexistent-kind") is False
+    # Read from the fact, never a second declaration: the helper's answer must track the rows.
+    assert api_catalog.RESPONSES_OUTPUT_CAP_PARAM == "max_output_tokens"
+    assert (
+        api_catalog.RESPONSES_OUTPUT_CAP_PARAM
+        not in api_catalog.WHITELISTS["openai"].unsupported_params
+    )
+    assert (
+        api_catalog.RESPONSES_OUTPUT_CAP_PARAM
+        in api_catalog.WHITELISTS["codex"].unsupported_params
+    )
+
+
+def test_kind_is_stream_only_reads_the_stream_only_field():
+    """Issue 06c's single source of truth for the auto-router's forbidden-feature axis: a kind is
+    stream-only IFF its whitelist row says so (`stream_only`). Read by BOTH the engine-side stream
+    gate (`remote/serve.py`) and the advertised envelope (`codex_capability_entry`), so the layer that
+    refuses a non-stream seat request and the layer that routes around it can never disagree. Unknown
+    kind → False: the OPPOSITE fail-direction from `kind_honours_output_cap` — absence means "never
+    excluded", so an old CLI / any hardware engine (never in WHITELISTS) is backward-compatible."""
+    assert api_catalog.kind_is_stream_only("codex") is True
+    assert api_catalog.kind_is_stream_only("openai") is False
+    assert api_catalog.kind_is_stream_only("nonexistent-kind") is False
+    # The predicate tracks the row, never a second declaration: only the seat carries the trait.
+    assert api_catalog.WHITELISTS["codex"].stream_only is True
+    assert api_catalog.WHITELISTS["openai"].stream_only is False
 
 
 def test_codex_tier_whitelist_integrity():
@@ -1057,7 +1146,7 @@ def test_api_whitelist_endpoints_per_kind():
     values are hand-duplicated with grid-src's `provider_supports` filter (absent ⇒ chat-only,
     old CLIs fail closed); the literal `"responses"` must match its `endpoint_path` byte-for-byte
     (CLAUDE.local.md lockstep rule)."""
-    assert api_catalog.WHITELISTS["openai"].endpoints == ("chat/completions",)
+    assert api_catalog.WHITELISTS["openai"].endpoints == ("chat/completions", "responses")
     assert api_catalog.WHITELISTS["codex"].endpoints == ("responses",)
 
 
@@ -1073,14 +1162,16 @@ def test_codex_kind_constant_is_defined_in_shared_and_reexported():
     assert api_keys.CODEX_KIND == api_catalog.CODEX_KIND
 
 
-def test_responses_only_kind_flags_codex_models_only():
+def test_responses_only_kind_flags_only_kinds_that_cannot_serve_chat():
     """The `grid chat` pre-flight asks one question — "is this model namespaced under a kind that
-    cannot serve chat/completions?" — and the answer is data-driven from the whitelist's
-    `endpoints`, never a hardcoded kind name. Anything that isn't such a namespace (openai's chat
-    kind, a hardware model whose NAME merely contains a colon, no namespace at all) is None."""
-    assert api_catalog.responses_only_kind("codex:gpt-5.5") == "codex"
+    cannot serve chat/completions?" — data-driven from the whitelist's `endpoints`, never a hardcoded
+    kind name. openai now serves `responses` TOO (issue 03), but is still NOT flagged: it is
+    responses-*capable*, not responses-*only*, because it also serves chat — so `grid chat` still
+    works against it. Only a kind with no chat endpoint at all (codex) is flagged. Anything that isn't
+    an API namespace (a hardware model whose NAME merely contains a colon, no namespace at all) is None."""
+    assert api_catalog.responses_only_kind("codex:gpt-5.5") == "codex"  # responses-only → refuse chat
     assert api_catalog.responses_only_kind("codex:") == "codex"  # still a codex-namespaced request
-    assert api_catalog.responses_only_kind("openai:gpt-5.5") is None  # serves chat/completions
+    assert api_catalog.responses_only_kind("openai:gpt-5.5") is None  # serves responses AND chat → not flagged
     assert api_catalog.responses_only_kind("llama3:8b") is None  # colon, but not an API kind
     assert api_catalog.responses_only_kind("gpt-5.5") is None  # no namespace
     assert api_catalog.responses_only_kind("") is None
@@ -1110,6 +1201,49 @@ def test_api_catalog_find_advertised_and_probed_features():
     assert features["json_schema"] is entry.supports_structured_outputs
 
 
+def test_format_api_entry_shows_responses_dialect():
+    """AC3/AC4/AC6 (issue 06), exercised on the formatter directly because no real catalog kind
+    reaches these states: every listed API kind serves `responses` and every listed model has
+    content caps, so the chat-only and zero-caps cases have no witness through the `grid catalog`
+    command. This unit test is therefore the ONLY coverage for AC3 and AC4 — do not trim it.
+
+    The rule is data-driven off the kind's `endpoints` tuple, exactly as `responses_only_kind`
+    reads it: `responses` shows iff the tuple carries it, and `chat/completions` is the assumed
+    baseline that is never shown."""
+    plain = api_catalog.ApiModelEntry(
+        vendor_name="m", context_window=1000,
+        supports_tools=False, supports_vision=False,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+    toolful = api_catalog.ApiModelEntry(
+        vendor_name="m", context_window=1000,
+        supports_tools=True, supports_vision=False,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+
+    def caps(line: str) -> str:
+        # The capability field is everything after the fixed `... ctx   ` prefix.
+        return line.split(" ctx   ", 1)[1]
+
+    serves_responses = ("chat/completions", "responses")
+    chat_only = ("chat/completions",)
+
+    # Serves responses + content caps → the dialect is appended AFTER the content caps.
+    assert caps(api_catalog.format_api_entry("openai", toolful, serves_responses)) == "tools, responses"
+    # AC4: serves responses + NO content caps → `responses`, never an empty field and never the
+    # contradictory `text only, responses` (the whole reason it joins the SAME list before the fallback).
+    assert caps(api_catalog.format_api_entry("openai", plain, serves_responses)) == "responses"
+    # AC3: a chat/completions-only kind shows no such capability...
+    assert caps(api_catalog.format_api_entry("openai", toolful, chat_only)) == "tools"
+    # ...and a bare chat-only model with no caps still reads as `text only`.
+    assert caps(api_catalog.format_api_entry("openai", plain, chat_only)) == "text only"
+
+    # AC6: the name/ctx columns are undisturbed — the change touches only the trailing caps field.
+    line = api_catalog.format_api_entry("openai", toolful, serves_responses)
+    assert line.startswith("  openai:m")
+    assert " ctx   " in line
+
+
 def test_catalog_api_json_roundtrips(capsys):
     rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=True))
 
@@ -1125,6 +1259,19 @@ def test_catalog_api_json_roundtrips(capsys):
     assert first["context_window"] == first_entry.context_window
     assert first["supports_tools"] is first_entry.supports_tools
     assert first["supports_vision"] is first_entry.supports_vision
+
+
+def test_catalog_api_openai_json_emits_endpoints(capsys):
+    """AC5 (issue 06): the machine-readable listing emits the endpoint list for EVERY API kind, not
+    just the codex seat. Before issue 06 the generic `_catalog_api` JSON omitted `endpoints`, so a
+    script could read it for codex (test_catalog_api_codex_json_emits_per_tier_contract) but not for
+    openai — the asymmetry this closes. The value is the whole tuple, so a script checks
+    `"responses" in endpoints` the same way for any kind."""
+    rc = cli.cmd_catalog(argparse.Namespace(api="openai", json=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["endpoints"] == ["chat/completions", "responses"]
 
 
 # ---------------------------------------------------------------------------
@@ -1664,6 +1811,76 @@ def test_codex_probe_unreadable_listing_is_contract_drift_but_empty_is_empty(mon
 
     slugs, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": []}))
     assert slugs == ()
+
+
+# ---------------------------------------------------------------------------
+# responses-endpoint route probe (issue 08 / ADR 0018) — hardware capability discovery.
+# Reuses `_mock_probe`: a real httpx.Client with MockTransport, so no network call is made.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_responses_endpoint_true_on_bad_request(monkeypatch):
+    """The route-existence probe (ADR 0018): a hardware engine that SERVES `/v1/responses` rejects a
+    deliberately-invalid body with a bad-request status — the route exists, the payload does not. A
+    bad-request is the ONLY answer read as "yes"."""
+    from remote import probe
+
+    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(400, json={"error": "missing model"}))
+
+    assert probe.probe_responses_endpoint("http://engine.example/v1") is True
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://engine.example/v1/responses"
+
+
+def test_probe_responses_endpoint_true_on_unprocessable(monkeypatch):
+    """422 is the other bad-request the dialect commonly answers an empty body with — the route
+    exists, so it is "yes" too."""
+    from remote import probe
+
+    _mock_probe(monkeypatch, lambda request: httpx.Response(422, json={"detail": "field required"}))
+    assert probe.probe_responses_endpoint("http://engine.example/v1") is True
+
+
+def test_probe_responses_endpoint_fails_closed_on_ambiguous_status(monkeypatch):
+    """Everything that is NOT a bad-request means "does not serve it" — route-missing (404),
+    method-not-allowed (405), a catch-all 200 page, and any other status. Advertising a capability an
+    engine lacks makes the router's candidate filter lie (the ADR 0017 class), so ambiguity is "no"."""
+    from remote import probe
+
+    for status in (404, 405, 200, 301, 500, 503):
+        _mock_probe(monkeypatch, lambda request, s=status: httpx.Response(s, json={"x": 1}))
+        assert probe.probe_responses_endpoint("http://engine.example/v1") is False, status
+
+
+def test_probe_responses_endpoint_fails_closed_on_transport_error(monkeypatch):
+    """A timeout or transport failure is "no" — a slow or unreachable probe must never advertise a
+    capability the engine may not have (fail closed)."""
+    from remote import probe
+
+    def boom(request):
+        raise httpx.ConnectError("unreachable")
+
+    _mock_probe(monkeypatch, boom)
+    assert probe.probe_responses_endpoint("http://engine.example/v1") is False
+
+
+def test_probe_responses_endpoint_sends_empty_body_and_spends_no_inference(monkeypatch):
+    """The probe posts a deliberately-EMPTY body (no messages, no input) exactly once, so it is a
+    route-existence question, not an inference: an empty body is expected to fail request validation
+    before any forward pass. (Whether that stays free per engine is issue 11's to confirm.)"""
+    from remote import probe
+
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(400)
+
+    seen = _mock_probe(monkeypatch, handler)
+    probe.probe_responses_endpoint("http://engine.example/v1")
+
+    assert captured["body"] == {}          # no prompt, no messages, no input — nothing to infer on
+    assert seen["calls"] == 1              # one request, no retry loop
 
 
 # ---------------------------------------------------------------------------
@@ -7597,10 +7814,14 @@ def _seed_reload_state(monkeypatch, tmp_path, engines, *, retained, media_models
     is the ``[(url, advertised, upstream, caps), ...]`` the live snapshot was built from; the state's
     ``media_signature`` reflects the STARTUP media config (``startup_bundles``), which the reload
     compares the re-read record against."""
-    from remote import api_keys, serve
+    from remote import api_keys, probe, serve
     from shared import run_records
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # A reload that adds a hardware --at engine now runs the once-per-engine Responses route probe
+    # (issue 08). Stub it False here so every reload test stays network-free without each restubbing it;
+    # a test asserting the probe overrides this afterward.
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
     routes, upstream, models, caps, _warn = (
         serve._build_routing([tuple(r) for r in retained]) if retained else ({}, {}, [], {}, [])
     )
@@ -8431,9 +8652,10 @@ def test_remote_engine_api_record_registers_static_caps_and_kind(monkeypatch, tm
     assert seen["node"] == "node-1" and seen["models"] == ["openai:gpt-5.5"]
     entry = seen["capabilities"]["models"]["openai:gpt-5.5"]
     assert entry["context_window"] == 1_050_000 and entry["features"]["tools"] is True
-    # Honest advertisement: an API engine never serves the legacy completions endpoint, so the
-    # relay must not be told it does (the serve-side gate stays as defense in depth).
-    assert entry["endpoints"] == ["chat/completions"]
+    # Honest advertisement: openai serves both dialects now (issue 03) but never the legacy
+    # completions endpoint, so the relay is told exactly that (the serve-side gate stays as defense
+    # in depth). Sourced from the kind's catalog row, not a hardcoded list.
+    assert entry["endpoints"] == ["chat/completions", "responses"]
     assert seen["meta"]["engine"] == "openai"  # the grid page shows the API engine's kind
     assert state_seen["bearer_by_url"] == {"https://api.openai.com/v1": "sk-test-123"}
 
@@ -8607,7 +8829,8 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
     """The codex capability envelope carries ONLY what passthrough can honestly claim (issue 05):
     `endpoints: ["responses"]` (the wire literal grid-src's per-model filter reads — absent means
     chat-only there, so old CLIs fail closed), the verified context window, features
-    {vision, tools, parallel_tool_calls}, and the join-time `vendor_rank` (issue 03 / ADR 0016 —
+    {vision, tools, parallel_tool_calls, stream_only} (the last a NEGATIVE routing trait, issue 06c —
+    the SSE-only seat, sourced from `kind_is_stream_only`), and the join-time `vendor_rank` (issue 03 / ADR 0016 —
     a top-level int sibling of context_window, the seat's tier-row position, 1 = most capable). It
     OMITS — not False — the chat-dialect flags (json_object/json_schema), `max_output_tokens` and
     the `limits` block (facts #1: the backend has no output cap under any name; a fabricated 64000
@@ -8624,7 +8847,12 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
     # vendor_rank rides top-level (NOT inside features — the grid-src reader takes it there). gpt-5.5
     # is index 2 in the free tier row [terra, luna, gpt-5.5, gpt-5.4-mini] → rank 3.
     assert entry["vendor_rank"] == 3
-    assert entry["features"] == {"vision": True, "tools": True, "parallel_tool_calls": True}
+    # issue 06c: the seat also advertises the NEGATIVE `stream_only` routing trait — its backend is
+    # SSE-only — sourced from `kind_is_stream_only`, so a non-streaming `auto` request forbids it and is
+    # never routed here. A routing trait, not a model capability (kept out of `codex_features`).
+    assert entry["features"] == {
+        "vision": True, "tools": True, "parallel_tool_calls": True, "stream_only": True,
+    }
     assert "max_output_tokens" not in entry
     assert "limits" not in entry
     assert "json_object" not in entry["features"] and "json_schema" not in entry["features"]
@@ -8632,14 +8860,18 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
 
 def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeypatch, tmp_path, capsys):
     """The stale-catalog degrade (catalog edited between join and respawn) stays honest for
-    codex: a warn plus an entry that still says `responses`-only with NO feature claims — never
+    codex: a warn plus an entry that still says `responses`-only with NO capability claims — never
     the chat-dialect all-False shape, and never a fabricated output cap. A model gone from the
-    whitelist has no tier-row position either, so `vendor_rank` is omitted (issue 03)."""
+    whitelist has no tier-row position either, so `vendor_rank` is omitted (issue 03).
+
+    issue 06c: the degrade still advertises the `stream_only` routing trait — a stale seat's backend
+    is still SSE-only, so a non-streaming `auto` request must still be routed away from it (fail-closed,
+    the opposite polarity to a capability, which degrades OFF)."""
     seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"])
 
     entry = seen["capabilities"]["models"]["codex:ghost"]
     assert entry["endpoints"] == ["responses"]
-    assert entry["features"] == {}
+    assert entry["features"] == {"stream_only": True}
     assert "max_output_tokens" not in entry and "limits" not in entry
     assert "context_window" not in entry  # unknown is omitted, never invented
     assert "vendor_rank" not in entry  # absent from the row → omit the fact, never rank 0/None
@@ -9118,11 +9350,34 @@ def test_adapt_output_token_param_leaves_a_kind_with_no_cap_parameter_alone():
     for value in (None, 16):  # the null is what slipped through; a real value must not re-key either
         body = {"model": "codex:gpt-5.4-mini", "max_tokens": value, "messages": []}
 
-        adapted = _adapt_output_token_param(body, "codex")
+        adapted = _adapt_output_token_param(body, "codex", "chat/completions")
 
         assert adapted == body
         assert None not in adapted  # `adapted[None] = ...` — not a JSON key
         assert '"null"' not in json.dumps(adapted)
+
+
+def test_adapt_output_token_param_leaves_the_responses_dialect_cap_alone():
+    """Defense-in-depth (issue 04): the adapter is a CHAT-dialect translator. On `chat/completions`
+    the grid-internal `max_tokens` is renamed to the vendor's chat spelling (openai →
+    `max_completion_tokens`); on `responses` the dialect's OWN cap `max_output_tokens` is already the
+    name the vendor wants — the relay passes it through byte-for-byte — so nothing is renamed.
+
+    The relay refuses `max_tokens` on `responses` (its wrong-dialect spelling), so a responses body
+    can never really carry it — but the guard must not DEPEND on that cross-repo invariant: a stray
+    `max_tokens` on a responses job is left alone, NOT mis-renamed to the chat spelling the vendor's
+    responses endpoint would reject."""
+    from remote.serve import _adapt_output_token_param
+
+    # the real path: the responses-dialect cap reaches openai untouched
+    body = {"model": "openai:gpt-5.5", "input": [], "max_output_tokens": 256}
+    assert _adapt_output_token_param(body, "openai", "responses") == body
+
+    # defense-in-depth: a stray chat-spelling on a responses job is left alone, not rewritten
+    stray = {"model": "openai:gpt-5.5", "input": [], "max_tokens": 256}
+    adapted = _adapt_output_token_param(stray, "openai", "responses")
+    assert adapted == stray
+    assert "max_completion_tokens" not in adapted
 
 
 def test_serve_handle_job_hardware_keeps_stop(monkeypatch, tmp_path):
@@ -9308,17 +9563,22 @@ def test_serve_handle_job_codex_refuses_chat_via_the_single_url_fallback_too(mon
     assert "serves responses only" in captured["error"]
 
 
-def test_serve_handle_job_responses_never_reaches_a_hardware_engine(monkeypatch, tmp_path):
-    """The other half of D-b: the global allow-list is NOT widened, so a responses job that routes
-    to a hardware engine — direct or via the fallback — is refused before any URL interpolation,
-    with the pre-matrix wording."""
+def test_serve_handle_job_responses_refused_by_a_hardware_engine_lacking_the_capability(monkeypatch, tmp_path):
+    """Per-engine gate (ADR 0018 decision 1 — this OVERTURNS the old unconditional 'never reaches a
+    hardware engine' invariant): a hardware engine whose join-time probe did NOT find `/responses`
+    refuses a responses job before any URL interpolation, with the pre-matrix wording, direct or via
+    the fallback. The default-caps engine here advertises no `responses` in its `endpoints`, so it is
+    exactly that engine. This is the fail-closed half of the widening — capability is per-engine, so an
+    engine that lacks it still gets the clean structured refusal, never a blind forward that would 404
+    at the engine. (A responses-CAPABLE engine is served: test_serve_handle_job_hardware_responses_streams_through.)"""
     from remote import relay, serve
 
-    state = _serve_state(monkeypatch, tmp_path)  # one hardware engine serving "m"
+    state = _serve_state(monkeypatch, tmp_path)  # one hardware engine serving "m", no `responses` in its caps
     captured = {}
     monkeypatch.setattr(relay, "submit_error",
                         lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
-    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("responses must never reach a hardware engine"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail(
+        "responses must not reach a hardware engine that lacks the capability"))
 
     serve.handle_job(state, {"transaction_id": "t3", "endpoint_path": "responses",
                              "body": {"model": "m"}, "is_stream": True})
@@ -9327,21 +9587,473 @@ def test_serve_handle_job_responses_never_reaches_a_hardware_engine(monkeypatch,
     assert "'responses'" in captured["error"]
 
 
-def test_serve_handle_job_responses_never_reaches_an_openai_engine(monkeypatch, tmp_path):
-    """openai stays chat-only under the matrix — its refusal message is byte-compatible with the
-    pre-matrix one, so consumers and the relay's terminal-error mapper see no difference."""
+def _responses_capable_hardware_caps(model="m"):
+    """A hardware caps envelope whose model advertises the Responses dialect — what the join-time probe
+    stamps (issue 08). The gate reads this same field to decide the engine may serve `responses`."""
+    return {"schema_version": 1,
+            "models": {model: {"endpoints": ["chat/completions", "completions", "responses"]}}}
+
+
+def test_serve_handle_job_hardware_responses_streams_through(monkeypatch, tmp_path):
+    """Issue 08 (AC1): a hardware engine whose probe found `/responses` serves a STREAMING Responses
+    request end-to-end. The forward arms are already dialect- (not kind-) specific, so once the gate
+    admits the job it takes the SAME shared block-aligned path openai/codex use — no bearer (it is a
+    local engine), whole `event:`+`data:` blocks realigned so the usage-bearing terminal event is never
+    torn. The only thing that changed vs the old refusal is the gate now consults the per-engine caps."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, capabilities=_responses_capable_hardware_caps())
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, chunks=list(content))
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    sse = (b'event: response.created\ndata: {}\n\n'
+           b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n')
+
+    def engine(request):
+        assert str(request.url) == "http://127.0.0.1:8081/v1/responses"  # {target}/{endpoint}
+        assert "authorization" not in request.headers                    # a hardware engine gets no bearer
+        return httpx.Response(200, content=iter([sse[i:i + 7] for i in range(0, len(sse), 7)]))
+
+    _mock_serve_engine(monkeypatch, engine)
+
+    serve.handle_job(state, {"transaction_id": "t8", "endpoint_path": "responses",
+                             "body": {"model": "m"}, "is_stream": True})
+
+    assert "error" not in captured
+    assert captured["stream"] is True
+    assert b"".join(captured["chunks"]) == sse
+
+
+def test_serve_handle_job_hardware_responses_non_stream_forwards_whole(monkeypatch, tmp_path):
+    """Issue 08 + issue 05: a NON-stream Responses job to a responses-capable hardware engine takes the
+    dialect-agnostic whole-body forward (`_forward_whole`) — the engine's single response object is
+    submitted with stream=False. Only the seat refuses a non-stream responses job; every other engine,
+    hardware included, serves it (the relay lifted its global stream mandate for exactly this)."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, capabilities=_responses_capable_hardware_caps())
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(content=content, stream=stream))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    obj = (b'{"id":"resp_x","object":"response","status":"completed",'
+           b'"output":[],"usage":{"input_tokens":1,"output_tokens":2}}')
+
+    def engine(request):
+        assert str(request.url) == "http://127.0.0.1:8081/v1/responses"
+        assert json.loads(request.content).get("stream") in (None, False)  # not forced to stream
+        return httpx.Response(200, content=obj)
+
+    _mock_serve_engine(monkeypatch, engine)
+    serve.handle_job(state, {"transaction_id": "t9", "endpoint_path": "responses",
+                             "body": {"model": "m"}, "is_stream": False})
+
+    assert "error" not in captured
+    assert captured["stream"] is False
+    assert captured["content"] == obj
+
+
+def test_serve_handle_job_hardware_responses_capable_still_serves_chat(monkeypatch, tmp_path):
+    """AC: chat/completions traffic is entirely unaffected by the widening — an engine that gained
+    `responses` keeps serving chat, because the composed set is the chat pair PLUS responses, not a
+    replacement. (An engine that FAILED the probe keeping chat is the default-caps case above.)"""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, capabilities=_responses_capable_hardware_caps())
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(content=content))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: pytest.fail(f"unexpected error: {message}"))
+    _mock_serve_engine(monkeypatch,
+                       lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]}))
+
+    serve.handle_job(state, {"transaction_id": "t10", "endpoint_path": "chat/completions",
+                             "body": {"model": "m"}, "is_stream": False})
+
+    assert captured["content"]  # forwarded and answered — chat still works on a responses-capable engine
+
+
+def test_serve_handle_job_hardware_responses_capable_keeps_a_closed_endpoint_set(monkeypatch, tmp_path):
+    """AC + ADR 0018 decision 3: the endpoint the gate consults stays a CLOSED set of fixed literals. A
+    responses-capable hardware engine still refuses anything but the exact literals — a stateful
+    retrieval route (`responses/resp_123`) and a traversal attempt (`responses/../secret`) are both
+    refused before any URL is built, proving the widening added ONE fixed literal, not an open prefix."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, capabilities=_responses_capable_hardware_caps())
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("an off-set endpoint must never be forwarded"))
+
+    for endpoint in ("responses/resp_123", "responses/../secret"):
+        captured = {}
+        monkeypatch.setattr(relay, "submit_error",
+                            lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+        serve.handle_job(state, {"transaction_id": "t11", "endpoint_path": endpoint,
+                                 "body": {"model": "m"}, "is_stream": True})
+        assert "unsupported endpoint" in captured["error"].lower(), endpoint
+
+
+def test_serve_handle_job_single_engine_fallback_serves_responses(monkeypatch, tmp_path):
+    """Review finding (rev-code/rev-silent): a grid with ONE responses-capable hardware engine must serve
+    a responses job even when body['model'] does not resolve to the advertised name. `route_and_kind`'s
+    single-engine fallback routes it to the sole engine (as chat does), and the capability is the
+    ENGINE's (ADR 0018), so the gate resolves it per-engine — not by the unmatched model. Refusing here
+    would emit 'unsupported endpoint' for an engine that DOES serve the dialect: the misleading-error
+    class ADR 0017/0018 exist to prevent, and an asymmetry with chat (which forwards blind here)."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path, capabilities=_responses_capable_hardware_caps("m"))
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(stream=stream, chunks=list(content)))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    sse = b'event: response.completed\ndata: {"usage":{"total_tokens":1}}\n\n'
+
+    def engine(request):
+        assert str(request.url) == "http://127.0.0.1:8081/v1/responses"  # the sole engine, via fallback
+        return httpx.Response(200, content=iter([sse]))
+
+    _mock_serve_engine(monkeypatch, engine)
+    # "other-model" is NOT the advertised "m" → single-engine fallback resolves the one engine; the gate
+    # must consult THAT engine's capability, so responses is served rather than falsely refused.
+    serve.handle_job(state, {"transaction_id": "t12", "endpoint_path": "responses",
+                             "body": {"model": "other-model"}, "is_stream": True})
+
+    assert "error" not in captured        # served, not refused as "unsupported endpoint"
+    assert captured["stream"] is True
+
+
+def test_hardware_serves_responses_guards_malformed_caps(monkeypatch, tmp_path):
+    """Review finding (rev-python): the fail-closed guards in `_hardware_serves_responses` are proven
+    directly. A non-dict model entry and a non-LIST `endpoints` both read as "no" without raising — the
+    latter is the interesting trap, since a bare string `endpoints="responses"` would make
+    `"responses" in "responses"` True on a naive membership check; the `isinstance(..., list)` guard
+    defeats it. A proper list carrying the literal reads True."""
+    from remote import serve
+
+    def snap(caps):
+        return serve._Snapshot.build(routes={"m": "http://e/v1"}, upstream={}, models=["m"],
+                                     capabilities=caps, meta={}, pricing={}, max_concurrency=1)
+
+    non_dict = snap({"schema_version": 1, "models": {"m": "not-a-dict"}})
+    string_eps = snap({"schema_version": 1, "models": {"m": {"endpoints": "responses"}}})  # a string, not a list
+    real = snap({"schema_version": 1, "models": {"m": {"endpoints": ["chat/completions", "responses"]}}})
+
+    assert serve._hardware_serves_responses(non_dict, "m", "http://e/v1") is False
+    assert serve._hardware_serves_responses(string_eps, "m", "http://e/v1") is False  # substring trap defeated
+    assert serve._hardware_serves_responses(real, "m", "http://e/v1") is True
+
+
+def test_serve_handle_job_openai_responses_streams_through(monkeypatch, tmp_path):
+    """The tracer bullet (issue 03): an app streams a Responses request naming an ``openai:*`` model
+    and gets the vendor's reply back through the grid. ``openai`` now serves the dialect (its catalog
+    row lists ``responses``), so the per-kind gate admits the job and it forwards through the SHARED
+    block-aligned responses path — the same one the seat uses — with the vendor key attached and the
+    advertised name rewritten to the vendor name.
+
+    This is the inverse of the deleted ``responses_never_reaches_an_openai_engine``: that openai is
+    chat-only is exactly the invariant this slice overturns. The 7-byte vendor chunking proves the
+    grouper realigns whole ``event:``+``data:`` blocks (a chat raw-passthrough forward would leak the
+    socket's 7-byte chunks instead), so the usage-bearing terminal event is never torn."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, chunks=list(content))  # keep the block boundaries
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    sse = (b'event: response.created\ndata: {}\n\n'
+           b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n')
+
+    def vendor(request):
+        assert str(request.url) == "https://api.openai.com/v1/responses"  # {base}/{endpoint}
+        assert request.headers["authorization"] == "Bearer sk-test-123"   # the stored vendor key
+        assert json.loads(request.content)["model"] == "gpt-5.5"          # advertised → vendor rewrite
+        return httpx.Response(200, content=iter([sse[i:i + 7] for i in range(0, len(sse), 7)]))
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t4", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": True})
+
+    assert "error" not in captured
+    assert captured["stream"] is True
+    assert captured["chunks"] == [
+        b'event: response.created\ndata: {}\n\n',
+        b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n',
+    ]  # two whole blocks, realigned from the 7-byte socket chunking
+    assert b"".join(captured["chunks"]) == sse
+
+
+def test_serve_handle_job_openai_responses_non_stream_forwards_whole(monkeypatch, tmp_path):
+    """Issue 05 (AC1): a NON-stream Responses job to an ``openai:*`` engine takes the whole-body
+    forward (``_forward_whole``), not the block-aligned stream. The vendor is called once,
+    non-streaming, and its whole JSON response object is submitted with ``stream=False`` — the same
+    non-stream arm chat has always had, reused because it is dialect-agnostic. Streaming (is_stream=True)
+    still goes through ``_forward_responses_stream`` (test_serve_handle_job_openai_responses_streams_through)."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(content=content, stream=stream))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    vendor_obj = (b'{"id":"resp_x","object":"response","status":"completed","model":"gpt-5.5",'
+                  b'"output":[],"usage":{"input_tokens":3,"output_tokens":5}}')
+
+    def vendor(request):
+        assert str(request.url) == "https://api.openai.com/v1/responses"   # {base}/{endpoint}
+        assert request.headers["authorization"] == "Bearer sk-test-123"    # the stored vendor key
+        sent = json.loads(request.content)
+        assert sent["model"] == "gpt-5.5"                                  # advertised → vendor rewrite
+        assert sent.get("stream") in (None, False)                        # NOT forced to stream
+        return httpx.Response(200, content=vendor_obj)
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t5", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5"}, "is_stream": False})
+
+    assert "error" not in captured
+    assert captured["stream"] is False        # the whole-body arm, not the block-aligned stream
+    assert captured["content"] == vendor_obj  # submitted verbatim — no block realignment on this path
+
+
+def test_serve_handle_job_openai_responses_honours_output_cap(monkeypatch, tmp_path):
+    """AC1 (issue 04): an app sets an output ceiling on a Responses request to an ``openai`` engine
+    and the value REACHES the vendor. The relay's responses contract is a passthrough that lifted its
+    blanket cap refusal, so the dialect's own ``max_output_tokens`` arrives here byte-for-byte; the
+    per-kind gate admits it (not in openai's ``unsupported_params``) and the chat-only cap adapter
+    leaves it untouched — so the vendor sees the ceiling the app asked for, under the dialect's own
+    name, never mis-translated to the chat spelling."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response", lambda url, tok, txn, *, content, stream: list(content))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+
+    def vendor(request):
+        captured.update(sent=json.loads(request.content))
+        return httpx.Response(200, content=b'event: response.completed\ndata: {"usage":{"total_tokens":3}}\n\n')
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5",
+                                      "input": [{"role": "user", "content": "hi"}],
+                                      "stream": True, "max_output_tokens": 256}, "is_stream": True})
+
+    assert "error" not in captured
+    assert captured["sent"]["max_output_tokens"] == 256      # the ceiling reached the vendor, dialect-named
+    assert "max_completion_tokens" not in captured["sent"]   # not mis-translated to the chat spelling
+    assert captured["sent"]["model"] == "gpt-5.5"            # advertised → vendor rewrite still applies
+
+
+def test_serve_handle_job_openai_responses_refuses_stop_before_the_vendor(monkeypatch, tmp_path):
+    """A consequence of the per-kind gate now running on the responses dialect (issue 04): openai's
+    `unsupported_params` (`stop`, verified against the CHAT API on 2026-07-14) is refused up-front on
+    `/responses` too, before any vendor call. This is a fail-closed EXTRAPOLATION — the responses
+    endpoint does not document `stop`, so the vendor would reject it, and refusing here saves the
+    round-trip (the gate's whole purpose). Pinned so the behavior is deliberate, not accidental: if
+    openai is ever found to accept `stop` on `/responses`, that is a catalog-data fix, not a code
+    change."""
     from remote import relay, serve
 
     state = _api_serve_state(monkeypatch, tmp_path)
     captured = {}
     monkeypatch.setattr(relay, "submit_error",
                         lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
-    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("responses must never reach the openai vendor"))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the vendor"))
 
-    serve.handle_job(state, {"transaction_id": "t4", "endpoint_path": "responses",
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "openai:gpt-5.5",
+                                      "input": [{"role": "user", "content": "hi"}],
+                                      "stream": True, "stop": ["\n"]}, "is_stream": True})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == "stop"                          # names the param the vendor rejects
+
+
+def test_serve_handle_job_openai_responses_non200_submits_terminal_error(monkeypatch, tmp_path):
+    """The caller obligation issue 02 handed to issue 03: ``_forward_responses_stream`` RETURNS a
+    non-200 (``_UpstreamFailure``) rather than reporting it, so this second caller — unlike the seat's
+    D-d refresh — must answer it with a terminal signal and does NOT retry (ADR 0012 job-error-only).
+    NOTHING in the toolchain catches a dropped return (issue 02's as-built: not even ``ruff --select
+    ALL``), so this test is what pins it: a vendor non-200 reaches the consumer as a ``submit_error``,
+    nothing is streamed, and the vendor is hit exactly once. Modelled on
+    ``test_forward_responses_stream_returns_the_drained_failure_without_submitting``, one layer up."""
+    from remote import relay, serve
+
+    state = _api_serve_state(monkeypatch, tmp_path)
+    submissions = []
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: submissions.append("response"))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: submissions.append(("error", message)))
+    calls = []
+
+    def vendor(request):
+        calls.append(str(request.url))
+        return httpx.Response(429, json={"error": {"message": "rate limited"}})
+
+    _mock_serve_engine(monkeypatch, vendor)
+
+    serve.handle_job(state, {"transaction_id": "t5", "endpoint_path": "responses",
                              "body": {"model": "openai:gpt-5.5"}, "is_stream": True})
 
-    assert "API engine 'openai' serves chat/completions only" in captured["error"]
+    assert calls == ["https://api.openai.com/v1/responses"]   # hit once — no retry (unlike the seat)
+    assert "response" not in submissions                      # nothing was streamed back
+    errors = [s for s in submissions if isinstance(s, tuple)]
+    assert len(errors) == 1 and "429" in errors[0][1]         # the terminal signal carries the status
+
+
+def test_static_api_caps_openai_advertises_both_endpoints():
+    """Change #2 in isolation: the advertised caps envelope sources its ``endpoints`` from the kind's
+    catalog row rather than a hardcoded chat-only list. This list is exactly what grid-src's per-model
+    ``provider_supports`` filter reads to decide the openai engine can serve ``responses`` — so if it
+    stayed hardcoded, the row change would never reach the relay and nothing would route. The
+    startup-path cousin ``test_remote_engine_api_record_registers_static_caps_and_kind`` proves the
+    same value through the full registration path; this pins the source at the unit layer."""
+    from remote import serve
+
+    entry = serve._static_api_caps("openai", ["openai:gpt-5.5"])["models"]["openai:gpt-5.5"]
+    assert entry["endpoints"] == ["chat/completions", "responses"]
+
+
+def test_static_api_caps_openai_advertises_output_cap_feature():
+    """Issue 06b: the openai caps envelope advertises the `output_cap` routing FEATURE — the engine
+    honours a Responses `max_output_tokens` cap — sourced from the kind's `unsupported_params` via
+    `kind_honours_output_cap`. This is the CLI half of the hand-duplicated wire literal grid-src's
+    auto-router filters on; absent here, a capped `auto` request would wrongly exclude the openai
+    engine that can in fact cap. Distinct from the numeric `max_output_tokens` limit already in the
+    envelope — this is the boolean the responses auto-branch keys on."""
+    from remote import serve
+
+    entry = serve._static_api_caps("openai", ["openai:gpt-5.5"])["models"]["openai:gpt-5.5"]
+    assert entry["features"]["output_cap"] is True
+
+
+def test_static_api_caps_codex_omits_output_cap_feature():
+    """The codex seat cannot honour an output cap under any name (facts.md #1), so its envelope must
+    NOT advertise `output_cap` — a capped `auto` request then excludes it (fail closed). Guards the
+    layer-2/layer-3 agreement: the routing feature and the engine gate read the same catalog fact,
+    so codex omitting the param means codex omitting the feature."""
+    from remote import serve
+
+    caps = serve._static_api_caps("codex", ["codex:gpt-5.5"], plan_type="free")
+    entry = caps["models"]["codex:gpt-5.5"]
+    assert "output_cap" not in entry["features"]
+
+
+def test_static_api_caps_stale_openai_model_fails_closed_on_output_cap():
+    """Fail-closed on degrade (issue 06b): a model gone from the whitelist between join and respawn
+    degrades to an all-False features dict — so even though the `openai` KIND honours the cap, the stale
+    model advertises `output_cap: False` and a capped `auto` request excludes the anomaly rather than
+    routing to a likely-broken model. Pins the `entry is not None and kind_honours_output_cap(...)`
+    short-circuit DIRECTLY at the unit layer: a future 'simplification' that drops the entry guard
+    (advertising True for a model we cannot resolve) fails here, not only through the slower
+    `_bring_up_engines` integration path (test_bring_up_engines_api_model_gone_from_whitelist_...)."""
+    from remote import serve
+
+    # KIND-level: openai honours the cap...
+    assert api_catalog.kind_honours_output_cap("openai") is True
+    # ...but a model absent from the whitelist degrades all-False, so its advertised feature is False.
+    entry = serve._static_api_caps("openai", ["openai:not-a-real-model"])["models"]["openai:not-a-real-model"]
+    assert entry["features"]["output_cap"] is False
+
+
+def _stub_hardware_probe(monkeypatch, *, serves_responses):
+    """Stub only the two HTTP layers of a hardware probe so the REAL `capabilities`/`envelope`/
+    `capability_entry` threading runs — `probe_llama_capabilities` (the live feature probe) returns a
+    fixed all-False dict, and `probe_responses_endpoint` returns the given route answer. Returns a
+    counter of route-probe calls so a test can assert it runs once per engine."""
+    from remote import probe
+
+    calls = {"responses": 0}
+
+    def _responses(url, **kw):
+        calls["responses"] += 1
+        return serves_responses
+
+    monkeypatch.setattr(probe, "probe_responses_endpoint", _responses)
+    monkeypatch.setattr(probe, "probe_llama_capabilities", lambda url, model: {
+        "vision": False, "json_object": False, "json_schema": False,
+        "tools": False, "parallel_tool_calls": False,
+    })
+    return calls
+
+
+def test_hardware_caps_advertise_responses_when_probe_true(monkeypatch):
+    """Issue 08 / ADR 0018: a hardware engine whose server serves ``/responses`` advertises the dialect
+    on EVERY model it serves — the ``endpoints`` list gains ``responses`` — and (PRD §3, since every
+    non-seat engine accepts an output cap) also flips the ``output_cap`` routing FEATURE True. That
+    per-model ``endpoints`` list is exactly what the relay's candidate filter reads to route a Responses
+    request, and ``output_cap`` is what lets a capped ``auto`` land on it."""
+    from remote import serve
+
+    _stub_hardware_probe(monkeypatch, serves_responses=True)
+    caps = serve._probe_spec_caps("http://engine.example/v1", ["m1", "m2"], ["m1", "m2"], None)
+
+    entry = caps["models"]["m1"]
+    assert entry["endpoints"] == ["chat/completions", "completions", "responses"]
+    assert entry["features"]["output_cap"] is True
+    assert "responses" in caps["models"]["m2"]["endpoints"]  # stamped on every model, not just the first
+
+
+def test_hardware_caps_omit_responses_when_probe_false(monkeypatch):
+    """An engine whose server does NOT serve the route (or answered ambiguously) is unchanged from
+    Phase 1: the chat pair only, and `output_cap` stays False so a capped `auto` request excludes it.
+    This is the fail-closed half — a missing capability costs the operator nothing on chat traffic."""
+    from remote import serve
+
+    _stub_hardware_probe(monkeypatch, serves_responses=False)
+    entry = serve._probe_spec_caps("http://engine.example/v1", ["m1"], ["m1"], None)["models"]["m1"]
+
+    assert entry["endpoints"] == ["chat/completions", "completions"]
+    assert entry["features"]["output_cap"] is False
+
+
+def test_hardware_responses_probe_runs_once_per_engine(monkeypatch):
+    """AC: the probe runs ONCE per engine, not once per model — it asks about the server's route, and N
+    models on one server would be N identical questions. A three-model spec probes exactly once, and the
+    single answer covers all three."""
+    from remote import serve
+
+    calls = _stub_hardware_probe(monkeypatch, serves_responses=True)
+    caps = serve._probe_spec_caps("http://engine.example/v1", ["m1", "m2", "m3"], ["m1", "m2", "m3"], None)
+
+    assert calls["responses"] == 1                                       # one probe for the whole engine
+    assert all("responses" in caps["models"][m]["endpoints"] for m in ("m1", "m2", "m3"))
+
+
+def test_api_and_codex_specs_never_run_the_responses_probe(monkeypatch):
+    """AC: API engines and subscription seats are never probed — their caps are static catalog data
+    (`_static_api_caps`), reached by the early return BEFORE the hardware route probe. A vendor must
+    see no traffic at join, and a codex seat must behave exactly as it does today (user story 16)."""
+    from remote import probe, serve
+
+    monkeypatch.setattr(probe, "probe_responses_endpoint",
+                        lambda *a, **k: pytest.fail("API engines / seats are never route-probed"))
+
+    serve._probe_spec_caps("https://api.openai.com/v1", ["openai:gpt-5.5"], ["gpt-5.5"], None, api_kind="openai")
+    serve._probe_spec_caps("https://chatgpt.com", ["codex:gpt-5.5"], ["gpt-5.5"], None,
+                           api_kind="codex", plan_type="free")
 
 
 def test_serve_codex_seat_holder_primes_from_the_store_and_self_heals(monkeypatch, tmp_path):
@@ -9597,14 +10309,127 @@ def test_iter_event_blocks_never_flushes_a_partial_block_on_error():
     assert out == [b"event: a\ndata: {}\n\n"]  # exactly the complete block; the torn half never left
 
 
+# A plain bearer header set — what a non-seat kind's `_forward_headers` produces. Deliberately NOT
+# the seat's five (`_codex_headers`): the shared responses forward must not know a seat exists.
+_NON_SEAT_HEADERS = {"Content-Type": "application/json", "Authorization": "Bearer k-plain"}
+
+
+def test_forward_responses_stream_submits_whole_event_blocks_for_any_kind(monkeypatch, tmp_path):
+    """PRD §5 / ADR 0018: block alignment is a property of the DIALECT, not of the subscription
+    seat — so the streaming submission is a path any engine kind can take.
+
+    Exercised here with no seat anywhere in the call: a plain `_serve_state` (whose codex holder is
+    created but never primed) and a plain bearer header set. It still submits one whole
+    `event:`+`data:` block per chunk. `test_serve_handle_job_codex_submits_the_fixture_as_whole_
+    event_blocks` asserts the same invariants THROUGH the seat; that overlap is deliberate, and
+    what is unique here is the seat's ABSENCE — if this path ever reached for `state.codex_seat`,
+    the unprimed holder would raise `CodexNotSignedIn` and this test would fail loudly rather than
+    let the two concerns quietly re-couple."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    fixture = _codex_fixture_bytes()
+    captured = {}
+
+    def cap_submit(url, tok, txn, *, content, stream):
+        captured.update(stream=stream, chunks=list(content))  # keep the chunk boundaries
+
+    monkeypatch.setattr(relay, "submit_response", cap_submit)
+
+    def engine(request):
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        # Awkward 7-byte chunking: block boundaries land mid-line, mid-JSON, everywhere.
+        return httpx.Response(200, content=iter([fixture[i:i + 7] for i in range(0, len(fixture), 7)]))
+
+    _mock_serve_engine(monkeypatch, engine)
+
+    failure = serve._forward_responses_stream(
+        state, "t1", "responses", {"model": "m"}, 600.0, "http://engine.example/v1",
+        headers=dict(_NON_SEAT_HEADERS),
+    )
+
+    assert failure is None  # a submitted 200 reports nothing back to the caller
+    assert captured["url"] == "http://engine.example/v1/responses"  # {target}/{endpoint}
+    assert captured["headers"]["authorization"] == "Bearer k-plain"  # the CALLER's headers, verbatim
+    assert "chatgpt-account-id" not in captured["headers"]  # nothing seat-shaped was added
+    assert captured["stream"] is True
+    assert len(captured["chunks"]) == 47
+    assert all(chunk.endswith(b"\n\n") for chunk in captured["chunks"])
+    assert b"".join(captured["chunks"]) == fixture  # byte-for-byte, whatever the socket chunking
+    assert b"[DONE]" not in b"".join(captured["chunks"])
+
+
+def test_forward_responses_stream_returns_the_drained_failure_without_submitting(monkeypatch, tmp_path):
+    """A non-200 is reported back to the CALLER rather than answered here, because the right answer
+    differs by kind: the seat refreshes a rotated bearer and retries once (ADR 0015 D-d), an API
+    engine does not (ADR 0012 keeps it job-error-only). Two properties make that split safe.
+
+    The body is drained INSIDE the response context and bound before both contexts close — so a
+    caller that then runs a token exchange holds no vendor connection open through it, and the
+    `Cf-Mitigated` header that the CF-403-vs-auth-403 taxonomy keys on (`_warn_codex_upstream`,
+    D-f) is still readable afterwards, not just the status int. And nothing is submitted: the job
+    has had NO terminal signal yet, which is precisely why a non-None return OBLIGES its caller to
+    send one — dropping it would hang the consumer."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    submissions = []
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda *a, **k: submissions.append("response"))
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda *a, **k: submissions.append("error"))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(
+        403, headers={"Cf-Mitigated": "challenge"}, json={"detail": "blocked"}))
+
+    failure = serve._forward_responses_stream(
+        state, "t1", "responses", {"model": "m"}, 600.0, "http://engine.example/v1",
+        headers=dict(_NON_SEAT_HEADERS),
+    )
+
+    assert submissions == []  # the caller owns the terminal signal — nothing was sent for it
+    assert failure is not None
+    assert failure.status == 403
+    assert failure.headers.get("cf-mitigated") == "challenge"  # readable after the contexts closed
+    assert "blocked" in failure.text
+
+
+def test_forward_responses_stream_flushes_a_final_block_with_no_trailing_blank_line(monkeypatch, tmp_path):
+    """An engine that ends its stream without a trailing blank line must still have its last block
+    submitted — that block is the `response.completed` carrying the usage, so swallowing it would
+    under-bill whoever served the request while looking exactly like a clean stream.
+
+    `_iter_event_blocks` already guarantees this and is tested directly above; what this pins is the
+    WIRING — that the grouper is genuinely in the shared submission path, so a later change that
+    forwarded raw bytes here (as the chat path legitimately does) could not silently drop the tail."""
+    from remote import relay, serve
+
+    state = _serve_state(monkeypatch, tmp_path)
+    tail = b'event: response.completed\ndata: {"usage":{"total_tokens":7}}'  # no trailing blank line
+    stream = b"event: response.created\ndata: {}\n\n" + tail
+    captured = {}
+    monkeypatch.setattr(relay, "submit_response",
+                        lambda url, tok, txn, *, content, stream: captured.update(chunks=list(content)))
+    _mock_serve_engine(monkeypatch, lambda request: httpx.Response(200, content=iter([stream])))
+
+    failure = serve._forward_responses_stream(
+        state, "t1", "responses", {"model": "m"}, 600.0, "http://engine.example/v1",
+        headers=dict(_NON_SEAT_HEADERS),
+    )
+
+    assert failure is None
+    assert captured["chunks"][-1] == tail  # flushed verbatim, terminator or not
+    assert b"".join(captured["chunks"]) == stream
+
+
 def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypatch, tmp_path):
-    """AC 1: URL = the kind's base URL + the job's endpoint path; headers are the real client's
-    set, built fresh from the live bundle (bearer + account id + originator/user-agent + SSE
+    """AC 1 (issue 03): URL = the kind's base URL + the job's endpoint path; headers are the real
+    client's set, built fresh from the live bundle (bearer + account id + originator/user-agent + SSE
     accept + json content-type — and NO OpenAI-Beta); the body goes verbatim except the
-    advertised→vendor model rewrite (the one existing alias mechanism). `temperature` — which IS
-    in the codex whitelist's `unsupported_params` — and a null `max_tokens` both pass through
-    untouched: the chat-dialect refusal and the output-param rename are provably inert on the
-    responses path (contract violations are the vendor's to answer, in its own shape)."""
+    advertised→vendor model rewrite (the one existing alias mechanism). A null `max_tokens` passes
+    through untouched: the per-kind gate refuses only a REAL value (issue 04), so a null is neither
+    refused nor renamed. (A real cap spelling or `temperature` IS now refused up-front on this path —
+    see ``test_serve_handle_job_codex_responses_refuses_unsupported_param_before_the_seat``.)"""
     from remote import api_keys, relay, serve
 
     state = _codex_serve_state(monkeypatch, tmp_path)
@@ -9619,7 +10444,7 @@ def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypa
     monkeypatch.setattr(relay, "submit_error",
                         lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
     job_body = {"model": "codex:gpt-5.4-mini", "input": [{"role": "user", "content": "hi"}],
-                "stream": True, "temperature": 0.5, "max_tokens": None}
+                "stream": True, "max_tokens": None}
 
     def vendor(request):
         assert str(request.url) == f"{_CODEX_BASE}/responses"
@@ -9643,10 +10468,76 @@ def test_serve_handle_job_codex_forwards_verbatim_with_the_seat_headers(monkeypa
     assert captured["body"] == b"event: response.created\ndata: {}\n\n"
 
 
+@pytest.mark.parametrize("param,value", [
+    ("max_output_tokens", 256),   # the responses-dialect cap the relay now lets through (issue 04)
+    ("temperature", 0.5),         # a chat-era knob the seat's allowlist backend denies (facts.md #7)
+])
+def test_serve_handle_job_codex_responses_refuses_unsupported_param_before_the_seat(
+        monkeypatch, tmp_path, param, value):
+    """AC2/AC7 (issue 04): the codex row's ``unsupported_params`` is now an EXECUTABLE per-kind gate
+    on the responses dialect, not advisory catalog data. The relay lifted its blanket
+    ``max_output_tokens`` refusal precisely so the kind-aware engine — the only layer that knows the
+    seat cannot set a cap under any name — answers it; and the seat genuinely 400s both of these
+    (facts.md #7). So a responses job carrying one is refused BEFORE any seat call, riding the same
+    ``engine error 400: {…}`` string the chat gate uses. The relay re-renders that into the responses
+    ``response.failed`` envelope, so the app's error handling does not fork on which layer caught it."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the seat"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini",
+                                      "input": [{"role": "user", "content": "hi"}],
+                                      "stream": True, param: value}, "is_stream": True})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == param                    # names the parameter (AC6)
+    assert inner["code"] == "unsupported_parameter"
+
+
+def test_serve_handle_job_codex_refuses_a_non_stream_responses_job(monkeypatch, tmp_path):
+    """AC7 (issue 05): the subscription seat is SSE-only, so a NON-stream responses job is refused by
+    its per-kind ENGINE gate. The relay lifted its global stream-mandatory rule for every other engine,
+    so the kind-aware layer — the only one that knows this backend cannot stream off — is where the
+    seat's refusal now lives. Refused BEFORE any seat call, riding the same ``engine error 400: {…}``
+    string the other per-kind gates use; the relay re-renders it into the responses ``{"detail": …}``
+    envelope, byte-identical to the old pre-queue ``Stream must be set to true`` (user story 16)."""
+    from remote import api_keys, relay, serve
+
+    state = _codex_serve_state(monkeypatch, tmp_path)
+    api_keys.store_codex_bundle(_codex_bundle())
+    state.codex_seat.prime_from_store()
+    captured = {}
+    monkeypatch.setattr(relay, "submit_error",
+                        lambda url, tok, txn, *, message, tokens_delivered=0: captured.update(error=message))
+    monkeypatch.setattr(relay, "submit_response", lambda *a, **k: pytest.fail("a refused job has no response"))
+    _mock_serve_engine(monkeypatch, lambda request: pytest.fail("a refused job must never reach the seat"))
+
+    serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
+                             "body": {"model": "codex:gpt-5.4-mini",
+                                      "input": [{"role": "user", "content": "hi"}], "stream": False},
+                             "is_stream": False})
+
+    assert captured["error"].startswith("engine error 400: ")
+    inner = json.loads(captured["error"][len("engine error 400: "):])["error"]
+    assert inner["param"] == "stream"
+    assert inner["code"] == "unsupported_parameter"
+    assert "Stream must be set to true" in inner["message"]
+
+
 def test_serve_handle_job_codex_streams_regardless_of_the_job_flag(monkeypatch, tmp_path):
-    """D-e: the upstream only speaks SSE, so a codex job takes the streaming forward whatever the
-    job's `is_stream` says (the relay always marks responses jobs streaming; this pins our side
-    against relay drift)."""
+    """D-e: the upstream only speaks SSE, so a codex job takes the streaming forward whatever a
+    STREAMING job's transport says. A NON-stream codex responses job is a different case — the seat
+    refuses it at its per-kind gate (test_serve_handle_job_codex_refuses_a_non_stream_responses_job) —
+    so this pins that once a job IS streaming, the forward stays streaming regardless of drift."""
     from remote import api_keys, relay, serve
 
     state = _codex_serve_state(monkeypatch, tmp_path)
@@ -9662,7 +10553,7 @@ def test_serve_handle_job_codex_streams_regardless_of_the_job_flag(monkeypatch, 
         200, content=b"event: response.created\ndata: {}\n\n"))
 
     serve.handle_job(state, {"transaction_id": "t1", "endpoint_path": "responses",
-                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": False})
+                             "body": {"model": "codex:gpt-5.4-mini"}, "is_stream": True})
 
     assert captured["stream"] is True  # forced — the flag cannot demote a responses job
 
@@ -10769,8 +11660,11 @@ def test_bring_up_engines_external_multi_probes_each(monkeypatch, tmp_path):
         "advertise_as": [],
     }
     seen = []
+    # A hardware spec now runs the once-per-engine Responses route probe (issue 08); stub it away so this
+    # `_bring_up_engines` test stays network-free and asserts only the per-model capability probing.
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
     monkeypatch.setattr(probe, "capabilities",
-                        lambda url, model, *, advertise_as=None, context_window=None: seen.append((url, model))
+                        lambda url, model, *, advertise_as=None, context_window=None, **_: seen.append((url, model))
                         or {"schema_version": 1, "models": {advertise_as or model: {"f": model}}})
 
     results, launched, launcher = serve._bring_up_engines(record)
@@ -10796,8 +11690,9 @@ def test_bring_up_engines_single_spec_multi_model_probes_every_model(monkeypatch
         "advertise_as": [],
     }
     seen = []
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)  # issue 08: keep this test network-free
     monkeypatch.setattr(probe, "capabilities",
-                        lambda url, model, *, advertise_as=None, context_window=None: seen.append(model)
+                        lambda url, model, *, advertise_as=None, context_window=None, **_: seen.append(model)
                         or {"schema_version": 1, "models": {advertise_as or model: {"f": model}}})
 
     results, launched, _ = serve._bring_up_engines(record)
@@ -10862,6 +11757,10 @@ def test_bring_up_engines_api_model_gone_from_whitelist_warns_and_degrades(monke
     assert upstream == ["gpt-5.5", "gpt-legacy"]  # prefix-strip fallback still rewrites sanely
     legacy = caps["models"]["openai:gpt-legacy"]
     assert all(v is False for v in legacy["features"].values())  # degraded, not crashed
+    # issue 06b: `output_cap` is a per-KIND fact, but a model gone from the whitelist fails CLOSED —
+    # its degraded features are all-False, so a capped `auto` request excludes the anomaly rather than
+    # routing to a likely-broken model. (`endpoints` stays per-kind; the features dict does not.)
+    assert legacy["features"]["output_cap"] is False
     err = capsys.readouterr().err
     assert "openai:gpt-legacy" in err and "whitelist" in err  # ...and the degrade is observable
 
@@ -10878,8 +11777,9 @@ def test_bring_up_engines_mixed_union_probes_only_hardware(monkeypatch, tmp_path
         "advertise_as": [],
     }
     probed = []
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)  # issue 08: keep this test network-free
     monkeypatch.setattr(probe, "capabilities",
-                        lambda url, model, *, advertise_as=None, context_window=None: probed.append((url, model))
+                        lambda url, model, *, advertise_as=None, context_window=None, **_: probed.append((url, model))
                         or {"schema_version": 1, "models": {advertise_as or model: {}}})
 
     results, launched, _ = serve._bring_up_engines(record)
@@ -10899,10 +11799,11 @@ def test_bring_up_engines_external_alias_probes_real_name_keys_alias(monkeypatch
     }
     seen = {}
 
-    def fake_caps(url, model, *, advertise_as=None, context_window=None):
+    def fake_caps(url, model, *, advertise_as=None, context_window=None, **_):
         seen.update(url=url, model=model, advertise_as=advertise_as)
         return {"schema_version": 1, "models": {advertise_as or model: {"f": model}}}
 
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)  # issue 08: keep this test network-free
     monkeypatch.setattr(probe, "capabilities", fake_caps)
 
     results, launched, _ = serve._bring_up_engines(record)
@@ -10919,8 +11820,9 @@ def test_bring_up_engines_falls_back_to_flat_record(monkeypatch, tmp_path):
 
     # A record written before multi-engine has no `engines` list — synthesise one spec from flat fields.
     record = {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "advertise_as": []}
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)  # issue 08: keep this test network-free
     monkeypatch.setattr(probe, "capabilities",
-                        lambda url, model, *, advertise_as=None, context_window=None: {"schema_version": 1, "models": {advertise_as or model: {}}})
+                        lambda url, model, *, advertise_as=None, context_window=None, **_: {"schema_version": 1, "models": {advertise_as or model: {}}})
 
     results, launched, _ = serve._bring_up_engines(record)
     assert launched == []  # external engine: nothing launched
@@ -12086,9 +12988,11 @@ def test_remote_models_json_maps_name_to_node_key(monkeypatch, tmp_path, capsys)
     _mock_overview(monkeypatch, _OVERVIEW_2NODES)
     assert cli.main(["models", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio"} in payload
-    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio"} in payload
-    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box"} in payload
+    # `responses` joins every entry (issue 10); this overview omits `responses_models`, so an older
+    # master degrades to False everywhere rather than crashing.
+    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
+    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
+    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
 
 
 def test_remote_models_empty_when_no_nodes(monkeypatch, tmp_path, capsys):
@@ -12136,7 +13040,7 @@ def test_remote_models_json_includes_auto_first_when_router_enabled(monkeypatch,
     _mock_overview(monkeypatch, {**_OVERVIEW_2NODES, "router_enabled": True})
     assert cli.main(["models", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload[0] == {"model": "auto", "engine": "grid-router", "node": ""}
+    assert payload[0] == {"model": "auto", "engine": "grid-router", "node": "", "responses": False}
 
 
 def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch, tmp_path, capsys):
@@ -12146,6 +13050,74 @@ def test_remote_models_shows_auto_even_with_zero_nodes_when_enabled(monkeypatch,
     assert cli.main(["models"]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
     assert lines == ["auto"]
+
+
+# ── responses dialect annotation on the live listing (issue 10) ──
+
+# Two engines both serve `glm-5.2`, but only the MLX one serves the Responses dialect; `qwen-3` serves
+# it nowhere. Exercises AC1 (capable shows), AC2 (incapable omits), AC4 (same id, per-engine truth).
+_OVERVIEW_RESPONSES = {
+    "nodes": [
+        {"name": "mac-studio", "engine": "MLX", "models": ["glm-5.2", "qwen-3"],
+         "responses_models": ["glm-5.2"], "online": True},
+        {"name": "ollama-box", "engine": "ollama", "models": ["glm-5.2"],
+         "responses_models": [], "online": True},
+    ],
+}
+
+
+def test_remote_models_verbose_annotates_a_responses_capable_row(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models", "--verbose"]) == 0
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if "glm-5.2" in ln and "mac-studio" in ln]
+    assert rows and "responses" in rows[0]  # glm-5.2 on the MLX engine serves the dialect
+
+
+def test_remote_models_verbose_omits_responses_per_engine(monkeypatch, tmp_path, capsys):
+    # Per-engine truth (AC2/AC4): glm-5.2 serves the dialect on MLX but NOT on ollama; qwen-3 nowhere.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models", "--verbose"]) == 0
+    by_row: dict[str, str] = {}
+    for ln in capsys.readouterr().out.splitlines():
+        if "glm-5.2" in ln and "mac-studio" in ln:
+            by_row["mac_glm"] = ln
+        if "glm-5.2" in ln and "ollama-box" in ln:
+            by_row["ollama_glm"] = ln
+        if "qwen-3" in ln:
+            by_row["qwen"] = ln
+    assert "responses" in by_row["mac_glm"]         # capable engine shows it
+    assert "responses" not in by_row["ollama_glm"]  # same id, incapable engine → omitted
+    assert "responses" not in by_row["qwen"]        # not served via the dialect anywhere
+
+
+def test_remote_models_json_carries_per_engine_responses_flag(monkeypatch, tmp_path, capsys):
+    # AC6: the machine-readable form carries the same per-engine fact, true and false alike.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {"model": "glm-5.2", "engine": "MLX", "node": "mac-studio", "responses": True} in payload
+    assert {"model": "glm-5.2", "engine": "ollama", "node": "ollama-box", "responses": False} in payload
+    assert {"model": "qwen-3", "engine": "MLX", "node": "mac-studio", "responses": False} in payload
+
+
+def test_remote_models_verbose_degrades_when_responses_field_absent(monkeypatch, tmp_path, capsys):
+    # An older master's overview omits responses_models entirely → nothing annotated, no crash.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_2NODES)
+    assert cli.main(["models", "--verbose"]) == 0
+    assert "responses" not in capsys.readouterr().out
+
+
+def test_remote_models_plain_listing_stays_bare_names(monkeypatch, tmp_path, capsys):
+    # The default (non-verbose) output is unchanged — bare deduped ids for scripting, no annotation.
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_overview(monkeypatch, _OVERVIEW_RESPONSES)
+    assert cli.main(["models"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert lines == ["glm-5.2", "qwen-3"]  # deduped, first-seen order, no `responses` suffix
 
 
 def test_remote_engines_requires_grid_up(monkeypatch, tmp_path):

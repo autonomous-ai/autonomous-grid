@@ -25,6 +25,7 @@ _PROBE_TIMEOUT = 15.0
 _PROPS_TIMEOUT = 5.0
 _SHOW_TIMEOUT = 5.0
 _BENCHMARK_TIMEOUT = 60.0
+_RESPONSES_PROBE_TIMEOUT = 5.0
 
 # A minimal valid image for the live vision probe — we only test whether the engine ACCEPTS image
 # input, not the answer, so any decodable pixel works. Bump the size if a specific engine rejects
@@ -47,6 +48,8 @@ def capabilities(
     *,
     advertise_as: str | None = None,
     context_window: int | None = None,
+    endpoints: list[str] | None = None,
+    honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """One-call public API: live-probe ``llm_url`` for ``model`` and return the register envelope.
 
@@ -56,8 +59,45 @@ def capabilities(
     answers to) yet register under the alias (what consumers ask for).
 
     ``context_window`` (the engine's ``--ctx-size``) is advertised so the master can catalog it.
+
+    ``endpoints`` and ``honours_output_cap`` carry the once-per-engine Responses discovery (issue 08):
+    the caller runs ``probe_responses_endpoint`` ONCE for the engine's server and passes the same
+    answer here for every model it advertises — the dialect is a property of the server, not a model.
+    Both default to the pre-Phase-2 hardware posture (chat pair, no cap feature), so a caller that has
+    not probed the route is unchanged.
     """
-    return envelope(advertise_as or model, probe_llama_capabilities(llm_url, model), context_window)
+    return envelope(
+        advertise_as or model, probe_llama_capabilities(llm_url, model), context_window,
+        endpoints=endpoints, honours_output_cap=honours_output_cap,
+    )
+
+
+def probe_responses_endpoint(llm_url: str, *, timeout: float = _RESPONSES_PROBE_TIMEOUT) -> bool:
+    """Discover whether the engine's server serves the Responses dialect at ``/responses`` (ADR 0018).
+
+    A route-existence probe, NOT an inference: POST a deliberately-invalid (empty) body and read the
+    status. A *bad-request* (400/422) means the route exists and rejected the payload → ``True``; a
+    *route-missing* status (404), *method-not-allowed* (405), a catch-all ``200`` page, any other
+    status, and any transport failure / timeout all mean "does not serve it" → ``False``. **Fail
+    closed**: over-advertising makes the relay's candidate filter lie (the ADR 0017 error class),
+    while under-advertising only keeps the engine on the chat traffic it already serves.
+
+    The dialect is a property of the engine's SERVER, not of a model, so callers run this ONCE per
+    engine and stamp the answer onto every model it advertises — never once per model.
+
+    No tokens are spent and no inference runs: an empty body is *expected* to fail request validation
+    before any forward pass. That "the probe is free" premise is unverified per engine (decisions.md
+    §5 item 4) and — unlike the 404-vs-400 ambiguity, which the fail-closed rule above already makes
+    safe — has no fail-closed backstop; if issue 11's live gate finds an engine doing real work on an
+    empty body, this probe must change shape (a structurally-invalid but still-cheap body), not merely
+    keep failing closed.
+    """
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(f"{llm_url.rstrip('/')}/responses", json={})
+    except httpx.HTTPError:
+        return False
+    return resp.status_code in (400, 422)
 
 
 # --- HTTP (routed through httpx.Client so tests can inject a MockTransport) ---
@@ -404,14 +444,25 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
 
 def capability_entry(
     probed: dict[str, bool], context_window: int | None = None,
-    endpoints: list[str] | None = None,
+    endpoints: list[str] | None = None, honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """Render one model's capability entry (matches the desktop/relay shape). ``context_window`` is
     included ONLY when actually known (the engine's ``--ctx-size`` or an API whitelist entry) — an
     unknown window is omitted, never defaulted, so the master (and the auto-router Advisor) treats
     absence as "unknown" rather than trusting a fabricated 128000. ``endpoints`` defaults to the
-    hardware-engine pair; an API engine passes ``["chat/completions"]`` — it never serves legacy
-    completions (ADR 0012)."""
+    hardware-engine pair; an API engine passes its catalog row's endpoints (issue 03) — chat plus
+    ``responses`` for a kind whose vendor serves the dialect (openai) — but never legacy completions
+    (ADR 0012).
+
+    ``honours_output_cap`` advertises the ``output_cap`` FEATURE — the engine honours a Responses
+    ``max_output_tokens`` cap. It is a hand-duplicated wire literal grid-src's auto-router filters on
+    (issue 06b): a capped ``auto`` request excludes engines that lack it, so it never lands on a seat
+    that would 400 the cap post-queue. Defaults ``False`` so every current caller — every Phase-1
+    hardware probe — is unchanged; the openai kind passes ``True`` via ``_static_api_caps``, and
+    Phase 2's hardware probe (issue 08) flips this default on. Distinct from the numeric
+    ``max_output_tokens`` LIMIT below: that is issue 09's enforcement ceiling, this is the routing
+    boolean. The codex seat uses ``codex_capability_entry`` and never reaches here, so it never
+    advertises the feature — the fail-closed omission this filter relies on."""
     input_modalities = ["text", "image"] if probed["vision"] else ["text"]
     ctx = int(context_window) if context_window else None
     return {
@@ -429,6 +480,8 @@ def capability_entry(
             "audio": False,
             "logprobs": False,
             "top_logprobs": False,
+            # Appended last so the existing feature order is undisturbed. issue 06b wire literal.
+            "output_cap": honours_output_cap,
         },
         "limits": {
             **({"max_context_tokens": ctx} if ctx is not None else {}),
@@ -442,12 +495,14 @@ def capability_entry(
 
 def envelope(
     model_name: str, probed: dict[str, bool], context_window: int | None = None,
-    endpoints: list[str] | None = None,
+    endpoints: list[str] | None = None, honours_output_cap: bool = False,
 ) -> dict[str, Any]:
     """Wrap a probed-features dict in the ``{schema_version, models}`` envelope the relay requires."""
     return {
         "schema_version": 1,
-        "models": {model_name: capability_entry(probed, context_window, endpoints=endpoints)},
+        "models": {model_name: capability_entry(
+            probed, context_window, endpoints=endpoints, honours_output_cap=honours_output_cap,
+        )},
     }
 
 
@@ -475,12 +530,19 @@ def codex_capability_entry(
     the caller supplies it — never for the ``entry=None`` degrade, which has no row position.
     """
     codex_endpoints = list(api_catalog.WHITELISTS[api_catalog.CODEX_KIND].endpoints)
+    # issue 06c: the seat advertises the NEGATIVE `stream_only` routing trait on BOTH branches (its
+    # backend is SSE-only, stale-catalog or not). Sourced from the predicate the engine-side stream gate
+    # also reads (`kind_is_stream_only`), NOT a literal True, so advertise and gate can't disagree.
+    stream_only = api_catalog.kind_is_stream_only(api_catalog.CODEX_KIND)
     if entry is None:
         return {
             "endpoints": codex_endpoints,
             "input_modalities": ["text"],
             "output_modalities": ["text"],
-            "features": {},
+            # No capability claims for an unresolved model — but the seat's backend is still SSE-only, so
+            # the `stream_only` routing trait stays (issue 06c). Fail-closed: a non-streaming `auto`
+            # request is still routed away from a stale seat, the opposite polarity to a capability.
+            "features": {"stream_only": stream_only},
         }
     features = api_catalog.codex_features(entry)
     # vendor_rank (1 = most capable) is a TOP-LEVEL capability fact, a sibling of context_window —
@@ -494,7 +556,9 @@ def codex_capability_entry(
         "output_modalities": ["text"],
         "context_window": int(entry.context_window),
         **({"vendor_rank": vendor_rank} if vendor_rank is not None else {}),
-        "features": features,
+        # A routing trait folded in beside the honest capabilities — NOT added to `codex_features`,
+        # which also feeds `grid catalog --api codex --json` and must stay capability-only.
+        "features": {**features, "stream_only": stream_only},
     }
 
 

@@ -32,6 +32,17 @@ class ApiWhitelist:
     max_output_param: str | None = "max_tokens"
     unsupported_params: tuple[str, ...] = ()
     endpoints: tuple[str, ...] = ("chat/completions",)
+    # This kind's backend speaks SSE only, so it cannot serve a NON-streaming Responses request — the
+    # codex subscription seat (ADR 0018 / issue 06c). Advertised to the relay as the NEGATIVE
+    # `stream_only` capability-feature (remote/probe.codex_capability_entry) and forbidden by a
+    # non-streaming `auto` request, so the auto-router never lands one on a seat that would 400 it
+    # post-queue. Read by BOTH that advertise path and the engine-side stream gate (remote/serve.py) via
+    # `kind_is_stream_only`, so the two can't disagree. Hand-duplicated with grid-src's
+    # KNOWN_FEATURE_KEYS (CLAUDE.md lockstep): only the seat ever sets this True, and an old CLI / master
+    # that doesn't know the literal simply doesn't exclude the seat — the pre-06c behaviour, never a NEW
+    # failure (master-before-CLI rollout, ADR 0018 §11). Default False: every other API kind and every
+    # hardware engine (never in this table) serves non-streaming.
+    stream_only: bool = False
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
 # https://developers.openai.com/api/docs/models) on 2026-07-08.
@@ -214,6 +225,11 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # All four whitelist models reject `stop` ("Unsupported parameter: 'stop' is not supported
         # with this model.") — verified against the live API on 2026-07-14. `stop: null` is accepted.
         unsupported_params=("stop",),
+        # ADR 0018 (issue 03): the openai vendor serves the Responses dialect natively, so this kind
+        # serves BOTH endpoints. `responses` is hand-duplicated with grid-src's per-model
+        # `provider_supports` filter and must match its `endpoint_path` byte-for-byte (absent there ⇒
+        # chat-only, so old CLIs fail closed) — CLAUDE.local.md lockstep rule. Never `completions`.
+        endpoints=("chat/completions", "responses"),
     ),
     "codex": ApiWhitelist(
         last_verified=CODEX_LAST_VERIFIED,
@@ -229,6 +245,9 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         unsupported_params=("max_tokens", "max_output_tokens", "max_completion_tokens", "temperature"),
         # ADR 0015 D-b: a codex seat serves the `responses` endpoint ONLY.
         endpoints=("responses",),
+        # ADR 0018 / issue 06c: the seat's backend is SSE-only, so it cannot serve a non-streaming
+        # Responses request. The ONLY row that sets this — see `kind_is_stream_only`.
+        stream_only=True,
     ),
     "doggi": ApiWhitelist(
         last_verified=DOGGI_LAST_VERIFIED,
@@ -348,7 +367,60 @@ def responses_only_kind(model: str) -> str | None:
     return kind
 
 
-def format_api_entry(kind: str, entry: ApiModelEntry) -> str:
+# The Responses-dialect output-token cap parameter. A kind honours a cap IFF this is NOT among its
+# `unsupported_params` — the exact fact remote/serve.py `_api_unsupported_params` refuses on — so the
+# auto-router's cap filter (issue 06b) and the per-kind engine gate (issue 04) read ONE source and can
+# never disagree. This is the dialect's OWN spelling (`max_tokens`/`max_completion_tokens` are the
+# chat-dialect spellings the relay refuses on `responses` outright).
+RESPONSES_OUTPUT_CAP_PARAM = "max_output_tokens"
+
+
+def kind_honours_output_cap(kind: str) -> bool:
+    """True iff an API engine of ``kind`` honours a Responses output-token cap (``max_output_tokens``).
+
+    Read from the SAME catalog fact issue 04's engine-side gate reads (``unsupported_params``), so the
+    auto-router's candidate filter (issue 06b, layer 2) and the engine gate (issue 04, layer 3) can
+    never disagree about a kind: ``openai`` honours it, the ``codex`` seat cannot cap under any name.
+    An unknown kind is not-cap-capable — fail closed, matching how ``_static_api_caps`` and
+    ``_served_endpoints`` degrade an unknown kind to the conservative answer.
+    """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return False
+    return RESPONSES_OUTPUT_CAP_PARAM not in whitelist.unsupported_params
+
+
+def kind_is_stream_only(kind: str) -> bool:
+    """True iff an API engine of ``kind`` can serve ONLY streaming Responses requests — the codex
+    subscription seat, whose backend speaks SSE only (ADR 0018 / issue 06c).
+
+    Read from the whitelist row's ``stream_only`` field by BOTH the engine-side stream gate
+    (``remote/serve.py``, which refuses a non-stream job for such a kind) and the advertised envelope
+    (``remote/probe.codex_capability_entry``, which emits the negative ``stream_only`` trait the
+    auto-router forbids on a non-streaming request), so the layer that refuses and the layer that routes
+    around it can never disagree about which kind is stream-only.
+
+    An unknown kind — and every hardware engine, which is never in ``WHITELISTS`` — is NOT stream-only:
+    absence is the safe default (never excluded), the OPPOSITE fail-direction from
+    ``kind_honours_output_cap`` and the reason a non-streaming request stays backward-compatible against
+    an old CLI that advertises nothing.
+    """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return False
+    return whitelist.stream_only
+
+
+def format_api_entry(kind: str, entry: ApiModelEntry, endpoints: tuple[str, ...]) -> str:
+    """The human-readable catalog line for one model: ``kind``/``entry`` name and size it, while
+    ``endpoints`` (the whitelist row's — a per-KIND fact, not a per-model boolean) says which relay
+    dialects the kind serves.
+
+    Only the notable dialect — ``responses`` — is surfaced as a capability; ``chat/completions`` is
+    never rendered as one, so a kind that serves only chat shows no endpoint tag at all (issue 06
+    AC3). Reads the same ``endpoints`` tuple the relay filter and ``responses_only_kind`` read, so a
+    new responses-serving kind lights up here for free.
+    """
     caps = ", ".join(
         name
         for name, supported in (
@@ -356,6 +428,11 @@ def format_api_entry(kind: str, entry: ApiModelEntry) -> str:
             ("vision", entry.supports_vision),
             ("json", entry.supports_json_mode),
             ("structured", entry.supports_structured_outputs),
+            # Appended last so the existing caps order and the fixed-width columns are undisturbed;
+            # folding it into the SAME list (not a separate suffix after `caps or 'text only'`) is
+            # what keeps a model whose only capability is the dialect rendering `responses`, never
+            # the contradictory `text only, responses` (issue 06 AC4).
+            ("responses", "responses" in endpoints),
         )
         if supported
     )
