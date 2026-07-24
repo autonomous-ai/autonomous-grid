@@ -48,6 +48,7 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .device import cmd_device_info
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
@@ -70,6 +71,7 @@ __all__ = [
     "cmd_models",
     "cmd_engines",
     "cmd_catalog",
+    "cmd_device_info",
     "cmd_pull",
     "cmd_rm",
     "cmd_mode",

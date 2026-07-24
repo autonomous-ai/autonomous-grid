@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from shared.system import arch
+
 
 @dataclass
 class GpuInfo:
@@ -118,7 +120,10 @@ def _macos_vram_mb(timeout: float = 5.0) -> float:
         return _MAC_VRAM_MB
     if platform.system() != "Darwin":
         _MAC_VRAM_MB = 0.0
-    elif platform.machine() == "arm64":
+    elif arch.native_machine() == "arm64":
+        # `native_machine`, not `platform.machine()`: an x86_64 (Rosetta) Python on Apple
+        # Silicon reports "x86_64" and would wrongly take the Intel-Mac path, reading a few
+        # GB of integrated VRAM instead of the full unified-memory pool.
         _MAC_VRAM_MB = _sysctl_memsize_mb()
     else:
         _MAC_VRAM_MB = _macos_profiler_vram_mb(timeout=timeout)
