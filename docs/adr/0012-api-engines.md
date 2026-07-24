@@ -33,6 +33,20 @@ the only place the CLI itself calls OpenAI. Rejected: a control-plane catalog AP
 (needless moving part for a small curated table; keeping it current is a data edit
 verified against vendor docs, not a live probing subsystem).
 
+> **Amended 2026-07-24 (issue 10b — dynamic codex catalog;
+> `.scratch/codex-subs/PRD-issue-10-dynamic-catalog.md`).** The "no key, no network call" posture
+> holds for the openai kind but is **relaxed for codex**: `grid catalog --api codex` is now
+> **seat-aware**. When a codex seat is signed in it makes ONE free `GET /models` probe (spending
+> nothing) to show the current plan's REAL entitlement, marked live, then writes a grid-side cache
+> (`~/.grid/codex_models_cache.json`, `0o600`, scoped to the seat). Offline or a rejected seat fall
+> back to that cache, then to a static, **illustrative** cross-plan reference encoded from the pricing
+> docs; with **no seat signed in** it shows the illustrative reference directly (the cache is a
+> signed-in seat's entitlement) — always with a warning. There is **no `--live` flag**; the behaviour
+> is automatic. The static table stopped
+> being a serving gate in issue 10a (the live probe is the source of truth for the served set); it
+> survives ONLY as the illustrative reference. The catalog never dies on a probe failure — a read-only
+> surface always renders the cache or the reference.
+
 Curation rule: the current flagship family plus mini/nano variants and the reasoning
 series (which, as of the GPT-5.x lineup, is folded into the flagship family rather than
 a separate o-series); excludes audio/realtime, embeddings, image, moderation, and

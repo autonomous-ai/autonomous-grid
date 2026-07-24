@@ -474,6 +474,43 @@ poll-worker default of 8 does **not** apply to codex — a codex-containing unio
 >   ALL api kinds — the codex URL-mismatch refusal above sidesteps it for codex; openai keeps
 >   the historic behavior.
 
+> **Amended 2026-07-24 (issue 10a — the live probe is the source of truth; `.scratch/codex-subs/
+> PRD-issue-10-dynamic-catalog.md`).** D-f's safety rule **flips**: the guarantee is now "an
+> unverified **capability** fails closed", NOT "an unverified **model** is refused". The static
+> tier table stops being a serving gate.
+>
+> - **Served set = the seat's live `GET /models` probe, with NO static intersection.** Membership is
+>   the probe rows where `visibility != "hide"` **and** `supported_in_api is not False` — an
+>   explicit vendor `false` excludes (a model that would 400 if called), but an ABSENT field serves
+>   (never fail closed on a *model*; real bodies always send `true`). A model the seat is entitled to
+>   is served the day the vendor ships it — no CLI edit, no PR — and a paid seat serves its real
+>   entitlement instead of degrading to the free four.
+> - **Caps are DERIVED from the probe and PERSISTED in the run record at join** (`model_caps`:
+>   advertised name → `context_window`/`vision`/`tools`/`vendor_rank`), because the serving side no
+>   longer has a static table to look them up from. `_static_api_caps` reads them from the record;
+>   `vendor_rank` = the model's 1-based position in the probe's visible order (reproduces the curated
+>   order). A model absent from `model_caps` degrades to the responses-only fail-closed entry + a
+>   warn (the stale-catalog posture). An unknown `context_window` (the `0` sentinel) is **omitted**
+>   from the envelope, never fabricated — `codex_capability_entry` now uses the `capability_entry`
+>   conditional-key idiom. `endpoints: ["responses"]` stays byte-for-byte (grid-src lockstep).
+> - **An explicit `-m` miss is still refused, never silently narrowed** — but the "can serve" list
+>   now names the **probe** set, not a tier row.
+> - **The tier machinery is removed** (`codex_effective_tier` / `codex_tier_entries` /
+>   `codex_vendor_rank`, and the whole `_warn_codex_tier` "tier not verified" warning set): with
+>   membership driven by the probe, its degrade concept is meaningless. `plan_type` survives only as
+>   a display/message label (never gates serving). This **supersedes** the issue-05 "Tier selection"
+>   and "tier warns" bullets above and the review-pass "the verified tier row is what actually bounds
+>   advertising" point — the hide + `supported_in_api` filters are now the sole structural guards, so
+>   a `visibility` rename fails **open on the model** (served, fails visibly per-job), no longer
+>   backstopped by an intersection. **Unverified assumption (security review):** "fails visibly
+>   per-job" leans on the vendor's API rejecting a call to a hidden model — but `codex-auto-review`
+>   being hidden from the vendor's own picker does not *prove* the backend 4xxs a direct call. If it
+>   silently serves, a `visibility` rename would route jobs to a vendor-internal/review model unseen.
+>   Left as a documented risk (settling it needs a live probe), not a code gate — the precondition is
+>   a vendor field rename or an in-trust-store MITM.
+> - The static per-tier table survives ONLY as an illustrative cross-plan reference for
+>   `grid catalog` (issue 10b), display-only; it never gates serving again.
+
 > **Amended 2026-07-16 (issue 06 — as built, provider half).** The provider submits whole event
 > blocks via `remote/serve._iter_event_blocks`, regrouping the vendor's arbitrary socket chunking
 > so each HTTP chunk to the relay is one complete `event:`+`data:` block, blank line included —
@@ -513,6 +550,15 @@ poll-worker default of 8 does **not** apply to codex — a codex-containing unio
   in v1 for either kind.
 - Two grids on one box share one seat: refresh is serialized cross-process; quota and rate
   limits are shared and unmanaged in v1.
+- **Grid-side model cache (issue 10b).** Every successful `GET /models` probe — the join probe AND
+  `grid catalog --api codex`'s own seat-aware probe — is cached to `~/.grid/codex_models_cache.json`
+  (`0o600`; slugs + derived caps only, never a token and never the raw account id), so an offline
+  catalog shows the seat's real last-known set instead of only the illustrative reference. It is
+  scoped to the seat by a one-way SHA-256 FINGERPRINT of the account id (the raw id never touches
+  disk), so a cache written by a DIFFERENT seat on the same box is never shown; it is also invalidated
+  on a `client_version` mismatch (a grid upgrade bumps the pin). Both the write (best-effort) and the
+  read (defensive — corrupt / absent / stale / all-rows-unreadable → `None`, and an out-of-range
+  number degrades rather than raising) fail soft: the catalog never dies on its own cache.
 - A residual brick risk remains by design: a crash after the token exchange returns but
   before the write can still lose the rotation; the journal makes it *detectable* (next
   refresh fails cleanly → "re-run `grid join --api codex` to sign in again"), not

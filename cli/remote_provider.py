@@ -30,7 +30,7 @@ from shared.models import api_catalog
 
 if TYPE_CHECKING:  # runtime imports of remote.* stay lazy (see the module docstring)
     from remote.codex_oauth import CodexBundle
-    from remote.codex_probe import SeatRejected
+    from remote.codex_probe import CodexModel, SeatRejected
 
 # Remote has exactly ONE identity per grid: the relay node_id is pinned to the per-grid access token
 # (remote/serve._node_id_from_token), so two `grid join`s on a grid would register the same node and
@@ -263,9 +263,10 @@ def _resolve_api_targets(
     from remote import api_keys  # lazy: only stdlib + shared.* at module top (see module docstring)
 
     if kind == api_keys.CODEX_KIND:
-        # `requested`, not `chosen`: codex's no--m default is the seat's TIER row ∩ its live set
-        # (D-f), which the resolver computes itself — the union default here would name paid-tier
-        # models a lesser seat can never serve.
+        # `requested`, not `chosen`: codex's no--m default is the seat's LIVE PROBE set (issue 10a —
+        # the resolver probes and computes it itself, no static intersection), so the `chosen =
+        # list(valid)` union default is wrong here — it would name static-table models the live seat
+        # may not actually serve.
         return _resolve_codex_targets(args, whitelist, requested, network_id)
     return _resolve_key_api_targets(args, kind, whitelist, valid, chosen)
 
@@ -284,7 +285,7 @@ def _resolve_codex_targets(
     ``GET {base}/models`` probe — egress reachability + seat liveness + the seat's real entitled
     set in one round-trip — not the key path's ``GET /v1/models``.
     """
-    from remote import api_keys
+    from remote import api_keys, codex_models_cache
 
     from . import codex_signin
 
@@ -314,29 +315,44 @@ def _resolve_codex_targets(
             "`grid join --api codex`. Nothing was changed."
         )
     if (
-        live_codex is not None and not fresh
+        live_codex is not None and not fresh and live_codex.get("model_caps")
         and (not requested or set(requested) <= set(live_codex.get("models") or []))
     ):
-        # Same credential, no model beyond the live union — nothing a probe could inform. (A -m
-        # SUBSET is unchanged too: narrowing is leave-then-rejoin by design, a join only ever
-        # adds.) The mandated tier warn still fires: a degraded tier must resurface on EVERY
-        # join, not once at the first one (silent-failure review #4). The spec's models list is
-        # copied so the returned spec can never alias the live record's own list.
-        _warn_codex_tier(bundle.plan_type)
-        return [{**live_codex, "models": list(live_codex.get("models") or [])}], False
+        # Same credential, no model beyond the live union, AND the live spec already carries
+        # probe-derived caps — nothing a probe could inform. (A -m SUBSET is unchanged too:
+        # narrowing is leave-then-rejoin by design, a join only ever adds.) The `model_caps` guard
+        # forces a re-probe when the live record predates issue 10a (no caps recorded): skipping it
+        # there would leave the serving side advertising every model fail-closed. The spec's models
+        # list AND model_caps are copied so the returned spec can never alias the live record's own
+        # mutable fields (the immutability rule its sibling `models` already follows).
+        return [{
+            **live_codex,
+            "models": list(live_codex.get("models") or []),
+            "model_caps": dict(live_codex.get("model_caps") or {}),
+        }], False
 
     live, bundle, fresh = _probe_codex_seat_with_recovery(args, whitelist, bundle, fresh)
-    served = _select_codex_models(bundle.plan_type, requested, live)
+    # Cache the fresh probe (issue 10b), scoped to this seat's account fingerprint: an offline
+    # `grid catalog --api codex` then shows the seat's real last-known set instead of only the static
+    # reference. Best-effort inside the writer — a cache-write failure never fails the join. Written
+    # HERE, after a real probe — the probe-skip early-return above never reaches this line, so an
+    # unchanged re-join keeps the last real cache.
+    codex_models_cache.write_cache(
+        live, client_version=api_catalog.CODEX_CLIENT_VERSION, account_id=bundle.account_id,
+    )
+    served, model_caps = _select_codex_models(requested, live)
     return [{
         "endpoint_url": whitelist.base_url,
         "models": served,
         "engine_label": api_keys.CODEX_KIND,
         "api_kind": api_keys.CODEX_KIND,
-        # The seat's tier, so serve can recompute each model's vendor_rank from the SAME tier row
-        # the advertised set was picked from (issue 03). A short plan-label string (the seat's raw
-        # tier claim), never a secret; `None` (vendor said nothing) rides through and degrades to
-        # the minimal row at serve time.
+        # The seat's tier — a display/message label only now (issue 10a: serving no longer gates on
+        # it). A short plan string (the seat's raw claim), never a secret; `None` rides through.
         "plan_type": bundle.plan_type,
+        # The probe-derived per-model caps the serving side reads to build the capability envelope,
+        # now that no static table exists to look them up from (issue 10a). Non-secret routing data
+        # — model names + context_window/vision/tools/vendor_rank, never a token or the account id.
+        "model_caps": model_caps,
     }], fresh
 
 
@@ -345,14 +361,14 @@ def _probe_codex_seat_with_recovery(
     whitelist: api_catalog.ApiWhitelist,
     bundle: CodexBundle,
     fresh: bool,
-) -> tuple[tuple[str, ...], CodexBundle, bool]:
+) -> tuple[tuple[CodexModel, ...], CodexBundle, bool]:
     """D-f's probe, with the ONE recovery issue 05 allows: a STORED seat the vendor rejects gets
     a single fresh sign-in and one re-probe, interactive runs only (the PRD's sign-in inline
     "when the stored one is dead" — without it, a dead stored bundle makes every re-join load the
     same corpse and fail forever, since no other re-sign-in verb exists). A fresh seat failing, a
     second failure, or a non-interactive run gets the terminal auth-class message. Returns
-    ``(live_slugs, bundle, fresh)`` — the bundle and freshness the join must proceed with, since
-    a recovery re-mints both.
+    ``(live_records, bundle, fresh)`` — the probe's rich per-model records, plus the bundle and
+    freshness the join must proceed with, since a recovery re-mints both.
     """
     from remote import codex_probe
 
@@ -391,88 +407,49 @@ def _codex_seat_rejected(rejected: SeatRejected) -> str:
     )
 
 
-def _warn_codex_tier(plan_type: str | None) -> None:
-    """The issue's mandated tier warn (ADR 0015 D-f amendments): it fires HERE, at the moment the
-    tier picks the advertised row — not at sign-in, where the tier has no consumer yet. Three
-    degrade cases, three wordings — the operator's diagnosis differs, the advertised row doesn't:
-
-    * ``None`` — the vendor said NOTHING. Loud, because a vendor rename of the tier claim decays
-      to exactly this (``decode_seat`` degrades a renamed field to None by design), and without
-      this line every seat would quietly advertise the minimal set forever.
-    * unrecognized — the vendor said something outside its own known vocabulary (drift).
-    * known-but-unverified — our table simply has no verified row yet; informational, not a warn.
-
-    A populated known tier prints nothing. Only the LAST case may echo the tier: it is a member
-    of the closed ``CODEX_PLAN_TYPES`` vocabulary, so the echo cannot carry arbitrary token text.
-    """
-    minimal = api_catalog.CODEX_MINIMAL_TIER
-    if plan_type is None:
-        print(
-            "Warning: this codex seat is signed in but reports no subscription tier — the vendor "
-            f"may have changed its token format. Advertising the minimal ('{minimal}') model set; "
-            "if your plan should serve more, check for a newer grid release.",
-            file=sys.stderr,
-        )
-    elif plan_type not in api_catalog.CODEX_PLAN_TYPES:
-        print(
-            "Warning: this codex seat reports a subscription tier this grid release doesn't "
-            f"recognize — advertising the minimal ('{minimal}') model set.",
-            file=sys.stderr,
-        )
-    elif plan_type not in api_catalog.CODEX_TIER_MODELS:
-        print(
-            f"The '{plan_type}' tier's model list isn't verified in this grid release yet — "
-            f"advertising the verified '{minimal}' set.",
-            file=sys.stderr,
-        )
-
-
 def _select_codex_models(
-    plan_type: str | None, requested: list[str], live: tuple[str, ...]
-) -> list[str]:
-    """The advertised set: the seat's tier row ∩ its live entitled set ∩ any explicit ``-m``
-    request (ADR 0015 D-f). The tier row bounds advertising no matter what the seat can reach —
-    an unverified model must never be advertised on a guess."""
+    requested: list[str], live: tuple[CodexModel, ...]
+) -> tuple[list[str], dict[str, dict[str, object]]]:
+    """The advertised set + its persisted caps, straight from the seat's live probe (issue 10a — no
+    static tier intersection; the probe IS the source of truth for both the set and its caps).
+
+    Membership is the probe set. An explicit ``-m`` for a model the seat can't serve is REFUSED,
+    never silently narrowed (the deliberate divergence from openai's skip), naming what the probe
+    set CAN serve. Returns ``(served advertised names, model_caps)`` where ``model_caps[advertised]``
+    is the caps the serving side reads from the run record — ``context_window``/``vision``/``tools``
+    derived from the probe, and ``vendor_rank`` = the model's 1-based position in the probe's visible
+    order (vendor/priority order, the curated ordering today's ranking reproduces).
+    """
     kind = api_catalog.CODEX_KIND
-    tier = api_catalog.codex_effective_tier(plan_type)
-    _warn_codex_tier(plan_type)
-    valid = {
-        api_catalog.advertised_name(kind, entry): entry
-        for entry in api_catalog.CODEX_TIER_MODELS[tier]
+    # Caps for the WHOLE probe set (not just the -m subset): an additive re-join unions this engine's
+    # models, so the persisted caps must cover every entitled model or a later `-m` append would union
+    # a model whose caps this write dropped. `vendor_rank` = 1-based probe order (vendor/priority).
+    model_caps: dict[str, dict[str, object]] = {
+        f"{kind}:{model.slug}": {
+            "context_window": model.context_window,
+            "vision": model.supports_vision,
+            "tools": model.supports_tools,
+            "vendor_rank": index + 1,
+        }
+        for index, model in enumerate(live)
     }
-    # An explicit ask is refused, never silently narrowed (issue 05 — deliberate divergence from
-    # openai's skip: a personal seat asked for a model it lacks deserves a refusal, and a silent
-    # subset would advertise less than the operator believes they joined).
-    outside_tier = [model for model in requested if model not in valid]
-    if outside_tier:
-        # The tier bound (D-f): only a verified row may be advertised, whatever the seat can
-        # reach — so this is refused even when the live set contains the model.
+    outside = [model for model in requested if model not in model_caps]
+    if outside:
+        # A personal seat asked for a model it can't serve deserves a refusal, not a silent subset.
+        # Name what the seat CAN serve (the probe set) so the operator isn't left guessing.
         raise SystemExit(
-            f"Not in the '{tier}' tier's verified list: {', '.join(outside_tier)}. "
-            f"This seat's tier can serve: {', '.join(valid)}. Nothing was joined."
+            f"Not available on this codex seat: {', '.join(outside)}. "
+            f"This seat can serve: {', '.join(model_caps) or '(none)'}. Nothing was joined."
         )
-    target = requested or list(valid)
-    served = [model for model in target if valid[model].vendor_name in live]
-    missing = [model for model in target if model not in served]
-    if requested and missing:
-        available = [model for model in valid if valid[model].vendor_name in live]
-        # Never "serves none" here — the seat may well serve OTHER verified models, and the
-        # actionable fact is which ones.
+    served = requested or list(model_caps)
+    if not served:
+        # The no--m default found nothing: the seat's live listing is empty (every model hidden or
+        # API-unsupported). Nothing was "requested", so no name is blamed.
         raise SystemExit(
-            f"Not available on this codex seat: {', '.join(missing)}. "
-            f"This seat can serve: {', '.join(available) or '(none of the verified models)'}. "
+            "This codex seat currently serves no models — its live listing is empty. "
             "Nothing was joined."
         )
-    if not served:
-        # The no--m default found nothing: name the verified row so the operator sees what a
-        # serving seat WOULD have offered (nothing was "requested", so no name is blamed).
-        raise SystemExit(
-            f"This codex seat currently serves none of the verified '{tier}'-tier models: "
-            f"{', '.join(valid)}. Nothing was joined."
-        )
-    if missing:
-        print(f"Skipping (not on this seat): {', '.join(missing)}", file=sys.stderr)
-    return served
+    return served, model_caps
 
 
 def _resolve_key_api_targets(
@@ -706,6 +683,8 @@ def _merge_engines(
         if existing is None:
             copy = dict(spec)
             copy["models"] = list(copy.get("models") or [])
+            if "model_caps" in copy:  # a fresh dict, like models above — never alias the incoming spec
+                copy["model_caps"] = dict(copy["model_caps"])
             merged.append(copy)
             index[_spec_key(copy)] = copy
             changed = True
@@ -714,13 +693,20 @@ def _merge_engines(
         if added:
             existing["models"] = list(existing.get("models") or []) + added
             changed = True
-        # A re-join re-resolves the seat's scalar facts too: refresh plan_type (the codex tier —
-        # issue 03) from the incoming spec, or the engine ranks against the tier it FIRST joined at
-        # forever (serve reads vendor_rank off this stored field). A same-key engine is the same
-        # seat, so the freshly-resolved value is authoritative. Key-guarded so a non-codex spec,
-        # which never carries plan_type, stays byte-identical.
+        # A re-join re-resolves the seat's scalar facts too: refresh plan_type (the seat's tier
+        # label) and model_caps (the probe-derived per-model caps serve reads from the record —
+        # issue 10a) from the incoming spec, or the engine would keep the caps/rank it FIRST joined
+        # with forever. A same-key engine is the same seat, so the freshly-probed values are
+        # authoritative. Key-guarded so a non-codex spec, which carries neither, stays byte-identical.
         if "plan_type" in spec:
             existing["plan_type"] = spec["plan_type"]
+        if "model_caps" in spec:
+            # UNION, not replace: `existing["models"]` only ever GROWS (above), so a model still in
+            # the union but dropped by a shrunk fresh re-probe must keep its last-known caps rather
+            # than silently degrade to the fail-closed serve entry. Incoming caps win for a re-probed
+            # model; a model absent from the fresh probe keeps its prior entry. A fresh dict (never a
+            # mutate of either side) so the write can't alias the live record or the incoming spec.
+            existing["model_caps"] = {**(existing.get("model_caps") or {}), **spec["model_caps"]}
     return merged, changed
 
 
