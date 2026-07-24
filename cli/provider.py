@@ -384,9 +384,19 @@ def cmd_leave(args: argparse.Namespace) -> int:
         names = ", ".join(sorted(records))
         raise SystemExit(f"Several engines joined ({names}); pass --engine <id> or --all.")
 
+    survivors: list[tuple[str, int]] = []
     for engine_id in targets:
-        _stop_engine(grid_id, engine_id, records[engine_id])
-        print(f"Left engine {engine_id} on {cfg['name']}.")
+        survivor = _stop_engine(grid_id, engine_id, records[engine_id])
+        if survivor:  # honest teardown: a child that survived SIGKILL kept its record — don't lie "Left"
+            survivors.append((engine_id, survivor))
+        else:
+            print(f"Left engine {engine_id} on {cfg['name']}.")
+    if survivors:
+        named = ", ".join(f"{engine_id} (pid {pid})" for engine_id, pid in survivors)
+        raise SystemExit(
+            f"Could not stop engine(s) {named} on {cfg['name']}; their record was kept so "
+            "`grid leave` can retry. Investigate the process before re-joining."
+        )
     return 0
 
 
@@ -421,8 +431,11 @@ def _leave_summary(records: dict[str, dict[str, Any]]) -> str:
     return "; ".join(parts)
 
 
-def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
-    run_records.stop_engine(grid_id, engine_id, record)
+def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> int:
+    """Stop one engine child and reap only a ComfyUI it itself started. Returns the surviving pid
+    (0 when confirmed gone) from the honest teardown, so the caller can keep the record + fail loudly
+    instead of printing "Left …" over a live process."""
+    survivor = run_records.stop_engine(grid_id, engine_id, record)
     # Reap ONLY a ComfyUI this engine itself started (`comfyui_started` persisted at bring-up) — never one
     # shared with another media engine or started by the operator — and target its specific port so a
     # co-resident engine's ComfyUI is untouched. Covers the case where the engine's own teardown was
@@ -435,6 +448,7 @@ def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
             comfyui.stop_running(port)
         except OSError as exc:  # best-effort: one media engine's reap must not abort a `leave --all`
             print(f"Reaping ComfyUI on :{port} failed (ignoring): {exc}", file=sys.stderr)
+    return survivor
 
 
 # ---------------------------------------------------------------------------

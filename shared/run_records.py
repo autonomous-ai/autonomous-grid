@@ -27,6 +27,13 @@ from shared.models import api_catalog
 
 _IS_WINDOWS = sys.platform == "win32"
 
+# The argv marker of the detached REMOTE serve subprocess: `<cli> __remote-engine <network_id>
+# <engine_id>`. The join spawn (`cli/remote_provider._spawn_remote_engine`) builds it and the leave
+# orphan sweep (`remote/orphan_sweep`) matches on it, so they share ONE constant and can never drift.
+# A third copy is the dispatch literal in `cli/_main.py` (kept in lockstep by hand, like the sibling
+# `__engine`/`__server` dispatch keys).
+REMOTE_ENGINE_MARKER = "__remote-engine"
+
 
 # How long ``stop_engine`` waits for a SIGTERM'd child to exit before SIGKILLing its group.
 # SIGTERM → SIGKILL escalation budget for a detached engine child. 25 = the serve loop's worker
@@ -242,11 +249,17 @@ def terminate_pid(pid: int) -> bool:
     return not pid_alive(pid)
 
 
-def stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
-    """SIGTERM the detached engine child so it unregisters + tears down, then drop its record.
+def stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> int:
+    """SIGTERM the detached engine child so it unregisters + tears down, then drop its record — but
+    only when the child is **confirmed gone**. Escalates to SIGKILL of the process group if it does
+    not exit within the grace window.
 
-    Escalates to SIGKILL of the process group if it does not exit within the grace window. The
-    record is removed either way, so a leave never leaves a stale handle behind.
+    Returns the surviving pid, or ``0`` when the child is confirmed gone. A child that survives even
+    SIGKILL keeps its record — so a retried ``grid leave`` still has a handle and the caller can fail
+    loudly naming the pid — the honest teardown that stops leave printing "Left …" over a live child.
     """
-    terminate_pid(int(record.get("pid") or 0))
-    record_path(grid_id, engine_id).unlink(missing_ok=True)
+    pid = int(record.get("pid") or 0)
+    if terminate_pid(pid):
+        record_path(grid_id, engine_id).unlink(missing_ok=True)
+        return 0
+    return pid

@@ -3220,6 +3220,30 @@ def test_leave_all_removes_records(monkeypatch, tmp_path):
     assert cli.provider._read_records(grid_id) == {}
 
 
+def test_local_leave_survivor_keeps_record_and_fails_loud(monkeypatch, tmp_path):
+    """Honest teardown (local): a serve child that survives even SIGKILL keeps its record and
+    `grid leave` exits non-zero naming the pid, instead of printing 'Left engine …' over a live one."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(grid_id, "mac",
+                               {"engine_id": "mac", "node_id": "n", "grid_id": grid_id, "pid": 4242})
+
+    from shared import run_records
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # never dies, even after SIGKILL
+    monkeypatch.setattr(run_records, "kill_group", lambda pid: None)
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: None)
+    clock = {"v": 1000.0}
+    monkeypatch.setattr(run_records.time, "time", lambda: clock["v"])
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: clock.__setitem__("v", clock["v"] + 10))
+
+    args = cli.build_parser().parse_args(["leave", "home", "--all"])
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_leave(args)
+    assert "4242" in str(exc.value)                     # names the surviving pid
+    assert "mac" in cli.provider._read_records(grid_id)  # record kept so a retry still has a handle
+
+
 def test_leave_media_engine_stops_comfyui(monkeypatch, tmp_path):
     """Leaving a media engine reaps the ComfyUI it OWNS, targeting that engine's port."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -3771,6 +3795,43 @@ def test_terminate_pid_reports_true_when_process_exits(monkeypatch):
     assert run_records.terminate_pid(4242) is True  # SIGTERM took → confirmed dead
 
 
+def test_stop_engine_keeps_record_when_child_survives_sigkill(monkeypatch, tmp_path):
+    """Honest teardown: a child that survives even SIGKILL keeps its run record (so a retried leave
+    still has a handle) and `stop_engine` returns the surviving pid, not 0."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from shared import run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # never dies, even after SIGKILL
+    monkeypatch.setattr(run_records, "kill_group", lambda pid: None)
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: None)
+    clock = {"v": 1000.0}
+    monkeypatch.setattr(run_records.time, "time", lambda: clock["v"])
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: clock.__setitem__("v", clock["v"] + 10))
+
+    record_file = run_records.record_path("n1", "remote")
+    record_file.parent.mkdir(parents=True, exist_ok=True)
+    record_file.write_text("{}")
+
+    survivor = run_records.stop_engine("n1", "remote", {"pid": 4242})
+    assert survivor == 4242      # names the surviving pid instead of lying "gone"
+    assert record_file.exists()  # record kept so a retried `grid leave` still has a handle
+
+
+def test_stop_engine_unlinks_record_when_confirmed_gone(monkeypatch, tmp_path):
+    """The confirmed-gone branch: `terminate_pid` reports the child dead → the record is unlinked and
+    `stop_engine` returns 0, so a healthy leave still clears its handle."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from shared import run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)  # already gone
+    record_file = run_records.record_path("n1", "remote")
+    record_file.parent.mkdir(parents=True, exist_ok=True)
+    record_file.write_text("{}")
+
+    assert run_records.stop_engine("n1", "remote", {"pid": 4242}) == 0  # confirmed gone
+    assert not record_file.exists()  # record unlinked on confirmed death
+
+
 def test_pid_alive_treats_permission_error_as_alive(monkeypatch):
     """A process owned by another uid answers `os.kill(pid, 0)` with EPERM — it EXISTS, so it is alive.
     Reporting it dead would let a join spawn a clobbering second node under the same token id."""
@@ -3781,6 +3842,129 @@ def test_pid_alive_treats_permission_error_as_alive(monkeypatch):
 
     monkeypatch.setattr(run_records.os, "kill", raise_eperm)
     assert run_records.pid_alive(4242) is True
+
+
+# ---------------------------------------------------------------------------
+# Orphan sweep (remote/orphan_sweep.py) — reap mistargeted/record-less serve children on full leave
+# ---------------------------------------------------------------------------
+
+def test_orphan_sweep_matcher_matches_exact_network_id_only():
+    """The matcher picks a `__remote-engine <network_id>` child by exact whole-token network id, and
+    skips another grid's child (different id), a command with no marker-then-id, and any excluded pid.
+    Handles both spawn argv shapes (a resolved `grid` binary and `python -m cli`)."""
+    from remote import orphan_sweep
+
+    ps = "\n".join([
+        "  4242 /Users/me/.local/bin/grid __remote-engine n1 remote",   # ours → match
+        "  4243 /Users/me/.local/bin/grid __remote-engine n2 remote",   # grid B → skip (different id)
+        "  4244 /usr/bin/python3.12 -m cli __remote-engine n1 remote",  # ours, python argv → match
+        "  4245 /usr/bin/vim n1 __remote-engine",                       # marker last, no id after → skip
+        "  9999 /Users/me/.local/bin/grid __remote-engine n1 remote",   # excluded pid → skip
+    ])
+    assert orphan_sweep._match_orphan_pids(ps, "n1", exclude_pids={9999}) == [4242, 4244]
+
+
+def test_orphan_sweep_matcher_skips_degenerate_rows_and_reads_padded_pids():
+    """Robustness: a space-padded pid column is parsed, and a blank line / header / pid-only row /
+    marker-with-no-id-after never crash or false-match."""
+    from remote import orphan_sweep
+
+    ps = "\n".join([
+        "",                                                          # blank line
+        "  PID COMMAND",                                             # header (PID not a digit)
+        "  12345",                                                   # pid only, no command
+        "   777   /opt/homebrew/bin/grid __remote-engine n1 remote", # padded pid + extra spaces → match
+        "  4246 __remote-engine",                                    # marker only, no id after → skip
+    ])
+    assert orphan_sweep._match_orphan_pids(ps, "n1", exclude_pids=set()) == [777]
+
+
+def test_sweep_orphans_reaps_killable_and_flags_survivor(monkeypatch):
+    """`sweep_orphans` terminates each argv-matched child via `terminate_pid`: a killed one is
+    `reaped`, a wedged one (survives SIGKILL → `terminate_pid` False) is a `survivor`."""
+    from remote import orphan_sweep
+
+    ps = "\n".join([
+        "  111 /bin/grid __remote-engine n1 remote",
+        "  222 /bin/grid __remote-engine n1 remote",
+    ])
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: ps)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: pid == 111)  # 222 wedged
+
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result.reaped == (111,)
+    assert result.survivors == (222,)
+    assert result.foreign == ()
+
+
+def test_sweep_orphans_reports_eperm_as_foreign_not_fatal(monkeypatch):
+    """A matched pid owned by another user makes `terminate_pid` raise `PermissionError` — the sweep
+    marks it `foreign` (reported, not fatal) and never a `survivor`, so it can't force a loud leave."""
+    from remote import orphan_sweep
+
+    def raise_eperm(pid):
+        raise PermissionError()
+
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  333 /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", raise_eperm)
+
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result.foreign == (333,)
+    assert result.survivors == () and result.reaped == ()
+
+
+def test_sweep_orphans_is_empty_on_windows(monkeypatch):
+    """Windows keeps the record-pid path (follow-up F2); the argv sweep is a no-op there and never
+    shells out to `ps`."""
+    from remote import orphan_sweep
+
+    monkeypatch.setattr(orphan_sweep.sys, "platform", "win32")
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: pytest.fail("must not run ps on Windows"))
+    assert orphan_sweep.sweep_orphans("n1") == orphan_sweep.SweepResult((), (), ())
+
+
+def test_sweep_orphans_degrades_when_ps_unavailable(monkeypatch, capsys):
+    """A missing/slow `ps` degrades to an empty result with a stderr note — never a traceback — since
+    the record-pid kills and the relay backstop already ran."""
+    from remote import orphan_sweep
+
+    def boom(*a, **k):
+        raise FileNotFoundError("ps")
+
+    monkeypatch.setattr(orphan_sweep.subprocess, "run", boom)
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result == orphan_sweep.SweepResult((), (), (), scanned=False)  # "couldn't check" ≠ clean
+    assert result.scanned is False
+    assert "couldn't list processes" in capsys.readouterr().err
+
+
+def test_ps_output_treats_nonzero_ps_exit_as_couldnt_scan(monkeypatch, capsys):
+    """A `ps` that runs but exits non-zero (unsupported flags on a minimal/BusyBox ps) must not read
+    as a clean empty scan — `_ps_output` returns None (→ scanned=False) with a note, not "".."""
+    from remote import orphan_sweep
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(orphan_sweep.subprocess, "run", lambda *a, **k: _Proc())
+    assert orphan_sweep._ps_output() is None
+    assert "ps" in capsys.readouterr().err.lower()
+
+
+def test_sweep_orphans_never_targets_its_own_pid(monkeypatch):
+    """Defence in depth: even if the leave process's own row carried the marker + network id,
+    `sweep_orphans` excludes `os.getpid()`, so `grid leave` can never SIGKILL itself."""
+    import os as _os
+
+    from remote import orphan_sweep
+
+    mypid = _os.getpid()
+    monkeypatch.setattr(orphan_sweep, "_ps_output",
+                        lambda: f"  {mypid} /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
+                        lambda pid: pytest.fail(f"must never terminate own pid {pid}"))
+    assert orphan_sweep.sweep_orphans("n1") == orphan_sweep.SweepResult((), (), ())
 
 
 # ---------------------------------------------------------------------------
@@ -6088,6 +6272,15 @@ def _capture_relay_puts(monkeypatch, *, status=200):
     return puts
 
 
+def _disable_orphan_sweep(monkeypatch):
+    """Neutralize the full-leave argv sweep in a test that isn't exercising it: patch the
+    lazily-imported ``remote.orphan_sweep._ps_output`` (NOT an attribute on ``remote_provider``) to a
+    successfully-read but EMPTY process table (``""``, not ``None``) — so ``sweep_orphans`` finds no
+    orphan AND reports ``scanned=True`` (a clean sweep, not a ps failure), and never shells out to the
+    real host ``ps``."""
+    monkeypatch.setattr("remote.orphan_sweep._ps_output", lambda **k: "")
+
+
 def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False,
                           reload_signal="sighup", access_token="AT"):
     from shared import run_records
@@ -6114,6 +6307,7 @@ def test_remote_leave_tears_down_the_identity(monkeypatch, tmp_path, capsys):
         pid=0, access_token=_jwt({"node_id": "node-jwt"}),
     )
     puts = _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)  # not exercising the sweep here — keep it hermetic (no real ps)
 
     assert cli.main(["leave"]) == 0  # bare leave tears down the whole singleton identity
     assert cli.provider._read_records("n1") == {}
@@ -6133,10 +6327,153 @@ def test_remote_leave_backstop_lands_even_when_child_was_killed(monkeypatch, tmp
     killed = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: killed.append(pid) or True)
     puts = _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)  # this asserts killed==[4242] — sweep must not touch the host ps
 
     assert cli.main(["leave"]) == 0
     assert killed == [4242]                                # the child was terminated first (kill-first)
     assert puts == [("/nodes/node-jwt", "consumer", [])]   # ...and the backstop still landed
+
+
+def test_remote_leave_stale_pid_sweep_reaps_live_child(monkeypatch, tmp_path):
+    """AC#1 (the diagnosis red case): the record's pid is stale/dead while the REAL serve child (a
+    different pid) is alive. Full leave's argv sweep finds and reaps it, the backstop flips the node to
+    consumer (model drops), and the stale record is unlinked. Exit 0."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=9999, access_token=_jwt({"node_id": "node-jwt"}),  # 9999 = stale (dead) recorded pid
+    )
+    from remote import orphan_sweep
+    # The real live child is pid 4242, discoverable ONLY by the argv sweep (the record points at 9999).
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  4242 /bin/grid __remote-engine n1 remote")
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert 4242 in killed                                 # the real child reaped by the sweep
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # backstop consumer-flip → model drops
+    assert cli.provider._read_records("n1") == {}         # the stale record was unlinked
+
+
+def test_remote_leave_no_records_sweep_reaps_orphan(monkeypatch, tmp_path, capsys):
+    """AC#2: a bare `grid leave` with NO run records still sweeps — a record-less orphan (its record
+    dir deleted out from under a live child) is found by argv and reaped, then the backstop deregisters."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  7777 /bin/grid __remote-engine n1 remote")
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert killed == [7777]                               # the record-less orphan reaped by argv
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...and the backstop still deregisters
+    assert "Reaped 1 orphaned serve child" in capsys.readouterr().out
+
+
+def test_remote_leave_sweep_survivor_fails_loud_after_backstop(monkeypatch, tmp_path):
+    """A serve child that survives even SIGKILL: the backstop still flips the node to consumer (model
+    drops), THEN leave fails loud naming the surviving pid — never a false 'Left'."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (9999,), ()))
+    puts = _capture_relay_puts(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave"])
+    assert "9999" in str(exc.value)                             # names the surviving pid
+    assert "deregistered team from the relay" in str(exc.value)  # sent=True → honest "deregistered"
+    assert puts == [("/nodes/node-jwt", "consumer", [])]        # ...the backstop really fired first
+
+
+def test_remote_leave_sweep_reports_foreign_process(monkeypatch, tmp_path, capsys):
+    """A matched process owned by another user is reported (stderr note) but never fails the leave —
+    it isn't ours to reap, so exit 0 and 'Left' stand."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (), (1234,)))
+    _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    captured = capsys.readouterr()
+    assert "Left team" in captured.out
+    assert "1234" in captured.err and "another user" in captured.err
+
+
+def test_remote_leave_ps_failure_qualifies_success(monkeypatch, tmp_path, capsys):
+    """Honesty (silent-failure review): when the argv sweep can't read the process table (ps down),
+    the backstop still drops the model, but `grid leave` must NOT print an unqualified 'Left' — it
+    couldn't verify no stray child remains, so the success line is qualified with the TTL fallback."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: None)  # ps unavailable → couldn't scan
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    captured = capsys.readouterr()
+    assert "Left team" in captured.out
+    assert "Couldn't scan" in captured.out and "TTL" in captured.out  # qualified, not a bare success
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...and the backstop still dropped the model
+
+
+def test_remote_leave_record_survivor_keeps_record_and_fails_loud(monkeypatch, tmp_path):
+    """A recorded child that survives SIGKILL keeps its record and fails the leave loudly naming the
+    pid — the backstop still deregisters first, so the model drops regardless."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: False)  # wedged
+    _disable_orphan_sweep(monkeypatch)  # isolate the record-survivor path from the argv sweep
+    puts = _capture_relay_puts(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave"])
+    assert "4242" in str(exc.value)
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # backstop fired before the loud fail
+    assert "remote" in cli.provider._read_records("n1")   # record kept for a retry
+
+
+def test_remote_leave_engine_last_survivor_keeps_record_and_fails_loud(monkeypatch, tmp_path):
+    """`grid leave --engine <last-engine>` is a full teardown (Option A): if the sole engine's child
+    survives even SIGKILL, the backstop still deregisters the node, THEN leave keeps the record and
+    fails loud naming the pid — never 'removed the last engine' over a live child."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: False)  # wedged
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _disable_orphan_sweep(monkeypatch)  # isolate the record-survivor path from the argv sweep
+    puts = _capture_relay_puts(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave", "--engine", "http://h:11434/v1"])
+    assert "4242" in str(exc.value)
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # backstop fired before the loud fail
+    assert "remote" in cli.provider._read_records("n1")  # record kept so a retry still has a handle
 
 
 def test_remote_leave_no_records_still_backstops(monkeypatch, tmp_path, capsys):
@@ -6148,6 +6485,7 @@ def test_remote_leave_no_records_still_backstops(monkeypatch, tmp_path, capsys):
                             "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
     puts = _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)  # no records to sweep here — keep it hermetic
 
     assert cli.main(["leave"]) == 0
     assert puts == [("/nodes/node-jwt", "consumer", [])]   # resolved the relay live, sent the backstop
@@ -6186,6 +6524,7 @@ def test_remote_leave_backstop_401_degrades_best_effort(monkeypatch, tmp_path, c
         pid=0, access_token=token,
     )
     _capture_relay_puts(monkeypatch, status=401)
+    _disable_orphan_sweep(monkeypatch)  # keep hermetic — the 401 degrade path, not the sweep
 
     assert cli.main(["leave"]) == 0            # still succeeds — the TTL is the fallback
     captured = capsys.readouterr()
@@ -6203,6 +6542,7 @@ def test_remote_leave_no_records_backstop_failure_is_honest(monkeypatch, tmp_pat
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team", "access_token": "not-a-jwt"}], active="team")
     # node_id_from_token("not-a-jwt") == "" degrades before any network call — no relay/lifecycle mock needed.
+    _disable_orphan_sweep(monkeypatch)  # keep hermetic
 
     assert cli.main(["leave"]) == 0
     captured = capsys.readouterr()
@@ -6222,6 +6562,7 @@ def test_remote_leave_no_records_surfaces_relay_resolve_error(monkeypatch, tmp_p
         raise SystemExit("team status failed (503): upstream unavailable")
 
     monkeypatch.setattr("cli.remote_grid.resolve_relay_base", boom)
+    _disable_orphan_sweep(monkeypatch)  # keep hermetic
 
     assert cli.main(["leave"]) == 0
     err = capsys.readouterr().err
@@ -6239,6 +6580,7 @@ def test_remote_leave_backstop_relay_error_degrades(monkeypatch, tmp_path, capsy
         pid=0, access_token=_jwt({"node_id": "node-jwt"}),
     )
     _capture_relay_puts(monkeypatch, status=500)
+    _disable_orphan_sweep(monkeypatch)  # keep hermetic
 
     assert cli.main(["leave"]) == 0
     captured = capsys.readouterr()
@@ -6321,6 +6663,7 @@ def test_remote_leave_engine_openai_last_tears_down(monkeypatch, tmp_path, capsy
     _seed_remote_identity(monkeypatch, tmp_path, [
         {"endpoint_url": "https://api.openai.com/v1", "models": ["openai:gpt-5.5"],
          "engine_label": "openai", "api_kind": "openai"}], pid=0)
+    _disable_orphan_sweep(monkeypatch)  # full teardown now sweeps too — keep hermetic
 
     assert cli.main(["leave", "--engine", "openai"]) == 0
     assert cli.provider._read_records("n1") == {}  # last engine removed → the whole identity is torn down
@@ -6328,12 +6671,41 @@ def test_remote_leave_engine_openai_last_tears_down(monkeypatch, tmp_path, capsy
 
 
 def test_remote_leave_engine_last_tears_down(monkeypatch, tmp_path, capsys):
+    """`grid leave --engine <last>` tears the identity down AND (Option A) sends the authoritative
+    backstop deregister, like a bare leave — not just a local record removal."""
     _seed_remote_identity(monkeypatch, tmp_path,
-                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}], pid=0)
+                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+                          pid=0, access_token=_jwt({"node_id": "node-jwt"}))
+    _disable_orphan_sweep(monkeypatch)
+    puts = _capture_relay_puts(monkeypatch)
 
     assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0  # the only engine
     assert cli.provider._read_records("n1") == {}  # last engine removed → whole identity torn down
     assert "last engine" in capsys.readouterr().out.lower()
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...and the backstop deregistered the node
+
+
+def test_remote_leave_engine_last_stale_pid_sweeps_and_backstops(monkeypatch, tmp_path):
+    """Option A / the gap sfh found: `grid leave --engine <last>` with a STALE record pid and a live
+    different-pid orphan reaps the orphan via the argv sweep AND sends the backstop — the same
+    authoritative teardown as a bare leave, so a `--engine <last>` can never strand an orphan."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=9999, access_token=_jwt({"node_id": "node-jwt"}),  # 9999 = stale (dead) recorded pid
+    )
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  4242 /bin/grid __remote-engine n1 remote")
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: pid != 9999)  # 9999 dead
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0
+    assert 4242 in killed                                 # the real orphan reaped by the argv sweep
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...and the backstop deregistered the node
+    assert cli.provider._read_records("n1") == {}         # the stale record was unlinked
 
 
 def test_remote_leave_engine_unknown_errors(monkeypatch, tmp_path):
@@ -6460,6 +6832,7 @@ def test_remote_leave_media_engine_stops_comfyui(monkeypatch, tmp_path, capsys):
 
     calls = []
     monkeypatch.setattr(comfyui, "stop_running", lambda port=8188: calls.append(port) or 0)
+    _disable_orphan_sweep(monkeypatch)  # keep hermetic
     assert cli.main(["leave"]) == 0  # bare leave tears down the singleton identity + reaps its ComfyUI
     assert calls == [8188]
     assert cli.provider._read_records("n1") == {}

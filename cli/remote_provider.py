@@ -42,6 +42,15 @@ _REMOTE_IDENTITY = "remote"
 # One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
 _VENDOR_LIST_TIMEOUT = 15.0
 
+# Appended to a full-leave success line when the argv sweep could not read the process table (ps
+# down): the backstop still dropped the model, but we couldn't verify no stray child remains, so the
+# success is qualified rather than an unconditional "Left". One definition, shared by both full-leave
+# report paths (bare/`--all` and the `--engine <last>` teardown).
+_SWEEP_UNSCANNED_NOTE = (
+    " Couldn't scan for stray serve processes (ps unavailable); any that remain drop after the "
+    "node TTL (~120s)."
+)
+
 
 def _reject_local_only_flags(args: argparse.Namespace) -> None:
     """local-only `grid join` flags have no meaning in remote mode (DECISIONS D8): a remote engine
@@ -1014,7 +1023,7 @@ def _spawn_remote_engine(network_id: str, engine_id: str) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     return subprocess.Popen(
-        runtime.cli_command() + ["__remote-engine", network_id, engine_id],
+        runtime.cli_command() + [run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -1049,39 +1058,116 @@ def cmd_remote_leave(args: argparse.Namespace) -> int:
     with file_lock(run_records.record_path(network_id, _REMOTE_IDENTITY)):
         records = run_records.read_records(network_id)
         # `--engine <endpoint_url|label>` shrinks the union. When survivors remain the identity is still
-        # a provider, so this path sends no backstop. Its own last-engine-teardown sub-case (dropping the
-        # final engine tears the whole identity down) is deliberately left at today's no-backstop
-        # behaviour too — issue 02's argv sweep + honest teardown hardens that path; only the bare /
-        # `--all` full-leave branch below backstops. With no records there is no union to shrink, so keep
-        # today's dead-end for the targeted form; the idempotent-repair backstop is only for the bare /
-        # whole-identity leave intent.
+        # a provider, so a shrink sends NO backstop. But its last-engine sub-case (dropping the final
+        # engine) IS a full identity teardown, so `_leave_one_engine` runs the same reap (record kills +
+        # argv sweep) + unconditional backstop as a bare / `--all` leave — a `--engine <last>` with a
+        # stale-pid orphan can't strand a live child or leave the node registered (issue 02). With no
+        # records there is no union to shrink, so keep today's dead-end for the targeted form; the
+        # idempotent-repair sweep + backstop are only for the bare / whole-identity leave intent.
         if args.engine and not args.all:
             if not records:
                 print(f"No engines joined to {label}.")
                 return 0
-            return _leave_one_engine(args, network_id, label, records)
+            return _leave_one_engine(args, rec, session, network_id, label, records)
 
-        # Full leave (bare / `--all`). Kill the recorded child(ren) FIRST — that preserves the child's
-        # in-flight drain and its own unregister — then send an authoritative CLI backstop deregister
-        # UNCONDITIONALLY, so the model drops from the grid immediately even when the child was
-        # SIGKILLed, was already dead, or its own unregister was rejected. A bare leave with no records
-        # still backstops: an idempotent repair for a historical orphan whose record was deleted out
-        # from under a live child.
-        from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
-
-        for engine_id, record in records.items():
-            provider._stop_engine(network_id, engine_id, record)
-        sent = _full_leave_backstop(rec, records, session, network_id, label)
-        if records:
-            print(f"Left {label}.")
-        elif sent:
-            print(f"No engines were tracked for {label}; deregistered it from the relay to be safe.")
-        else:
-            # No local records AND the safety deregister didn't land. Do NOT print the old
-            # "No engines joined" dead-end — it reads as "nothing to do" and contradicts the stderr
-            # caveat `_full_leave_backstop` just printed; acknowledge the attempted repair honestly.
-            print(f"No engines were tracked for {label}; the safety deregister didn't land (see above).")
+        # Full leave (bare / `--all`). Reap the recorded child(ren) + argv-sweep any orphan a stale/
+        # missing record could never reach, THEN send an authoritative CLI backstop deregister
+        # UNCONDITIONALLY, so the model drops from the grid immediately even when a child was SIGKILLed,
+        # was already dead, or its own unregister was rejected. A bare leave with no records still sweeps
+        # + backstops: an idempotent repair for a historical orphan whose record was deleted out from
+        # under a live child.
+        sent, scanned = _full_leave_teardown(rec, session, network_id, label, records)
+        _full_leave_report(label, bool(records), sent, scanned)
         return 0
+
+
+def _full_leave_survivor_exit(survivors: list[int], label: str, sent: bool) -> None:
+    """Raise the honest non-zero ``grid leave`` failure when serve child(ren) survived the reap. The
+    message stays honest on two axes: it never claims "record kept" (false for a record-less swept
+    orphan), and it asserts the relay deregister only when it actually landed (``sent``) — else it
+    would contradict the "didn't land" caveat ``_full_leave_backstop`` already printed to stderr.
+    """
+    pids = ", ".join(map(str, survivors))
+    outcome = (
+        f"deregistered {label} from the relay, but could not stop serve child(ren) pid(s) {pids}"
+        if sent
+        else f"could not stop serve child(ren) pid(s) {pids} (and the relay deregister didn't land — "
+        "see above)"
+    )
+    raise SystemExit(
+        f"grid leave: {outcome}. A retried `grid leave` will target them again; investigate before "
+        f"re-joining (e.g. `kill -9 {survivors[0]}`)."
+    )
+
+
+def _full_leave_reap(
+    network_id: str, label: str, records: dict[str, dict[str, object]]
+) -> tuple[list[int], bool]:
+    """The reap half of a full leave: SIGTERM→SIGKILL the recorded child(ren), then argv-sweep the
+    process table for any live serve child a stale/missing record could never reach (the reproduced
+    orphan bug) plus a record-less orphan. Prints the reaped/foreign notes. Returns
+    ``(surviving_pids, scanned)``: the survivors are recorded children wedged past SIGKILL PLUS swept
+    orphans that survived — disjoint by construction (the sweep excludes the recorded pids, so a
+    wedged recorded child is never re-terminated); ``scanned`` is False when the sweep could not read
+    the process table (ps down), so the caller qualifies its success line instead of claiming a
+    teardown it never verified. The backstop + report stay in the caller (so ``cmd_remote_leave``
+    stays small).
+    """
+    from remote import orphan_sweep  # POSIX argv sweep (lazy: remote.* imports stay in-handler)
+    from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
+
+    record_pids = {int(record.get("pid") or 0) for record in records.values()}
+    record_survivors: list[int] = []
+    for engine_id, record in records.items():
+        survivor = provider._stop_engine(network_id, engine_id, record)
+        if survivor:  # survived even SIGKILL — its record was kept; the caller fails loud, never "Left"
+            record_survivors.append(survivor)
+    swept = orphan_sweep.sweep_orphans(network_id, exclude_pids=record_pids)
+    if swept.reaped:
+        print(
+            f"Reaped {len(swept.reaped)} orphaned serve child(ren) on {label} "
+            f"(pid(s) {', '.join(map(str, swept.reaped))})."
+        )
+    for pid in swept.foreign:
+        print(
+            f"Note: a remote-engine process for {label} (pid {pid}) is owned by another user; "
+            "left it alone.",
+            file=sys.stderr,
+        )
+    return record_survivors + list(swept.survivors), swept.scanned
+
+
+def _full_leave_teardown(
+    rec: dict[str, object], session: str, network_id: str, label: str,
+    records: dict[str, dict[str, object]],
+) -> tuple[bool, bool]:
+    """The authoritative full-identity teardown shared by a bare / ``--all`` leave and a
+    ``--engine <last>`` drop: reap (record kills + argv sweep) then the UNCONDITIONAL backstop
+    deregister, raising loud (via ``_full_leave_survivor_exit``) if a child survived even SIGKILL.
+    Returns ``(sent, scanned)`` so the caller prints its own success line — the wording differs
+    between a bare leave and a last-engine drop."""
+    survivors, scanned = _full_leave_reap(network_id, label, records)
+    sent = _full_leave_backstop(rec, records, session, network_id, label)
+    if survivors:  # a live child survived SIGKILL — its record was kept; fail loud, never "Left"
+        _full_leave_survivor_exit(survivors, label, sent)
+    return sent, scanned
+
+
+def _full_leave_report(label: str, had_records: bool, sent: bool, scanned: bool) -> None:
+    """Print the honest outcome of a full leave with no surviving child. ``scanned`` False means the
+    argv sweep couldn't read the process table (ps down) — the backstop still dropped the model, but a
+    stray child may persist, so the success line is qualified rather than an unconditional "Left"
+    (silent-failure review: "couldn't check" must not read as "verified clean")."""
+    unscanned = "" if scanned else _SWEEP_UNSCANNED_NOTE
+    if had_records:
+        print(f"Left {label}.{unscanned}")
+    elif sent:
+        print(f"No engines were tracked for {label}; deregistered it from the relay to be safe.{unscanned}")
+    else:
+        # No local records AND the safety deregister didn't land. Do NOT print the old "No engines
+        # joined" dead-end — it reads as "nothing to do" and contradicts the stderr caveat
+        # `_full_leave_backstop` just printed; acknowledge the attempted repair honestly.
+        print(f"No engines were tracked for {label}; the safety deregister didn't land (see above).")
 
 
 def _backstop_degrade(reason: str) -> bool:
@@ -1175,12 +1261,19 @@ def _backstop_signaling_url(
 
 
 def _leave_one_engine(
-    args: argparse.Namespace, network_id: str, label: str, records: dict[str, dict[str, object]]
+    args: argparse.Namespace,
+    rec: dict[str, object],
+    session: str,
+    network_id: str,
+    label: str,
+    records: dict[str, dict[str, object]],
 ) -> int:
     """Drop the engine matching ``--engine`` (endpoint URL, or a unique label) from the identity's union.
 
-    Removing the last text engine (with no media) tears the whole identity down; otherwise the singleton
-    is respawned serving the reduced union. Operates on the live record(s), adopting any legacy sibling.
+    Removing the last text engine (with no media) tears the whole identity down — an authoritative full
+    leave (reap + argv sweep + unconditional backstop, via ``rec``/``session``), like a bare / ``--all``
+    leave; otherwise the singleton is respawned serving the reduced union (no backstop — still a
+    provider). Operates on the live record(s), adopting any legacy sibling.
     """
     survivors = [rec for rec in records.values() if run_records.pid_alive(int(rec.get("pid") or 0))]
     survivors = survivors or list(records.values())
@@ -1195,12 +1288,13 @@ def _leave_one_engine(
     remaining = [spec for spec in union if id(spec) not in drop_ids]
     media = any(bool(rec.get("media")) for rec in survivors)
 
-    if not remaining and not media:  # nothing left to serve → tear the whole identity down
-        from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
-
-        for engine_id, record in records.items():
-            provider._stop_engine(network_id, engine_id, record)
-        print(f"Left {label} (removed the last engine).")
+    if not remaining and not media:
+        # Dropping the last engine is a full identity teardown, so it is authoritative like a bare /
+        # `--all` leave: reap (record kills + argv sweep) then the UNCONDITIONAL backstop, so a stale-pid
+        # orphan can't survive here and the node can't stay registered as a provider (issue 02 / A).
+        _sent, scanned = _full_leave_teardown(rec, session, network_id, label, records)
+        note = "" if scanned else _SWEEP_UNSCANNED_NOTE
+        print(f"Left {label} (removed the last engine).{note}")
         return 0
 
     # Rebuild the singleton from the identity's own record, minus the dropped engine, and respawn it.
