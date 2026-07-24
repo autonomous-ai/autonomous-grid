@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import subprocess
 from dataclasses import dataclass
 
 
@@ -20,6 +21,7 @@ class HostInfo:
     os_name: str
     os_version: str
     cpu_count: int
+    physical_cores: int
     machine: str
     disk_total_gb: float
     disk_free_gb: float
@@ -51,10 +53,64 @@ def gather(home: str = "~") -> HostInfo:
         os_name=platform.system(),
         os_version=platform.release(),
         cpu_count=os.cpu_count() or 1,
+        physical_cores=physical_cores(),
         machine=platform.machine(),
         disk_total_gb=round(disk.total / (1024 ** 3), 2),
         disk_free_gb=round(disk.free / (1024 ** 3), 2),
     )
+
+
+def _sysctl(name: str) -> str:
+    """Read one sysctl scalar (macOS/BSD). "" on any failure — best-effort."""
+    try:
+        out = subprocess.check_output(["sysctl", "-n", name], timeout=3.0, stderr=subprocess.DEVNULL)
+        return out.decode("utf-8", "replace").strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def physical_cores() -> int:
+    """Physical (not logical) CPU cores. `psutil.cpu_count(logical=False)` when
+    psutil is present; else `sysctl hw.physicalcpu` on macOS; else the logical
+    count. Never exceeds the logical thread count. Best-effort, always >= 1."""
+    logical = os.cpu_count() or 1
+    n: int | None = None
+    try:
+        import psutil
+
+        n = psutil.cpu_count(logical=False)
+    except Exception:
+        n = None
+    if not n and platform.system() == "Darwin":
+        raw = _sysctl("hw.physicalcpu")
+        if raw:
+            try:
+                n = int(raw)
+            except ValueError:
+                n = None
+    if not n:
+        n = logical
+    return max(1, min(int(n), logical))
+
+
+def cpu_brand() -> str:
+    """Human CPU brand string (e.g. "Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz").
+    macOS via sysctl, Linux via /proc/cpuinfo, else `platform.processor()`.
+    Best-effort — never raises."""
+    system = platform.system()
+    if system == "Darwin":
+        brand = _sysctl("machdep.cpu.brand_string")
+        if brand:
+            return brand
+    if system == "Linux":
+        try:
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.lower().startswith("model name") and ":" in line:
+                        return line.split(":", 1)[1].strip()
+        except OSError:
+            pass
+    return platform.processor() or platform.machine() or "unknown"
 
 
 def _memory_snapshot() -> tuple[int, int, float]:
@@ -83,10 +139,19 @@ def _disk_snapshot(home_dir: str):
         return psutil.disk_usage(home_dir)
     except Exception:
         pass
-    usage = os.statvfs(home_dir)
+    # `os.statvfs` is Unix-only; guard it so a Windows box without psutil degrades to
+    # zeros instead of raising AttributeError (which would crash `host.gather()`).
+    if hasattr(os, "statvfs"):
+        usage = os.statvfs(home_dir)
+
+        class Disk:
+            total = usage.f_frsize * usage.f_blocks
+            free = usage.f_frsize * usage.f_bavail
+
+        return Disk()
 
     class Disk:
-        total = usage.f_frsize * usage.f_blocks
-        free = usage.f_frsize * usage.f_bavail
+        total = 0
+        free = 0
 
     return Disk()

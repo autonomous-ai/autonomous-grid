@@ -27,6 +27,7 @@ from . import remote_grid, remote_overview, remote_provider, remote_request
 AGNOSTIC = frozenset({
     None,
     "version",
+    "device-info",
     "catalog",
     "pull",
     "rm",
