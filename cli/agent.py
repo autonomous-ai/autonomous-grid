@@ -9,8 +9,14 @@ def cmd_agent_install(args: argparse.Namespace) -> int:
         from shared.agent import installer
 
         if installer.is_installed() and not args.force:
-            print(f"Hermes is already installed -> {installer.hermes_bin()}")
-            return 0
+            if installer.acp_ready():
+                print(f"Hermes is already installed -> {installer.hermes_bin()}")
+                return 0
+            # The binary is there, but not the part the Grid app drives it through — an install
+            # made before we asked for the `[acp]` extra. Saying "already installed" and stopping
+            # left the app with an agent that failed every chat turn and no way to repair it
+            # short of `--force`, so finish the job instead.
+            print("Hermes is installed without ACP support; completing the install ...")
         path = installer.install_hermes()
         print(f"Installed hermes -> {path}")
         return 0

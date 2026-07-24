@@ -2697,11 +2697,72 @@ def test_agent_install_is_a_no_op_when_hermes_is_already_there(monkeypatch, tmp_
         raise AssertionError("must not reinstall when hermes is present")
 
     monkeypatch.setattr(agent_installer, "install_hermes", fail)
+    monkeypatch.setattr(agent_installer, "acp_ready", lambda: True)
 
     rc = cli.cmd_agent_install(argparse.Namespace(name="hermes", force=False))
 
     assert rc == 0
     assert "already installed" in capsys.readouterr().out
+
+
+def test_agent_install_completes_an_install_that_cannot_serve_acp(monkeypatch, tmp_path, capsys):
+    """ACP is the only channel the app talks to Hermes through, so an install missing it answers
+    no chat at all. Reporting "already installed" and stopping left that machine stuck."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    hermes = agent_installer.hermes_bin()
+    hermes.parent.mkdir(parents=True)
+    hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(agent_installer, "acp_ready", lambda: False)
+    monkeypatch.setattr(agent_installer, "install_hermes", lambda: calls.append("install") or hermes)
+
+    rc = cli.cmd_agent_install(argparse.Namespace(name="hermes", force=False))
+
+    assert rc == 0
+    assert calls == ["install"]
+    assert "without ACP support" in capsys.readouterr().out
+
+
+def test_hermes_is_installed_with_the_acp_extra(monkeypatch, tmp_path):
+    """Without `[acp]` the binary installs fine and `hermes acp` dies on startup — a successful
+    install the user cannot chat with."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    uv = tmp_path / "uv"
+    monkeypatch.setattr(agent_installer, "ensure_uv", lambda: uv)
+    recorded = []
+
+    def fake_run(cmd, **_kwargs):
+        recorded.append(cmd)
+        hermes = agent_installer.hermes_bin()
+        hermes.parent.mkdir(parents=True, exist_ok=True)
+        hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(agent_installer.subprocess, "run", fake_run)
+
+    agent_installer.install_hermes()
+
+    assert recorded[-1][-1] == "hermes-agent[acp]"
+
+
+def test_acp_readiness_is_hermes_own_verdict(monkeypatch, tmp_path):
+    """`hermes acp --check` runs the adapter's imports, so it catches a half-installed agent that
+    a file-exists check calls healthy."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    hermes = agent_installer.hermes_bin()
+    hermes.parent.mkdir(parents=True)
+    hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+    seen = []
+
+    def fake_run(cmd, **_kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1)
+
+    monkeypatch.setattr(agent_installer.subprocess, "run", fake_run)
+
+    assert agent_installer.acp_ready() is False
+    assert seen == [[str(hermes), "acp", "--check"]]
 
 
 def test_agent_install_forces_a_reinstall_when_asked(monkeypatch, tmp_path):
