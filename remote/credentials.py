@@ -11,7 +11,9 @@ deliberately has no ``active_network`` concept.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
+import json
 import os
 import tomllib
 import uuid
@@ -149,3 +151,25 @@ def require_session() -> str:
     if not token:
         raise SystemExit("You're not signed in. Run `grid login` to sign in.")
     return str(token)
+
+
+def node_id_from_token(access_token: str) -> str:
+    """The provider node_id, read from a per-grid access token's JWT ``node_id`` claim.
+
+    The relay authorizes ``PUT /nodes/{node_id}`` only for the node the token belongs to — any other
+    id is rejected with 403 "Cannot access another node". So node_id is NOT ours to invent (a random
+    ``node-<uuid>`` is exactly what the relay refuses, and the run record's ``node_id`` field is a
+    junk display value); it must come from the token. The serve loop (``remote/serve.py``) registers
+    under it; ``grid leave`` addresses its backstop deregister to it. Decode the JWT payload
+    best-effort and read the claim — no signature check (the relay verifies server-side; we only need
+    the claim to address our own node). Returns "" when the token isn't a decodable JWT carrying a
+    node_id, so the caller can surface a clean re-login error.
+    """
+    try:
+        payload = access_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)  # restore the base64 padding a JWT strips
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (IndexError, ValueError, json.JSONDecodeError):
+        return ""
+    node_id = claims.get("node_id") if isinstance(claims, dict) else None
+    return str(node_id) if node_id else ""

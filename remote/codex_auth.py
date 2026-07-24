@@ -51,7 +51,7 @@ authorization decision — and three things keep it that way:
    a decoder whose entire value is being offline.
 
 The technique (split → restore padding → urlsafe decode → guard the shape) mirrors
-``remote/serve.py``'s ``_node_id_from_token``, which reads our own relay token the same way and for
+``remote/credentials.py``'s ``node_id_from_token``, which reads our own relay token the same way and for
 the same reason. The contracts differ deliberately: that one is best-effort and returns ``""``;
 this one raises, because a seat we cannot identify cannot serve.
 

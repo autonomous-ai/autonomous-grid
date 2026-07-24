@@ -13,7 +13,6 @@ run record never carries a token.
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import signal
@@ -131,7 +130,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         raise SystemExit("Run `grid login` to refresh your grid tokens, then re-join.")
     # The relay binds the node to the token: it authorizes PUT /nodes/{node_id} only for the token's
     # own node (else 403 "Cannot access another node"). So node_id is read from the JWT, never invented.
-    node_id = _node_id_from_token(access_token)
+    node_id = credentials.node_id_from_token(access_token)
     if not node_id:
         raise SystemExit(
             "This grid's access token carries no node identity; run `grid login` to refresh your "
@@ -820,26 +819,6 @@ def _load_tokens(network_id: str) -> tuple[str | None, str | None]:
         if net.get("network_id") == network_id:
             return net.get("access_token"), net.get("refresh_token")
     return None, None
-
-
-def _node_id_from_token(access_token: str) -> str:
-    """The provider node_id, read from the per-grid access token's JWT ``node_id`` claim.
-
-    The relay authorizes ``PUT /nodes/{node_id}`` only for the node the token belongs to — any other
-    id is rejected with 403 "Cannot access another node". So node_id is NOT ours to invent (a random
-    ``node-<uuid>`` is exactly what the relay refuses); it must come from the token. Decode the JWT
-    payload best-effort and read the claim — no signature check (the relay verifies server-side; we
-    only need the claim to address our own node). Returns "" when the token isn't a decodable JWT
-    carrying a node_id, so the caller can surface a clean re-login error.
-    """
-    try:
-        payload = access_token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)  # restore the base64 padding a JWT strips
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (IndexError, ValueError, json.JSONDecodeError):
-        return ""
-    node_id = claims.get("node_id") if isinstance(claims, dict) else None
-    return str(node_id) if node_id else ""
 
 
 # ---------------------------------------------------------------------------

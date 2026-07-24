@@ -6064,11 +6064,36 @@ def test_remote_join_media_bundle_add_respawns_not_sighup(monkeypatch, tmp_path)
     assert set(rec["media_bundles"]) == {"image_generation", "i2v"}
 
 
-def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False, reload_signal="sighup"):
+def _jwt(claims: dict) -> str:
+    """An unsigned JWT-shaped token whose payload segment carries ``claims`` — enough for the
+    best-effort claim decode in ``credentials.node_id_from_token`` (no signature is checked). Shared by
+    the node-id unit test and the leave-backstop tests, which need a token that decodes to a real
+    node_id so the backstop addresses the right node (a non-JWT token decodes to "" and degrades)."""
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{body}.sig"
+
+
+def _capture_relay_puts(monkeypatch, *, status=200):
+    """Install a relay double that records every PUT as ``(path, role, models)`` and answers
+    ``status``. Returns the growing list, so a test can assert exactly which deregister(s) the leave
+    backstop sent (or that none were sent). Reuses ``_mock_relay`` — real request-building, no network."""
+    puts: list[tuple[str, object, object]] = []
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else {}
+        puts.append((request.url.path, body.get("role"), body.get("models")))
+        return httpx.Response(status, json={"status": "updated"})
+
+    _mock_relay(monkeypatch, handler)
+    return puts
+
+
+def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False,
+                          reload_signal="sighup", access_token="AT"):
     from shared import run_records
 
     _seed_remote(monkeypatch, tmp_path,
-                networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+                networks=[{"network_id": "n1", "name": "team", "access_token": access_token}], active="team")
     run_records.write_record("n1", "remote", {
         "engine_id": "remote", "grid_id": "n1", "pid": pid, "media": media,
         "reload_signal": reload_signal,  # a Slice-2 identity supports SIGHUP hot-reload; None = pre-handler
@@ -6080,12 +6105,146 @@ def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=Fal
 
 
 def test_remote_leave_tears_down_the_identity(monkeypatch, tmp_path, capsys):
-    _seed_remote_identity(monkeypatch, tmp_path,
-                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}], pid=0)
+    """Bare leave tears down the singleton identity AND sends the authoritative backstop deregister —
+    a role=consumer PUT to the JWT-claim node id, so the model drops from the grid immediately even
+    when the serve child's own unregister never landed (issue 01 / AC#1)."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    puts = _capture_relay_puts(monkeypatch)
 
     assert cli.main(["leave"]) == 0  # bare leave tears down the whole singleton identity
     assert cli.provider._read_records("n1") == {}
     assert "Left team" in capsys.readouterr().out
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # to the CLAIM id, not the record's junk node_id
+
+
+def test_remote_leave_backstop_lands_even_when_child_was_killed(monkeypatch, tmp_path):
+    """AC#2: when the serve child had to be terminated (its own exit-path unregister may never have
+    run), the CLI backstop still flips the node to consumer — the deregister does not depend on the
+    child having unregistered itself."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: killed.append(pid) or True)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert killed == [4242]                                # the child was terminated first (kill-first)
+    assert puts == [("/nodes/node-jwt", "consumer", [])]   # ...and the backstop still landed
+
+
+def test_remote_leave_no_records_still_backstops(monkeypatch, tmp_path, capsys):
+    """AC#3: a bare `grid leave` with zero run records is an idempotent repair — it resolves the node
+    from the token and still sends the consumer PUT (relay base resolved live), so a historical orphan
+    whose record was deleted out from under it gets deregistered instead of dead-ending."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert puts == [("/nodes/node-jwt", "consumer", [])]   # resolved the relay live, sent the backstop
+    assert "No engines joined" not in capsys.readouterr().out  # not the old dead-end
+
+
+def test_remote_leave_engine_shrink_sends_no_backstop(monkeypatch, tmp_path):
+    """AC#4 (negative): `grid leave --engine <x>` shrinks the union but the identity is still a
+    provider serving the survivor, so it must send NO deregister — the relay double fails if hit. A
+    valid JWT is seeded so the guard actually bites: a non-JWT token would decode to "" and degrade
+    before any PUT, passing this test vacuously even if the shrink path wrongly backstopped."""
+    import signal as _sig
+
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["mistral"], "engine_label": "vllm"},
+    ], access_token=_jwt({"node_id": "node-jwt"}))
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _mock_relay(monkeypatch, lambda r: pytest.fail("shrink (--engine) must not send a backstop deregister"))
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0
+    rec = cli.provider._read_records("n1")["remote"]
+    assert [e["endpoint_url"] for e in rec["engines"]] == ["http://h:8000/v1"]  # survivor kept
+    assert spawned["signals"] == [(4242, _sig.SIGHUP)]  # hot-reloaded in place (existing behaviour intact)
+
+
+def test_remote_leave_backstop_401_degrades_best_effort(monkeypatch, tmp_path, capsys):
+    """AC#5: a 401 on the backstop degrades to a clear best-effort message (no traceback, no token in
+    the output; the node TTL is the fallback) and `grid leave` still exits 0."""
+    token = _jwt({"node_id": "node-jwt"})
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=token,
+    )
+    _capture_relay_puts(monkeypatch, status=401)
+
+    assert cli.main(["leave"]) == 0            # still succeeds — the TTL is the fallback
+    captured = capsys.readouterr()
+    assert "Left team" in captured.out         # the leave itself reported success
+    assert "grid login" in captured.err and "TTL" in captured.err  # actionable best-effort caveat
+    assert token not in captured.err and token not in captured.out  # never leak the token
+    assert "Traceback" not in captured.err
+
+
+def test_remote_leave_no_records_backstop_failure_is_honest(monkeypatch, tmp_path, capsys):
+    """AC#3 honesty (silent-failure review): a bare leave with zero records whose backstop can't land
+    (here a token with no node identity) must NOT print the old reassuring 'No engines joined' dead-end
+    — it acknowledges the failed safety deregister, with the reason + ~120s TTL fallback on stderr, and
+    never a traceback."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": "not-a-jwt"}], active="team")
+    # node_id_from_token("not-a-jwt") == "" degrades before any network call — no relay/lifecycle mock needed.
+
+    assert cli.main(["leave"]) == 0
+    captured = capsys.readouterr()
+    assert "No engines joined" not in captured.out                 # not the misleading pre-fix dead-end
+    assert "TTL" in captured.err and "grid login" in captured.err  # honest caveat + the fallback
+    assert "Traceback" not in captured.err
+
+
+def test_remote_leave_no_records_surfaces_relay_resolve_error(monkeypatch, tmp_path, capsys):
+    """(silent-failure review) When the no-records backstop can't resolve the relay address, surface the
+    REAL control-plane reason — not a blanket 'the grid may be down' that hides a 500/timeout/session-401."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
+
+    def boom(*a, **k):
+        raise SystemExit("team status failed (503): upstream unavailable")
+
+    monkeypatch.setattr("cli.remote_grid.resolve_relay_base", boom)
+
+    assert cli.main(["leave"]) == 0
+    err = capsys.readouterr().err
+    assert "503" in err or "upstream unavailable" in err           # the real reason, not a blanket 'down'
+    assert "Traceback" not in err
+
+
+def test_remote_leave_backstop_relay_error_degrades(monkeypatch, tmp_path, capsys):
+    """(code review) The RelayError degrade path end-to-end through `grid leave`: a relay 5xx on the
+    backstop degrades to a best-effort caveat (exit 0, ~120s TTL fallback, no traceback), like the 401
+    case — closes the branch-coverage gap for the non-401 relay failure."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    _capture_relay_puts(monkeypatch, status=500)
+
+    assert cli.main(["leave"]) == 0
+    captured = capsys.readouterr()
+    assert "Left team" in captured.out         # the leave itself still reports success
+    assert "TTL" in captured.err               # best-effort caveat with the fallback
+    assert "Traceback" not in captured.err
 
 
 def test_remote_leave_engine_shrinks_union(monkeypatch, tmp_path):
@@ -6836,6 +6995,47 @@ def test_relay_unregister_flips_role_to_consumer_best_effort(monkeypatch, tmp_pa
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(500))
     relay.unregister_node("https://r", "AT", "n")  # best-effort: a failed drain never raises
+
+
+def test_relay_deregister_node_puts_consumer_and_raises_typed(monkeypatch, tmp_path):
+    """The one-shot CLI backstop (`grid leave`): PUT role=consumer + empty models to /nodes/{id} with
+    the bearer — same wire shape as the serve loop's unregister, but it RAISES typed errors (401 →
+    RelayUnauthorized, else RelayError) so the leave handler can report an honest best-effort outcome
+    instead of the fire-and-forget drain's silent swallow."""
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"], seen["body"] = request.headers.get("authorization"), json.loads(request.content)
+        return httpx.Response(200, json={"status": "updated"})
+
+    _mock_relay(monkeypatch, handler)
+    relay.deregister_node("https://r", "AT", "node-1")
+    assert (seen["method"], seen["path"]) == ("PUT", "/nodes/node-1")
+    assert seen["auth"] == "Bearer AT"
+    assert seen["body"]["role"] == "consumer" and seen["body"]["models"] == []
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(401, text="nope"))
+    with pytest.raises(relay.RelayUnauthorized):
+        relay.deregister_node("https://r", "AT", "n")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(500, text="boom"))
+    with pytest.raises(relay.RelayError):
+        relay.deregister_node("https://r", "AT", "n")
+
+
+def test_relay_deregister_node_maps_invalid_url_to_relay_error(monkeypatch, tmp_path):
+    """`httpx.InvalidURL` is NOT an `HTTPError` subclass, so a malformed signaling_url/node_id (raised at
+    client build, before any I/O) must still map to `RelayError` — otherwise `grid leave`'s one-shot
+    call, which has no outer catch, would surface a raw traceback instead of its best-effort caveat.
+    Uses the real httpx client (no `_mock_relay`); the bad URL raises before any network attempt."""
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    with pytest.raises(relay.RelayError):
+        relay.deregister_node(":::not a url:::", "AT", "node-1")
 
 
 # ---------------------------------------------------------------------------
@@ -7724,18 +7924,11 @@ def test_relay_poll_malformed_body_raises_relay_error(monkeypatch):
 def test_serve_node_id_comes_from_access_token_jwt():
     """The relay binds node_id to the token (PUT /nodes/{id} → 403 'Cannot access another node'
     otherwise), so the serve loop must read node_id from the JWT claim, never invent a random one."""
-    import base64
-    import json as _json
+    from remote import credentials
 
-    from remote import serve
-
-    def _jwt(claims):
-        body = base64.urlsafe_b64encode(_json.dumps(claims).encode()).decode().rstrip("=")
-        return f"header.{body}.sig"
-
-    assert serve._node_id_from_token(_jwt({"node_id": "node-abc", "sub": "u1"})) == "node-abc"
-    assert serve._node_id_from_token(_jwt({"sub": "u1"})) == ""        # JWT without a node_id claim
-    assert serve._node_id_from_token("opaque-not-a-jwt") == ""         # not a JWT at all
+    assert credentials.node_id_from_token(_jwt({"node_id": "node-abc", "sub": "u1"})) == "node-abc"
+    assert credentials.node_id_from_token(_jwt({"sub": "u1"})) == ""   # JWT without a node_id claim
+    assert credentials.node_id_from_token("opaque-not-a-jwt") == ""    # not a JWT at all
 
 
 def test_serve_register_once_sends_cached_payload(monkeypatch, tmp_path):
@@ -8459,7 +8652,7 @@ def test_remote_engine_startup_missing_api_key_everywhere_exits_naming_fix(monke
                            "engine_label": "openai", "api_kind": "openai"}]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     assert serve.run_remote_engine_from_record("n1", "remote") == 1
@@ -8599,7 +8792,7 @@ def test_remote_engine_startup_missing_api_key_reaps_record(monkeypatch, tmp_pat
                      "engine_label": "openai", "api_kind": "openai"}],
     })
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
 
     assert serve.run_remote_engine_from_record("n1", "remote") == 1  # died pre-register, non-zero
     assert not rr.record_path("n1", "remote").exists()  # reaped, not stranded
@@ -8633,7 +8826,7 @@ def test_remote_engine_api_record_registers_static_caps_and_kind(monkeypatch, tm
                            "engine_label": "openai", "api_kind": "openai"}]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     monkeypatch.setattr(probe, "capabilities", lambda *a, **k: pytest.fail("api engines are never probed"))
     seen = {}
     monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw, node=node))
@@ -8673,7 +8866,7 @@ def test_remote_engine_startup_wires_api_endpoint_gating(monkeypatch, tmp_path):
                            "engine_label": "openai", "api_kind": "openai"}]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     monkeypatch.setattr(relay, "register_node", lambda *a, **k: None)
     monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
     monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
@@ -8743,7 +8936,7 @@ def test_remote_engine_codex_union_defaults_to_one_worker(monkeypatch, tmp_path)
                            "engine_label": "codex", "api_kind": "codex"}]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     seen = {}
     monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
     monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
@@ -8814,7 +9007,7 @@ def _codex_serve_skeleton(monkeypatch, tmp_path, models, *, plan_type=None):
               "engines": [spec]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     seen = {}
     monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
     monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
@@ -8918,7 +9111,7 @@ def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path)
                            "engine_label": "openai", "api_kind": "openai"}]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     seen = {}
     monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
     monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
@@ -8958,7 +9151,7 @@ def test_run_remote_engine_starts_reload_thread_with_sighup_blocked(monkeypatch,
               "engines": [{"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None}]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
     monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
-    monkeypatch.setattr(serve, "_node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
     monkeypatch.setattr(serve, "_bring_up_engines",
                         lambda rec: ([("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}})], [], None))
     registered = []

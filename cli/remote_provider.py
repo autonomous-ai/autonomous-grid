@@ -33,7 +33,7 @@ if TYPE_CHECKING:  # runtime imports of remote.* stay lazy (see the module docst
     from remote.codex_probe import SeatRejected
 
 # Remote has exactly ONE identity per grid: the relay node_id is pinned to the per-grid access token
-# (remote/serve._node_id_from_token), so two `grid join`s on a grid would register the same node and
+# (remote/credentials.node_id_from_token), so two `grid join`s on a grid would register the same node and
 # clobber each other. The run record is therefore a singleton keyed by this constant — one file
 # engines_dir(<network_id>)/remote.json — and repeated joins are additive (ADR 0010). `--name` no longer
 # keys the record (it can't mint a second identity); it is the grid-page display name (record["meta_name"]).
@@ -1041,26 +1041,137 @@ def cmd_remote_leave(args: argparse.Namespace) -> int:
 
     from . import remote_grid
 
-    credentials.require_session()
+    session = credentials.require_session()
     rec = remote_grid._select(getattr(args, "grid", None))
     network_id = remote_grid._network_id(rec)
     label = rec.get("name") or network_id
 
     with file_lock(run_records.record_path(network_id, _REMOTE_IDENTITY)):
         records = run_records.read_records(network_id)
-        if not records:
-            print(f"No engines joined to {label}.")
-            return 0
-        # `--engine <endpoint_url|label>` drops one engine from the union; anything else (bare / `--all`)
-        # tears down the whole identity — remote has one identity per grid, so both mean the same here.
+        # `--engine <endpoint_url|label>` shrinks the union. When survivors remain the identity is still
+        # a provider, so this path sends no backstop. Its own last-engine-teardown sub-case (dropping the
+        # final engine tears the whole identity down) is deliberately left at today's no-backstop
+        # behaviour too — issue 02's argv sweep + honest teardown hardens that path; only the bare /
+        # `--all` full-leave branch below backstops. With no records there is no union to shrink, so keep
+        # today's dead-end for the targeted form; the idempotent-repair backstop is only for the bare /
+        # whole-identity leave intent.
         if args.engine and not args.all:
+            if not records:
+                print(f"No engines joined to {label}.")
+                return 0
             return _leave_one_engine(args, network_id, label, records)
+
+        # Full leave (bare / `--all`). Kill the recorded child(ren) FIRST — that preserves the child's
+        # in-flight drain and its own unregister — then send an authoritative CLI backstop deregister
+        # UNCONDITIONALLY, so the model drops from the grid immediately even when the child was
+        # SIGKILLed, was already dead, or its own unregister was rejected. A bare leave with no records
+        # still backstops: an idempotent repair for a historical orphan whose record was deleted out
+        # from under a live child.
         from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
 
         for engine_id, record in records.items():
             provider._stop_engine(network_id, engine_id, record)
-        print(f"Left {label}.")
+        sent = _full_leave_backstop(rec, records, session, network_id, label)
+        if records:
+            print(f"Left {label}.")
+        elif sent:
+            print(f"No engines were tracked for {label}; deregistered it from the relay to be safe.")
+        else:
+            # No local records AND the safety deregister didn't land. Do NOT print the old
+            # "No engines joined" dead-end — it reads as "nothing to do" and contradicts the stderr
+            # caveat `_full_leave_backstop` just printed; acknowledge the attempted repair honestly.
+            print(f"No engines were tracked for {label}; the safety deregister didn't land (see above).")
         return 0
+
+
+def _backstop_degrade(reason: str) -> bool:
+    """Print one best-effort backstop caveat to stderr and report the deregister as not-landed.
+
+    The shared ~120s-TTL fallback tail lives here so the leave-backstop failure branches can't drift
+    (a new branch is one ``_backstop_degrade(...)`` call from the same wording). ``reason`` is the
+    branch-specific clause and must never carry a token — only the grid label and a status/reason.
+    """
+    print(f"{reason} Any model this box served drops after the node TTL (~120s).", file=sys.stderr)
+    return False
+
+
+def _full_leave_backstop(
+    rec: dict[str, object],
+    records: dict[str, dict[str, object]],
+    session: str,
+    network_id: str,
+    label: str,
+) -> bool:
+    """Send the authoritative CLI-side deregister after a full leave: a relay ``PUT`` role=``consumer``
+    (empty models) addressed to the token's JWT ``node_id`` claim — never the run record's junk
+    ``node_id`` field — so the model drops from the grid immediately even when the serve child's own
+    unregister never ran.
+
+    Best-effort: a missing node identity, a down/unreachable grid, or a relay rejection degrades to a
+    clear stderr caveat (the ~120s node TTL is the fallback), never a traceback and never a token in
+    the output. Returns whether the relay accepted the deregister. Token refresh on 401 is follow-up
+    F4; here an expired token just degrades.
+    """
+    from remote import credentials, relay
+
+    access_token = str(rec.get("access_token") or "")
+    node_id = credentials.node_id_from_token(access_token)
+    if not node_id:
+        return _backstop_degrade(
+            f"Couldn't deregister {label} from the relay: this grid's token carries no node identity — "
+            "run `grid login` to refresh it."
+        )
+
+    signaling_url, resolve_error = _backstop_signaling_url(rec, records, session, network_id, label)
+    if not signaling_url:
+        # resolve_relay_base raises for a stopped grid AND for any control-plane failure (429/500/
+        # timeout, or a session-token 401), so surface the real reason instead of a blanket "down".
+        return _backstop_degrade(
+            f"Couldn't reach the relay to deregister {label} ({resolve_error or 'the grid may be down'})."
+        )
+
+    try:
+        relay.deregister_node(signaling_url, access_token, node_id)
+        return True
+    except relay.RelayUnauthorized:
+        return _backstop_degrade(
+            f"The relay rejected the deregister for {label} (token expired) — run `grid login`."
+        )
+    except relay.RelayError as exc:
+        return _backstop_degrade(f"Couldn't deregister {label} from the relay ({exc}).")
+
+
+def _backstop_signaling_url(
+    rec: dict[str, object],
+    records: dict[str, dict[str, object]],
+    session: str,
+    network_id: str,
+    label: str,
+) -> tuple[str, str]:
+    """The relay base to send the backstop to, as ``(url, error_reason)``.
+
+    Prefer the URL the (now-stopped) child was registered against — stored on its run record, so the
+    common full-leave case needs no network round-trip; the singleton ``remote`` record wins over any
+    legacy ``engine-<uuid>`` sibling that might carry a stale address. With no records (a bare
+    idempotent-repair leave) resolve it live from the control plane. A failed live resolve returns
+    ``("", str(exc))`` — the real control-plane status/reason, not a blanket "down" — so the caller can
+    tell a transient 500/timeout or a session-token 401 apart from a genuinely stopped grid.
+    """
+    from . import remote_grid
+
+    singleton = records.get(_REMOTE_IDENTITY)
+    ordered = ([singleton] if singleton is not None else []) + [
+        record for engine_id, record in records.items() if engine_id != _REMOTE_IDENTITY
+    ]
+    for record in ordered:
+        url = str(record.get("signaling_url") or "").rstrip("/")
+        if url:
+            return url, ""
+    try:
+        base, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
+        return base.rstrip("/"), ""
+    except SystemExit as exc:
+        return "", str(exc)
 
 
 def _leave_one_engine(
