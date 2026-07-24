@@ -16,6 +16,7 @@ from ._constants import (
 )
 from .agent import cmd_agent_install, cmd_agent_status
 from .auth import cmd_login, cmd_logout, cmd_sync
+from .device import cmd_device_info
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
 from .remote_router import AdvisorsAction, MAX_ADVISORS, cmd_remote_router, parse_advisor_token
@@ -228,6 +229,13 @@ def _add_engines(sub) -> None:
 
 
 def _add_models(sub) -> None:
+    device_info = sub.add_parser(
+        "device-info",
+        help="This machine's hardware profile (CPU, memory, disk, GPU)",
+    )
+    device_info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    device_info.set_defaults(handler=cmd_device_info)
+
     catalog = sub.add_parser("catalog", help="Models Grid can pull")
     catalog.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     catalog.add_argument(
