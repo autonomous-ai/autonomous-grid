@@ -799,7 +799,18 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
             label = "comfyui"
         else:
             label = "llama.cpp"
-    return {"name": record.get("meta_name") or engine_id, "engine": label}
+    meta = {"name": record.get("meta_name") or engine_id, "engine": label}
+    # The seat tier of an API engine (codex: free/plus/pro/…), surfaced on the grid page next to the
+    # engine kind. A public label, never a secret — distinct from the token/account_id we never emit.
+    # Union identities can gather several engines; take the first spec that carries one (only API
+    # engines like codex do — hardware specs never set plan_type), so a codex+hardware union still
+    # shows the codex tier. None (no such engine, or vendor said nothing) omits the key entirely.
+    plan_type = next(
+        (e.get("plan_type") for e in (record.get("engines") or []) if e.get("plan_type")), None
+    )
+    if plan_type:
+        meta["plan_type"] = plan_type
+    return meta
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
