@@ -116,6 +116,27 @@ def _warn(msg: str) -> None:
 # Detached entry
 # ---------------------------------------------------------------------------
 
+def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
+    """Heal pid drift at the source: under the record lock, write our real ``os.getpid()`` into our
+    own run record, so the recorded pid is always this live serve process's — regardless of what the
+    spawner wrote (``proc.pid`` of a launcher whose interpreter is a group-child, the ``0`` caught in
+    the join write-race window, or a copied/older record).
+
+    Holds the SAME ``file_lock`` the CLI join-append and leave teardown take (``cli.remote_provider``),
+    so a concurrent write can't be lost and "record gone" is observed atomically. Read-checks first
+    (``update_record`` no-ops when the record is gone), so a record a concurrent full leave just
+    deleted is never resurrected. This heals drift for a leave that reads the record AFTER our stamp;
+    a leave that wins the lock BEFORE it still acts on the spawner's pid, and the true child is then
+    reaped by issue-02's argv orphan sweep (``remote.orphan_sweep``), not by this stamp. Best-effort:
+    a failed stamp warns and serves on — the engine must serve even if the disk write hiccups (the
+    reload bookkeeping's never-raise contract)."""
+    try:
+        with file_lock(run_records.record_path(grid_id, engine_id)):
+            run_records.update_record(grid_id, engine_id, pid=os.getpid())
+    except (Exception, SystemExit) as exc:  # never let a disk hiccup stop the engine serving
+        _warn(f"could not stamp live pid into the run record for {engine_id}@{grid_id}: {exc}")
+
+
 def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     """Detached ``__remote-engine`` entry: serve one engine to the grid's relay until SIGTERM."""
     record = run_records.read_record(grid_id, engine_id)
@@ -156,6 +177,12 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     registered = False
     rc = 0
     try:
+        # Heal pid drift at the source before the (possibly slow) engine bring-up: once we stamp, the
+        # record's pid is THIS live process, so a later `grid leave` kills the right child instead of
+        # whatever the spawner recorded (proc.pid of a launcher, or the transient 0). A leave that wins
+        # the record lock before we stamp falls back to issue-02's argv sweep. Best-effort +
+        # read-checked (see `_stamp_own_pid`).
+        _stamp_own_pid(grid_id, engine_id)
         # API-engine keys come from the machine-local key store (env var as fallback) — resolve
         # them up front so a keyless respawn dies naming the fix instead of advertising models
         # whose every job would 401 upstream. Never read from the record; the record never carries

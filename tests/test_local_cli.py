@@ -8304,6 +8304,84 @@ def test_serve_node_id_comes_from_access_token_jwt():
     assert credentials.node_id_from_token("opaque-not-a-jwt") == ""    # not a JWT at all
 
 
+def test_stamp_own_pid_overwrites_a_stale_spawner_value(monkeypatch, tmp_path):
+    """The detached serve child heals pid drift at the source: at startup it stamps its own real
+    ``os.getpid()`` into its run record, overriding whatever the spawner wrote — ``proc.pid`` of a
+    launcher whose interpreter is a group-child, or the ``0`` caught in the join write-race window."""
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": 999999,
+        "signaling_url": "https://relay.example",
+    })
+
+    serve._stamp_own_pid("n1", "remote")
+
+    assert run_records.read_record("n1", "remote")["pid"] == os.getpid()
+
+
+def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
+    """Only ``pid`` changes: a concurrent CLI join-append (under the same record lock) that added
+    engines/models/meta must keep every field it wrote — the stamp merges, never clobbers."""
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seeded = {
+        "engine_id": "remote", "grid_id": "n1", "pid": 0,
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "models": ["m1", "m2"],
+        "engines": [{"endpoint_url": "http://127.0.0.1:8081", "models": ["m1", "m2"]}],
+    }
+    run_records.write_record("n1", "remote", seeded)
+
+    serve._stamp_own_pid("n1", "remote")
+
+    got = run_records.read_record("n1", "remote")
+    assert got["pid"] == os.getpid()
+    assert {k: v for k, v in got.items() if k != "pid"} == {k: v for k, v in seeded.items() if k != "pid"}
+
+
+def test_stamp_own_pid_does_not_recreate_a_deleted_record(monkeypatch, tmp_path):
+    """If a concurrent full leave already deleted the record, the stamp must NOT recreate it — a
+    resurrected record would strand a stale handle after the SIGTERM leave already sent. The stamp
+    reads under the lock and no-ops when the record is gone."""
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # No record on disk — as if a full leave deleted it out from under this starting child.
+    serve._stamp_own_pid("n1", "remote")
+
+    assert not run_records.record_path("n1", "remote").exists()
+    assert run_records.read_record("n1", "remote") is None
+
+
+def test_stamp_own_pid_is_best_effort_on_write_failure(monkeypatch, tmp_path, capsys):
+    """A failed stamp must never stop the engine serving: a disk hiccup warns to stderr and returns,
+    matching the reload bookkeeping's never-raise contract (the record is left untouched)."""
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": 0, "signaling_url": "https://relay.example",
+    })
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(serve.run_records, "update_record", boom)
+
+    serve._stamp_own_pid("n1", "remote")  # must NOT raise
+
+    err = capsys.readouterr().err
+    assert "could not stamp live pid" in err and "disk full" in err  # the warn carries the diagnostic
+    assert run_records.read_record("n1", "remote")["pid"] == 0  # untouched by the failed stamp
+
+
 def test_serve_register_once_sends_cached_payload(monkeypatch, tmp_path):
     from remote import relay, serve
 
