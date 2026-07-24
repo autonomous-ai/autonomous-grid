@@ -125,13 +125,20 @@ def load_codex_bundle() -> codex_oauth.CodexBundle | None:
     if not str(account_id).strip() or not str(account_id).isprintable():
         return None
     plan_type = entry.get("plan_type")
+    # plan_type is a display/message label that rides onto the operator's terminal (`grid catalog`'s
+    # "Your current plan (…)" heading, issue 10b). Bounded + printable-checked HERE at the LOAD
+    # boundary, exactly as `account_id` is above — a forged/hostile token that stored an ANSI-laden or
+    # oversized tier string can't inject terminal escapes or flood output (CWE-150). Unusable → None
+    # ("unknown tier"), identical to absence. (Real labels are short: `enterprise_cbp_usage_based`.)
+    if not (isinstance(plan_type, str) and plan_type.isprintable() and len(plan_type) <= 64):
+        plan_type = None
     return codex_oauth.CodexBundle(
         access_token=str(access_token),
         refresh_token=str(refresh_token),
         account_id=str(account_id),
         # Absent means "the token never said" — ADR 0015 D-f's minimal whitelist. TOML has no null,
         # so absence is the ONLY way None survives a round-trip (see `store_codex_bundle`).
-        plan_type=plan_type if isinstance(plan_type, str) else None,
+        plan_type=plan_type,
         # `isinstance(True, int)` is True in Python, so an unguarded read would turn `last_refresh =
         # true` into 1 — epoch 1970 — and refresh eagerly forever (the guard `codex_auth` uses on `exp`).
         last_refresh=last_refresh if isinstance(last_refresh, int) and not isinstance(last_refresh, bool) else 0,

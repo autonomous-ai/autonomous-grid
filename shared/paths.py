@@ -28,6 +28,13 @@ def api_keys_file() -> Path:
     return grid_home() / "api_keys.toml"
 
 
+def codex_models_cache_file() -> Path:
+    """Grid-side cache of the codex seat's last `GET /models` probe (JSON, 0o600). Written after every
+    successful probe (join + `grid catalog --api codex`), read back when offline. The seat's own
+    entitlement — carries no token/account id — and survives logout, like api_keys.toml (issue 10b)."""
+    return grid_home() / "codex_models_cache.json"
+
+
 def grids_dir() -> Path:
     return grid_home() / "grids"
 

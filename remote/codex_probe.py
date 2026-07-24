@@ -32,6 +32,9 @@ exists to prevent. Classification rules paid for in spike evidence:
 
 from __future__ import annotations
 
+import math
+import sys
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -41,6 +44,31 @@ from . import codex_oauth
 # One request on a human-watched path: a hung socket must surface as an error, not hang the join.
 # Matches `_VENDOR_LIST_TIMEOUT` (the openai join call) and `_EXCHANGE_TIMEOUT` (the sign-in).
 _PROBE_TIMEOUT = 15.0
+
+# A model slug rides into the advertised name and onto the operator's terminal (the join print,
+# the `-m` refusal). Vendor text at best, so it is printable-checked and length-bounded at the ONE
+# point of origin — the same `_safe`/`_bounded_detail` posture — so an unbounded/ANSI-laden slug from
+# a hostile or MITM'd backend can never forge lines or inject escapes downstream (CWE-150). Real
+# slugs are short (`gpt-5.6-terra`); 128 is generous headroom.
+_MAX_SLUG_LEN = 128
+
+
+@dataclass(frozen=True)
+class CodexModel:
+    """One entitled model from the seat's live ``GET /models`` — slug plus the caps the codex
+    capability envelope needs (issue 10a). The probe is the SOLE source of truth for the served set
+    and its caps now that the static tier table no longer gates serving; the CLI persists these into
+    the run record at join so the serving side can build the envelope with no static lookup.
+
+    ``context_window`` uses ``0`` as the "unknown" sentinel (the existing media/doggi convention), so
+    an absent/malformed probe value is OMITTED from the envelope downstream, never a fabricated
+    number. Caps fail closed per field (absent → the conservative claim); the model itself is still
+    served (DESIGN §8 — never fail closed on a model)."""
+
+    slug: str
+    context_window: int  # 0 = unknown (omitted from the envelope), never fabricated
+    supports_vision: bool
+    supports_tools: bool
 
 
 class SeatRejected(Exception):
@@ -59,13 +87,17 @@ class SeatRejected(Exception):
 
 def probe_seat(
     bundle: codex_oauth.CodexBundle, *, base_url: str, client_version: str
-) -> tuple[str, ...]:
-    """The seat's visible model slugs, or why this machine cannot serve it.
+) -> tuple[CodexModel, ...]:
+    """The seat's servable models (slug + derived caps), or why this machine cannot serve it.
 
     One GET, no retry. Raises ``SeatRejected`` for the auth class and ``SystemExit`` (a terminal
-    operator message ending "Nothing was joined.") for every other failure. The slugs come back
-    deduped in vendor order; ``visibility: "hide"`` rows are dropped — a model the vendor hides
-    from its own client must never be advertised to a grid (facts.md #5, ``codex-auto-review``).
+    operator message ending "Nothing was joined.") for every other failure. The records come back
+    deduped in vendor order; membership is ``visibility != "hide"`` AND ``supported_in_api`` is not
+    explicitly ``False`` (issue 10a / DESIGN §6): a model the vendor hides from its own client
+    (``codex-auto-review``) or explicitly marks API-unsupported is never advertised, but an ABSENT
+    ``supported_in_api`` is served (Option A — never fail closed on a model). Caps derive from the
+    probe (``context_window``; vision from ``input_modalities``; tools from the tool-call flags),
+    fail-closed per field.
     """
     url = f"{base_url}/models"
     headers = {
@@ -87,7 +119,7 @@ def probe_seat(
 
     if resp.status_code != 200:
         _raise_probe_failure(resp)
-    return _visible_slugs(resp)
+    return _visible_models(resp)
 
 
 def _raise_probe_failure(resp: httpx.Response) -> None:
@@ -154,12 +186,26 @@ def _bounded_detail(resp: httpx.Response) -> str:
     return ""
 
 
-def _visible_slugs(resp: httpx.Response) -> tuple[str, ...]:
-    """The visible model slugs of a 200 listing, defensively.
+def _readable_slug(model: object) -> bool:
+    """Whether a row carries a usable model slug: a non-empty, PRINTABLE, length-bounded string. A
+    row that fails this is treated exactly like one with no slug — dropped, and (if NO row anywhere
+    is readable) surfaced as contract drift. Bounding + printable-checking at the ONE origin means a
+    hostile/ANSI slug from a compromised or MITM'd backend can never ride the advertised name onto
+    the operator's terminal (the join print / `-m` refusal) and forge lines or inject escapes
+    (CWE-150) — the same posture `_bounded_detail` already takes for vendor `detail` text."""
+    if not isinstance(model, dict):
+        return False
+    slug = model.get("slug")
+    return isinstance(slug, str) and bool(slug) and slug.isprintable() and len(slug) <= _MAX_SLUG_LEN
 
-    The body is vendor JSON with ~42 fields per model; only ``slug`` and ``visibility`` are read,
-    and nothing is indexed without a shape check — a vendor reshape must surface as the
-    "unreadable listing" contract-drift error, never as a KeyError escaping the taxonomy.
+
+def _visible_models(resp: httpx.Response) -> tuple[CodexModel, ...]:
+    """The servable models of a 200 listing (slug + derived caps), defensively.
+
+    The body is vendor JSON with ~42 fields per model; only the caps-critical fields are read, and
+    nothing is indexed without a shape check — a vendor reshape must surface as the "unreadable
+    listing" contract-drift error or a conservative caps claim, never as an exception escaping the
+    failure taxonomy.
     """
     try:
         doc: Any = resp.json()
@@ -169,26 +215,115 @@ def _visible_slugs(resp: httpx.Response) -> tuple[str, ...]:
     if not isinstance(models, list):
         raise _unreadable_listing()
 
-    # Drift vs empty is decided by READABILITY, not by what survives the hide-filter: an
-    # all-hidden listing parsed perfectly and is a legitimate (if unusual) seat state — sending
-    # its operator to "check for a newer grid release" would be a lie. Only a non-empty listing
-    # in which NO row anywhere carries a readable slug is shape drift (silent-failure review #1).
-    readable = [
-        model for model in models
-        if isinstance(model, dict) and isinstance(model.get("slug"), str) and model["slug"]
-    ]
+    # Drift vs empty is decided by READABILITY, not by what survives the membership filters: an
+    # all-hidden (or all-unsupported) listing parsed perfectly and is a legitimate (if unusual) seat
+    # state — sending its operator to "check for a newer grid release" would be a lie. Only a
+    # non-empty listing in which NO row anywhere carries a readable slug is shape drift.
+    readable = [model for model in models if _readable_slug(model)]
     if models and not readable:
         raise _unreadable_listing()
 
-    slugs: dict[str, None] = {}  # insertion-ordered dedupe, vendor order preserved
+    picked: dict[str, CodexModel] = {}  # insertion-ordered dedupe, vendor order, first occurrence wins
+    drifted: set[str] = set()
     for model in readable:
-        # The hide-filter is defence in depth, NOT the wall: if the vendor renames `visibility`
-        # this check fails open, and what actually stops a hidden model being advertised is the
-        # verified tier row the join intersects with (pinned by test). A hidden model that IS in
-        # the tier row would then be advertised and fail per-job — visible damage, not silent.
-        if model.get("visibility") != "hide":
-            slugs.setdefault(model["slug"])
-    return tuple(slugs)
+        # Membership (issue 10a / DESIGN §6): the hide-filter drops a model the vendor hides from its
+        # own picker (codex-auto-review); the supported_in_api filter drops one the vendor EXPLICITLY
+        # marks API-unsupported (US5). These two filters are now the SOLE structural guards — the
+        # static tier intersection that used to backstop them is gone. If the vendor renames
+        # `visibility` the hide-filter fails OPEN and the hidden model is served: visible damage (it
+        # 400s per job), never silent, and never a model failed closed (DESIGN §8). An ABSENT
+        # supported_in_api is served (Option A); only an explicit `False` excludes.
+        if model.get("visibility") == "hide":
+            continue
+        if model.get("supported_in_api") is False:
+            continue
+        slug = model["slug"]
+        if slug not in picked:  # first occurrence wins; a later dup is never re-parsed (nor re-checked)
+            picked[slug] = _model_caps(model)
+            drifted.update(_malformed_caps_fields(model))
+    _warn_caps_drift(drifted)
+    return tuple(picked.values())
+
+
+def _warn_caps_drift(fields: set[str]) -> None:
+    """One operator breadcrumb when a caps-critical field arrived PRESENT-but-unreadable across the
+    listing (a vendor reshape). Per-field fail-closed is otherwise SILENT — a whole-listing field
+    rename would strip vision/tools/context from every model with a "success" join and no signal
+    (the membership set at least surfaces in the join's `models=` print; caps never do). Fires ONLY
+    on genuine shape drift, never on real data or a legitimately absent (sparse) field."""
+    if fields:
+        print(
+            "Note: the codex model listing carried capability field(s) "
+            f"{', '.join(sorted(fields))} in a shape this grid can't read; those capabilities were "
+            "treated conservatively for the affected models. A vendor API change may be "
+            "under-reporting your models — check for a newer grid release.",
+            file=sys.stderr,
+        )
+
+
+def _is_finite_number(value: Any) -> bool:
+    """A real, finite number — the shape a numeric probe field must have before coercion. Excludes
+    ``bool`` (``True``/``False`` are ``int`` in Python) and non-finite floats (Python's ``json``
+    accepts ``Infinity``/``NaN``, and ``int(inf)`` raises ``OverflowError`` — which would escape the
+    probe's failure taxonomy as a raw traceback). A huge arbitrary-precision ``int`` (e.g. a 309-digit
+    JSON literal in a hostile vendor body or a corrupted `codex_models_cache.json`) ALSO overflows the
+    float conversion inside ``math.isfinite`` — caught here so it reads as "not a usable number" (→ the
+    ``0`` unknown sentinel), never a raw traceback that would break the probe's / the cache's contract."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _positive_int(value: Any) -> int:
+    """A probe field coerced to a positive int, or the ``0`` unknown sentinel (→ omitted from the
+    envelope downstream, never fabricated) when absent, non-numeric, non-finite, or non-positive."""
+    return int(value) if _is_finite_number(value) and value > 0 else 0
+
+
+def _flag(value: Any) -> bool:
+    """A probe boolean, fail-closed: ``True`` ONLY for the JSON literal ``true``. Any other shape —
+    a vendor reshaping the field to a truthy string (``bool("false")`` is ``True``!), a number, or
+    absence — is the conservative ``False``, the same fail-closed direction as the numeric guard."""
+    return value is True
+
+
+def _malformed_caps_fields(model: dict[str, Any]) -> tuple[str, ...]:
+    """Caps-critical fields PRESENT in a row but in an unreadable SHAPE — the vendor-reshape signal
+    for ``_warn_caps_drift``. Distinct from a legitimately ABSENT field (sparse — no signal, no
+    warn): a key that isn't there is normal; a key that IS there but the wrong type is drift."""
+    bad: list[str] = []
+    ctx = model.get("context_window")
+    if ctx is not None and not _is_finite_number(ctx):
+        bad.append("context_window")
+    modalities = model.get("input_modalities")
+    if modalities is not None and not isinstance(modalities, list):
+        bad.append("input_modalities")
+    for field in ("supports_parallel_tool_calls", "supports_search_tool"):
+        value = model.get(field)
+        if value is not None and not isinstance(value, bool):
+            bad.append(field)
+    return tuple(bad)
+
+
+def _model_caps(model: dict[str, Any]) -> CodexModel:
+    """Derive one model's caps from its probe row, fail-closed per field (never raises).
+
+    ``context_window`` → a positive int, else ``0`` (unknown sentinel); vision → ``"image" in
+    input_modalities``; tools → ``supports_parallel_tool_calls or supports_search_tool``, each
+    accepted ONLY as a real JSON ``true`` (`_flag`). A field the vendor stops sending — or reshapes —
+    yields the conservative claim; the model is still served (DESIGN §8). A present-but-unreadable
+    caps field is additionally surfaced by `_malformed_caps_fields` → `_warn_caps_drift`."""
+    modalities = model.get("input_modalities")
+    return CodexModel(
+        slug=model["slug"],
+        context_window=_positive_int(model.get("context_window")),
+        supports_vision=isinstance(modalities, list) and "image" in modalities,
+        supports_tools=_flag(model.get("supports_parallel_tool_calls"))
+        or _flag(model.get("supports_search_tool")),
+    )
 
 
 def _unreadable_listing() -> SystemExit:

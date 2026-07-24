@@ -858,9 +858,13 @@ def test_api_whitelist_integrity():
         assert all(names), f"{kind} has an entry with an empty vendor name"
         assert len(set(names)) == len(names), f"{kind} has duplicate vendor names"
         for entry in whitelist.entries:
-            # Media APIs (e.g. Doggi) have context_window=0; text APIs must have > 0.
-            if whitelist.supports_model_listing:
+            # Media APIs (e.g. Doggi) have context_window=0. A text API normally declares a real
+            # window, EXCEPT codex, whose illustrative cross-plan reference carries paid rows with the
+            # `0` unknown-ctx sentinel (issue 10b) — their exact values are pinned by
+            # test_codex_tier_whitelist_integrity, so here we only forbid a negative/garbage window.
+            if whitelist.supports_model_listing and kind != api_catalog.CODEX_KIND:
                 assert entry.context_window > 0
+            assert entry.context_window >= 0
             assert api_catalog.advertised_name(kind, entry) == f"{kind}:{entry.vendor_name}"
         date.fromisoformat(whitelist.last_verified)  # dated, ISO format
         # APIs with base_url=None require --at (e.g. Doggi); others must have a valid HTTPS URL.
@@ -874,60 +878,51 @@ def test_api_whitelist_integrity():
         assert whitelist.endpoints, f"{kind} must serve at least one endpoint"
 
 
-def test_catalog_api_codex_prints_per_tier_whitelist(monkeypatch, capsys):
-    """`grid catalog --api codex` prints the static per-tier table — offline, with no credential
-    (ADR 0012 D-a posture; the sign-in and the live probe belong to `grid join`). Each populated
-    tier prints its rows; the fallback rule for every other tier is stated naming the minimal
-    tier; and the consumer-facing facts are disclosed: these models serve the `responses`
-    endpoint (an external Codex app, not `grid chat`), requests leave the grid, and jobs spend
-    the seat's own monthly allowance."""
+def test_catalog_api_codex_no_seat_shows_illustrative_reference(monkeypatch, tmp_path, capsys):
+    """`grid catalog --api codex` with no seat signed in (issue 10b): NO probe, no network — it shows
+    the illustrative cross-plan reference (free through pro, incl. the paid rows) with a "not signed
+    in" note, and the consumer-facing disclosures (responses endpoint, `grid chat` can't call it,
+    requests leave the grid, the seat's own allowance)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # a clean home: no stored codex bundle
+
     def _no_network(*args, **kwargs):
-        raise AssertionError("`grid catalog --api` must not touch the network")
+        raise AssertionError("`grid catalog --api codex` must not touch the network with no seat")
 
     monkeypatch.setattr(httpx, "Client", _no_network)
-    monkeypatch.setattr(httpx, "request", _no_network)
-    monkeypatch.setattr(httpx, "stream", _no_network)
 
     rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
 
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
     assert rc == 0
     assert "Unknown" not in out
-    assert api_catalog.CODEX_LAST_VERIFIED in out
-    for tier, entries in api_catalog.CODEX_TIER_MODELS.items():
-        assert f"\n{tier}:\n" in out  # a per-tier section header
-        for entry in entries:
-            assert api_catalog.advertised_name("codex", entry) in out
-            assert f"{entry.context_window:,}" in out
+    assert "Not signed in" in err  # the no-seat warning goes to stderr (clean listing on stdout)
+    assert api_catalog.CODEX_REFERENCE_LAST_VERIFIED in out  # the reference's own (pricing-docs) date
+    # every plan renders (delta style: free rows under `free / go`, paid rows under plus/pro)
+    assert "free / go:" in out and "plus:" in out and "pro:" in out
+    for slug in ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.3-codex-spark"):
+        assert f"codex:{slug}" in out
+    assert "Business / Enterprise / Edu serve the same set as Plus." in out
     # Chat-dialect capability words never appear on codex rows (honest passthrough claims only).
     assert "json" not in out and "structured" not in out
-    assert api_catalog.CODEX_MINIMAL_TIER in out  # the fallback rule names the minimal tier
-    assert "responses" in out  # the endpoint disclosure...
-    assert "grid chat" in out  # ...and what NOT to point at it
-    assert "leave the grid" in out  # provenance disclosure (openai parity)
-    assert "allowance" in out  # flat-rate seat: jobs spend the provider's own allowance
+    # consumer-facing disclosures (openai parity)
+    assert "responses" in out and "grid chat" in out
+    assert "leave the grid" in out and "allowance" in out
 
 
-def test_catalog_api_codex_shows_responses_per_entry(monkeypatch, capsys):
-    """AC2 (issue 06): the subscription-seat listing shows the dialect too — every codex model
-    serves `responses` (its row is `endpoints=("responses",)`), so the same data-driven cap tag
-    appears on each per-tier entry line, beside the tools/vision it already showed. Asserted on the
-    model's OWN line: distinct from the trailing prose that also says "responses", this witnesses the
-    per-model capability tag. The per-tier GROUPING is unchanged — that is pinned separately by
-    test_catalog_api_codex_prints_per_tier_whitelist's `\nfree:\n` assertion."""
-    def _no_network(*args, **kwargs):
-        raise AssertionError("`grid catalog --api` must not touch the network")
-
-    monkeypatch.setattr(httpx, "Client", _no_network)
-    monkeypatch.setattr(httpx, "request", _no_network)
-    monkeypatch.setattr(httpx, "stream", _no_network)
+def test_catalog_api_codex_reference_shows_responses_per_entry(monkeypatch, tmp_path, capsys):
+    """AC2 (issue 06), now on the illustrative reference (issue 10b): every codex model serves
+    `responses` (its row is `endpoints=("responses",)`), so the same data-driven cap tag appears on
+    each reference line, beside the tools/vision it already showed. Asserted on the model's OWN line,
+    distinct from the trailing prose that also says "responses"."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # no seat: the reference renders, no probe
 
     rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
 
     out = capsys.readouterr().out
     assert rc == 0
     lines = [ln for ln in out.splitlines() if "codex:gpt-5.6-terra" in ln]
-    assert lines, "the gpt-5.6-terra model line must be printed"
+    assert lines, "the gpt-5.6-terra reference line must be printed"
     assert "responses" in lines[0]  # the per-model dialect tag, not merely the trailing prose
     assert "tools" in lines[0] and "vision" in lines[0]  # alongside the caps it already showed
 
@@ -944,34 +939,141 @@ def test_catalog_api_still_rejects_a_kind_that_really_is_unknown(capsys):
     assert "codex" in msg and "openai" in msg  # the supported list
 
 
-def test_catalog_api_codex_json_emits_per_tier_contract(capsys):
-    """`--json` for codex speaks `tiers`, not the flat `models` (the reshape is safe: v0.2.1
-    predates every codex commit, so the interim flat-empty shape never shipped in a release).
-    Entries carry NO chat-dialect keys — json-mode/structured-outputs are chat notions a
-    Responses passthrough cannot honestly claim — and `supports_parallel_tool_calls` is the one
-    shared derivation the capability envelope also uses, so the two surfaces cannot disagree."""
+def test_catalog_api_codex_json_no_seat_contract(monkeypatch, tmp_path, capsys):
+    """`--json` for codex (issue 10b): keeps the `tiers` shape (every row `live:false`) and ADDS a
+    `current_plan` key (null with no seat), a `source_url`, a `warning`, and per-row `live` flags. An
+    unknown context window is `null`, never a fabricated 0; chat-dialect keys stay absent."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # no seat → current_plan is null, no probe
+
     rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=True))
 
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["kind"] == "codex"
-    assert payload["last_verified"] == api_catalog.CODEX_LAST_VERIFIED
     assert payload["endpoints"] == ["responses"]
-    assert payload["minimal_tier"] == api_catalog.CODEX_MINIMAL_TIER
-    assert "models" not in payload  # per-tier kinds speak `tiers`
+    assert payload["last_verified"] == api_catalog.CODEX_REFERENCE_LAST_VERIFIED  # the reference date
+    assert payload["source_url"] == api_catalog.CODEX_PRICING_DOCS_URL
+    assert payload["current_plan"] is None  # not signed in
+    assert payload["warning"] and "Not signed in" in payload["warning"]
+    assert "models" not in payload  # the flat shape never returns; the reference speaks `tiers`
     assert set(payload["tiers"]) == set(api_catalog.CODEX_TIER_MODELS)
-    free = payload["tiers"]["free"]
-    assert len(free) == len(api_catalog.CODEX_TIER_MODELS["free"])
-    first, first_entry = free[0], api_catalog.CODEX_TIER_MODELS["free"][0]
+
+    free = payload["tiers"]["free / go"]
+    assert len(free) == len(api_catalog.CODEX_TIER_MODELS["free / go"])
+    first, first_entry = free[0], api_catalog.CODEX_TIER_MODELS["free / go"][0]
     assert first["advertised"] == api_catalog.advertised_name("codex", first_entry)
     assert first["vendor_name"] == first_entry.vendor_name
-    assert first["context_window"] == first_entry.context_window
-    assert first["supports_tools"] is True
-    assert first["supports_vision"] is True
-    assert first["supports_parallel_tool_calls"] is True
-    assert first["notes"] == first_entry.notes
-    assert "supports_json_mode" not in first
-    assert "supports_structured_outputs" not in first
+    assert first["context_window"] == first_entry.context_window  # a known (>0) free row
+    assert first["supports_tools"] is True and first["supports_vision"] is True
+    assert first["live"] is False  # every reference row is illustrative
+    assert "supports_json_mode" not in first and "supports_structured_outputs" not in first
+
+    # an illustrative paid row carries a NULL context window (unknown), never a fabricated 0
+    sol = next(r for r in payload["tiers"]["plus"] if r["vendor_name"] == "gpt-5.6-sol")
+    assert sol["context_window"] is None and sol["live"] is False
+
+
+def test_catalog_api_codex_online_shows_live_current_plan_and_writes_cache(monkeypatch, tmp_path, capsys):
+    """Signed in + online (issue 10b): the catalog probes the seat's REAL set (marked live), writes
+    the cache, and shows it above the illustrative reference. A brand-new entitled slug in NO static
+    table still appears — the feature's point. `--json` marks the current_plan rows live."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import api_keys, codex_models_cache
+
+    api_keys.store_codex_bundle(_codex_bundle(plan_type="plus"))
+    body = _codex_models_body()
+    body["models"].append({  # a newly-shipped slug in no static table
+        "slug": "gpt-5.7-nova", "visibility": "list", "supported_in_api": True,
+        "context_window": 400000, "input_modalities": ["text", "image"],
+        "supports_parallel_tool_calls": True, "supports_search_tool": True,
+    })
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=body))
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Your current plan (plus) — live" in out
+    assert "codex:gpt-5.7-nova" in out  # served with no code change — the win the feature exists for
+    cached = codex_models_cache.read_cache(
+        client_version=api_catalog.CODEX_CLIENT_VERSION, account_id="acct-1",
+    )
+    assert cached is not None and any(m.slug == "gpt-5.7-nova" for m in cached.models)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["current_plan"]["plan_type"] == "plus" and payload["current_plan"]["live"] is True
+    assert all(r["live"] is True for r in payload["current_plan"]["models"])
+    nova = next(r for r in payload["current_plan"]["models"] if r["vendor_name"] == "gpt-5.7-nova")
+    assert nova["context_window"] == 400000
+    assert all(r["live"] is False for rows in payload["tiers"].values() for r in rows)
+
+
+def test_catalog_api_codex_offline_falls_back_to_cache_with_warning(monkeypatch, tmp_path, capsys):
+    """Signed in but the probe fails at the socket (issue 10b Q2): the catalog does NOT die — it warns
+    "couldn't reach your seat" and shows the LAST cached set (marked cached, not live)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import api_keys, codex_models_cache
+    from remote.codex_probe import CodexModel
+
+    api_keys.store_codex_bundle(_codex_bundle(plan_type="pro"))
+    codex_models_cache.write_cache(  # a prior successful probe for THIS seat
+        (CodexModel(slug="gpt-5.6-terra", context_window=272_000, supports_vision=True, supports_tools=True),),
+        client_version=api_catalog.CODEX_CLIENT_VERSION, account_id="acct-1",
+    )
+
+    def _transport_fail(request):
+        raise httpx.ConnectError("connection refused")
+
+    _mock_probe(monkeypatch, _transport_fail)
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert rc == 0
+    assert "Couldn't reach your codex seat" in err  # the warning is on stderr
+    assert "cached" in out.lower()  # the current-plan heading (stdout)
+    assert "codex:gpt-5.6-terra" in out  # the cached set still shows, marked cached
+
+
+def test_catalog_api_codex_seat_rejected_warns_distinctly(monkeypatch, tmp_path, capsys):
+    """Signed in but the seat is rejected (401) while ONLINE (issue 10b Q2): a DISTINCT actionable
+    warning naming `grid join --api codex`, NOT the generic offline line; still falls back to the
+    illustrative reference (no cache here)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import api_keys
+
+    api_keys.store_codex_bundle(_codex_bundle(plan_type="plus"))
+    _mock_probe(monkeypatch, lambda request: httpx.Response(401, json={"detail": "bad token"}))
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert rc == 0
+    assert "seat was rejected" in err and "grid join --api codex" in err  # the warning is on stderr
+    assert "Couldn't reach" not in err  # distinct from the generic offline warning
+    assert "gpt-5.3-codex-spark" in out  # the illustrative reference still renders on stdout
+
+
+def test_catalog_api_codex_no_seat_ignores_a_leftover_cache(monkeypatch, tmp_path, capsys):
+    """With no seat signed in, `grid catalog --api codex` shows the illustrative reference + the "not
+    signed in" note — it does NOT surface a leftover cache from a prior sign-in as a "current plan"
+    (the cache is a signed-in seat's entitlement; a signed-out box has no current seat). Pins the
+    deliberate no-seat → reference choice (issue 10b Q2)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+
+    codex_models_cache.write_cache(  # a cache from a prior sign-in remains on disk
+        _cache_models(), client_version=api_catalog.CODEX_CLIENT_VERSION, account_id="acct-1",
+    )
+
+    rc = cli.cmd_catalog(argparse.Namespace(api="codex", json=False))
+    captured = capsys.readouterr()
+    out, err = captured.out, captured.err
+    assert rc == 0
+    assert "Not signed in" in err
+    assert "Your current plan" not in out  # the leftover cache is NOT shown as a current plan
+    assert "free / go:" in out  # only the illustrative reference
 
 
 def test_api_whitelist_key_kinds_name_their_env_var():
@@ -1045,100 +1147,57 @@ def test_kind_is_stream_only_reads_the_stream_only_field():
 
 
 def test_codex_tier_whitelist_integrity():
-    """The per-tier codex table (issue 05). Guards the D-f data rules: every populated tier is
-    real vendor `PlanType` vocabulary; rows are non-empty, duplicate-free, and inside the flat
-    union (`entries` IS the union, so `find_advertised` resolves every codex model); the minimal
-    tier's row exists (the fallback every unknown/unverified tier degrades to); the hidden
-    `codex-auto-review` slug is excluded everywhere (facts.md #5, visibility: "hide"); and the
-    table is dated + carries the probe's pinned client version."""
+    """The illustrative cross-plan reference (issue 10b — relabeled from the old serving-gate tier
+    table; it is display-only now and NEVER gates serving, the live probe does). Guards its internal
+    consistency: plan-LABEL keys (no longer vendor `PlanType` vocabulary); rows non-empty and
+    duplicate-free; a slug shared across plans is the SAME entry (the flat union keeps the first, so
+    a colliding spec would silently lose in every `find_advertised`); `entries` IS exactly the union
+    (so the pre-probe `-m` reference resolves every codex model, the paid slugs included); the hidden
+    `codex-auto-review` slug is excluded; the free set keeps its live-verified 272k caps while the
+    paid rows are illustrative (unknown ctx → the `0` sentinel), inferred from the pricing docs."""
     from datetime import date
 
     tiers = api_catalog.CODEX_TIER_MODELS
-    assert tiers, "at least one tier must be populated"
-    assert set(tiers) <= api_catalog.CODEX_PLAN_TYPES, "tier keys are vendor vocabulary, not ours"
-    assert api_catalog.CODEX_MINIMAL_TIER in tiers, "the minimal fallback row must be populated"
+    assert set(tiers) == {"free / go", "plus", "pro"}  # display labels, not vendor vocabulary
 
     union = {entry.vendor_name for entry in api_catalog.WHITELISTS["codex"].entries}
     seen: set[str] = set()
     by_name: dict = {}
     for tier, entries in tiers.items():
         names = [entry.vendor_name for entry in entries]
-        assert names, f"tier {tier!r} must not be an empty row (absent means unverified)"
-        assert all(names) and len(set(names)) == len(names), f"tier {tier!r} rows must be unique"
-        assert set(names) <= union, f"tier {tier!r} names something the flat union lacks"
-        # issue 03: each row is a valid, gap-free vendor_rank source — positions are exactly 1..N
-        # (no gaps, no duplicate slots), so codex_vendor_rank is a total order over the row.
-        ranks = [api_catalog.codex_vendor_rank(tier, name) for name in names]
-        assert ranks == list(range(1, len(names) + 1)), f"tier {tier!r} is not a gap-free 1..N ranking"
+        assert names, f"plan {tier!r} must not be an empty row"
+        assert all(names) and len(set(names)) == len(names), f"plan {tier!r} rows must be unique"
+        assert set(names) <= union, f"plan {tier!r} names something the flat union lacks"
         for entry in entries:
-            # A vendor_name shared across tiers must be the SAME entry: the flat union keeps the
-            # first occurrence (`_codex_tier_union` setdefault), so a colliding second-tier entry
-            # with different specs would silently lose to it in every serve-time lookup
-            # (silent-failure review, latent trap — inert while one tier exists).
+            # A vendor_name shared across plans must be the SAME entry: the flat union keeps the
+            # first occurrence (`_codex_tier_union` setdefault), so a colliding second entry with
+            # different specs would silently lose to it in every lookup (silent-failure review).
             assert by_name.setdefault(entry.vendor_name, entry) == entry, (
-                f"{entry.vendor_name!r} appears in two tiers with different specs"
+                f"{entry.vendor_name!r} appears in two plans with different specs"
             )
         seen |= set(names)
-    assert seen == union, "WHITELISTS['codex'].entries must be exactly the union of the tier rows"
+    assert seen == union, "WHITELISTS['codex'].entries must be exactly the union of the plan rows"
     assert "codex-auto-review" not in union  # visibility: "hide" — never advertised
 
-    # The free row is the live-verified 2026-07-15 set, in the vendor's priority order.
-    free = [entry.vendor_name for entry in tiers["free"]]
-    assert free == ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"]
+    # The free/go row is the live-verified 2026-07-15 set in vendor priority order; the paid rows
+    # (Plus↑ sol/5.4, Pro-only spark) are illustrative — inferred from the pricing docs, unknown ctx.
+    assert [e.vendor_name for e in tiers["free / go"]] == [
+        "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini",
+    ]
+    paid = {"gpt-5.6-sol", "gpt-5.4", "gpt-5.3-codex-spark"}
+    assert paid <= union
     for entry in api_catalog.WHITELISTS["codex"].entries:
-        assert entry.context_window == 272_000
-        assert entry.supports_tools and entry.supports_vision
+        # Free rows keep the verified 272k; the paid rows carry the `0` unknown-ctx sentinel (→ `—`).
+        assert entry.context_window == (0 if entry.vendor_name in paid else 272_000)
+        assert entry.supports_tools and entry.supports_vision  # true of every codex model to date
         # Chat-dialect notions — a passthrough kind cannot honestly claim them (issue 05).
         assert not entry.supports_json_mode and not entry.supports_structured_outputs
 
     date.fromisoformat(api_catalog.CODEX_LAST_VERIFIED)
+    date.fromisoformat(api_catalog.CODEX_REFERENCE_LAST_VERIFIED)
+    assert api_catalog.CODEX_REFERENCE_LAST_VERIFIED == "2026-07-24"
+    assert api_catalog.CODEX_PRICING_DOCS_URL.startswith("https://")
     assert api_catalog.CODEX_CLIENT_VERSION  # the `GET /models?client_version=…` pin
-
-
-def test_codex_tier_entries_selects_row_or_minimal():
-    """D-f's selection rule as one pure lookup: a populated tier gets its row; a missing (None),
-    unrecognized ("banana"), or known-but-unverified ("plus") tier degrades to the minimal row —
-    the join never widens on a guess. The warn wording for the three degrade cases is the CLI's
-    (they differ only in what the operator is told, not in what is advertised)."""
-    free_row = api_catalog.CODEX_TIER_MODELS["free"]
-    minimal = api_catalog.CODEX_TIER_MODELS[api_catalog.CODEX_MINIMAL_TIER]
-
-    assert api_catalog.codex_tier_entries("free") == free_row
-    assert api_catalog.codex_tier_entries(None) == minimal      # vendor said nothing
-    assert api_catalog.codex_tier_entries("banana") == minimal  # outside the vendor vocabulary
-    assert api_catalog.codex_tier_entries("plus") == minimal    # known tier, row unverified
-    assert "plus" in api_catalog.CODEX_PLAN_TYPES  # pin: "plus" IS known — its degrade differs from banana's only in wording
-
-
-def test_codex_vendor_rank_from_tier_row(monkeypatch):
-    """The join-time capability rank (issue 03 / ADR 0016): a codex model's 1-based position within
-    the seat's EFFECTIVE tier row — 1 = the row's most-capable head, the curated order we own. A
-    model absent from that row has no rank (None): drift omits the fact, never fabricates a
-    position. The source is the tier ROW, not the flat union — proven by a synthetic second tier
-    whose order differs from the free row's."""
-    # The live free row, in curated order: terra, luna, gpt-5.5, gpt-5.4-mini.
-    assert api_catalog.codex_vendor_rank("free", "gpt-5.6-terra") == 1
-    assert api_catalog.codex_vendor_rank("free", "gpt-5.6-luna") == 2
-    assert api_catalog.codex_vendor_rank("free", "gpt-5.5") == 3
-    assert api_catalog.codex_vendor_rank("free", "gpt-5.4-mini") == 4
-    # Absent from the row → no rank (a drifted/unknown model omits the fact, never invents one).
-    assert api_catalog.codex_vendor_rank("free", "gpt-5.6-nonesuch") is None
-    # The tier degrade is codex_tier_entries': None (vendor silent), unrecognized ("banana"), and
-    # known-but-unverified ("plus") all fall to the minimal (free) row, so the rank is computed
-    # against the row the seat actually advertises.
-    assert api_catalog.codex_vendor_rank(None, "gpt-5.6-terra") == 1
-    assert api_catalog.codex_vendor_rank("banana", "gpt-5.6-terra") == 1
-    assert api_catalog.codex_vendor_rank("plus", "gpt-5.6-terra") == 1  # known, unverified → free
-
-    # Rank follows the SEAT'S TIER ROW, not the flat union. Synthetic second tier (the real table
-    # has only `free`): a `plus` row that REVERSES the capability order must rank by ITS OWN order.
-    # Built from REAL entries so the frozen union/whitelist still resolves the names.
-    free = api_catalog.CODEX_TIER_MODELS["free"]
-    terra, luna, big, mini = free  # by curated order
-    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free, "plus": (mini, big, luna, terra)})
-    assert api_catalog.codex_vendor_rank("plus", mini.vendor_name) == 1   # head of the plus row
-    assert api_catalog.codex_vendor_rank("plus", terra.vendor_name) == 4  # tail of the plus row
-    assert api_catalog.codex_vendor_rank("free", terra.vendor_name) == 1  # free row unchanged
 
 
 def test_api_whitelist_endpoints_per_kind():
@@ -1242,6 +1301,22 @@ def test_format_api_entry_shows_responses_dialect():
     line = api_catalog.format_api_entry("openai", toolful, serves_responses)
     assert line.startswith("  openai:m")
     assert " ctx   " in line
+
+
+def test_format_api_entry_unknown_context_window_renders_dash():
+    """issue 10b / DESIGN §8.1: an unknown context window (the `0` sentinel — an illustrative paid
+    codex row, or a media model) renders `—`, never `0 ctx` or a fabricated number, and the caps
+    still render after it. The known (>0) rendering path is byte-identical (asserted by
+    test_format_api_entry_shows_responses_dialect, which uses ctx=1000)."""
+    unknown = api_catalog.ApiModelEntry(
+        vendor_name="m", context_window=0,
+        supports_tools=True, supports_vision=True,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+    line = api_catalog.format_api_entry("codex", unknown, ("responses",))
+    assert "—" in line
+    assert "0" not in line          # no `0 ctx`, no fabricated number in the ctx column
+    assert "tools" in line and "vision" in line and "responses" in line
 
 
 def test_catalog_api_json_roundtrips(capsys):
@@ -1635,6 +1710,15 @@ def _codex_bundle(plan_type="free"):
     )
 
 
+def _codex_models_body():
+    """The captured real free-seat ``GET /models`` body (issue 10a fixture): terra/luna/5.5/5.4-mini
+    `list` + codex-auto-review `hide`, each `supported_in_api: true`, caps per facts.md #5. Returns a
+    fresh dict each call so a test can append edge rows without mutating the shared fixture."""
+    import json
+
+    return json.loads((Path(__file__).parent / "fixtures" / "codex_models.json").read_text())
+
+
 def _mock_probe(monkeypatch, handler, _real=httpx.Client):
     """The `_mock_vendor` pattern for the codex probe: a REAL httpx.Client with MockTransport
     injected, capturing the whole request for the URL/header asserts."""
@@ -1656,37 +1740,217 @@ def _mock_probe(monkeypatch, handler, _real=httpx.Client):
 
 
 def _probe(monkeypatch, handler):
-    """Run probe_seat against a mocked vendor; returns (result_or_exc, seen)."""
+    """Run probe_seat against a mocked vendor; returns (records_or_exc, seen)."""
     from remote import codex_probe
 
     seen = _mock_probe(monkeypatch, handler)
-    slugs = codex_probe.probe_seat(
+    records = codex_probe.probe_seat(
         _codex_bundle(),
         base_url=api_catalog.WHITELISTS["codex"].base_url,
         client_version=api_catalog.CODEX_CLIENT_VERSION,
     )
-    return slugs, seen
+    return records, seen
 
 
-def test_codex_probe_sends_the_verified_request_and_returns_visible_slugs(monkeypatch):
+def _cache_models():
+    from remote.codex_probe import CodexModel
+
+    return (
+        CodexModel(slug="gpt-5.6-terra", context_window=272_000, supports_vision=True, supports_tools=True),
+        CodexModel(slug="gpt-5.4-mini", context_window=0, supports_vision=False, supports_tools=False),
+    )
+
+
+def test_codex_models_cache_roundtrips(monkeypatch, tmp_path):
+    """issue 10b: write_cache then read_cache returns the same models, keyed on the client_version the
+    join/catalog probe pins. The `0` unknown-ctx sentinel survives the round-trip unchanged."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+
+    models = _cache_models()
+    codex_models_cache.write_cache(models, client_version="0.144.2", account_id="acct-1")
+    cached = codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1")
+
+    assert cached is not None
+    assert cached.models == models
+    assert cached.fetched_at > 0
+
+
+def test_codex_models_cache_stale_client_version_reads_none(monkeypatch, tmp_path):
+    """A grid upgrade bumps the pinned `client_version`, so a cache written by an older grid is
+    treated as stale (`None`) — never trusted against a mismatched version (issue 10b)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="acct-1")
+    assert codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1") is not None
+    assert codex_models_cache.read_cache(client_version="0.999.0", account_id="acct-1") is None
+
+
+def test_codex_models_cache_absent_or_malformed_reads_none_never_raises(monkeypatch, tmp_path):
+    """Q2 — the catalog must NEVER die on its own cache. An absent, corrupt, non-dict, or
+    models-less file reads back as `None` (fall to the static reference), never a raise; a body with
+    a mix of readable/unreadable rows drops the bad rows rather than the whole cache."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+    from shared import paths
+
+    assert codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1") is None  # absent
+    path = paths.codex_models_cache_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for junk in ("not json at all", "[1, 2, 3]", '{"client_version": "0.144.2"}'):
+        path.write_text(junk)
+        assert codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1") is None
+
+    # a valid body (correct seat + version) with a MIX of readable/unreadable rows → the bad rows
+    # drop, the cache is NOT lost. Built by writing a real body then injecting junk, so the account
+    # fingerprint stays correct.
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="acct-1")
+    doc = json.loads(path.read_text())
+    doc["models"].extend([{"no": "slug"}, "junk", {"slug": 123}])
+    path.write_text(json.dumps(doc))
+    cached = codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1")
+    assert cached is not None
+    assert [m.slug for m in cached.models] == ["gpt-5.6-terra", "gpt-5.4-mini"]
+
+
+def test_codex_models_cache_is_hardened_and_secret_free(monkeypatch, tmp_path):
+    """The cache is the seat's entitlement, not a credential: `0o600`, and it carries only slugs +
+    caps — never a token or the account id (issue 10b)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+    from shared import paths
+
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="acct-1")
+    path = paths.codex_models_cache_file()
+    assert (path.stat().st_mode & 0o777) == 0o600
+    text = path.read_text()
+    # only slugs + caps + a one-way account FINGERPRINT — never a token, and never the RAW account id
+    for secret in ("access_token", "refresh_token", "tok-", "acct-1"):
+        assert secret not in text
+
+
+def test_codex_models_cache_all_unreadable_rows_reads_none(monkeypatch, tmp_path):
+    """A non-empty listing whose rows are ALL unreadable is corruption, not an empty seat — it reads
+    back as `None` (fall to the illustrative reference), mirroring the live probe's contract-drift
+    guard, so a garbled cache never becomes the false claim "your seat serves no models" (rev-silent).
+    An EMPTY listing, by contrast, is a legitimately-empty cached seat — a valid result, not None."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+    from shared import paths
+
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="acct-1")
+    path = paths.codex_models_cache_file()
+    doc = json.loads(path.read_text())
+    doc["models"] = [{"no": "slug"}, "junk", {"slug": ""}, {"slug": 123}]  # every row unreadable
+    path.write_text(json.dumps(doc))
+    assert codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1") is None
+
+    doc["models"] = []  # a legitimately-empty seat
+    path.write_text(json.dumps(doc))
+    empty = codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1")
+    assert empty is not None and empty.models == ()
+
+
+def test_codex_models_cache_out_of_range_number_reads_without_crash(monkeypatch, tmp_path):
+    """A huge arbitrary-precision int in a numeric field (corruption / hostile edit) must NOT raise
+    OverflowError (which `math.isfinite`/`float` do on the int→float conversion) — it degrades to the
+    `0` unknown-ctx sentinel / epoch-0, never a traceback that breaks Q2's never-dies contract (rev-py)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+    from shared import paths
+
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="acct-1")
+    path = paths.codex_models_cache_file()
+    doc = json.loads(path.read_text())
+    doc["fetched_at"] = 10 ** 400
+    doc["models"] = [{"slug": "gpt-5.5", "context_window": 10 ** 400, "vision": True, "tools": True}]
+    path.write_text(json.dumps(doc))
+
+    cached = codex_models_cache.read_cache(client_version="0.144.2", account_id="acct-1")
+    assert cached is not None
+    assert cached.fetched_at == 0.0  # out-of-range → epoch-0, not a crash
+    assert cached.models[0].context_window == 0  # out-of-range → unknown sentinel, not a crash
+
+
+def test_codex_models_cache_write_error_is_swallowed(monkeypatch, tmp_path, capsys):
+    """`write_cache` is best-effort: an OSError from the writer never propagates (the join/catalog must
+    not fail because a cache couldn't be written), and it leaves an operator breadcrumb (rev-silent)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+
+    def _boom(*a, **k):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(codex_models_cache.jsonio, "atomic_write_json", _boom)
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="acct-1")  # no raise
+
+    assert "could not write the codex model cache" in capsys.readouterr().err
+
+
+def test_codex_models_cache_ignores_a_different_seats_cache(monkeypatch, tmp_path):
+    """The cache is scoped to the seat that wrote it by a one-way account fingerprint: a read for a
+    DIFFERENT account returns `None`, so an offline catalog never shows one seat's models under
+    another seat's plan label (rev-code)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import codex_models_cache
+
+    codex_models_cache.write_cache(_cache_models(), client_version="0.144.2", account_id="seat-A")
+    assert codex_models_cache.read_cache(client_version="0.144.2", account_id="seat-A") is not None
+    assert codex_models_cache.read_cache(client_version="0.144.2", account_id="seat-B") is None
+
+
+def test_load_codex_bundle_sanitizes_hostile_plan_type(monkeypatch, tmp_path):
+    """plan_type rides onto the terminal (`grid catalog`'s "Your current plan (…)" heading), so the
+    LOAD boundary bounds + printable-checks it exactly as account_id — a forged token that stored an
+    ANSI-laden or oversized tier string reads back as None ("unknown tier"), never terminal-injectable
+    (CWE-150, rev-code). A normal short label passes through unchanged."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from remote import api_keys, credentials
+    from shared import paths
+
+    def _stored(plan_type):
+        credentials.atomic_write_toml(paths.api_keys_file(), {"codex": {
+            "access_token": "a", "refresh_token": "r", "account_id": "acct-1",
+            "last_refresh": 0, "plan_type": plan_type,
+        }})
+        return api_keys.load_codex_bundle().plan_type
+
+    assert _stored("plus") == "plus"  # a real label survives
+    assert _stored("bad\x1b[31mescape") is None  # ANSI escapes → dropped ("unknown tier")
+    assert _stored("x" * 200) is None  # oversized → dropped
+
+
+def test_codex_probe_sends_the_verified_request_and_returns_rich_records(monkeypatch):
     """The probe is the ONE vendor call a changed join makes, and it is free (facts.md B1). It
     sends the verified URL + `client_version` pin and exactly the five headers the real client
-    sends (spike probe.py `headers_for`). It returns the seat's visible slugs — a
-    `visibility: "hide"` row (codex-auto-review) is never advertised — deduped, vendor order
-    preserved; the ~42 unknown fields per model ride along ignored. A CF-RAY header on the 200
-    is NOT a Cloudflare block: CF-RAY rides every response, including successes (facts.md B4)."""
+    sends (spike probe.py `headers_for`). It returns rich per-model records — slug PLUS the caps
+    the envelope needs (issue 10a) — in vendor order, deduped (first occurrence wins); a
+    `visibility: "hide"` row (codex-auto-review) is never advertised; the ~42 unknown fields per
+    model ride along ignored. Caps derive from the probe: `context_window` direct, vision from
+    `"image" in input_modalities`, tools from `supports_parallel_tool_calls or supports_search_tool`.
+    A CF-RAY header on the 200 is NOT a Cloudflare block (facts.md B4)."""
     body = {"models": [
-        {"slug": "gpt-5.6-terra", "visibility": "list", "context_window": 272000, "unknown_field": 1},
-        {"slug": "gpt-5.5", "visibility": "list"},
-        {"slug": "gpt-5.5", "visibility": "list"},            # vendor dupe → deduped
+        {"slug": "gpt-5.6-terra", "visibility": "list", "supported_in_api": True,
+         "context_window": 272000, "input_modalities": ["text", "image"],
+         "supports_parallel_tool_calls": True, "supports_search_tool": True, "unknown_field": 1},
+        {"slug": "gpt-5.5", "visibility": "list", "supported_in_api": True,
+         "context_window": 272000, "input_modalities": ["text"],  # text-only → no vision
+         "supports_parallel_tool_calls": False, "supports_search_tool": True},  # search_tool → tools
+        {"slug": "gpt-5.5", "visibility": "list"},            # vendor dupe → deduped (first wins)
         {"slug": "codex-auto-review", "visibility": "hide"},  # hidden → excluded
     ]}
 
-    slugs, seen = _probe(monkeypatch, lambda request: httpx.Response(
+    records, seen = _probe(monkeypatch, lambda request: httpx.Response(
         200, json=body, headers={"CF-RAY": "a1b94a2e9cacfd7c-SIN"},
     ))
 
-    assert slugs == ("gpt-5.6-terra", "gpt-5.5")
+    assert [m.slug for m in records] == ["gpt-5.6-terra", "gpt-5.5"]
+    terra, big = records
+    assert terra.context_window == 272000 and terra.supports_vision and terra.supports_tools
+    assert big.context_window == 272000
+    assert big.supports_vision is False  # input_modalities text-only
+    assert big.supports_tools is True    # supports_search_tool alone is enough
     assert seen["calls"] == 1  # one request, no retry
     assert seen["method"] == "GET"
     assert seen["url"] == (
@@ -1698,6 +1962,108 @@ def test_codex_probe_sends_the_verified_request_and_returns_visible_slugs(monkey
     assert seen["headers"]["originator"] == "codex_cli_rs"
     assert seen["headers"]["user-agent"] == "codex_cli_rs"
     assert seen["headers"]["accept"] == "application/json"
+
+
+def test_codex_probe_membership_drops_only_explicit_supported_in_api_false(monkeypatch):
+    """Membership = visible ∧ not-explicitly-unsupported. `supported_in_api: false` is dropped
+    (US5 — a model that would 400 if called is never advertised); an ABSENT field is SERVED
+    (Option A / DESIGN §8 — never fail closed on a MODEL, only an explicit vendor `false`
+    excludes). Real bodies always send `true`, so the absent case only bites a reshaped body."""
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "served-true", "visibility": "list", "supported_in_api": True},
+        {"slug": "served-absent", "visibility": "list"},                            # absent → served
+        {"slug": "dropped-false", "visibility": "list", "supported_in_api": False},  # explicit → dropped
+    ]}))
+    assert [m.slug for m in records] == ["served-true", "served-absent"]
+
+
+def test_codex_probe_derives_caps_fail_closed_on_missing_fields(monkeypatch, capsys):
+    """Caps fail CLOSED per field — never raising, never dropping the model: a row missing
+    input_modalities/tool flags claims neither vision nor tools; a missing (or non-numeric)
+    context_window becomes the `0` unknown sentinel (the envelope omits it downstream, never a
+    fabricated number). The model is still served. A legitimately ABSENT field is sparse-normal —
+    NO drift breadcrumb (that fires only for a present-but-unreadable field)."""
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "bare", "visibility": "list"},  # no caps fields at all
+    ]}))
+    (bare,) = records
+    assert bare.slug == "bare"
+    assert bare.supports_vision is False
+    assert bare.supports_tools is False
+    assert bare.context_window == 0
+    assert capsys.readouterr().err == ""  # absent (sparse) fields draw no warn
+
+
+def test_codex_probe_context_window_infinity_is_unknown_not_a_crash(monkeypatch):
+    """A vendor `context_window` of `Infinity`/`1e400` (Python's json accepts both) must degrade to
+    the `0` unknown sentinel, NEVER crash the join with an uncaught `OverflowError` from `int(inf)`
+    (issue 10a review, HIGH). The model is still served."""
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(
+        200, content='{"models": [{"slug": "big", "visibility": "list", "context_window": 1e400}]}',
+        headers={"Content-Type": "application/json"},
+    ))
+    (big,) = records
+    assert big.slug == "big"
+    assert big.context_window == 0  # inf → unknown, not a crash, not a fabricated number
+
+
+def test_codex_probe_tool_flags_fail_closed_on_a_non_bool(monkeypatch):
+    """The tool flags are accepted ONLY as a real JSON `true` (issue 10a review): a vendor reshape to
+    a truthy STRING must NOT over-claim tools — `bool("false")` is `True` in Python, so a naive
+    coercion would flip the capability OPEN, the wrong direction. Degrades to the conservative False,
+    matching every sibling caps field."""
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "m", "visibility": "list", "supported_in_api": True,
+         "supports_parallel_tool_calls": "false", "supports_search_tool": "false"},
+    ]}))
+    (m,) = records
+    assert m.supports_tools is False  # a truthy string never over-claims
+
+
+def test_codex_probe_drops_a_slug_with_terminal_control_sequences(monkeypatch):
+    """A hostile/MITM'd backend returning a slug with ANSI/OSC escape sequences (or an absurd length)
+    must never let that string ride the advertised name onto the operator's terminal (issue 10a
+    review, CWE-150). Such a row is treated like one with no readable slug — dropped — so clean
+    models still serve; only an all-unreadable listing is contract drift."""
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "gpt-5.5", "visibility": "list", "supported_in_api": True},
+        {"slug": "evil\x1b[2J\x1b[H", "visibility": "list", "supported_in_api": True},  # ANSI clear-screen
+        {"slug": "x" * 300, "visibility": "list", "supported_in_api": True},            # over-long
+    ]}))
+    assert [m.slug for m in records] == ["gpt-5.5"]  # both hostile rows dropped, the clean one served
+
+
+def test_codex_probe_warns_once_on_a_present_but_malformed_caps_field(monkeypatch, capsys):
+    """A caps-critical field PRESENT but in an unreadable shape (a vendor reshape) is treated
+    conservatively AND surfaces ONE operator breadcrumb (issue 10a review) — a whole-listing field
+    rename would otherwise strip caps from every model silently, with a "success" join and no signal.
+    The model is still served."""
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+        {"slug": "m", "visibility": "list", "supported_in_api": True,
+         "input_modalities": "text,image", "context_window": 272000},  # modalities a STRING, not a list
+    ]}))
+    (m,) = records
+    assert m.supports_vision is False  # unreadable modalities → conservative claim
+    err = capsys.readouterr().err
+    assert "input_modalities" in err and "conservatively" in err  # the one breadcrumb
+
+
+def test_codex_capability_entry_omits_unknown_context_window():
+    """Issue 10a / DESIGN §8.1: a codex model whose probe carried no context_window (the `0` unknown
+    sentinel) OMITS the key from the envelope — never a fabricated number — while a known window is
+    emitted. Ports the `capability_entry` conditional-key idiom into the codex path."""
+    from remote import probe
+
+    known = api_catalog.ApiModelEntry(
+        vendor_name="gpt-x", context_window=272000, supports_tools=True, supports_vision=True,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+    unknown = api_catalog.ApiModelEntry(
+        vendor_name="gpt-y", context_window=0, supports_tools=False, supports_vision=False,
+        supports_json_mode=False, supports_structured_outputs=False,
+    )
+    assert probe.codex_capability_entry(known, vendor_rank=1)["context_window"] == 272000
+    assert "context_window" not in probe.codex_capability_entry(unknown, vendor_rank=2)
 
 
 def test_codex_probe_auth_failures_raise_the_typed_seat_rejection(monkeypatch):
@@ -4871,25 +5237,21 @@ def test_remote_join_api_codex_reuses_a_stored_seat_with_no_sign_in(monkeypatch,
     assert "at-1" not in out_err.out + out_err.err and "rt-1" not in out_err.out + out_err.err
 
 
-def test_remote_join_api_codex_stored_seat_probes_and_serves_the_tier_set(monkeypatch, tmp_path, capsys):
-    """The tracer join (issue 05): a stored free seat, no -m. ONE free probe (`GET {base}/models`
-    with the seat's bearer + account-id header) proves reachability and the entitled set; the
-    advertised set is the tier row ∩ the seat's live set, namespaced `codex:*`; the record's spec
-    is kind-generic (endpoint_url/models/engine_label/api_kind — never a token, never the account
-    id); the serve process spawns. A populated, verified tier draws NO tier warning."""
+def test_remote_join_api_codex_serves_the_probe_set_with_persisted_caps(monkeypatch, tmp_path, capsys):
+    """The tracer join (issue 10a): a stored free seat, no -m. ONE free probe (`GET {base}/models`
+    with the seat's bearer + account-id header) is the SOLE source of truth — the served set is
+    exactly the probe's visible ∧ API-supported models (codex-auto-review, visibility:hide, dropped),
+    namespaced `codex:*`, with NO static tier intersection. Per-model caps DERIVED from the probe are
+    PERSISTED in the run record's spec (`model_caps`) so the serving side needs no static lookup; the
+    spec stays kind-generic and secret-free (never a token or the account id). The free-seat
+    observable set is UNCHANGED (AC8): exactly the four free models, caps per facts.md #5."""
     from remote import api_keys
     from shared import run_records
 
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     api_keys.store_codex_bundle(_codex_bundle())
-    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
-        {"slug": "gpt-5.6-terra", "visibility": "list"},
-        {"slug": "gpt-5.6-luna", "visibility": "list"},
-        {"slug": "gpt-5.5", "visibility": "list"},
-        {"slug": "gpt-5.4-mini", "visibility": "list"},
-        {"slug": "codex-auto-review", "visibility": "hide"},
-    ]}))
+    seen = _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=_codex_models_body()))
 
     assert cli.main(["join", "--api", "codex"]) == 0
 
@@ -4898,14 +5260,22 @@ def test_remote_join_api_codex_stored_seat_probes_and_serves_the_tier_set(monkey
     assert seen["headers"]["authorization"] == "Bearer tok-access"
     assert seen["headers"]["chatgpt-account-id"] == "acct-1"
     record = cli.provider._read_records("n1")["remote"]
-    assert record["engines"] == [{
-        "endpoint_url": "https://chatgpt.com/backend-api/codex",
-        "models": ["codex:gpt-5.6-terra", "codex:gpt-5.6-luna", "codex:gpt-5.5", "codex:gpt-5.4-mini"],
-        "engine_label": "codex",
-        "api_kind": "codex",
-        "plan_type": "free",  # issue 03: the seat's tier — the row serve reads vendor_rank from
-    }]
-    assert record["models"] == record["engines"][0]["models"]
+    spec = record["engines"][0]
+    assert spec["endpoint_url"] == "https://chatgpt.com/backend-api/codex"
+    # Exactly the four free models; codex-auto-review (visibility:hide) dropped. No static ∩.
+    assert spec["models"] == [
+        "codex:gpt-5.6-terra", "codex:gpt-5.6-luna", "codex:gpt-5.5", "codex:gpt-5.4-mini",
+    ]
+    assert spec["engine_label"] == "codex" and spec["api_kind"] == "codex"
+    assert spec["plan_type"] == "free"  # a display/message label only now — never gates serving
+    # Caps derived from the probe and persisted per model (facts.md #5: 272k ctx, vision, tools);
+    # vendor_rank = the 1-based probe order (terra 1, luna 2, gpt-5.5 3, gpt-5.4-mini 4).
+    assert spec["model_caps"]["codex:gpt-5.6-terra"] == {
+        "context_window": 272000, "vision": True, "tools": True, "vendor_rank": 1,
+    }
+    assert spec["model_caps"]["codex:gpt-5.5"]["vendor_rank"] == 3
+    assert set(spec["model_caps"]) == set(spec["models"])  # caps cover exactly the served set here
+    assert record["models"] == spec["models"]
     assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
     # Secret hygiene: the bearer and the account id reach no record and no terminal output.
     record_text = run_records.record_path("n1", "remote").read_text()
@@ -4913,91 +5283,81 @@ def test_remote_join_api_codex_stored_seat_probes_and_serves_the_tier_set(monkey
     out_err = capsys.readouterr()
     assert "tok-access" not in out_err.out + out_err.err
     assert "acct-1" not in out_err.out + out_err.err
-    assert "Warning" not in out_err.err  # a verified populated tier draws no tier warning
 
 
-def test_remote_join_api_codex_tier_selects_the_row_and_warns_per_degrade_case(monkeypatch, tmp_path, capsys):
-    """D-f row selection + the issue's mandated warn-log, with a synthetic second tier (the real
-    table has only `free`, so a bigger `plus` row is the only way to SEE selection — review L3).
-    Four seats, four outcomes:
-
-      * plus (populated row)   → the plus row, NO tier line at all
-      * None (vendor silent)   → minimal row + "Warning:" — the alarm the issue amendment demands:
-                                 a vendor claim-rename must not silently downgrade seats forever
-      * banana (unrecognized)  → minimal row + "Warning:" (vendor vocabulary drift)
-      * go (known, unverified) → minimal row + an info line that is NOT a warning
-    """
+def test_remote_join_api_codex_serves_a_model_absent_from_the_static_table(monkeypatch, tmp_path):
+    """The wall is gone (issue 10a AC2): a model the seat's probe lists but that no static table ever
+    named — a newly-shipped slug — is served the day the vendor ships it, no CLI edit, no PR. Proven
+    with a probe body carrying a hypothetical `gpt-5.7-nova`, absent from the static reference's whole
+    `entries` union (10b added the paid slugs, so `gpt-5.6-sol` no longer witnesses this); its caps
+    come from the probe and its vendor_rank is its position in the live listing."""
     from remote import api_keys
 
-    free_row = api_catalog.CODEX_TIER_MODELS["free"][:2]
-    plus_row = api_catalog.CODEX_TIER_MODELS["free"]
-    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free_row, "plus": plus_row})
-    listing = {"models": [{"slug": e.vendor_name, "visibility": "list"} for e in plus_row]}
+    assert not any(  # guard the premise: nova really is absent from the static reference
+        e.vendor_name == "gpt-5.7-nova" for e in api_catalog.WHITELISTS["codex"].entries
+    )
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    body = _codex_models_body()
+    body["models"].append({
+        "slug": "gpt-5.7-nova", "visibility": "list", "supported_in_api": True,
+        "context_window": 400000, "input_modalities": ["text", "image"],
+        "supports_parallel_tool_calls": True, "supports_search_tool": True,
+    })
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=body))
 
-    cases = [
-        ("plus", 4), (None, 2), ("banana", 2), ("go", 2),
-    ]
-    errs = {}
-    for plan, expected_count in cases:
-        home = tmp_path / f"case-{plan}"
-        _seed_running_remote_grid(monkeypatch, home)
-        _mock_remote_spawn(monkeypatch)
-        api_keys.store_codex_bundle(_codex_bundle(plan_type=plan))
-        _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=listing))
+    assert cli.main(["join", "--api", "codex"]) == 0
 
-        assert cli.main(["join", "--api", "codex"]) == 0
-
-        record = cli.provider._read_records("n1")["remote"]
-        assert len(record["models"]) == expected_count, f"plan={plan!r}"
-        # The seat's tier rides the spec verbatim (issue 03) — even None (vendor silent): serve
-        # reads each model's vendor_rank from the row this plan_type selects.
-        assert record["engines"][0].get("plan_type") == plan, f"plan={plan!r}"
-        errs[plan] = capsys.readouterr().err
-
-    assert "Warning" not in errs["plus"] and "isn't verified" not in errs["plus"]
-    assert "Warning:" in errs[None] and "no subscription tier" in errs[None]
-    assert "newer grid release" in errs[None]  # the recovery hint — this case may be OUR staleness
-    assert "Warning:" in errs["banana"]
-    assert "recognize" in errs["banana"]
-    assert "Warning:" not in errs["go"]  # known tier, merely unverified — informational only
-    assert "isn't verified" in errs["go"] and "'go'" in errs["go"]
+    spec = cli.provider._read_records("n1")["remote"]["engines"][0]
+    assert "codex:gpt-5.7-nova" in spec["models"]  # served with no static-reference entry
+    assert spec["model_caps"]["codex:gpt-5.7-nova"] == {
+        "context_window": 400000, "vision": True, "tools": True, "vendor_rank": 5,
+    }
 
 
-def test_remote_join_api_codex_explicit_model_errors_name_what_is_available(monkeypatch, tmp_path):
-    """D5's explicit--m semantics: an explicit ask is REFUSED, never silently narrowed (the
-    deliberate divergence from openai's skip — a personal seat asked for a model it lacks
-    deserves a refusal). Outside the tier row → the tier's verified list is named (D-f bounds
-    advertising to the verified row whatever the seat has); in the row but not on the seat →
-    what the seat CAN serve is named, and the message never claims the seat "serves none" when
-    it demonstrably serves others. Nothing spawns on either."""
+def test_remote_join_api_codex_writes_the_models_cache(monkeypatch, tmp_path):
+    """issue 10b: the join probe writes `~/.grid/codex_models_cache.json`, so a later offline
+    `grid catalog --api codex` shows the seat's real last-known set instead of only the static
+    reference. Best-effort in the writer, but on a normal join it lands with the served set."""
+    from remote import api_keys, codex_models_cache
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    api_keys.store_codex_bundle(_codex_bundle())
+    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json=_codex_models_body()))
+
+    assert cli.main(["join", "--api", "codex"]) == 0
+
+    cached = codex_models_cache.read_cache(
+        client_version=api_catalog.CODEX_CLIENT_VERSION, account_id="acct-1",
+    )
+    assert cached is not None
+    # the free-seat set with codex-auto-review (visibility "hide") excluded — the served membership
+    assert [m.slug for m in cached.models] == ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini"]
+
+
+def test_remote_join_api_codex_explicit_unentitled_model_is_refused_naming_the_probe_set(monkeypatch, tmp_path):
+    """`-m` semantics (issue 10a AC5): an explicit model the seat's probe doesn't list is REFUSED,
+    never silently narrowed, and the message names what the probe set CAN serve. The probe — not a
+    static tier — is the authority, so the "can serve" list reflects the live seat, and the message
+    never claims the seat "serves none" while it demonstrably serves others. Nothing spawns."""
     from remote import api_keys
-
-    # Synthetic split (review L3): the union whitelist keeps all 4 entries, the tier row shrinks
-    # to 2 — the only way a union-valid, tier-invalid name can exist while only `free` is real.
-    free_row = api_catalog.CODEX_TIER_MODELS["free"][:2]  # terra, luna
-    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free_row})
 
     _seed_running_remote_grid(monkeypatch, tmp_path)
     spawned = _mock_remote_spawn(monkeypatch)
     api_keys.store_codex_bundle(_codex_bundle())
+    # The probe serves only terra; gpt-5.5 is a valid whitelist name but not on THIS seat's listing.
     _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
-        {"slug": "gpt-5.6-terra", "visibility": "list"},
+        {"slug": "gpt-5.6-terra", "visibility": "list", "supported_in_api": True},
     ]}))
 
-    # -m outside the tier row (but inside the union whitelist): the tier bound refuses it.
     with pytest.raises(SystemExit) as exc:
         cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.5"])
     msg = str(exc.value)
-    assert "codex:gpt-5.5" in msg and "'free'" in msg
-    assert "codex:gpt-5.6-terra" in msg and "codex:gpt-5.6-luna" in msg  # the tier's verified list
-
-    # -m inside the tier row but absent from the live seat: name what IS available, truthfully.
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["join", "--api", "codex", "-m", "codex:gpt-5.6-luna"])
-    msg = str(exc.value)
-    assert "codex:gpt-5.6-luna" in msg
-    assert "codex:gpt-5.6-terra" in msg   # the seat CAN serve this...
-    assert "serves none" not in msg       # ...so "serves none" would be a lie
+    assert "codex:gpt-5.5" in msg             # the refused request, named
+    assert "codex:gpt-5.6-terra" in msg       # ...against what the seat's probe CAN serve
+    assert "serves none" not in msg           # the seat serves terra, so "none" would be a lie
 
     assert cli.provider._read_records("n1") == {} and "cmd" not in spawned
 
@@ -5086,6 +5446,38 @@ def test_merge_engines_refreshes_codex_plan_type_on_rejoin():
     hw_incoming = [{"endpoint_url": "http://h:11434/v1", "models": ["llama3", "qwen"], "engine_label": None}]
     hw_merged, _ = cli.remote_provider._merge_engines(hw_base, hw_incoming)
     assert "plan_type" not in hw_merged[0]
+
+
+def test_merge_engines_unions_codex_model_caps_keeping_a_dropped_models_caps():
+    """A re-join UNIONS model_caps, never replaces it (issue 10a review). `models` only ever grows,
+    so a model still in the union but dropped by a shrunk fresh probe must keep its last-known caps
+    instead of silently degrading to the fail-closed serve entry. Incoming caps win for a re-probed
+    model; a model absent from the fresh probe keeps its prior entry."""
+    codex = "https://chatgpt.com/backend-api/codex"
+
+    def caps(rank):
+        return {"context_window": 272000, "vision": True, "tools": True, "vendor_rank": rank}
+
+    base = [{"endpoint_url": codex, "models": ["codex:a", "codex:b", "codex:c"],
+             "engine_label": "codex", "api_kind": "codex", "plan_type": "free",
+             "model_caps": {"codex:a": caps(1), "codex:b": caps(2), "codex:c": caps(3)}}]
+    # A fresh re-probe DROPPED c (vendor entitlement shrank) and added d; `-m codex:d` forced it.
+    incoming = [{"endpoint_url": codex, "models": ["codex:a", "codex:b", "codex:d"],
+                 "engine_label": "codex", "api_kind": "codex", "plan_type": "free",
+                 "model_caps": {"codex:a": caps(1), "codex:b": caps(2), "codex:d": caps(9)}}]
+
+    merged, changed = cli.remote_provider._merge_engines(base, incoming)
+
+    assert changed  # codex:d is genuinely new
+    (spec,) = merged
+    assert spec["models"] == ["codex:a", "codex:b", "codex:c", "codex:d"]  # models only grow
+    # c is still served (in models) → its last-known caps are RETAINED, not dropped to fail-closed.
+    assert set(spec["model_caps"]) == {"codex:a", "codex:b", "codex:c", "codex:d"}
+    assert spec["model_caps"]["codex:c"]["vendor_rank"] == 3  # base's entry kept (absent from re-probe)
+    assert spec["model_caps"]["codex:d"]["vendor_rank"] == 9  # incoming's entry added
+    # The write is a fresh dict — it never aliases the base or incoming spec's own map.
+    assert spec["model_caps"] is not base[0]["model_caps"]
+    assert spec["model_caps"] is not incoming[0]["model_caps"]
 
 
 def test_remote_join_api_codex_fresh_signin_onto_live_seat_respawns(monkeypatch, tmp_path, capsys):
@@ -5270,59 +5662,33 @@ def test_codex_probe_all_hidden_listing_is_empty_not_drift(monkeypatch):
     back and the join's selection layer then says truthfully that the seat serves nothing. The
     old discriminator sent all-hidden operators chasing a grid upgrade that doesn't exist. Only
     a non-empty listing with NO readable slug anywhere is drift."""
-    slugs, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
+    records, _ = _probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
         {"slug": "codex-auto-review", "visibility": "hide"},
         {"slug": "under-review-model", "visibility": "hide"},
     ]}))
-    assert slugs == ()
+    assert records == ()
 
 
-def test_remote_join_api_codex_hidden_models_never_advertised_even_if_the_flag_renames(monkeypatch, tmp_path):
-    """(silent-failure review #1, containment pin) If the vendor renames `visibility` the hide
-    filter no-ops — fails OPEN. What actually bounds advertising is the verified tier row: a
-    model absent from it (codex-auto-review) can never be advertised whatever the live listing
-    says. This test pins that containment so the filter stays defence-in-depth, not the wall."""
+def test_remote_join_api_codex_hide_filter_is_the_sole_guard_for_hidden_models(monkeypatch, tmp_path):
+    """(issue 10a) With the static tier intersection gone, the `visibility:"hide"` filter is the
+    SOLE structural guard against advertising a model the vendor hides from its own picker: under
+    the real field name it drops codex-auto-review, so the free-seat observable set is unchanged.
+    If the vendor RENAMES `visibility` the filter fails OPEN and the hidden model is served — visible
+    damage (it 400s per job), never a MODEL failed closed (DESIGN §8). The old "even if renamed"
+    tier-row backstop is intentionally gone; this pins the guarantee that still holds."""
     from remote import api_keys
 
     _seed_running_remote_grid(monkeypatch, tmp_path)
     _mock_remote_spawn(monkeypatch)
     api_keys.store_codex_bundle(_codex_bundle())
     _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
-        {"slug": "codex-auto-review", "visible": "hidden"},  # renamed flag → filter can't see it
-        {"slug": "gpt-5.5", "visible": "listed"},
+        {"slug": "codex-auto-review", "visibility": "hide", "supported_in_api": True},
+        {"slug": "gpt-5.5", "visibility": "list", "supported_in_api": True},
     ]}))
 
     assert cli.main(["join", "--api", "codex"]) == 0
 
     assert cli.provider._read_records("n1")["remote"]["models"] == ["codex:gpt-5.5"]
-
-
-def test_remote_join_api_codex_rejoin_warns_again_while_tier_is_degraded(monkeypatch, tmp_path, capsys):
-    """(silent-failure review #4) The mandated tier warn fires on EVERY join — including the
-    zero-vendor-call no-op re-join — while the degraded condition persists. A seat stuck at
-    plan_type=None must not warn once at the first join and then never again for the life of
-    the seat: habitual re-joins (reboots, timers) would otherwise never resurface it, which is
-    exactly the silent decay the issue's amendment exists to prevent."""
-    from remote import api_keys
-
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    _mock_remote_spawn(monkeypatch)
-    api_keys.store_codex_bundle(_codex_bundle(plan_type=None))
-    _mock_probe(monkeypatch, lambda request: httpx.Response(200, json={"models": [
-        {"slug": "gpt-5.5", "visibility": "list"},
-    ]}))
-
-    assert cli.main(["join", "--api", "codex"]) == 0
-    assert "no subscription tier" in capsys.readouterr().err  # join #1 warns
-
-    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(httpx, "Client", lambda *a, **k: pytest.fail(
-        "a no-op re-join still performs zero vendor calls"
-    ))
-    for _ in range(2):
-        assert cli.main(["join", "--api", "codex"]) == 0
-        err = capsys.readouterr().err
-        assert "Warning:" in err and "no subscription tier" in err  # ...and still warns
 
 
 def test_remote_join_api_codex_noop_requires_the_current_backend_url(monkeypatch, tmp_path):
@@ -8858,11 +9224,12 @@ def test_remote_join_codex_onto_api_only_respawns_for_concurrency_flip(monkeypat
     assert (4242, _sig.SIGHUP) not in spawned["signals"]  # ...instead of hot-reloading it
 
 
-def _codex_serve_skeleton(monkeypatch, tmp_path, models, *, plan_type=None):
+def _codex_serve_skeleton(monkeypatch, tmp_path, models, *, plan_type=None, model_caps=None):
     """The register-capture skeleton (:api_only_defaults_to_eight_workers pattern) for a
-    codex-only record serving ``models``. ``plan_type`` (when given) rides the engine spec exactly
-    as the CLI writes it — the tier row serve reads vendor_rank from. Returns the kwargs
-    register_node saw."""
+    codex-only record serving ``models``. ``model_caps`` (advertised name → probe-derived caps) and
+    ``plan_type`` (the seat's tier label) ride the engine spec exactly as the CLI writes them at
+    join — serve reads each model's caps + vendor_rank from ``model_caps`` (issue 10a). Returns the
+    kwargs register_node saw."""
     from remote import api_keys, relay, serve
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
@@ -8871,6 +9238,8 @@ def _codex_serve_skeleton(monkeypatch, tmp_path, models, *, plan_type=None):
             "models": list(models), "engine_label": "codex", "api_kind": "codex"}
     if plan_type is not None:
         spec["plan_type"] = plan_type
+    if model_caps is not None:
+        spec["model_caps"] = model_caps
     record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
               "engines": [spec]}
     monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
@@ -8887,30 +9256,31 @@ def _codex_serve_skeleton(monkeypatch, tmp_path, models, *, plan_type=None):
 
 
 def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch, tmp_path):
-    """The codex capability envelope carries ONLY what passthrough can honestly claim (issue 05):
-    `endpoints: ["responses"]` (the wire literal grid-src's per-model filter reads — absent means
-    chat-only there, so old CLIs fail closed), the verified context window, features
-    {vision, tools, parallel_tool_calls, stream_only} (the last a NEGATIVE routing trait, issue 06c —
-    the SSE-only seat, sourced from `kind_is_stream_only`), and the join-time `vendor_rank` (issue 03 / ADR 0016 —
-    a top-level int sibling of context_window, the seat's tier-row position, 1 = most capable). It
-    OMITS — not False — the chat-dialect flags (json_object/json_schema), `max_output_tokens` and
-    the `limits` block (facts #1: the backend has no output cap under any name; a fabricated 64000
-    would be a provider-written limit the relay might act on), and audio/logprobs."""
-    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:gpt-5.5"])
+    """The codex capability envelope carries ONLY what passthrough can honestly claim, built from the
+    caps the join PERSISTED in the record (issue 10a): `endpoints: ["responses"]` (the wire literal
+    grid-src's per-model filter reads — absent means chat-only there, so old CLIs fail closed), the
+    probe's context window, features {vision, tools, parallel_tool_calls, stream_only} (the last a
+    NEGATIVE routing trait, issue 06c — the SSE-only seat, sourced from `kind_is_stream_only`), and
+    the join-time `vendor_rank` (a top-level int sibling of context_window). It OMITS — not False —
+    the chat-dialect flags (json_object/json_schema), `max_output_tokens` and the `limits` block
+    (facts #1: the backend has no output cap under any name; a fabricated 64000 would be a
+    provider-written limit the relay might act on), and audio/logprobs."""
+    caps = {"codex:gpt-5.5": {"context_window": 272000, "vision": True, "tools": True, "vendor_rank": 3}}
+    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:gpt-5.5"], model_caps=caps)
 
-    caps = seen["capabilities"]
-    assert caps["schema_version"] == 1
-    entry = caps["models"]["codex:gpt-5.5"]
+    envelope = seen["capabilities"]
+    assert envelope["schema_version"] == 1
+    entry = envelope["models"]["codex:gpt-5.5"]
     assert entry["endpoints"] == ["responses"]
     assert entry["input_modalities"] == ["text", "image"]
     assert entry["output_modalities"] == ["text"]
     assert entry["context_window"] == 272_000
-    # vendor_rank rides top-level (NOT inside features — the grid-src reader takes it there). gpt-5.5
-    # is index 2 in the free tier row [terra, luna, gpt-5.5, gpt-5.4-mini] → rank 3.
+    # vendor_rank rides top-level (NOT inside features — the grid-src reader takes it there), read
+    # straight from the record's model_caps (the probe's visible order at join), never recomputed.
     assert entry["vendor_rank"] == 3
     # issue 06c: the seat also advertises the NEGATIVE `stream_only` routing trait — its backend is
-    # SSE-only — sourced from `kind_is_stream_only`, so a non-streaming `auto` request forbids it and is
-    # never routed here. A routing trait, not a model capability (kept out of `codex_features`).
+    # SSE-only — sourced from `kind_is_stream_only`, so a non-streaming `auto` request is never routed
+    # here. A routing trait, not a model capability (kept out of `codex_features`).
     assert entry["features"] == {
         "vision": True, "tools": True, "parallel_tool_calls": True, "stream_only": True,
     }
@@ -8919,50 +9289,46 @@ def test_remote_engine_codex_record_registers_honest_responses_caps(monkeypatch,
     assert "json_object" not in entry["features"] and "json_schema" not in entry["features"]
 
 
-def test_remote_engine_codex_model_gone_from_whitelist_degrades_honestly(monkeypatch, tmp_path, capsys):
-    """The stale-catalog degrade (catalog edited between join and respawn) stays honest for
-    codex: a warn plus an entry that still says `responses`-only with NO capability claims — never
-    the chat-dialect all-False shape, and never a fabricated output cap. A model gone from the
-    whitelist has no tier-row position either, so `vendor_rank` is omitted (issue 03).
+def test_remote_engine_codex_model_absent_from_caps_degrades_honestly(monkeypatch, tmp_path, capsys):
+    """The fail-closed degrade (issue 10a): a codex model advertised but absent from the record's
+    `model_caps` — a record written before the live-probe catalog, or a caps map that dropped it —
+    stays `responses`-only with NO capability claims (never the chat-dialect all-False shape, never a
+    fabricated output cap or context window) AND warns (an absent no-caps entry must not be silent).
 
-    issue 06c: the degrade still advertises the `stream_only` routing trait — a stale seat's backend
-    is still SSE-only, so a non-streaming `auto` request must still be routed away from it (fail-closed,
-    the opposite polarity to a capability, which degrades OFF)."""
-    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"])
+    issue 06c: the degrade still advertises the `stream_only` routing trait — a seat's backend is
+    SSE-only whether or not its caps were recorded, so a non-streaming `auto` request must still be
+    routed away from it (fail-closed, the opposite polarity to a capability, which degrades OFF)."""
+    seen = _codex_serve_skeleton(monkeypatch, tmp_path, ["codex:ghost"], model_caps={})
 
     entry = seen["capabilities"]["models"]["codex:ghost"]
     assert entry["endpoints"] == ["responses"]
     assert entry["features"] == {"stream_only": True}
     assert "max_output_tokens" not in entry and "limits" not in entry
     assert "context_window" not in entry  # unknown is omitted, never invented
-    assert "vendor_rank" not in entry  # absent from the row → omit the fact, never rank 0/None
-    assert "no longer in the codex whitelist" in capsys.readouterr().err
+    assert "vendor_rank" not in entry  # no caps recorded → no rank fabricated
+    assert "no probe-derived caps" in capsys.readouterr().err
 
 
-def test_remote_engine_codex_vendor_rank_follows_the_seats_tier_row(monkeypatch, tmp_path, capsys):
-    """vendor_rank is sourced from the SEAT'S tier row, not the flat union (issue 03 / ADR 0016).
-    A synthetic `plus` tier (the real table has only `free`) REVERSES the free order and drops one
-    model; a seat whose stored plan_type is `plus` must advertise ranks in the plus order. A model
-    advertised but OUTSIDE the seat's row carries no rank — the frozen union resolves its entry, but
-    the row has no position for it, so the fact is omitted (graceful drift) AND an operator warn
-    fires (silent-failure review: a silent no-rank is indistinguishable from tier-table drift).
-    Rows are built from REAL entries so `find_advertised` (frozen union) still resolves every name."""
-    free = api_catalog.CODEX_TIER_MODELS["free"]
-    terra, luna, big, mini = free  # curated free order: terra 1, luna 2, gpt-5.5 3, gpt-5.4-mini 4
-    # plus row: reversed + gpt-5.5 dropped → mini 1, luna 2, terra 3; gpt-5.5 is off-row.
-    monkeypatch.setattr(api_catalog, "CODEX_TIER_MODELS", {"free": free, "plus": (mini, luna, terra)})
+def test_remote_engine_codex_vendor_rank_comes_from_the_recorded_caps(monkeypatch, tmp_path, capsys):
+    """vendor_rank is read from the record's `model_caps` (issue 10a — the join persisted the probe's
+    visible order), NOT recomputed at serve time from a tier row. A model present in `model_caps`
+    advertises its recorded rank; a model advertised but absent from `model_caps` carries NO rank (the
+    fact is omitted, never rank 0/None) and a warn fires (an absent no-caps entry is never silent)."""
+    caps = {
+        "codex:a": {"context_window": 272000, "vision": True, "tools": True, "vendor_rank": 1},
+        "codex:b": {"context_window": 272000, "vision": True, "tools": True, "vendor_rank": 2},
+    }
+    models = _codex_serve_skeleton(
+        monkeypatch, tmp_path, ["codex:a", "codex:b", "codex:c"], model_caps=caps,
+    )["capabilities"]["models"]
 
-    advertised = [f"codex:{e.vendor_name}" for e in (mini, luna, terra, big)]
-    models = _codex_serve_skeleton(monkeypatch, tmp_path, advertised, plan_type="plus")["capabilities"]["models"]
-
-    assert models[f"codex:{mini.vendor_name}"]["vendor_rank"] == 1
-    assert models[f"codex:{luna.vendor_name}"]["vendor_rank"] == 2
-    assert models[f"codex:{terra.vendor_name}"]["vendor_rank"] == 3
-    # gpt-5.5 resolves in the frozen union but has no position in the plus row → no rank, and a warn.
-    assert "vendor_rank" not in models[f"codex:{big.vendor_name}"]
+    assert models["codex:a"]["vendor_rank"] == 1
+    assert models["codex:b"]["vendor_rank"] == 2
+    # codex:c isn't in model_caps → no rank fabricated, and an operator warn fires (not silent).
+    assert "vendor_rank" not in models["codex:c"]
     err = capsys.readouterr().err
-    assert f"codex:{big.vendor_name}" in err and "rank" in err  # off-row model flagged (not silent)
-    assert f"codex:{mini.vendor_name}" not in err               # a ranked model is not flagged
+    assert "codex:c" in err and "no probe-derived caps" in err  # off-caps model flagged
+    assert "codex:a" not in err                                 # a recorded model is not flagged
 
 
 def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path):
@@ -10017,7 +10383,9 @@ def test_static_api_caps_codex_omits_output_cap_feature():
     so codex omitting the param means codex omitting the feature."""
     from remote import serve
 
-    caps = serve._static_api_caps("codex", ["codex:gpt-5.5"], plan_type="free")
+    caps = serve._static_api_caps("codex", ["codex:gpt-5.5"], model_caps={
+        "codex:gpt-5.5": {"context_window": 272000, "vision": True, "tools": True, "vendor_rank": 1},
+    })
     entry = caps["models"]["codex:gpt-5.5"]
     assert "output_cap" not in entry["features"]
 
@@ -10114,7 +10482,9 @@ def test_api_and_codex_specs_never_run_the_responses_probe(monkeypatch):
 
     serve._probe_spec_caps("https://api.openai.com/v1", ["openai:gpt-5.5"], ["gpt-5.5"], None, api_kind="openai")
     serve._probe_spec_caps("https://chatgpt.com", ["codex:gpt-5.5"], ["gpt-5.5"], None,
-                           api_kind="codex", plan_type="free")
+                           api_kind="codex", model_caps={
+                               "codex:gpt-5.5": {"context_window": 272000, "vision": True,
+                                                 "tools": True, "vendor_rank": 1}})
 
 
 def test_serve_codex_seat_holder_primes_from_the_store_and_self_heals(monkeypatch, tmp_path):

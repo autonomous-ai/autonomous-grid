@@ -140,22 +140,10 @@ CODEX_KIND = "codex"
 # with the whitelist itself.
 CODEX_CLIENT_VERSION = "0.144.2"
 
-# The vendor's own `PlanType` vocabulary, read from the client binary (facts.md #5). Distinguishes
-# "unrecognized tier" (vendor drift — outside this set) from "known but unverified" (inside it, no
-# populated row in CODEX_TIER_MODELS). Neither advertises beyond the minimal row; only the warn
-# wording turns on the difference, and that wording lives with the CLI (issue 05).
-CODEX_PLAN_TYPES = frozenset({
-    "free", "go", "plus", "pro", "prolite", "team", "self_serve_business_usage_based",
-    "business", "enterprise_cbp_usage_based", "enterprise", "hc", "edu", "education",
-})
-
-# Per-tier rows: ONLY a tier verified against a live seat may be populated — paid tiers are
-# UNRESOLVED-NOACCESS and must not be filled from guesswork (facts.md #5); an absent row means
-# "unverified", never "empty tier". Vendor priority order preserved. `codex-auto-review`
-# (visibility: "hide") is deliberately excluded. The json-mode/structured-outputs booleans are
-# False because they are chat-dialect notions a Responses passthrough cannot honestly claim — and
-# the capability envelope OMITS those keys outright rather than advertising False
-# (remote/probe.codex_capability_entry, issue 05).
+# The free set is live-verified (2026-07-15, facts.md #5) against a real seat; `codex-auto-review`
+# (visibility: "hide") is deliberately excluded. The json-mode/structured-outputs booleans are False
+# because they are chat-dialect notions a Responses passthrough cannot honestly claim — the capability
+# envelope OMITS those keys outright rather than advertising False (remote/probe.codex_capability_entry).
 _CODEX_FREE_MODELS: tuple[ApiModelEntry, ...] = (
     ApiModelEntry(
         vendor_name="gpt-5.6-terra",
@@ -195,11 +183,59 @@ _CODEX_FREE_MODELS: tuple[ApiModelEntry, ...] = (
     ),
 )
 
-CODEX_TIER_MODELS: dict[str, tuple[ApiModelEntry, ...]] = {"free": _CODEX_FREE_MODELS}
+# The paid-only rows (issue 10b): ILLUSTRATIVE, encoded from the public pricing docs
+# (`CODEX_PRICING_DOCS_URL`), which give a display name + plan only — no caps. So the context window is
+# the `0` unknown sentinel (rendered `—`, never a fabricated number) and tools/vision follow the
+# profile every codex model has had to date. The slugs are INFERRED from display names — verify against
+# a real paid-seat probe. DISPLAY-ONLY: `grid catalog` shows them; serving is the live probe's job.
+_CODEX_PAID_MODELS: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="gpt-5.6-sol",
+        context_window=0,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Illustrative (pricing docs) — Plus and up; verify against a paid seat.",
+    ),
+    ApiModelEntry(
+        vendor_name="gpt-5.4",
+        context_window=0,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Illustrative (pricing docs) — Plus and up; verify against a paid seat.",
+    ),
+)
 
-# What a missing, unrecognized, or unverified tier advertises (ADR 0015 D-f: never the full
-# table). Free is the least-entitled tier, so degrading to it can only under-advertise.
-CODEX_MINIMAL_TIER = "free"
+_CODEX_PRO_ONLY: tuple[ApiModelEntry, ...] = (
+    ApiModelEntry(
+        vendor_name="gpt-5.3-codex-spark",
+        context_window=0,
+        supports_tools=True,
+        supports_vision=True,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Illustrative (pricing docs) — Pro only, research preview; verify against a paid seat.",
+    ),
+)
+
+# The illustrative cross-plan reference (issue 10b — relabeled from the old serving-gate tier table).
+# DISPLAY-ONLY: `grid catalog --api codex` renders it as a menu of what each plan can serve; it NEVER
+# gates a join (the live probe is the source of truth for the served set). Keyed by PLAN LABELS (not
+# the vendor's `PlanType` vocabulary) — the three distinct membership sets across all plans. Business /
+# Enterprise / Edu share the Plus set, so they are surfaced as a note rather than a duplicate row.
+CODEX_TIER_MODELS: dict[str, tuple[ApiModelEntry, ...]] = {
+    "free / go": _CODEX_FREE_MODELS,
+    "plus": _CODEX_FREE_MODELS + _CODEX_PAID_MODELS,
+    "pro": _CODEX_FREE_MODELS + _CODEX_PAID_MODELS + _CODEX_PRO_ONLY,
+}
+
+# Provenance for the illustrative reference (issue 10b). The pricing-docs read date is distinct from
+# `CODEX_LAST_VERIFIED` (the free-seat probe date) — different data, different verification.
+CODEX_PRICING_DOCS_URL = "https://learn.chatgpt.com/docs/pricing"
+CODEX_REFERENCE_LAST_VERIFIED = "2026-07-24"
 
 
 def _codex_tier_union() -> tuple[ApiModelEntry, ...]:
@@ -234,7 +270,9 @@ WHITELISTS: dict[str, ApiWhitelist] = {
     "codex": ApiWhitelist(
         last_verified=CODEX_LAST_VERIFIED,
         base_url="https://chatgpt.com/backend-api/codex",
-        # The union of the tier rows (issue 05); per-tier selection is `codex_tier_entries`.
+        # The union of the tier rows — the pre-probe `-m` validation reference (issue 05). Serving no
+        # longer intersects it: the live probe is the source of truth for the served set + caps (issue
+        # 10a). 10b relabels this table as the illustrative cross-plan reference and adds the paid rows.
         entries=_codex_tier_union(),
         env_var=None,  # ADR 0015 D-c: an OAuth seat has no env-var input path
         max_output_param=None,  # facts.md #1: this backend has no output-cap parameter, under any name
@@ -278,43 +316,6 @@ def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
     for entry in whitelist.entries:
         if advertised_name(kind, entry) == advertised:
             return entry
-    return None
-
-
-def codex_effective_tier(plan_type: str | None) -> str:
-    """The tier whose row a seat claiming ``plan_type`` advertises: its own when populated, else
-    the minimal tier. Split from ``codex_tier_entries`` because operator messages need the NAME
-    of the row they ended up on, not just its contents."""
-    if plan_type is not None and plan_type in CODEX_TIER_MODELS:
-        return plan_type
-    return CODEX_MINIMAL_TIER
-
-
-def codex_tier_entries(plan_type: str | None) -> tuple[ApiModelEntry, ...]:
-    """The tier row a seat claiming ``plan_type`` may advertise (ADR 0015 D-f).
-
-    Missing (``None``), unrecognized (outside ``CODEX_PLAN_TYPES``), and known-but-unverified (no
-    populated row) tiers all degrade to the minimal row — the join must never widen on a guess.
-    Pure lookup: the operator-facing warns for the three degrade cases are the CLI's (issue 05),
-    because they differ only in wording, not in what is advertised.
-    """
-    return CODEX_TIER_MODELS[codex_effective_tier(plan_type)]
-
-
-def codex_vendor_rank(plan_type: str | None, vendor_name: str) -> int | None:
-    """The 1-based capability rank of ``vendor_name`` within the seat's effective tier row
-    (``codex_tier_entries``): 1 = the row's most-capable head, the curated order we own (ADR 0016).
-    ``None`` when the model is absent from that row — a drifted model omits the fact rather than
-    fabricating a position, so the master renders nothing for it and ordering degrades gracefully.
-
-    The tier ROW, not the flat ``entries`` union, is the authority: two tiers may order the same
-    model differently, and a seat advertises exactly one tier's row (``codex_tier_entries`` applies
-    the same D-f degrade the join used to pick that row). Positions are contiguous ``1..N`` because
-    each row is duplicate-free (pinned by ``test_codex_tier_whitelist_integrity``). Sourced from
-    the whitelist order, never the vendor's unverified ``priority`` field (ADR 0016)."""
-    for index, entry in enumerate(codex_tier_entries(plan_type)):
-        if entry.vendor_name == vendor_name:
-            return index + 1
     return None
 
 
@@ -436,7 +437,13 @@ def format_api_entry(kind: str, entry: ApiModelEntry, endpoints: tuple[str, ...]
         )
         if supported
     )
-    return (
-        f"  {advertised_name(kind, entry):<24} {entry.context_window:>9,} ctx   "
-        f"{caps or 'text only'}"
-    )
+    # An unknown context window (the `0` sentinel — a media row, or an illustrative paid codex row
+    # whose caps the pricing docs don't give, issue 10b) renders `—`, never `0 ctx` or a fabricated
+    # number (DESIGN §8.1). No "ctx" unit for the unknown case; width-matched so the caps column stays
+    # aligned. The known (>0) path is byte-identical to before (so the `" ctx   "` split in
+    # test_format_api_entry_shows_responses_dialect is undisturbed).
+    if entry.context_window > 0:
+        ctx = f"{entry.context_window:>9,} ctx   "
+    else:
+        ctx = f"{'—':>9}       "
+    return f"  {advertised_name(kind, entry):<24} {ctx}{caps or 'text only'}"
