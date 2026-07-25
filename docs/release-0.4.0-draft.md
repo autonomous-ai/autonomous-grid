@@ -48,7 +48,8 @@ beside the incumbent, which is impossible on Grid's own MLX engine — it holds 
 so it briefly made every night score a model against itself at exactly +0.000.
 
 The gate now scores the incumbent first, while it is still what the node holds, then loads the
-candidate and scores that, and restores the incumbent if the candidate lost. The measured climbs
+candidate and scores that, and then restores the incumbent — always, whatever the verdict, because
+a check is supposed to be an observation. The winner is deployed once, afterwards, by the caller. The measured climbs
 below are unaffected — they come from the feedback rung, whose split was always correct — but any
 imitation number produced before this release was partly memorisation.
 
@@ -75,7 +76,7 @@ same wall clock only because the weights moved often enough.
 
 ## Numbers a room should hear
 
-- 1,070 tests green.
+- 1,078 tests green.
 - The whole training plane is 62 files and about 10,600 lines, in `train/`.
 - One unauthenticated request could stall a grid for 49 seconds before v0.4.0. It can't now
   (bounded quantifiers, clip-before-scan, a body cap, and a background writer).
