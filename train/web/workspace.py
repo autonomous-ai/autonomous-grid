@@ -146,6 +146,27 @@ CHECKS: dict[str, list[dict]] = {
          "help": "One priority line and one next action, nothing rambling.",
          "default": True},
     ],
+    "any-task": [
+        {"id": "similarity", "label": "Answers the way your team answers",
+         "help": "Compares each attempt with what your team actually wrote for that piece of work.",
+         "default": True, "locked": True},
+        {"id": "grounding", "label": "Uses the specifics of what came in",
+         "help": "Rewards answers that pick up the reference numbers, names and dates in the "
+                 "request instead of answering generically.",
+         "default": True},
+        {"id": "format", "label": "Finished, not a draft",
+         "help": "Sensible length, no [placeholders] left in, none of the marketing words we ban.",
+         "default": True},
+    ],
+    "sort-into-categories": [
+        {"id": "correct_category", "label": "Picks the category your team picked",
+         "help": "Right or wrong, checked against your own history. This is the most reliable "
+                 "kind of check there is.",
+         "default": True, "locked": True},
+        {"id": "parseable", "label": "Answers in a shape your tools can read",
+         "help": "One category line, nothing else — so you can wire the answer into a workflow.",
+         "default": True},
+    ],
 }
 
 _REWARD_SOURCES = {
@@ -298,9 +319,143 @@ def reward_parseable(prompts, completions=None, completions_text=None, **kwargs)
     return out
 ''',
     },
+    # The pack for departments nobody planned for. Same three checks as support, with a length
+    # window wide enough for a one-line answer, because "what your team writes back" ranges from
+    # a shipping note to a policy explanation.
+    "any-task": {
+        "header": '''"""Checks for this model, generated from the options chosen in the web interface.
+Edit freely — this is a plain Python file and `grid train run` reads it as-is."""
+from __future__ import annotations
+
+import difflib
+import json
+import re
+from pathlib import Path
+
+_REFS = {}
+_p = Path(__file__).parent / "refs.jsonl"
+if _p.is_file():
+    for _line in _p.read_text(encoding="utf-8").splitlines():
+        _row = json.loads(_line)
+        _REFS[_row["prompt"]] = _row["reference"]
+
+_BANNED = {"revolutionary", "empower", "supercharge", "unlock", "transform", "leverage",
+           "synergy", "delve", "elevate"}
+_PLACEHOLDER = re.compile(r"\\[(?:name|order|tracking|date|link|company)[^\\]]*\\]|\\{\\{[^}]*\\}\\}|xxx+",
+                          re.IGNORECASE)
+
+
+def _texts(completions, completions_text):
+    return completions_text if completions_text is not None else completions
+''',
+        "similarity": '''
+
+def reward_similarity(prompts, completions=None, completions_text=None, **kwargs):
+    """Closeness to what your team actually wrote (0.5 when we have no reference)."""
+    out = []
+    for prompt, text in zip(prompts, _texts(completions, completions_text)):
+        reference = _REFS.get(prompt)
+        if not reference:
+            out.append(0.5)
+            continue
+        out.append(difflib.SequenceMatcher(None, text.lower().split(),
+                                           reference.lower().split()).ratio())
+    return out
+''',
+        "grounding": '''
+
+def reward_grounding(prompts, completions=None, completions_text=None, **kwargs):
+    """Does the answer engage with THIS request — its ids, numbers, names?"""
+    out = []
+    for prompt, text in zip(prompts, _texts(completions, completions_text)):
+        distinctive = set(re.findall(r"[A-Z]{2,}[-\\d]*\\d|\\d{4,}|[A-Z][a-z]+[A-Z]\\w+", prompt))
+        if not distinctive:
+            out.append(0.5)
+            continue
+        out.append(sum(1 for token in distinctive if token in text) / len(distinctive))
+    return out
+''',
+        "format": '''
+
+def reward_format(prompts, completions=None, completions_text=None, **kwargs):
+    """Finished work: sane length, no leftover placeholders, no banned words. The window is wide
+    because one team's answer is a sentence and another's is three paragraphs."""
+    out = []
+    for text in _texts(completions, completions_text):
+        words = text.split()
+        score = 1.0
+        if not 4 <= len(words) <= 320:
+            score -= 0.5
+        if _PLACEHOLDER.search(text):
+            score -= 0.5
+        if any(word.lower().strip(".,!") in _BANNED for word in words):
+            score -= 0.3
+        out.append(max(score, 0.0))
+    return out
+''',
+    },
+    "sort-into-categories": {
+        "header": '''"""Checks for this model, generated from the options chosen in the web interface.
+
+The answer key here is your own history: the category your team chose for each item. That makes
+this the cleanest reward in the product — no judging, no similarity, just right or wrong."""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+_LABELS = {}
+_p = Path(__file__).parent / "labels.jsonl"
+if _p.is_file():
+    for _line in _p.read_text(encoding="utf-8").splitlines():
+        _row = json.loads(_line)
+        _LABELS[_row["prompt"]] = _row["label"]
+
+_CATEGORIES = sorted(set(_LABELS.values()))
+_LINE = re.compile(r"^\\s*CATEGORY:\\s*(\\S.*?)\\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _texts(completions, completions_text):
+    return completions_text if completions_text is not None else completions
+
+
+def _picked(text):
+    match = _LINE.search(text)
+    return match.group(1).strip().lower() if match else None
+''',
+        "correct_category": '''
+
+def reward_correct_category(prompts, completions=None, completions_text=None, **kwargs):
+    """1.0 when it picked the category your team picked, 0.0 when it didn't."""
+    out = []
+    for prompt, text in zip(prompts, _texts(completions, completions_text)):
+        truth = _LABELS.get(prompt)
+        out.append(0.5 if truth is None else (1.0 if _picked(text) == truth else 0.0))
+    return out
+''',
+        "parseable": '''
+
+def reward_parseable(prompts, completions=None, completions_text=None, **kwargs):
+    """One CATEGORY line, from the set it was trained on, and nothing else — so the answer can
+    be wired straight into a workflow."""
+    out = []
+    for text in _texts(completions, completions_text):
+        picked, score = _picked(text), 0.0
+        if len(_LINE.findall(text)) == 1:
+            score += 0.5
+        if picked and (picked in _CATEGORIES or not _CATEGORIES):
+            score += 0.4
+        if len([line for line in text.strip().splitlines() if line.strip()]) == 1:
+            score += 0.1
+        out.append(score)
+    return out
+''',
+    },
 }
 
-_MAX_TOKENS = {"support-replies": 220, "sales-triage": 60}
+_MAX_TOKENS = {"support-replies": 220, "sales-triage": 60,
+               "any-task": 320, "sort-into-categories": 24}
 
 
 def write_checks(workspace: Workspace, chosen: list[str]) -> Path:

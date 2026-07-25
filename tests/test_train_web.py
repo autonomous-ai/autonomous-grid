@@ -584,3 +584,174 @@ def test_the_front_page_lists_models_once_there_are_any(client, tmp_path):
     assert "Your models" in page
     assert "Support replies" in page
     assert "one job the way your team does it" not in page   # the explainer steps aside
+
+
+# --- the two general packs: any department, not just support and sales ----------------------
+
+def _generic_jsonl(n: int = 300) -> str:
+    """Procurement answering suppliers — a department nobody wrote a pack for."""
+    rows = [
+        {"Request": f"Supplier asks when PO-{4400 + i} will be approved and what the terms are",
+         "Reply sent": (f"PO-{4400 + i} is approved as of this morning. Terms are NET-30 from "
+                        "delivery, and the remittance contact is ap@autonomous.ai.")}
+        for i in range(n)
+    ]
+    return "".join(json.dumps(r) + "\n" for r in rows)
+
+
+def _labelled_csv(per_class: int = 40) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Text", "Queue"])
+    for i in range(per_class):
+        writer.writerow([f"My invoice {i} was charged twice", "billing"])
+        writer.writerow([f"Where is order AN-{i} now", "shipping"])
+        writer.writerow([f"Desk {i} shows E07 and will not move", "technical"])
+    return buf.getvalue()
+
+
+def test_the_generic_pack_reads_any_two_columns_and_says_which():
+    report, kept = prepare.prepare("any-task", _generic_jsonl(300), "procurement.jsonl")
+    assert report.ok and report.level == "good"
+    assert report.rows_usable == 300
+    # Reading the answer as the question would train the model backwards, so the guess is stated.
+    assert report.columns_used == {"the work": "request", "what your team wrote": "reply sent"}
+    assert "rename the columns" in report.detail
+    assert kept[0]["prompt"].startswith("Supplier asks")
+
+
+def test_the_generic_pack_refuses_a_one_column_export():
+    report, kept = prepare.prepare("any-task", '{"notes": "just one column"}\n', "x.jsonl")
+    assert not report.ok and report.level == "blocked"
+    assert "two columns" in report.headline
+    assert kept == []
+
+
+def test_categories_are_balanced_so_guessing_the_commonest_cannot_win():
+    lopsided = _labelled_csv(40).splitlines()
+    lopsided += [f"Another billing one {i},billing" for i in range(200)]
+    report, kept = prepare.prepare("sort-into-categories", "\n".join(lopsided) + "\n", "q.csv")
+    assert report.ok
+    assert report.distribution["billing"] == 240      # what the export contained
+    assert len(kept) == 3 * 40                        # what we train on, capped at the smallest
+    assert "balanced at 40" in report.headline
+
+
+def test_sorting_needs_at_least_two_categories_and_not_too_many():
+    one = "Text,Queue\n" + "".join(f"item {i},billing\n" for i in range(80))
+    report, _ = prepare.prepare("sort-into-categories", one, "q.csv")
+    assert not report.ok and "one category" in report.headline
+
+    many = "Text,Queue\n" + "".join(f"item {i},cat{i}\n" for i in range(60))
+    report, _ = prepare.prepare("sort-into-categories", many, "q.csv")
+    assert not report.ok and "more like free text" in report.detail
+
+    thin = "Text,Queue\n" + "".join(f"item {i},{'a' if i % 2 else 'b'}\n" for i in range(12))
+    report, _ = prepare.prepare("sort-into-categories", thin, "q.csv")
+    assert not report.ok and "smallest category" in report.headline
+
+
+@pytest.mark.parametrize("pack,payload,filename", [
+    ("support-replies", _tickets_csv(60), "t.csv"),
+    ("sales-triage", _leads_jsonl(20), "l.jsonl"),
+    ("any-task", _generic_jsonl(60), "g.jsonl"),
+    ("sort-into-categories", _labelled_csv(40), "q.csv"),
+], ids=["support-replies", "sales-triage", "any-task", "sort-into-categories"])
+def test_the_generated_rewards_file_actually_runs(pack, payload, filename, tmp_path, monkeypatch):
+    """Every pack's rewards.py is generated Python. If it does not import, the night is wasted.
+
+    This is the only test that executes the generated source, so it exercises each template's
+    regexes and its reading of refs/labels off disk — the parts a syntax check would miss.
+    """
+    from train.config import DataConfig, RewardsConfig
+    from train.rewards import load_reward_funcs
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create(f"w-{pack}", pack)
+    report = workspace.attach_data(w, filename, payload)
+    assert report.ok, report.headline
+    ticked = [c["id"] for c in workspace.CHECKS[pack] if c.get("default")]
+    path = workspace.write_checks(w, ticked)
+
+    funcs = load_reward_funcs(RewardsConfig(python_file=str(path)),
+                              DataConfig(prompts_jsonl=str(w.path / "prompts.jsonl")))
+    assert len(funcs) == len(ticked)
+
+    prompts = [json.loads(line)["prompt"] for line in
+               (w.path / "prompts.jsonl").read_text(encoding="utf-8").splitlines()[:4]]
+    answers = [json.loads(line)["messages"][-1]["content"] for line in
+               (w.path / "sft.jsonl").read_text(encoding="utf-8").splitlines()[:4]]
+    for func in funcs:
+        scores = func(prompts, completions=answers, completions_text=answers)
+        assert len(scores) == len(prompts)
+        assert all(0.0 <= float(s) <= 1.0 for s in scores), (func.__name__, scores)
+    # Her team's own answers should score well by construction — that is what "correct" means here.
+    named = {f.__name__: f for f in funcs}
+    for key in ("reward_similarity", "reward_correct_category", "reward_correct_priority"):
+        if key in named:
+            got = named[key](prompts, completions=answers, completions_text=answers)
+            assert min(got) >= 0.6, (key, got)
+
+
+def test_a_wrong_category_scores_zero_and_rambling_loses_the_shape_mark(tmp_path, monkeypatch):
+    from train.config import DataConfig, RewardsConfig
+    from train.rewards import load_reward_funcs
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("q", "sort-into-categories")
+    workspace.attach_data(w, "q.csv", _labelled_csv(40))
+    path = workspace.write_checks(w, ["correct_category", "parseable"])
+    funcs = {f.__name__: f for f in load_reward_funcs(
+        RewardsConfig(python_file=str(path)),
+        DataConfig(prompts_jsonl=str(w.path / "prompts.jsonl")))}
+
+    prompt = json.loads((w.path / "prompts.jsonl").read_text(encoding="utf-8")
+                        .splitlines()[0])["prompt"]
+    truth = json.loads((w.path / "labels.jsonl").read_text(encoding="utf-8")
+                       .splitlines()[0])["label"]
+    wrong = next(c for c in ("billing", "shipping", "technical") if c != truth)
+
+    assert funcs["reward_correct_category"]([prompt], completions=[f"CATEGORY: {truth}"],
+                                           completions_text=[f"CATEGORY: {truth}"]) == [1.0]
+    assert funcs["reward_correct_category"]([prompt], completions=[f"CATEGORY: {wrong}"],
+                                           completions_text=[f"CATEGORY: {wrong}"]) == [0.0]
+    # An invented category is wrong even if it sounds plausible.
+    assert funcs["reward_correct_category"]([prompt], completions=["CATEGORY: finance"],
+                                           completions_text=["CATEGORY: finance"]) == [0.0]
+    tidy = funcs["reward_parseable"]([prompt], completions=[f"CATEGORY: {truth}"],
+                                     completions_text=[f"CATEGORY: {truth}"])[0]
+    ramble = funcs["reward_parseable"](
+        [prompt],
+        completions=[f"Well it could be a few things.\nCATEGORY: {truth}\nCATEGORY: {wrong}\nHope that helps!"],
+        completions_text=[f"Well it could be a few things.\nCATEGORY: {truth}\nCATEGORY: {wrong}\nHope that helps!"])[0]
+    assert tidy == 1.0 and ramble < tidy
+
+
+def test_a_manager_can_walk_the_whole_wizard_with_her_own_categories(client, tmp_path, monkeypatch):
+    """The generic path, through the browser, exactly as a logistics manager would meet it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    page = client.get("/new").text
+    assert "Sort work into your own categories" in page
+    assert "Something else my team answers in writing" in page
+
+    # No name typed: it gets named after the job rather than after support.
+    created = client.post("/new", data={"pack": "sort-into-categories"})
+    slug = created.headers["location"].split("/w/")[1].split("/")[0]
+    assert "Sort work into your own categories" in client.get("/").text
+
+    up = client.post(f"/w/{slug}/data", json={"filename": "queues.csv",
+                                              "content": _labelled_csv(40)})
+    assert up.json()["ok"]
+    data_page = client.get(f"/w/{slug}").text
+    assert "balanced at 40" in data_page
+    assert "Columns we used:" in data_page and "“queue”" in data_page
+
+    checks_page = client.get(f"/w/{slug}/checks").text
+    assert "Picks the category your team picked" in checks_page
+    client.post(f"/w/{slug}/checks", data={"check": ["parseable"]})
+    generated = (workspace.load(slug).path / "rewards.py").read_text(encoding="utf-8")
+    assert "reward_correct_category" in generated       # locked check cannot be unticked
+
+    workspace.write_config(workspace.load(slug), model="m", endpoint="http://x/v1", steps=10)
+    toml = (workspace.load(slug).path / "grid-train.toml").read_text(encoding="utf-8")
+    assert "max_tokens = 24" in toml                    # a category, not an essay

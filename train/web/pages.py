@@ -242,6 +242,8 @@ def _stage_chip(w, live: str = "") -> str:
 PACK_TITLES = {
     "support-replies": "Draft replies to support tickets",
     "sales-triage": "Sort and prioritise incoming leads",
+    "sort-into-categories": "Sort work into your own categories",
+    "any-task": "Something else my team answers in writing",
 }
 PACK_BLURBS = {
     "support-replies": ("Give it your resolved tickets and it learns to draft the reply your team "
@@ -249,10 +251,27 @@ PACK_BLURBS = {
     "sales-triage": ("Give it leads whose outcome you already know and it learns to flag which new "
                      "ones are worth your morning. The answer key is what actually closed, so this "
                      "is the most reliable kind of training there is."),
+    "sort-into-categories": ("Routing, tagging, triage, flagging — anything where the answer is one "
+                             "of a handful of choices your team already makes by hand. Your own "
+                             "past choices are the answer key, so it is right or wrong with no "
+                             "judgement involved."),
+    "any-task": ("Procurement replies, shipping notes, policy answers, handover summaries. If your "
+                 "team has a record of what came in and what they wrote back, that record is a "
+                 "training set."),
 }
 PACK_NEEDS = {
     "support-replies": "An export with the customer's message and the reply your team sent.",
     "sales-triage": "An export with each enquiry and what happened to it (won, lost, no response).",
+    "sort-into-categories": ("An export with the text and the category your team chose for it. Two "
+                             "to twenty-four categories, at least 30 examples of each."),
+    "any-task": "An export with two columns: the work that came in, and what your team wrote back.",
+}
+# What one row of her export is called, for the "try it" buttons.
+PACK_NOUNS = {
+    "support-replies": "tickets",
+    "sales-triage": "leads",
+    "sort-into-categories": "items",
+    "any-task": "examples",
 }
 
 
@@ -270,7 +289,8 @@ not from anything generic.</p>
 <form method="post" action="/new" class="card">
 {cards}
 <label class="field"><span>Give it a name (so you recognise it later)</span>
-<input type="text" name="name" value="Support replies" required maxlength="60"></label>
+<input type="text" name="name" placeholder="Leave blank and we'll name it after the job"
+       maxlength="60"></label>
 <button class="primary" type="submit">Next — add your examples</button>
 </form>
 <p class="small muted">Something else in mind? The command line takes any task you can write a
@@ -296,10 +316,19 @@ def data_step(w) -> str:
         if dist:
             dist_line = ('<p class="small muted">Groups found: '
                          + ", ".join(f"{html.escape(k)} {v}" for k, v in dist.items()) + "</p>")
+        # Which columns we guessed. Silent guessing is the one way this page can be confidently
+        # wrong — reading the answer as the question trains the model backwards.
+        cols = report.get("columns_used") or {}
+        cols_line = ""
+        if cols:
+            cols_line = ('<p class="small muted">Columns we used: '
+                         + " · ".join(f"{html.escape(role)} → “{html.escape(str(col))}”"
+                                      for role, col in cols.items() if col)
+                         + "</p>")
         banner = f"""<div class="note {cls}"><b>{html.escape(report['headline'])}</b>
 {html.escape(report['detail'])}</div>
 <p class="small muted">Read {report.get('rows_seen', 0)} rows · using
-{report.get('rows_usable', 0)} of them.</p>{dist_line}
+{report.get('rows_usable', 0)} of them.</p>{cols_line}{dist_line}
 <h2>What it will learn from</h2>{samples}"""
         if report.get("ok"):
             banner += f"""<div class="row"><a class="btn primary" href="/w/{html.escape(w.slug)}/checks">
@@ -541,9 +570,10 @@ def try_step(w, samples: list[str], prompt: str = "", answers: list | None = Non
     work is one click away so the first thing she tries is real, and the two answers sit side by
     side because that comparison is the argument.
     """
+    noun = PACK_NOUNS.get(w.pack, "examples")
     chips = "".join(
         f'<button type="button" class="btn" data-fill="{html.escape(s, quote=True)}">'
-        f'Use one of my {"tickets" if w.pack == "support-replies" else "leads"} ({i + 1})</button>'
+        f'Use one of my {noun} ({i + 1})</button>'
         for i, s in enumerate(samples)
     )
     if answers is None:

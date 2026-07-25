@@ -17,6 +17,14 @@ import re
 
 # Column names seen in real exports (Zendesk, Intercom, HubSpot, Freshdesk, spreadsheets).
 _ALIASES = {
+    # The generic pair: whatever the work was, and whatever your team answered.
+    "work": ("work", "input", "question", "request", "text", "prompt", "task", "description",
+             "message", "body", "subject", "content", "enquiry", "inquiry", "item"),
+    "answer": ("answer", "output", "reply", "response", "result", "resolution", "summary",
+               "completion", "final", "sent", "notes", "outcome text"),
+    # A label, for the sorting jobs: which queue, which category, which priority.
+    "label": ("label", "category", "class", "type", "queue", "tag", "topic", "priority",
+              "department", "team", "disposition", "reason", "bucket", "status"),
     "subject": ("subject", "title", "ticket subject", "summary"),
     "body": ("body", "description", "message", "question", "ticket body",
              "first message", "customer message", "content", "text"),
@@ -204,7 +212,103 @@ def prepare_leads(rows: list[dict]) -> tuple[Report, list[dict]]:
                   len(rows), len(kept), samples, columns, counts), kept
 
 
-PREPARERS = {"support-replies": prepare_support, "sales-triage": prepare_leads}
+def prepare_generic(rows: list[dict]) -> tuple[Report, list[dict]]:
+    """Any job where your team writes an answer: two columns, the work and what they sent.
+
+    This is the pack that makes the product work for departments nobody planned for — procurement
+    replying to suppliers, HR answering policy questions, ops writing shipping notes. If a team has
+    a spreadsheet of "here is what came in, here is what we said", it can train a model.
+    """
+    if not rows:
+        return Report(False, "blocked", "We couldn't read that file.",
+                      "Export as CSV or JSONL with two columns: the work that came in, and what "
+                      "your team wrote back."), []
+    work_col, answer_col = _pick(rows, "work"), _pick(rows, "answer")
+    if not work_col or not answer_col or work_col == answer_col:
+        found = ", ".join(list(rows[0].keys())[:8]) or "none"
+        return Report(False, "blocked", "We need two columns to learn from.",
+                      "One with the work that came in, one with what your team wrote back. "
+                      f"Columns we found: {found}.", rows_seen=len(rows)), []
+
+    kept = [
+        {"prompt": _text(row, work_col), "reference": _text(row, answer_col)}
+        for row in rows
+        if _text(row, work_col) and len(_text(row, answer_col).split()) >= 3
+    ]
+    columns = {"the work": work_col, "what your team wrote": answer_col}
+    samples = [{"prompt": k["prompt"][:400], "reference": k["reference"][:400]} for k in kept[:3]]
+    detail_columns = (f"Reading “{work_col}” as the work and “{answer_col}” as your team's answer. "
+                      "If that is the wrong way round, rename the columns and upload again.")
+    if len(kept) < 40:
+        return Report(False, "blocked", f"Only {len(kept)} usable pairs.",
+                      f"{detail_columns} Aim for a few hundred.",
+                      len(rows), len(kept), samples, columns), kept
+    level = "good" if len(kept) >= 250 else "thin"
+    return Report(True, level, f"{len(kept)} usable pairs — {'a strong set' if level == 'good' else 'enough to start'}.",
+                  detail_columns, len(rows), len(kept), samples, columns), kept
+
+
+def prepare_classify(rows: list[dict]) -> tuple[Report, list[dict]]:
+    """Sorting work into your own categories, checked against what your team actually chose.
+
+    The reward here is exact: either it picked the category your team picked, or it did not. That
+    makes it the most reliable kind of training available, and it fits a surprising amount of what
+    a business does all day — routing, tagging, triage, quality flags.
+    """
+    if not rows:
+        return Report(False, "blocked", "We couldn't read that file.",
+                      "Export as CSV or JSONL with the text and the category your team chose."), []
+    text_col, label_col = _pick(rows, "work"), _pick(rows, "label")
+    if not text_col or not label_col or text_col == label_col:
+        found = ", ".join(list(rows[0].keys())[:8]) or "none"
+        return Report(False, "blocked", "We need the text and the category your team chose.",
+                      f"Columns we found: {found}.", rows_seen=len(rows)), []
+
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        text, label = _text(row, text_col), _text(row, label_col).strip()
+        if not text or not label or len(label) > 60:
+            continue
+        buckets.setdefault(label.lower(), []).append({"prompt": text, "label": label.lower()})
+
+    counts = {label: len(items) for label, items in buckets.items()}
+    columns = {"the text": text_col, "the category": label_col}
+    if len(counts) < 2:
+        return Report(False, "blocked", "Only one category found.",
+                      "A sorting model needs at least two categories to choose between.",
+                      len(rows), 0, [], columns, counts), []
+    if len(counts) > 24:
+        return Report(False, "blocked", f"{len(counts)} different categories.",
+                      "That is more like free text than a set of categories. Group them into a "
+                      "dozen or fewer, or use the “anything your team answers” option instead.",
+                      len(rows), 0, [], columns, counts), []
+
+    # Balanced, so the model cannot win by always guessing the commonest category.
+    floor = min(counts.values())
+    kept = [row for items in buckets.values() for row in items[:floor]]
+    samples = [{"prompt": k["prompt"][:300], "reference": k["label"]} for k in kept[:3]]
+    spread = ", ".join(f"{label} {count}" for label, count in sorted(counts.items(),
+                                                                     key=lambda kv: -kv[1])[:6])
+    if floor < 10:
+        return Report(False, "blocked",
+                      f"The smallest category has only {floor} examples.",
+                      f"Categories are balanced so the model can't win by guessing the commonest "
+                      f"one, which caps every category at the smallest. Found: {spread}. Aim for "
+                      "30+ each.", len(rows), len(kept), samples, columns, counts), kept
+    level = "good" if floor >= 30 else "thin"
+    return Report(True, level,
+                  f"{len(kept)} examples across {len(counts)} categories, balanced at {floor} each.",
+                  f"Found: {spread}. Your team's own choices are the answer key, which makes this "
+                  "the most reliable kind of training there is.",
+                  len(rows), len(kept), samples, columns, counts), kept
+
+
+PREPARERS = {
+    "support-replies": prepare_support,
+    "sales-triage": prepare_leads,
+    "any-task": prepare_generic,
+    "sort-into-categories": prepare_classify,
+}
 
 
 def prepare(pack: str, text: str, filename: str) -> tuple[Report, list[dict]]:
@@ -217,6 +321,11 @@ def prepare(pack: str, text: str, filename: str) -> tuple[Report, list[dict]]:
 # The instruction each pack's model works under. Kept identical to the CLI packs' SYSTEM_PROMPT so
 # a model started in the browser and one started from a terminal learn the same job.
 SYSTEM_PROMPTS = {
+    "any-task": "Answer the way this team answers. Be specific and concise.",
+    "sort-into-categories": (
+        "Sort the text into exactly one category. Reply with ONLY this line:\n"
+        "CATEGORY: <one of the categories you were trained on>"
+    ),
     "support-replies": (
         "You are the support agent. Read the ticket and draft the reply to send. "
         "Be specific to this ticket, resolve the issue, and keep the reply under 160 words."
@@ -243,7 +352,13 @@ def write_task_files(pack: str, kept: list[dict], dest) -> None:
         "".join(json.dumps({"prompt": row["prompt"]}) + "\n" for row in kept), encoding="utf-8"
     )
     system = SYSTEM_PROMPTS.get(pack, "")
-    if pack == "support-replies":
+    if pack == "sort-into-categories":
+        (dest / "labels.jsonl").write_text(
+            "".join(json.dumps({"prompt": r["prompt"], "label": r["label"]}) + "\n" for r in kept),
+            encoding="utf-8",
+        )
+        answers = [(r["prompt"], f"CATEGORY: {r['label']}") for r in kept]
+    elif pack in ("support-replies", "any-task"):
         (dest / "refs.jsonl").write_text(
             "".join(json.dumps({"prompt": r["prompt"], "reference": r["reference"]}) + "\n"
                     for r in kept),
