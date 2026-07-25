@@ -699,7 +699,9 @@ def _add_train(sub) -> None:
                       help="Refuse to train on less than this.")
     auto.add_argument("--stage", choices=("auto", "sft", "rl"), default="auto",
                       help="auto = imitate the corrections (needs no rollout engine).")
-    auto.add_argument("--no-deploy", action="store_true", help="Prove it but don't serve it.")
+    auto.add_argument("--no-deploy", action="store_true",
+                      help="Prove it but don't serve it. (It is still loaded under a checking "
+                           "name — that is the only way to score it.)")
     auto.add_argument("--ignore-host", action="store_true",
                       help="Run even on battery or while the machine is in use.")
     auto.add_argument("--history", action="store_true", help="Show recent cycles instead.")
@@ -721,7 +723,8 @@ def _add_train(sub) -> None:
     )
     nightly.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     nightly.add_argument("--no-deploy", action="store_true",
-                         help="Train and prove it, but don't serve it even on a pass.")
+                         help="Train and prove it, but don't serve it even on a pass. (It is "
+                              "still loaded under a checking name so it can be scored.)")
     nightly.add_argument("--ignore-host", action="store_true",
                          help="Train even on battery or while the machine is in use.")
     nightly.add_argument("--history", action="store_true", help="Show recent nights instead.")

@@ -930,3 +930,117 @@ def test_the_data_page_says_where_to_get_the_file(client, tmp_path):
     # Every pack gets its own list, and none of them assumes she has a helpdesk at all.
     for pack in pages.PACK_TITLES:
         assert "spreadsheet" in pages.export_help(pack)
+
+
+def test_a_night_that_lost_is_never_shown_as_a_win(client, tmp_path, monkeypatch):
+    """The stage word becomes a sentence a customer reads. It has to be the true one."""
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+
+    class S:
+        requests, trainable, edited, teacher_rows = 900, 480, 200, 100
+        first_seen = last_seen = ""
+        headline = "h"
+        advice = "a"
+
+    history = [
+        # What run_cycle records now.
+        {"started": "2026-07-24T23:00:00", "stage": "refused", "ok": False,
+         "examples": 400, "delta": -0.004, "detail": "no meaningful gain (-0.004)"},
+        # What it recorded before 2026-07-26 for the same outcome — a history file outlives the
+        # release that wrote it, so the page must still read this correctly.
+        {"started": "2026-07-23T23:00:00", "stage": "proved", "ok": False,
+         "examples": 380, "delta": -0.010, "detail": "no meaningful gain (-0.010)"},
+        # Trained but never compared: not the same thing as "not better".
+        {"started": "2026-07-22T23:00:00", "stage": "trained", "ok": False, "examples": 300,
+         "detail": "trained, but there is no held-out set to prove it against"},
+    ]
+    page = pages.overnight_page(w, S(), history, {"power": "on mains", "activity": "idle 60s"},
+                                nightly_on=True, schedule={"installed": True, "when": "23:00"})
+    assert "It won on held-back work" not in page       # nothing here won
+    assert page.count("chip '>not better") == 2          # both refusals, old and new spelling
+    assert "not checked" in page
+    assert "no held-back work to compare it against" in page
+
+
+def test_the_page_never_contradicts_the_scheduler(client, tmp_path, monkeypatch):
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+
+    class S:
+        requests, trainable, edited, teacher_rows = 900, 900, 200, 100
+        first_seen = last_seen = ""
+        headline = "h"
+        advice = "a"
+
+    host = {"power": "on mains", "activity": "idle 60s"}
+    # A job exists but this model's switch is off: say so, don't print "nothing is scheduled".
+    installed_off = pages.overnight_page(w, S(), [], host, nightly_on=False,
+                                         schedule={"installed": True, "when": "23:00", "mine": True})
+    assert "A nightly job is installed" in installed_off
+    assert "Nothing is scheduled" not in installed_off
+
+    # A job installed by a different folder with the same model name would be replaced silently.
+    foreign = pages.overnight_page(w, S(), [], host, nightly_on=True,
+                                   schedule={"installed": True, "when": "23:00", "mine": False,
+                                             "workspace": "/Users/dee/other/support-replies"})
+    assert "Another model owns tonight" in foreign
+    assert "/Users/dee/other/support-replies" in foreign
+
+
+def test_a_long_category_is_not_permanently_unlearnable(client, tmp_path, monkeypatch):
+    """24 tokens fits "billing" and truncates a real one — and a truncated answer scores 0.0
+    on every rollout of that category, forever."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    long_label = "escalate-to-tier-2/hardware-warranty-emea-approval-needed"
+    rows = "Text,Queue\n" + "".join(
+        f"item {i},{long_label if i % 2 else 'billing'}\n" for i in range(120))
+    w = workspace.create("q", "sort-into-categories")
+    report = workspace.attach_data(w, "q.csv", rows)
+    assert report.ok, report.headline
+    workspace.write_config(w, model="m", endpoint="http://x/v1", steps=10)
+    toml = (w.path / "grid-train.toml").read_text(encoding="utf-8")
+    budget = int(next(line for line in toml.splitlines()
+                      if line.startswith("max_tokens")).split("=")[1])
+    # Enough room for "CATEGORY: " plus the longest category the customer actually uses.
+    assert budget >= 40, toml
+
+    short = workspace.create("q2", "sort-into-categories")
+    workspace.attach_data(short, "q.csv", "Text,Queue\n" + "".join(
+        f"item {i},{'billing' if i % 2 else 'shipping'}\n" for i in range(120)))
+    workspace.write_config(short, model="m", endpoint="http://x/v1", steps=10)
+    short_toml = (short.path / "grid-train.toml").read_text(encoding="utf-8")
+    assert "max_tokens = 24" in short_toml      # short categories stay cheap
+
+
+def test_the_column_guess_prefers_the_field_a_team_actually_sorts_by(client, tmp_path):
+    """Status is in every helpdesk export and is almost never the routing field."""
+    from train.web import prepare
+
+    rows = "Id,Subject,Description,Group,Status\n" + "".join(
+        f"{i},s,desc {i},{['billing', 'shipping', 'technical'][i % 3]},solved\n" for i in range(120))
+    report, _ = prepare.prepare("sort-into-categories", rows, "zendesk.csv")
+    assert report.columns_used["the category"] == "group"
+    assert report.ok and len(report.distribution) == 3
+
+
+def test_a_mailbox_export_is_not_trained_to_answer_with_a_timestamp(client, tmp_path):
+    """"Sent" in a mailbox export is the time, not the reply."""
+    import json as _json
+
+    from train.web import prepare
+
+    rows = [{"From": "s@x.com", "Subject": f"PO-{i}", "Body": f"When will PO-{i} be approved?",
+             "Sent": "2026-07-01 10:04:11 +0700",
+             "Reply body": "Approved this morning. Terms are NET-30 from delivery."}
+            for i in range(60)]
+    report, kept = prepare.prepare(
+        "any-task", "".join(_json.dumps(r) + "\n" for r in rows), "mailbox.jsonl")
+    assert report.columns_used["what your team wrote"] == "reply body"
+    assert kept[0]["reference"].startswith("Approved this morning")

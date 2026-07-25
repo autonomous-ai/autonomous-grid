@@ -140,3 +140,58 @@ def test_a_runaway_cursor_cannot_loop_forever(monkeypatch):
         "paging": {"next": {"after": "always"}}}))
     pulled = connectors.pull_hubspot(max_rows=10_000, transport=transport)
     assert pulled.pages == connectors._PAGE_LIMIT
+
+
+def test_a_rate_limited_ticket_is_not_recorded_as_having_no_reply(monkeypatch):
+    """The dangerous version: 5,000 tickets behind a 429 all look like tickets nobody answered."""
+    monkeypatch.setenv("ZENDESK_API_TOKEN", "t0ken")
+    monkeypatch.setattr(connectors, "_wait", lambda retry_after: None)
+    seen = {"comments": 0}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if "/comments.json" in request.url.path:
+            seen["comments"] += 1
+            return httpx.Response(429, headers={"retry-after": "1"}, json={})
+        return httpx.Response(200, json={"results": [
+            {"id": 1, "subject": "s", "description": "d", "status": "solved"},
+            {"id": 2, "subject": "s", "description": "d", "status": "solved"},
+        ]})
+
+    pulled = connectors.pull_zendesk("acme", "me@acme.com", transport=_transport(handle))
+    assert pulled.rows == []
+    assert pulled.unreadable == 2
+    assert seen["comments"] == 4                      # one retry each, then give up
+    assert "could not be read" in pulled.detail
+    assert "left out rather than recorded as having no reply" in pulled.trustworthy
+
+
+def test_one_network_hiccup_does_not_throw_away_the_whole_pull(monkeypatch):
+    monkeypatch.setenv("ZENDESK_API_TOKEN", "t0ken")
+    calls = {"n": 0}
+    reply = "Unplug the desk for sixty seconds and hold the down button until it recalibrates."
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if "/comments.json" in request.url.path:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("connection reset")
+            return httpx.Response(200, json={"comments": [
+                {"public": True, "body": "the customer"}, {"public": True, "body": reply}]})
+        return httpx.Response(200, json={"results": [
+            {"id": 1, "subject": "s", "description": "d", "status": "solved"}]})
+
+    pulled = connectors.pull_zendesk("acme", "me@acme.com", transport=_transport(handle))
+    assert len(pulled.rows) == 1 and pulled.rows[0]["reply"] == reply   # retried, not abandoned
+
+
+def test_a_partial_pull_never_reads_as_a_complete_one(monkeypatch):
+    """Hitting the page cap on a big CRM must not print like a full history."""
+    monkeypatch.setenv("HUBSPOT_ACCESS_TOKEN", "pat-x")
+    transport = _transport(lambda request: httpx.Response(200, json={
+        "results": [{"properties": {"description": "x", "dealstage": "closedwon"}}],
+        "paging": {"next": {"after": "always"}}}))
+    pulled = connectors.pull_hubspot(max_rows=10_000, transport=transport)
+    assert pulled.pages == connectors._PAGE_LIMIT
+    assert pulled.truncated and not pulled.complete
+    assert "safety limit" in pulled.detail
+    assert "PARTIAL" in pulled.trustworthy

@@ -16,15 +16,18 @@ import json
 import re
 
 # Column names seen in real exports (Zendesk, Intercom, HubSpot, Freshdesk, spreadsheets).
+# Order matters: the first alias that matches wins, so the strongest evidence goes first and
+# anything ambiguous goes last (see _WEAK below).
 _ALIASES = {
     # The generic pair: whatever the work was, and whatever your team answered.
     "work": ("work", "input", "question", "request", "text", "prompt", "task", "description",
              "message", "body", "subject", "content", "enquiry", "inquiry", "item"),
-    "answer": ("answer", "output", "reply", "response", "result", "resolution", "summary",
-               "completion", "final", "sent", "notes", "outcome text"),
+    "answer": ("answer", "output", "reply", "response", "resolution", "reply body", "agent reply",
+               "completion", "result", "summary", "notes", "outcome text"),
     # A label, for the sorting jobs: which queue, which category, which priority.
-    "label": ("label", "category", "class", "type", "queue", "tag", "topic", "priority",
-              "department", "team", "disposition", "reason", "bucket", "status"),
+    "label": ("label", "category", "queue", "group", "form", "tag", "topic", "class",
+              "department", "team", "disposition", "reason", "bucket", "priority", "type",
+              "status", "state"),
     "subject": ("subject", "title", "ticket subject", "summary"),
     "body": ("body", "description", "message", "question", "ticket body",
              "first message", "customer message", "content", "text"),
@@ -88,18 +91,35 @@ def _rows(text: str, filename: str) -> list[dict]:
     return [{str(k).strip().lower(): v for k, v in row.items() if k} for row in out]
 
 
+# Aliases that name the right thing often enough to keep, and the wrong thing often enough that
+# anything else should win first:
+#   "sent"   — in a mailbox export this is the TIMESTAMP, not the reply. Read as the answer, the
+#              model is trained to emit "2026-07-01 10:04:11 +0700" for every request.
+#   "status" — present in essentially every helpdesk export, and almost never the field a team
+#              sorts by. A routing model trained on it learns to predict "solved".
+_WEAK = {"sent", "final", "status", "state", "result", "type", "priority"}
+
+
 def _pick(rows: list[dict], field: str) -> str | None:
-    """Which column in this export is our `field`? Exact alias first, then substring."""
+    """Which column in this export is our `field`?
+
+    Strong aliases beat weak ones, exact beats substring, and within a tier the alias order above
+    decides. A wrong guess here is not a crash: it is a night of training on the wrong column and
+    a model that confidently answers with a timestamp — so the page also prints what was chosen.
+    """
     if not rows:
         return None
     keys = list(rows[0].keys())
-    for alias in _ALIASES[field]:
-        if alias in keys:
-            return alias
-    for alias in _ALIASES[field]:
-        for key in keys:
-            if alias in key:
-                return key
+    strong = [a for a in _ALIASES[field] if a not in _WEAK]
+    weak = [a for a in _ALIASES[field] if a in _WEAK]
+    for aliases in (strong, weak):
+        for alias in aliases:
+            if alias in keys:
+                return alias
+        for alias in aliases:
+            for key in keys:
+                if alias in key:
+                    return key
     return None
 
 

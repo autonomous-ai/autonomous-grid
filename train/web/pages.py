@@ -853,13 +853,28 @@ _STAGE_WORDS = {
                  "It beat the model you were using on held-back work, so it took over."),
     "proved": ("ok", "better",
                "It won on held-back work. Nothing was swapped in automatically."),
-    "trained": ("", "not better",
-                ("It learned something but could not beat what you already serve, so nothing "
-                 "changed — you kept the model you had. This is the gate doing its job.")),
+    "refused": ("", "not better",
+                ("It was checked against work it had never seen, did not beat the model you "
+                 "already serve, and so was not used. This is the gate doing its job.")),
+    "trained": ("", "not checked",
+                ("It trained, but there was no held-back work to compare it against — so it was "
+                 "not served. Nothing about the model you use changed.")),
     "waiting": ("", "waiting", ""),
     "skipped": ("", "left it alone", ""),
     "failed": ("bad", "didn't finish", ""),
 }
+
+
+def _night_words(row: dict) -> tuple[str, str, str]:
+    """(chip class, chip label, sentence) for one recorded night.
+
+    Reads `ok` as well as `stage` because runs recorded before 2026-07-26 wrote "proved" for a
+    night that FAILED the gate, and a history file outlives the release that wrote it.
+    """
+    stage = row.get("stage", "")
+    if stage == "proved" and row.get("ok") is False:
+        stage = "proved" if "won" in str(row.get("detail", "")) else "refused"
+    return _STAGE_WORDS.get(stage, ("", stage or "?", ""))
 
 
 def overnight_page(w, summary, history: list[dict], host: dict, *,
@@ -884,14 +899,28 @@ def overnight_page(w, summary, history: list[dict], host: dict, *,
     )
 
     # The schedule as the computer actually holds it, not as the page remembers asking for it.
-    scheduled = bool((schedule or {}).get("installed"))
-    at = (schedule or {}).get("when") or "23:00"
+    state = schedule or {}
+    scheduled = bool(state.get("installed")) and state.get("mine", True)
+    foreign = bool(state.get("installed")) and not state.get("mine", True)
+    at = state.get("when") or "23:00"
     short = max(min_examples - summary.trainable, 0)
-    if nightly_on and not scheduled:
+    if foreign:
+        tonight = ("<b>Another model owns tonight.</b> A nightly job is installed on this computer "
+                   f"for a different folder ({html.escape(str(state.get('workspace', '')))}), and "
+                   "turning it on here would replace it. Rename this model, or turn the other one "
+                   "off first.")
+        tone = "warn"
+    elif nightly_on and not scheduled:
         tonight = ("<b>Nothing will happen tonight.</b> The work is being kept, but this computer "
                    "has no job in its scheduler to train on it. Turn it on again from the model's "
                    "page, or run <code>grid train autopilot</code> yourself.")
         tone = "warn"
+    elif not nightly_on and scheduled:
+        # A job IS installed even though this model's switch reads off — say which, rather than
+        # printing "nothing is scheduled" over the top of a schedule we just read off disk.
+        tonight = (f"<b>A nightly job is installed</b> and runs at {at}, but this model's switch "
+                   "is off. Turn it on from the model's page, or remove the job there.")
+        tone = ""
     elif not nightly_on:
         tonight = ("<b>Nothing is scheduled.</b> Turn it on from the model's page and every answer "
                    "your team corrects becomes an example.")
@@ -910,7 +939,7 @@ def overnight_page(w, summary, history: list[dict], host: dict, *,
 
     rows = ""
     for row in reversed(history):
-        cls, title, explain = _STAGE_WORDS.get(row.get("stage", ""), ("", row.get("stage", "?"), ""))
+        cls, title, explain = _night_words(row)
         delta = row.get("delta")
         numeric = isinstance(delta, (int, float)) and not isinstance(delta, bool)
         change = f"{delta:+.3f}" if numeric else "—"

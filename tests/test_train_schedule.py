@@ -116,3 +116,59 @@ def test_labels_cannot_escape_into_a_filename(home, tmp_path, monkeypatch):
     assert schedule.label_for("../../etc/passwd") == "ai.autonomous.grid.train.etc-passwd"
     assert schedule.label_for("") == "ai.autonomous.grid.train.model"
     assert "/" not in schedule.label_for("a/b c")
+
+
+def test_a_rejected_install_leaves_nothing_behind(home, tmp_path, monkeypatch):
+    """status() reads the file. A rejected plist left on disk = a page saying "on" for a job
+    that will never run, which is the one thing this module must never do."""
+    monkeypatch.setattr(schedule.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(schedule, "_launchctl", lambda *a: (1, "Load failed: 5: I/O error"))
+    result = schedule.install(tmp_path, slug="s")
+    assert not result.ok
+    assert not schedule._plist_path("s").exists()
+    assert schedule.status(slug="s", system="Darwin")["installed"] is False
+
+
+def test_a_rejected_systemd_timer_leaves_nothing_behind(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(schedule.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/systemctl")
+    monkeypatch.setattr(schedule, "_systemctl", lambda *a: (1, "Failed to enable unit"))
+    result = schedule.install(tmp_path, slug="s")
+    assert not result.ok
+    assert not schedule._unit_path("s", "timer").exists()
+    assert not schedule._unit_path("s", "service").exists()
+
+
+def test_a_command_that_cannot_start_is_never_scheduled(home, tmp_path, monkeypatch):
+    """The Linux binary case: sys.executable is a path that does not exist between runs, so the
+    job would be installed, reported as on, and fail every night in silence."""
+    monkeypatch.setattr(schedule.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(schedule, "_can_run", lambda cmd: (False, "no such file or directory"))
+    result = schedule.install(tmp_path, slug="s")
+    assert not result.ok
+    assert "scheduling it would do nothing" in result.detail
+    assert not schedule._plist_path("s").exists()
+
+
+def test_the_scheduled_command_is_one_this_computer_can_actually_run(home, tmp_path):
+    """Not a mock: build the real argv and run it."""
+    command = schedule._command(tmp_path, None)
+    assert command[-2:] == ["train", "autopilot"]
+    ok, complaint = schedule._can_run(command)
+    assert ok, complaint
+
+
+def test_a_path_with_a_space_survives_systemd(home, tmp_path, monkeypatch):
+    """systemd splits ExecStart on whitespace; "/home/dee/My Models" would arrive as two args."""
+    monkeypatch.setattr(schedule.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(schedule.shutil, "which", lambda name: "/usr/bin/systemctl")
+    spaced = tmp_path / "My Models"
+    spaced.mkdir()
+    config = spaced / "grid-train.toml"
+    config.write_text("", encoding="utf-8")
+    result = schedule.install(spaced, slug="s", config=config)
+    assert result.ok, result.detail
+    service = schedule._unit_path("s", "service").read_text(encoding="utf-8")
+    exec_line = next(line for line in service.splitlines() if line.startswith("ExecStart="))
+    assert "'" in exec_line or '"' in exec_line          # the path is quoted, not split
+    assert "GRID_HOME=" in service                        # same store the person sees, not root's

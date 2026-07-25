@@ -58,12 +58,18 @@ def _eval_returning(passed: bool, delta: float, monkeypatch, calls):
     monkeypatch.setattr("train.evaluate.run_eval", fake_eval)
 
 
-def _deploy_returning(ok: bool, monkeypatch, calls):
+def _deploy_returning(ok: bool, monkeypatch, calls, *, staging_ok: bool = True):
+    """`staging_ok` lets a test load the candidate for checking but fail the real deploy."""
     def fake_deploy(adapter_dir, nodes, name, **kwargs):
         calls.append(f"deploy:{name}")
-        return [{"node": n, "ok": ok, "detail": "serving" if ok else "unreachable"} for n in nodes]
+        good = staging_ok if name.endswith("-candidate") else ok
+        return [{"node": n, "ok": good, "detail": "serving" if good else "unreachable"}
+                for n in nodes]
 
     monkeypatch.setattr("train.deploy.deploy_adapter", fake_deploy)
+    # The gate asks whether the serving name is a thing this engine holds. Answer without a socket.
+    monkeypatch.setattr("train.rollout.probe_endpoint",
+                        lambda cfg, model, **kw: {"ok": True, "detail": "", "model": model})
 
 
 def test_happy_night_trains_proves_then_deploys_in_that_order(stubs, monkeypatch):
@@ -72,7 +78,11 @@ def test_happy_night_trains_proves_then_deploys_in_that_order(stubs, monkeypatch
     _deploy_returning(True, monkeypatch, calls)
     result = nightly.run_cycle(_cfg(stubs["tmp"]))
     assert result.ok and result.stage == "deployed"
-    assert calls == ["train", "eval:support-v1", "deploy:support-v1"]
+    # The candidate is loaded under a staging name, THAT is what gets scored, and only then is it
+    # served under the name customers use. Scoring "support-v1" before deploying would score
+    # whatever the node already holds — last night's model — and ship tonight's unmeasured.
+    assert calls == ["train", "deploy:support-v1-candidate", "eval:support-v1-candidate",
+                     "deploy:support-v1"]
     assert "now serving as support-v1" in result.detail
 
 
@@ -81,8 +91,11 @@ def test_a_model_that_did_not_win_is_never_deployed(stubs, monkeypatch):
     _eval_returning(False, 0.004, monkeypatch, calls)
     _deploy_returning(True, monkeypatch, calls)
     result = nightly.run_cycle(_cfg(stubs["tmp"]))
-    assert not result.ok and result.stage == "proved"
-    assert "deploy:support-v1" not in calls      # the gate held
+    # "refused", not "proved": the comparison ran and the candidate lost. The word matters —
+    # the browser's overnight page turns this stage into a sentence a customer reads.
+    assert not result.ok and result.stage == "refused"
+    assert "deploy:support-v1" not in calls      # the gate held — only the staging load happened
+    assert calls == ["train", "deploy:support-v1-candidate", "eval:support-v1-candidate"]
     assert "no meaningful gain" in result.detail
 
 
@@ -101,7 +114,9 @@ def test_no_deploy_flag_stops_before_serving(stubs, monkeypatch):
     _deploy_returning(True, monkeypatch, calls)
     result = nightly.run_cycle(_cfg(stubs["tmp"]), deploy=False)
     assert result.ok and result.stage == "proved"
-    assert not any(c.startswith("deploy") for c in calls)
+    # It must still be loaded under the checking name — that is the only way to score it — but
+    # nothing is ever served under the name customers use.
+    assert calls == ["train", "deploy:support-v1-candidate", "eval:support-v1-candidate"]
 
 
 def test_a_machine_in_use_is_left_alone(stubs, monkeypatch):

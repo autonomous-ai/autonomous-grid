@@ -35,6 +35,21 @@ class Pulled:
     pages: int
     truncated: bool
     detail: str
+    unreadable: int = 0        # rows we fetched but could not complete (rate limits, hiccups)
+    complete: bool = True      # False when the vendor stopped us short of the history
+
+    @property
+    def trustworthy(self) -> str:
+        """What a person needs to know before treating this file as their history."""
+        if self.complete and not self.unreadable:
+            return ""
+        parts = []
+        if not self.complete:
+            parts.append("this is a PARTIAL pull")
+        if self.unreadable:
+            parts.append(f"{self.unreadable} item(s) could not be read (rate limits or network) "
+                         "and were left out rather than recorded as having no reply")
+        return " — ".join(parts)
 
 
 class ConnectorError(RuntimeError):
@@ -83,7 +98,9 @@ def pull_zendesk(subdomain: str, email: str, *, max_rows: int = 5000, status: st
     base = f"https://{subdomain.strip().strip('/')}.zendesk.com/api/v2"
     auth = (f"{email}/token", token)
     rows: list[dict] = []
+    unreadable = 0
     pages = 0
+    hit_page_limit = False
     url = f"{base}/search.json"
     params = {"query": f"type:ticket status:{status}", "sort_by": "created_at", "sort_order": "desc"}
     with _client(transport, auth=auth) as client:
@@ -97,32 +114,76 @@ def pull_zendesk(subdomain: str, email: str, *, max_rows: int = 5000, status: st
             body = response.json()
             pages += 1
             for ticket in body.get("results", []) or []:
+                reply = _zendesk_reply(client, base, ticket.get("id"))
+                if reply is UNREADABLE:
+                    unreadable += 1
+                    continue
                 rows.append({
                     "subject": ticket.get("subject") or "",
                     "description": ticket.get("description") or "",
-                    "reply": _zendesk_reply(client, base, ticket.get("id")),
+                    "reply": reply,
                     "status": ticket.get("status") or "",
                 })
                 if len(rows) >= max_rows:
                     break
             url, params = body.get("next_page"), None
+            if url and pages >= _PAGE_LIMIT:
+                hit_page_limit = True
     kept = [row for row in rows if row["reply"]]
-    return Pulled("zendesk", kept, pages, len(rows) >= max_rows,
-                  f"{len(kept)} solved tickets with a public reply, from {pages} page(s).")
+    stopped_early = len(rows) >= max_rows or hit_page_limit
+    detail = f"{len(kept)} solved tickets with a public reply, from {pages} page(s)."
+    if hit_page_limit:
+        detail += (f" Stopped at the {_PAGE_LIMIT}-page safety limit — there is more history than "
+                   "this file contains.")
+    if unreadable:
+        detail += f" {unreadable} ticket(s) could not be read and were left out."
+    return Pulled("zendesk", kept, pages, stopped_early, detail,
+                  unreadable=unreadable, complete=not stopped_early)
 
 
-def _zendesk_reply(client, base: str, ticket_id) -> str:
-    """The first public agent comment — what the team actually sent."""
+UNREADABLE = object()      # distinct from "": we could not read it, vs it genuinely had no reply
+
+
+def _zendesk_reply(client, base: str, ticket_id):
+    """The first public agent comment — or UNREADABLE if we could not find out.
+
+    Returning "" for a rate-limited or failed fetch is the dangerous version: 5,000 tickets behind
+    a 429 all look like tickets your team never answered, every one is dropped, and the report
+    says so confidently. One retry, then say we do not know.
+    """
+    import httpx
+
     if not ticket_id:
         return ""
-    response = client.get(f"{base}/tickets/{ticket_id}/comments.json")
-    if response.status_code != 200:
-        return ""
-    comments = response.json().get("comments", []) or []
-    for comment in comments[1:]:            # [0] is the customer's own first message
-        if comment.get("public") and (comment.get("body") or "").strip():
-            return comment["body"].strip()
-    return ""
+    url = f"{base}/tickets/{ticket_id}/comments.json"
+    for attempt in (0, 1):
+        try:
+            response = client.get(url)
+        except httpx.HTTPError:
+            continue                        # a hiccup on one ticket must not end the pull
+        if response.status_code == 200:
+            comments = response.json().get("comments", []) or []
+            for comment in comments[1:]:    # [0] is the customer's own first message
+                if comment.get("public") and (comment.get("body") or "").strip():
+                    return comment["body"].strip()
+            return ""                       # read it; there was genuinely no public reply
+        if response.status_code == 429 and attempt == 0:
+            _wait(response.headers.get("retry-after"))
+            continue
+        break
+    return UNREADABLE
+
+
+def _wait(retry_after: str | None) -> None:
+    """Honour Retry-After, within reason. A vendor asking for an hour is a reason to stop, not
+    to sleep through the night."""
+    import time
+
+    try:
+        seconds = min(float(retry_after or 2), 30.0)
+    except ValueError:
+        seconds = 2.0
+    time.sleep(max(seconds, 0.0))
 
 
 # --- HubSpot ------------------------------------------------------------------------------------
@@ -140,6 +201,7 @@ def pull_hubspot(*, max_rows: int = 5000, transport=None,
     rows: list[dict] = []
     pages = 0
     after = None
+    hit_page_limit = False
     with _client(transport, headers={"authorization": f"Bearer {token}"}) as client:
         while len(rows) < max_rows and pages < _PAGE_LIMIT:
             params = {"limit": 100, "properties": ",".join(_HUBSPOT_PROPS)}
@@ -163,8 +225,14 @@ def pull_hubspot(*, max_rows: int = 5000, transport=None,
             after = ((body.get("paging") or {}).get("next") or {}).get("after")
             if not after:
                 break
-    return Pulled("hubspot", rows, pages, len(rows) >= max_rows,
-                  f"{len(rows)} deals with both a description and a stage, from {pages} page(s).")
+            if pages >= _PAGE_LIMIT:
+                hit_page_limit = True
+    stopped_early = len(rows) >= max_rows or hit_page_limit
+    detail = f"{len(rows)} deals with both a description and a stage, from {pages} page(s)."
+    if hit_page_limit:
+        detail += (f" Stopped at the {_PAGE_LIMIT}-page safety limit — there is more history than "
+                   "this file contains.")
+    return Pulled("hubspot", rows, pages, stopped_early, detail, complete=not stopped_early)
 
 
 # --- writing what we pulled ---------------------------------------------------------------------

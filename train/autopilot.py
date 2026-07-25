@@ -38,7 +38,11 @@ MIN_EXAMPLES = 120
 class AutopilotResult:
     started: str
     ok: bool
-    stage: str        # "waiting" | "skipped" | "trained" | "proved" | "deployed" | "failed"
+    # waiting  — not enough examples yet          trained  — trained, but never compared
+    # skipped  — the machine was in use            refused  — compared, and it lost
+    # proved   — compared, and it won              deployed — it won and is now serving
+    # failed   — it did not finish
+    stage: str
     detail: str
     examples: int = 0
     delta: float | None = None
@@ -87,7 +91,8 @@ def run_cycle(cfg: TrainRunConfig, *, days: int = 30, min_examples: int = MIN_EX
         if not free:
             return _log(cfg, AutopilotResult(started, True, "skipped", why))
 
-    examples, dest = build_tonights_dataset(cfg, days=days, system_prompt=system_prompt)
+    examples, dest = build_tonights_dataset(
+        cfg, days=days, system_prompt=system_prompt or _workspace_system_prompt(cfg))
     if examples < min_examples:
         # Waiting is the correct outcome, not a failure: the store grows on its own as people work.
         return _log(cfg, AutopilotResult(
@@ -126,22 +131,27 @@ def run_cycle(cfg: TrainRunConfig, *, days: int = 30, min_examples: int = MIN_EX
     name = cfg.deploy.adapter_name or run_dir.name
 
     # Prove it. An SFT run has no held-out slice of its own, so borrow the workspace's if present.
-    from .evaluate import run_eval
+    from .evaluate import CandidateNotLoaded, prove_candidate
 
-    eval_source = run_dir if (run_dir / "eval_prompts.jsonl").is_file() else _find_holdout(cfg)
+    eval_source = _pick_eval_source(cfg, run_dir, dest)
     if eval_source is None:
         return _log(cfg, AutopilotResult(
             started, False, "trained",
             "trained, but there is no held-out set to prove it against — so it will not be served.",
             examples=examples, adapter=str(adapter)))
     try:
-        result = run_eval(cfg, eval_source, name)
-    except SystemExit as exc:
+        # The candidate goes onto the node under a staging name first. Scoring `name` would score
+        # last night's adapter and ship tonight's unmeasured.
+        result = prove_candidate(cfg, eval_source, adapter, name)
+    except (SystemExit, CandidateNotLoaded) as exc:
         return _log(cfg, AutopilotResult(started, False, "trained",
                                          f"trained, but could not be checked: {exc}",
                                          examples=examples, adapter=str(adapter)))
     if not result["passed"]:
-        return _log(cfg, AutopilotResult(started, False, "proved", result["verdict"],
+        # "refused", not "proved". The night DID happen and the comparison DID run — what it
+        # produced was worse, so nothing changed. Recording that as "proved" made the record read
+        # as a win on the page that shows a customer their week.
+        return _log(cfg, AutopilotResult(started, False, "refused", result["verdict"],
                                          examples=examples, delta=result["delta"],
                                          adapter=str(adapter)))
     if not deploy:
@@ -165,6 +175,93 @@ def run_cycle(cfg: TrainRunConfig, *, days: int = 30, min_examples: int = MIN_EX
                                      f"{result['verdict']} — now serving as {name}",
                                      examples=examples, delta=result["delta"],
                                      adapter=str(adapter)))
+
+
+def _workspace_system_prompt(cfg: TrainRunConfig) -> str:
+    """The instruction line this model was taught with, reused for tonight's captured work.
+
+    Every other path that writes sft.jsonl puts a system prompt in front — the sorting pack's
+    answers are only parseable because of it. Training tonight's rows without one teaches the model
+    a second, contradictory shape for the same job, and the graders then score it as wrong.
+    The workspace's own sft.jsonl already holds the right line, so take it from there.
+    """
+    rewards_dir = _rewards_dir(cfg)
+    source = (rewards_dir / "sft.jsonl") if rewards_dir else None
+    if not source or not source.is_file():
+        return ""
+    for line in source.read_text(encoding="utf-8").splitlines():
+        try:
+            messages = json.loads(line).get("messages") or []
+        except json.JSONDecodeError:
+            continue
+        for message in messages:
+            if message.get("role") == "system" and message.get("content"):
+                return str(message["content"])
+        break                       # first row decides; a mixed file is not a thing we write
+    return ""
+
+
+def _rewards_dir(cfg: TrainRunConfig) -> Path | None:
+    """Where the graders live — and therefore where they look for their answer key."""
+    return Path(cfg.rewards.python_file).expanduser().parent if cfg.rewards.python_file else None
+
+
+def _pick_eval_source(cfg: TrainRunConfig, run_dir: Path, dataset: Path) -> Path | None:
+    """Which held-out set tonight is judged on — and make sure the graders can score it.
+
+    A grader with no answer key for a prompt returns the neutral 0.5. It does that for *both*
+    models, so the gate can only ever say "no meaningful gain": the night trains correctly and can
+    never ship. That is what happened with captured work, whose prompts appear in none of the
+    workspace's reference files.
+
+    Two shapes, two answers:
+
+    * **Answer-key packs** (a `labels.jsonl` beside the graders — the sorting pack, lead triage):
+      captured traffic carries no label and we must not invent one, so tonight is judged on the
+      workspace's own held-out slice, which has labels.
+    * **Reference packs** (`refs.jsonl` — replies, and anything written): the captured examples
+      *are* references (the human's correction, or the stronger model's answer), so they are
+      merged into the graders' lookup and tonight is judged on tonight's held-out work.
+    """
+    rewards_dir = _rewards_dir(cfg)
+    captured = run_dir if (run_dir / "eval_prompts.jsonl").is_file() else None
+    workspace_holdout = _find_holdout(cfg)
+
+    if rewards_dir and (rewards_dir / "labels.jsonl").is_file():
+        return workspace_holdout or captured
+    if captured and rewards_dir:
+        merge_references(rewards_dir, dataset)
+    return captured or workspace_holdout
+
+
+def merge_references(rewards_dir: Path, dataset: Path, *, keep: int = 20_000) -> int:
+    """Teach the workspace's graders about tonight's examples. Returns how many it knows now.
+
+    The generated graders read `refs.jsonl` from their own directory; tonight's prompts are in the
+    dataset directory. Merging (newest wins, oldest dropped past `keep`) is what lets the gate say
+    anything at all about captured work.
+    """
+    source = dataset / "refs.jsonl"
+    if not source.is_file():
+        return 0
+    target = rewards_dir / "refs.jsonl"
+    known: dict[str, str] = {}
+    for path in (target, source):        # source second: tonight's version wins
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and row.get("prompt"):
+                known[row["prompt"]] = row.get("reference", "")
+    rows = list(known.items())[-keep:]
+    target.write_text(
+        "".join(json.dumps({"prompt": p, "reference": r}) + "\n" for p, r in rows),
+        encoding="utf-8",
+    )
+    return len(rows)
 
 
 def _find_holdout(cfg: TrainRunConfig) -> Path | None:

@@ -34,7 +34,9 @@ from .config import TrainRunConfig
 class CycleResult:
     started: str
     ok: bool
-    stage: str            # "skipped" | "trained" | "proved" | "deployed" | "failed"
+    # skipped — machine in use · trained — never compared · refused — compared and lost
+    # proved  — compared and won · deployed — won and serving · failed — did not finish
+    stage: str
     detail: str
     delta: float | None = None
     adapter: str = ""
@@ -90,20 +92,21 @@ def run_cycle(
                                      f"training crashed: {type(exc).__name__}: {exc}"))
     run_dir = adapter_dir.parent
 
-    # 2. Prove it on held-out work.
-    from .evaluate import run_eval
+    # 2. Prove it on held-out work — the CANDIDATE, loaded under a staging name. Asking the node
+    # for the serving name would score whatever it already holds (see evaluate.prove_candidate).
+    from .evaluate import CandidateNotLoaded, prove_candidate
 
     name = candidate_name or cfg.deploy.adapter_name or adapter_dir.parent.name
     try:
-        result = run_eval(cfg, run_dir, name)
-    except SystemExit as exc:
+        result = prove_candidate(cfg, run_dir, adapter_dir, name)
+    except (SystemExit, CandidateNotLoaded) as exc:
         return _log(cfg, CycleResult(started, False, "trained",
                                      f"trained, but could not be checked: {exc}",
                                      adapter=str(adapter_dir)))
     if not result["passed"]:
         # A night that produced nothing better is a *successful* night for the customer: the model
         # they rely on is untouched. Non-zero exit is for the operator, not a failure of the loop.
-        return _log(cfg, CycleResult(started, False, "proved", result["verdict"],
+        return _log(cfg, CycleResult(started, False, "refused", result["verdict"],
                                      delta=result["delta"], adapter=str(adapter_dir)))
 
     if not deploy:

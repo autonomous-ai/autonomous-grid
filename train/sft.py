@@ -254,20 +254,33 @@ def _jsonl_logger(transformers, path: Path):
 
 # --- the entry point ------------------------------------------------------------------------
 
-def write_holdout(examples: list[dict], run_dir: Path, *, fraction: float = 0.1,
-                  minimum: int = 4, seed: int = 1729) -> int:
-    """Reserve some examples the run never sees, and record their prompts for the gate.
+def split_holdout(examples: list[dict], *, fraction: float = 0.1, minimum: int = 4,
+                  seed: int = 1729) -> tuple[list[dict], list[dict]]:
+    """(held, learn) — one seeded shuffle, split once, so the two halves cannot overlap.
 
-    Without this an imitation run finishes with nothing to be judged against, and the browser flow
-    dead-ends one click before its payoff: trained, unprovable, unservable. Same seeded split the
-    feedback path uses, so "held-out" means the same thing on both rungs.
+    This returns both halves on purpose. The earlier shape returned only a *count*, and the caller
+    reconstructed the training half by slicing the ORIGINAL list — which is a different set of rows
+    than the shuffled ones we withheld. Measured on 100 examples: 8 of the 10 "never seen" prompts
+    were in the training set, so the gate was scoring memorisation and calling it improvement.
+    Whatever else changes here, the two halves must come from the same shuffle.
     """
     import random
 
     shuffled = list(examples)
     random.Random(seed).shuffle(shuffled)
     count = min(max(int(len(shuffled) * fraction), minimum), len(shuffled) // 2)
-    held = shuffled[:count]
+    return shuffled[:count], shuffled[count:]
+
+
+def write_holdout(examples: list[dict], run_dir: Path, *, fraction: float = 0.1,
+                  minimum: int = 4, seed: int = 1729, held: list[dict] | None = None) -> int:
+    """Record the held-out prompts for the gate, and return how many there are.
+
+    Pass `held` when the caller has already split (that is the only way to be sure the trainer and
+    the gate agree on which rows were withheld). Without it, this splits the same way.
+    """
+    if held is None:
+        held, _ = split_holdout(examples, fraction=fraction, minimum=minimum, seed=seed)
     prompts = []
     for row in held:
         # The user turn is the work; the assistant turn is the answer we are withholding.
@@ -298,9 +311,11 @@ def run_sft(cfg: TrainRunConfig, *, backend: str = "auto", iters: int | None = N
         shutil.copy2(cfg.source_path, run_dir / "config.toml")
 
     # Held out BEFORE training, and excluded from it: "is it better" is only answerable on work the
-    # model has not seen.
-    held = write_holdout(examples, run_dir)
-    learn_from = examples[held:] if held < len(examples) else examples
+    # model has not seen. One split, both halves — see split_holdout for why that matters.
+    held_rows, learn_from = split_holdout(examples)
+    held = write_holdout(examples, run_dir, held=held_rows)
+    if not learn_from:                       # a tiny dataset: better to train on all of it
+        learn_from = examples
 
     adapter = (run_sft_mlx(cfg, learn_from, run_dir, iters=iters) if chosen == "mlx"
                else run_sft_torch(cfg, learn_from, run_dir))

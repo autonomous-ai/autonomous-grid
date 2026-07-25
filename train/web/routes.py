@@ -392,7 +392,7 @@ def register(app) -> None:
         return pages.overnight_page(
             w, summarize(days=30), rows, hostsignals.summary(),
             nightly_on=bool(w.meta.get("nightly")), min_examples=autopilot.MIN_EXAMPLES,
-            schedule=sched.status(slug=w.slug),
+            schedule=sched.status(slug=w.slug, workspace=w.path),
         )
 
     @app.post("/w/{slug}/nightly")

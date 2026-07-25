@@ -145,3 +145,44 @@ def test_web_prepare_writes_lead_examples_in_the_graded_shape(tmp_path):
     # The ideal answer is the shape the graders check, carrying the true priority.
     assert examples[0]["messages"][-1]["content"].startswith("PRIORITY: hot")
     assert "NEXT:" in examples[0]["messages"][-1]["content"]
+
+
+def test_the_held_out_rows_are_the_ones_the_trainer_never_sees(tmp_path):
+    """The gate's whole meaning: measured, because this was wrong once.
+
+    The earlier code shuffled to pick the held-out rows but sliced the ORIGINAL list to pick the
+    training rows — so 8 of every 10 "never seen" prompts had been trained on, and a model could
+    pass the gate by memorising.
+    """
+    import json
+
+    from train.sft import split_holdout, write_holdout
+
+    examples = [
+        {"messages": [{"role": "user", "content": f"q{i}"},
+                      {"role": "assistant", "content": f"a{i}"}]}
+        for i in range(100)
+    ]
+    held_rows, learn_from = split_holdout(examples)
+    assert len(held_rows) == 10 and len(learn_from) == 90
+
+    def prompts(rows):
+        return {m["content"] for row in rows for m in row["messages"] if m["role"] == "user"}
+
+    assert not (prompts(held_rows) & prompts(learn_from))        # no overlap, at all
+    assert prompts(held_rows) | prompts(learn_from) == prompts(examples)   # and nothing lost
+
+    write_holdout(examples, tmp_path, held=held_rows)
+    written = {json.loads(line)["prompt"]
+               for line in (tmp_path / "eval_prompts.jsonl").read_text().splitlines()}
+    assert written == prompts(held_rows)    # the gate scores exactly what was withheld
+
+
+def test_the_split_is_stable_across_runs(tmp_path):
+    from train.sft import split_holdout
+
+    examples = [{"messages": [{"role": "user", "content": f"q{i}"},
+                              {"role": "assistant", "content": "a"}]} for i in range(50)]
+    first, _ = split_holdout(examples)
+    second, _ = split_holdout(examples)
+    assert first == second      # rerunning a comparison must give the same number

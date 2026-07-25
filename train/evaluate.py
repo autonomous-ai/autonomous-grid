@@ -195,6 +195,55 @@ border:1px solid var(--rule);padding:.1em .45em}}
 </main></body></html>"""
 
 
+class CandidateNotLoaded(RuntimeError):
+    """The candidate could not be put in front of the grader, so nothing was proved."""
+
+
+def prove_candidate(
+    cfg: TrainRunConfig,
+    run_dir: Path,
+    adapter_dir: Path,
+    serving_name: str,
+    *,
+    nodes=None,
+    transport=None,
+) -> dict:
+    """Score the model we are about to ship — not the one already serving under its name.
+
+    This exists because of a real defect. An unattended cycle trained a fresh adapter, then called
+    the gate with the *serving* name; the node resolves a name to whatever weights it already
+    holds, so on every night after the first the gate scored **last night's** adapter and then
+    deployed tonight's, never scored. The verdict was true of a model that was not the one shipped.
+
+    So: load the candidate under a staging name first, score that, and only then re-deploy it under
+    the name customers use. The staging name is reused each night, so nothing accumulates on the
+    node, and the incumbent is the adapter actually being served when one is loaded — "better than
+    what we already serve" is the question, not "better than the base model".
+    """
+    from .deploy import deploy_adapter
+    from .rollout import probe_endpoint
+
+    nodes = tuple(nodes or cfg.deploy.nodes or (cfg.rollout.base_url,))
+    staged = f"{serving_name}-candidate"
+    outcomes = deploy_adapter(adapter_dir, nodes, staged, transport=transport)
+    if not any(o.get("ok") for o in outcomes):
+        detail = "; ".join(f"{o['node']} ({o.get('detail', '')})" for o in outcomes)
+        raise CandidateNotLoaded(f"no node would load it for checking: {detail}")
+
+    # Compare against what is actually being served, when that is a trained model; a name the
+    # engine does not hold would 404 mid-eval and read as "could not be checked".
+    incumbent = cfg.rollout_model
+    if serving_name != incumbent:
+        probe = probe_endpoint(cfg.rollout, serving_name, transport=transport)
+        if probe.get("ok"):
+            incumbent = serving_name
+
+    result = run_eval(cfg, run_dir, staged, base_model=incumbent, transport=transport)
+    result["staged_as"] = staged
+    result["incumbent"] = incumbent
+    return result
+
+
 def run_eval(
     cfg: TrainRunConfig,
     run_dir: Path,

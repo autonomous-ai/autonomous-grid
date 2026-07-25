@@ -458,6 +458,32 @@ _MAX_TOKENS = {"support-replies": 220, "sales-triage": 60,
                "any-task": 320, "sort-into-categories": 24}
 
 
+def _token_budget(workspace: Workspace) -> int:
+    """How many tokens an answer may use — measured from the data, not assumed.
+
+    The sorting pack's 24 was fine for "billing" and a permanent zero for a real category like
+    "escalate-to-tier-2/hardware-warranty-emea-approval-needed": every rollout was cut off
+    mid-category, scored 0.0 for being wrong, and no amount of training could fix it. Categories
+    come from the customer's own history, so the budget has to come from there too.
+
+    Words-times-two is deliberately crude and deliberately generous: a tokenizer here would mean
+    loading the model to write a config file, and being wrong in the roomy direction costs a little
+    generation time, while being wrong the other way costs the whole run.
+    """
+    base = _MAX_TOKENS.get(workspace.pack, 200)
+    labels = workspace.path / "labels.jsonl"
+    if workspace.pack != "sort-into-categories" or not labels.is_file():
+        return base
+    longest = 0
+    for line in labels.read_text(encoding="utf-8").splitlines():
+        try:
+            label = str(json.loads(line).get("label", ""))
+        except json.JSONDecodeError:
+            continue
+        longest = max(longest, len(label.split()) + len(label) // 4)
+    return max(base, longest * 2 + 12)
+
+
 def write_checks(workspace: Workspace, chosen: list[str]) -> Path:
     """Generate rewards.py from the ticked boxes."""
     sources = _REWARD_SOURCES[workspace.pack]
@@ -499,7 +525,7 @@ name = {_toml_string(model)}
 [rollout]
 base_url = {_toml_string(endpoint)}
 api_key_env = "GRID_TRAIN_API_KEY"
-max_tokens = {_MAX_TOKENS.get(workspace.pack, 200)}
+max_tokens = {_token_budget(workspace)}
 temperature = 1.0
 sync_every = 2
 sync_nodes = [{", ".join(_toml_string(n) for n in nodes)}]
