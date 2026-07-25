@@ -341,7 +341,8 @@ class Example:
 
 
 def build_examples(days: int = 30, *, include_accepted: bool = True,
-                   models: tuple[str, ...] | list[str] | None = None) -> list[Example]:
+                   models: tuple[str, ...] | list[str] | None = None,
+                   include_teachers: bool = True) -> list[Example]:
     """Join traffic with feedback into rows worth imitating.
 
     `models` narrows the store to the traffic a particular model answered. The store is grid-wide
@@ -361,11 +362,13 @@ def build_examples(days: int = 30, *, include_accepted: bool = True,
     traffic = _read_days("traffic", days)
     if models:
         wanted = {str(m) for m in models}
-        # Teacher rows are recorded under the TEACHER's name (that is what answered), so filtering
-        # on our own model's name would drop exactly the examples distillation depends on — the
-        # hard requests a stronger model handled, which are the most valuable rows in the store.
+        # Teacher rows are recorded under the TEACHER's name — that is the model the request asked
+        # for — so there is nothing in the store that says which of your models a teacher answer
+        # belongs to. Two honest options and no third: share them with every model that trains
+        # (right when there is one model, and how it catches up to the frontier), or leave them
+        # out. The caller decides; `[data].learn_from_teachers` is where a person decides.
         traffic = [row for row in traffic
-                   if row.get("model") in wanted or row.get("teacher")]
+                   if row.get("model") in wanted or (include_teachers and row.get("teacher"))]
     feedback = {row["id"]: row for row in _read_days("feedback", days) if row.get("id")}
     examples: list[Example] = []
     for row in traffic:

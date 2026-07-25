@@ -65,9 +65,12 @@ def build_tonights_dataset(cfg: TrainRunConfig, *, days: int = 30,
 
     prune()                                   # keep the store inside its retention window
     # Only the traffic this model answered. The store is grid-wide; a routing model trained on a
-    # support model's tickets spends the night learning the wrong job.
-    served_as = [n for n in (cfg.deploy.adapter_name, cfg.model_name) if n]
-    examples = build_examples(days=days, models=served_as or None)
+    # support model's tickets spends the night learning the wrong job. The name customers use is
+    # the precise one — the base model id is shared by every workspace that started from it, so it
+    # is only a fallback for a grid where nothing has been deployed yet.
+    served_as = [cfg.deploy.adapter_name] if cfg.deploy.adapter_name else [cfg.model_name]
+    examples = build_examples(days=days, models=served_as,
+                              include_teachers=cfg.data.learn_from_teachers)
     dest = dataset_dir(cfg)
     write_training_files(examples, dest, system_prompt=system_prompt)
     return len(examples), dest

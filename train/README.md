@@ -255,6 +255,13 @@ grid train schedule on           # ...and have the computer run it every night
 grid train collect               # what has accumulated, in plain language
 ```
 
+**Whose examples are whose.** The store is grid-wide, so a night takes only the traffic that asked
+for *this* model by name. Requests your team sent to a **stronger** model are the exception: the
+store records the model that was asked for, and that was the frontier one, so nothing says which of
+your models a teacher answer belongs to. They are shared with every model that trains — which is
+exactly right on a grid with one model, and is how the local model catches up to the frontier — and
+`[data].learn_from_teachers = false` turns that off for a model whose job is different.
+
 Apps report the third signal by quoting back the `X-Grid-Request-Id` header they got with an
 answer:
 

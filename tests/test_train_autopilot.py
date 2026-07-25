@@ -95,7 +95,7 @@ def test_a_night_with_traffic_for_a_different_model_says_so(tmp_path, monkeypatc
         source_path=tmp_path / "grid-train.toml",
     )
 
-    def build(days=30, *, include_accepted=True, models=None):
+    def build(days=30, *, include_accepted=True, models=None, include_teachers=True):
         # Plenty of captured work, none of it answered by this model.
         return [] if models else [Example("q", "a", "edited", 1.0)] * 50
 

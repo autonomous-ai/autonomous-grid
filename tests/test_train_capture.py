@@ -433,3 +433,27 @@ def test_a_model_filter_keeps_the_teacher_rows(tmp_path, monkeypatch):
     assert kept.get("hard one") == "teacher"          # the whole point of a teacher
     assert "easy one" in kept
     assert "someone else's" not in kept               # another model's work still excluded
+
+
+def test_teacher_rows_can_be_kept_out_when_several_models_share_a_grid(tmp_path, monkeypatch):
+    """A teacher row is stored under the teacher's name — the model the request asked for — so
+    nothing in the store says which of your models it belongs to. Sharing them is right on a grid
+    with one model and wrong when two models do different jobs, so it is a choice, not a default
+    that pretends to be knowledge."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from train import capture
+
+    capture.save_policy(capture.Policy(enabled=True, teachers=("gpt-5",)))
+    capture.record(prompt="ours", completion="fine", model="support-v1", request_id="a")
+    capture.record(prompt="a hard one someone sent to the frontier", completion="a good answer",
+                   model="gpt-5", request_id="b")
+    capture.flush()
+    capture.record_feedback("a", verdict="accepted")
+    capture.flush()
+
+    shared = {e.prompt for e in capture.build_examples(models=("support-v1",))}
+    assert "a hard one someone sent to the frontier" in shared
+
+    alone = {e.prompt for e in capture.build_examples(models=("support-v1",),
+                                                      include_teachers=False)}
+    assert alone == {"ours"}

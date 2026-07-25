@@ -95,6 +95,13 @@ class DataConfig:
     prompts_jsonl: str = ""
     verifiers_env: str = ""
     verifiers_env_args: dict = dataclasses.field(default_factory=dict)
+    # Requests your team sent to a STRONGER model, which the grid keeps as teaching examples.
+    # They cannot be attributed to one of your models — the store records the model that was
+    # asked for, and that was the frontier one — so on a grid with several models they are shared
+    # by every model that trains. With one model that is exactly what you want (it is how the
+    # local model catches up to the frontier); with several whose jobs differ, turn it off for the
+    # ones that would be learning somebody else's work.
+    learn_from_teachers: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
