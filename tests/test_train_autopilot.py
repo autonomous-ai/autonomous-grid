@@ -66,3 +66,42 @@ def test_an_answer_key_pack_is_judged_on_work_that_has_an_answer_key(tmp_path):
     )
     chosen = _pick_eval_source(cfg, run_dir, tmp_path / "dataset")
     assert chosen == out / "older-run"          # the labelled holdout, not tonight's captured one
+
+
+def test_a_night_with_traffic_for_a_different_model_says_so(tmp_path, monkeypatch):
+    """0 examples has two causes: nobody used the grid, or nobody used THIS model. Only one of
+    them fixes itself overnight, so they must not print the same sentence."""
+    from train import autopilot
+    from train.capture import Example
+    from train.config import (
+        DataConfig,
+        DeployConfig,
+        RewardsConfig,
+        RolloutConfig,
+        TrainerConfig,
+        TrainRunConfig,
+    )
+
+    cfg = TrainRunConfig(
+        model_name="base/model",
+        rollout=RolloutConfig(base_url="http://x/v1"),
+        data=DataConfig(prompts_jsonl=str(tmp_path / "p.jsonl")),
+        rewards=RewardsConfig(python_file=str(tmp_path / "r.py")),
+        trainer=TrainerConfig(output_dir=str(tmp_path / "out")),
+        deploy=DeployConfig(nodes=("http://x/v1",), adapter_name="support-replies"),
+        source_path=tmp_path / "grid-train.toml",
+    )
+
+    def build(days=30, *, include_accepted=True, models=None):
+        # Plenty of captured work, none of it answered by this model.
+        return [] if models else [Example("q", "a", "edited", 1.0)] * 50
+
+    monkeypatch.setattr("train.capture.build_examples", build)
+    monkeypatch.setattr("train.capture.prune", lambda **kw: None)
+    monkeypatch.setattr(autopilot, "host_is_free", lambda **kw: (True, "idle"), raising=False)
+    monkeypatch.setattr("train.nightly.host_is_free", lambda **kw: (True, "idle"))
+
+    result = autopilot.run_cycle(cfg)
+    assert result.stage == "waiting"
+    assert "none of it was answered by this model" in result.detail
+    assert "support-replies" in result.detail

@@ -64,7 +64,10 @@ def build_tonights_dataset(cfg: TrainRunConfig, *, days: int = 30,
     from .capture import build_examples, prune, write_training_files
 
     prune()                                   # keep the store inside its retention window
-    examples = build_examples(days=days)
+    # Only the traffic this model answered. The store is grid-wide; a routing model trained on a
+    # support model's tickets spends the night learning the wrong job.
+    served_as = [n for n in (cfg.deploy.adapter_name, cfg.model_name) if n]
+    examples = build_examples(days=days, models=served_as or None)
     dest = dataset_dir(cfg)
     write_training_files(examples, dest, system_prompt=system_prompt)
     return len(examples), dest
@@ -95,11 +98,12 @@ def run_cycle(cfg: TrainRunConfig, *, days: int = 30, min_examples: int = MIN_EX
         cfg, days=days, system_prompt=system_prompt or _workspace_system_prompt(cfg))
     if examples < min_examples:
         # Waiting is the correct outcome, not a failure: the store grows on its own as people work.
-        return _log(cfg, AutopilotResult(
-            started, True, "waiting",
-            f"{examples} examples so far — waiting for {min_examples}. They accumulate as your "
-            "team uses the grid and your app reports what was sent.",
-            examples=examples))
+        # But "0 examples" has two very different causes, and only one of them fixes itself.
+        detail = (f"{examples} examples so far — waiting for {min_examples}. They accumulate as "
+                  "your team uses the grid and your app reports what was sent.")
+        if examples == 0:
+            detail += _nothing_for_this_model(cfg, days)
+        return _log(cfg, AutopilotResult(started, True, "waiting", detail, examples=examples))
 
     run_cfg = _with_dataset(cfg, dest)
 
@@ -175,6 +179,21 @@ def run_cycle(cfg: TrainRunConfig, *, days: int = 30, min_examples: int = MIN_EX
                                      f"{result['verdict']} — now serving as {name}",
                                      examples=examples, delta=result["delta"],
                                      adapter=str(adapter)))
+
+
+def _nothing_for_this_model(cfg: TrainRunConfig, days: int) -> str:
+    """When the store has traffic but none of it is ours, say which names it does have.
+
+    Silence here would be indistinguishable from "nobody used the grid today", and the fix — point
+    your tools at the model's name — is not something anyone would guess.
+    """
+    from .capture import build_examples
+
+    everything = build_examples(days=days)
+    if not everything:
+        return ""
+    return (" The store does have work in it, but none of it was answered by this model. Check "
+            f"that your tools ask for “{cfg.deploy.adapter_name or cfg.model_name}”.")
 
 
 def _workspace_system_prompt(cfg: TrainRunConfig) -> str:

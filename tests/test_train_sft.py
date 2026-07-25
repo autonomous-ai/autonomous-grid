@@ -186,3 +186,32 @@ def test_the_split_is_stable_across_runs(tmp_path):
     first, _ = split_holdout(examples)
     second, _ = split_holdout(examples)
     assert first == second      # rerunning a comparison must give the same number
+
+
+def test_doctor_does_not_call_a_working_mac_not_ready(monkeypatch, capsys):
+    """The Mac case: no serving engine, and yet `grid train sft` runs fine on this machine.
+
+    Reporting only the feedback rung's needs told the owner of the exact computer the browser
+    trains on that they were "not ready".
+    """
+    import argparse
+
+    from cli.train import cmd_train_doctor
+
+    report = {
+        "deps": {"torch": "2.2.2", "transformers": "4.44", "trl": "0.11", "peft": "0.12",
+                 "datasets": "5.0", "verifiers": ""},
+        "endpoint": {"ok": False, "model": "qwen", "detail": "rollout endpoint unreachable"},
+        "data": {"ok": True, "prompts": 300, "reward_funcs": 3},
+    }
+    monkeypatch.setattr("train.run.doctor", lambda cfg: report)
+    monkeypatch.setattr("train.config.load_config", lambda path: object())
+    code = cmd_train_doctor(argparse.Namespace(config=None, json=False))
+    out = capsys.readouterr().out
+    assert "Ready for stage one" in out
+    assert "Not ready" not in out
+    assert code == 0                      # a machine that can train is not an error
+
+    report["data"] = {"ok": False, "detail": "no examples yet"}
+    assert cmd_train_doctor(argparse.Namespace(config=None, json=False)) == 1
+    assert "Not ready" in capsys.readouterr().out

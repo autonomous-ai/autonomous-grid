@@ -340,8 +340,14 @@ class Example:
     weight: float    # 1.0 for a human-corrected answer; less for weaker signals
 
 
-def build_examples(days: int = 30, *, include_accepted: bool = True) -> list[Example]:
+def build_examples(days: int = 30, *, include_accepted: bool = True,
+                   models: tuple[str, ...] | list[str] | None = None) -> list[Example]:
     """Join traffic with feedback into rows worth imitating.
+
+    `models` narrows the store to the traffic a particular model answered. The store is grid-wide
+    — one file for every request the whole office made — so without this a business running a
+    support model and a routing model would train each on the other's work, and the routing model
+    would spend a night learning to write apologies.
 
     The ranking is the whole ethic of this module:
 
@@ -353,6 +359,9 @@ def build_examples(days: int = 30, *, include_accepted: bool = True) -> list[Exa
         that is the path to a model that only agrees with itself.
     """
     traffic = _read_days("traffic", days)
+    if models:
+        wanted = {str(m) for m in models}
+        traffic = [row for row in traffic if row.get("model") in wanted]
     feedback = {row["id"]: row for row in _read_days("feedback", days) if row.get("id")}
     examples: list[Example] = []
     for row in traffic:

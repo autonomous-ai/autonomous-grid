@@ -79,9 +79,42 @@ def cmd_train_doctor(args: argparse.Namespace) -> int:
         print(f"  ok {data['prompts']} prompts  ·  {data['reward_funcs']} reward function(s)")
     else:
         print(f"  NO {data.get('detail')}")
-    healthy = _healthy(report)
-    print("Ready to train." if healthy else "Not ready — fix the NO lines above.")
-    return 0 if healthy else 1
+    # Two rungs, two verdicts. Reporting only the feedback rung's needs told a Mac owner
+    # "Not ready" on the exact machine where the browser and the nightly cycle train fine — the
+    # imitation rung needs no engine at all.
+    imitation_ok, imitation_note = _imitation_ready(report)
+    feedback_ok = _healthy(report)
+    print("What this computer can do now")
+    print(f"  {'ok ' if imitation_ok else 'NO '}learn from answers your team already wrote "
+          f"(`grid train sft`)  ·  {imitation_note}")
+    print(f"  {'ok ' if feedback_ok else 'NO '}learn from feedback (`grid train run`)  ·  "
+          + ("ready" if feedback_ok else "needs an engine that serves the training contract "
+                                         "— `grid train serve` on a Mac, or vLLM"))
+    if feedback_ok:
+        print("Ready to train, both rungs.")
+    elif imitation_ok:
+        print("Ready for stage one. `grid train sft` works on this computer right now.")
+    else:
+        print("Not ready — fix the NO lines above.")
+    return 0 if (imitation_ok or feedback_ok) else 1
+
+
+def _imitation_ready(report: dict) -> tuple[bool, str]:
+    """Can stage one run here? It needs a trainer and data — no serving engine.
+
+    On Apple Silicon that is mlx-lm; everywhere else it is torch + trl. Data is the same
+    requirement either way.
+    """
+    from train.sft import pick_backend
+
+    if not report["data"].get("ok"):
+        return False, str(report["data"].get("detail", "no examples yet"))
+    backend = pick_backend("auto")
+    if backend == "mlx":
+        return True, "MLX on this Mac's own chip"
+    if all(report["deps"].get(m) for m in ("torch", "transformers", "trl", "peft")):
+        return True, "torch on this machine"
+    return False, "missing the trainer — pip install 'grid[train]'"
 
 
 def _healthy(report: dict) -> bool:
