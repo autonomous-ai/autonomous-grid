@@ -321,6 +321,38 @@ grid's, not a vendor's. The `model` field and `X-Grid-Routed-Model` header name 
 actually answered. Full contract and the transparency table in
 [docs/cli.md](docs/cli.md#router); rationale in [ADR 0013](docs/adr/0013-auto-routing.md).
 
+## Training on your grid (experimental)
+
+Your grid already runs inference on machines you own. `grid train` adds the other half: **teach a
+small model your work, on those same machines** — the data, the rollouts, and the weights never
+leave your network. Inference by day, training at night.
+
+```bash
+grid train packs                        # ready-made setups for real business data
+grid train init --pack support-replies  # tickets -> a reply-drafting model
+grid train serve                        # run THIS Mac as a rollout node (Apple Silicon)
+grid train run                          # the climb
+grid train ui                           # watch the reward and eval curves
+```
+
+RL fine-tuning is ~70-80% *sampling* — which is inference, which is what a grid is for. So the
+grid generates the rollouts across its nodes; one machine holds the trainer; the trained LoRA
+adapter is pushed back to the serving nodes under a stable name, and `auto` keeps routing to it.
+
+**Both backends are training-capable.** A rollout engine has to return the token ids it sampled
+and their logprobs — vLLM does this natively, and `grid train serve` does it from MLX, so an
+all-Apple-Silicon fleet needs no CUDA and no vLLM. A trainer on one backend can feed nodes on the
+other via `grid train convert-adapter`. Two-machine walkthrough:
+**[docs/two-node-training.md](docs/two-node-training.md)**; design and the honest limits:
+**[ADR 0019](docs/adr/0019-rl-training-plane.md)**.
+
+Try the hello world first — a complete GRPO climb in minutes, no GPU required:
+
+```bash
+python -m train.torch_grpo_hello        # any machine (CUDA or CPU)
+python -m train.mlx.grpo_hello          # Apple Silicon, needs: pip install mlx-lm
+```
+
 ## How it works
 
 Grid sits **above** your computers — like an API gateway above your services, or Tailscale above
