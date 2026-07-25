@@ -85,6 +85,9 @@ def run_cycle(
         adapter_dir = run_training(cfg)
     except SystemExit as exc:            # config/dependency problems arrive as SystemExit
         return _log(cfg, CycleResult(started, False, "failed", f"training did not start: {exc}"))
+    except Exception as exc:  # noqa: BLE001 — unattended at 3am: log the reason, never traceback
+        return _log(cfg, CycleResult(started, False, "failed",
+                                     f"training crashed: {type(exc).__name__}: {exc}"))
     run_dir = adapter_dir.parent
 
     # 2. Prove it on held-out work.

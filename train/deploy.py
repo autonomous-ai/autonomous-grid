@@ -42,31 +42,17 @@ def deploy_adapter(
     if key:
         headers["Authorization"] = f"Bearer {key}"
 
-    results = []
-    for node in nodes:
-        base = node.rstrip("/")
-        with httpx.Client(base_url=base, headers=headers, timeout=60.0, transport=transport) as client:
-            results.append(_deploy_one(client, base, adapter_dir, adapter_name))
+    # One implementation of "load this adapter on that machine", in train/sync.py: it tries the
+    # MLX engine's /reload_adapter first and falls back to vLLM's runtime-LoRA API. Deploying and
+    # mid-run syncing are the same act at different moments, so they must not drift apart — an
+    # earlier split version silently could not deploy to a Mac fleet at all.
+    from .sync import push_adapter
+
+    results = push_adapter(
+        adapter_dir, list(nodes), adapter_name=adapter_name,
+        api_key_env=api_key_env, transport=transport,
+    )
+    for result in results:
+        if result["ok"]:
+            result["detail"] = f"serving as {adapter_name!r}"
     return results
-
-
-def _deploy_one(client: httpx.Client, base: str, adapter_dir: Path, name: str) -> dict:
-    body = {"lora_name": name, "lora_path": str(adapter_dir)}
-    try:
-        # Idempotent re-deploy: drop any previous adapter under this name, ignore "not found".
-        client.post("/unload_lora_adapter", json={"lora_name": name})
-        response = client.post("/load_lora_adapter", json=body)
-    except httpx.TransportError as exc:
-        return {"node": base, "ok": False, "detail": f"unreachable: {exc}"}
-    if response.status_code == 404:
-        return {
-            "node": base,
-            "ok": False,
-            "detail": (
-                "no runtime LoRA endpoint — start vLLM with VLLM_ALLOW_RUNTIME_LORA_UPDATING=True "
-                "and --enable-lora"
-            ),
-        }
-    if response.status_code != 200:
-        return {"node": base, "ok": False, "detail": f"HTTP {response.status_code}: {response.text[:200]}"}
-    return {"node": base, "ok": True, "detail": f"serving as {name!r}"}

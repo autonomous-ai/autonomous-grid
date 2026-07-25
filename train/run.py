@@ -122,9 +122,16 @@ def _build_sync_callback(cfg: TrainRunConfig, run_dir: Path, transformers):
 def run_training(cfg: TrainRunConfig) -> Path:
     datasets, peft, trl, transformers = _import_stack()
 
-    if "rollout_func" not in inspect.signature(trl.GRPOTrainer.__init__).parameters:
+    # getattr, not attribute access: TRL lazily proxies its module, so a version without
+    # GRPOTrainer raises AttributeError from deep inside the import shim — which in an unattended
+    # nightly run surfaced as a traceback instead of a stated reason.
+    grpo_trainer = getattr(trl, "GRPOTrainer", None)
+    if grpo_trainer is None or "rollout_func" not in inspect.signature(
+        grpo_trainer.__init__
+    ).parameters:
         raise ConfigError(
-            f"this TRL version ({trl.__version__}) has no rollout_func hook — {_INSTALL_HINT}"
+            f"this TRL version ({getattr(trl, '__version__', 'unknown')}) has no GRPO trainer with "
+            f"the rollout_func hook — {_INSTALL_HINT}"
         )
 
     # Probe before loading gigabytes: a chat-only endpoint must fail here, not at step one.
@@ -172,7 +179,7 @@ def run_training(cfg: TrainRunConfig) -> Path:
     )
     dataset = datasets.Dataset.from_list([{"prompt": p} for p in prompts])
 
-    trainer = trl.GRPOTrainer(
+    trainer = grpo_trainer(
         model=cfg.model_name,
         args=grpo_config,
         train_dataset=dataset,

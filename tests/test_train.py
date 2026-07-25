@@ -198,13 +198,37 @@ def test_deploy_reports_per_node(tmp_path):
     assert results == [{"node": "http://a.test/v1", "ok": True, "detail": "serving as 'climb-1'"}]
 
 
-def test_deploy_explains_missing_runtime_lora(tmp_path):
-    transport = httpx.MockTransport(lambda req: httpx.Response(404))
+def test_deploy_reports_a_node_that_can_load_neither_way(tmp_path):
+    """404 on both dialects — an engine with no way to take an adapter at all."""
+    transport = httpx.MockTransport(lambda req: httpx.Response(404, text="Not Found"))
     results = deploy_adapter(
         _adapter_dir(tmp_path), ["http://a.test/v1"], "climb-1", transport=transport
     )
     assert results[0]["ok"] is False
-    assert "VLLM_ALLOW_RUNTIME_LORA_UPDATING" in results[0]["detail"]
+    assert "404" in results[0]["detail"]
+
+
+def test_deploy_works_against_an_mlx_engine(tmp_path):
+    """The bug the end-to-end check caught: deploy only spoke vLLM, so a Mac fleet failed.
+
+    Deploy and mid-run sync are the same act at different moments, so they share one
+    implementation — this pins that deploying to /reload_adapter works.
+    """
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/reload_adapter"):
+            return httpx.Response(200, json={"status": "applied"})
+        return httpx.Response(404)   # this engine has no vLLM runtime-LoRA route
+
+    results = deploy_adapter(
+        _adapter_dir(tmp_path), ["http://mac.local:8080/v1"], "climb-1",
+        transport=httpx.MockTransport(handler),
+    )
+    assert results[0]["ok"] is True
+    assert results[0]["detail"] == "serving as 'climb-1'"
+    assert paths == ["/reload_adapter"]   # took the Mac path, never needed the vLLM one
 
 
 def test_deploy_rejects_non_adapter(tmp_path):
