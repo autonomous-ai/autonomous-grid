@@ -37,7 +37,7 @@ downstream assumes this works.
 ## 2. Your own data (5 minutes)
 
 ```bash
-grid train web            # opens http://127.0.0.1:8811
+grid train web            # opens http://127.0.0.1:8322
 ```
 
 Four jobs to pick from: draft support replies · prioritise leads · sort work into your own
@@ -73,14 +73,16 @@ is more history, not more training time.
 
 ## 5. Use it
 
-"Start using this model" loads it onto this machine and gives you two lines to point any tool at:
+"Start using this model" loads it onto this machine and shows you the two lines to point any tool
+at — the address of the engine you chose on the machines step, and the model's name:
 
 ```
-OPENAI_BASE_URL=http://127.0.0.1:8811/v1
+OPENAI_BASE_URL=http://127.0.0.1:8090/v1      # your grid's own endpoint (`grid up`)
 model: <your-model>
 ```
 
-Anything that speaks the OpenAI API works.
+Copy them from the page rather than from here: if you pointed training at a different machine, that
+is the address the page will show. Anything that speaks the OpenAI API works.
 
 ## 6. Let it keep getting better
 
@@ -90,7 +92,7 @@ grid train schedule on       # a LaunchAgent that runs the cycle at 23:00
 grid train schedule          # confirm: on, where, and at what time
 ```
 
-Then `/w/<your-model>/overnight` in the browser shows what has accumulated, what tonight will do,
+Then `http://127.0.0.1:8322/w/<your-model>/overnight` shows what has accumulated, what tonight will do,
 and every past night — including the ones that trained and were refused, which is most of them
 early on.
 
