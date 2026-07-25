@@ -27,6 +27,7 @@ def deploy_adapter(
     *,
     api_key_env: str = "GRID_TRAIN_API_KEY",
     transport: httpx.BaseTransport | None = None,
+    record: bool = True,
 ) -> list[dict]:
     """Load `adapter_dir` as `adapter_name` on every node; per-node results, no fail-fast."""
     adapter_dir = Path(adapter_dir).expanduser().resolve()
@@ -55,7 +56,7 @@ def deploy_adapter(
     for result in results:
         if result["ok"]:
             result["detail"] = f"serving as {adapter_name!r}"
-    if any(r["ok"] for r in results):
+    if record and any(r["ok"] for r in results):
         record_deploy(adapter_name, adapter_dir)
     return results
 

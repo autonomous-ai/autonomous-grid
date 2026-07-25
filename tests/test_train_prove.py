@@ -230,3 +230,41 @@ def test_the_ledger_survives_the_run_directory_being_retrained(setup):
     kept = last_deployed("support-v1")
     assert kept is not None and kept != live
     assert (kept / "adapters.safetensors").read_text(encoding="utf-8") == "the good model"
+
+
+def test_a_failure_mid_check_still_puts_the_incumbent_back(setup, monkeypatch):
+    """The finally has to hold for the case nobody plans for: the engine dying mid-comparison."""
+    from train import evaluate
+
+    engine = OneSlotEngine()
+    engine.weights, engine.name = "night-1", "support-v1"
+    calls: list[str] = []
+    original = evaluate.score_model
+
+    def fail_second(cfg, model, prompts, funcs, **kw):
+        calls.append(model)
+        if len(calls) > 1:
+            raise RuntimeError("the engine died mid-check")
+        return original(cfg, model, prompts, funcs, **kw)
+
+    monkeypatch.setattr(evaluate, "score_model", fail_second)
+    put_back: list[bool] = []
+    monkeypatch.setattr(evaluate, "_put_back",
+                        lambda *a, **kw: put_back.append(True) or True)
+
+    with pytest.raises(RuntimeError, match="died mid-check"):     # the ORIGINAL error, not a
+        prove_candidate(setup["cfg"], setup["run_dir"], setup["adapter"]("night-2"),   # confusing
+                        "support-v1", transport=httpx.MockTransport(engine.handler))   # secondary
+    assert put_back == [True]
+
+
+def test_checking_does_not_keep_a_copy_of_every_candidate(setup):
+    """A check loads weights to measure them. Keeping 80 MB of each one, under a name nobody
+    serves, is how a laptop fills up quietly."""
+    from train.deploy import last_deployed
+
+    engine = OneSlotEngine()
+    engine.weights, engine.name = "night-1", "support-v1"
+    prove_candidate(setup["cfg"], setup["run_dir"], setup["adapter"]("night-2"), "support-v1",
+                    transport=httpx.MockTransport(engine.handler))
+    assert last_deployed("support-v1-candidate") is None

@@ -251,7 +251,9 @@ def prove_candidate(
 
     # From here the node may be holding the candidate instead of the customer's model, so every
     # exit from this block goes through the restore. A check is supposed to be an observation.
-    outcomes = deploy_adapter(adapter_dir, nodes, staged, transport=transport)
+    # record=False: this load exists only to measure. Recording it would keep an 80 MB copy of
+    # every candidate ever checked, under a name nobody serves.
+    outcomes = deploy_adapter(adapter_dir, nodes, staged, transport=transport, record=False)
     loaded = [o for o in outcomes if o.get("ok")]
     if not loaded:
         detail = "; ".join(f"{o['node']} ({o.get('detail', '')})" for o in outcomes)
