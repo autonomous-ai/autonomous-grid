@@ -736,20 +736,28 @@ def live_step(w, serving: dict, summary=None, nightly_on: bool = False) -> str:
     where = ", ".join(html.escape(str(n.get("node", ""))) for n in nodes if n.get("ok"))
     collecting = ""
     if summary is not None:
-        # Honest about the one thing a web page cannot do for her: put a job in the schedule.
-        schedule = f"""<p class="small muted" style="margin-top:.9rem">One more step, once: paste
-this into your scheduler (or ask whoever set up this computer to) and it will run every night at
-eleven.</p>
-<pre class="log">0 23 * * *  cd {html.escape(str(w.path))} &amp;&amp; grid train autopilot</pre>"""
+        # What the scheduler actually did, last time the button was pressed. A failure has to show
+        # here: "it will improve overnight" is the product's central promise, and a promise the
+        # computer quietly refused is worse than no promise.
+        note = w.meta.get("schedule") or {}
+        outcome = ""
+        if note and note.get("wanted") and not note.get("ok"):
+            outcome = (f'<div class="note warn"><b>It is collecting, but nothing is scheduled '
+                       f'yet.</b>{html.escape(str(note.get("detail", "")))}</div>')
+        elif nightly_on:
+            outcome = (f'<p class="small muted" style="margin-top:.9rem">'
+                       f'{html.escape(str(note.get("detail", "")))} It only trains when this '
+                       "computer is on mains power and nobody is using it.</p>")
         collecting = f"""<div class="card"><h2>It keeps getting better</h2>
 <p class="small muted">{html.escape(summary.headline)} {html.escape(summary.advice)}</p>
 <form method="post" action="/w/{slug}/nightly" class="row">
 <button class="{'' if nightly_on else 'primary'}" type="submit" name="nightly"
  value="{'off' if nightly_on else 'on'}">
-{'Stop keeping the work' if nightly_on else 'Start keeping the work it does'}</button>
-<span class="small muted">{'On — every answer your team corrects becomes an example.'
- if nightly_on else 'Every answer your team corrects becomes an example it can learn from.'}
-</span></form>{schedule if nightly_on else ''}
+{'Stop improving it overnight' if nightly_on else 'Improve it overnight, on its own'}</button>
+<span class="small muted">{'On — it keeps what your team corrects, trains overnight, and only '
+ 'serves the result if it wins.'
+ if nightly_on else 'It keeps what your team corrects and trains on it while nobody is working.'}
+</span></form>{outcome}
 <p class="small" style="margin-top:.9rem"><a href="/w/{slug}/overnight">See what it has collected
 and what every night did &rarr;</a></p></div>"""
 
@@ -802,7 +810,8 @@ _STAGE_WORDS = {
 
 
 def overnight_page(w, summary, history: list[dict], host: dict, *,
-                   nightly_on: bool = False, min_examples: int = 120) -> str:
+                   nightly_on: bool = False, min_examples: int = 120,
+                   schedule: dict | None = None) -> str:
     """What has been collected, what tonight will do, and what every past night did."""
     slug = html.escape(w.slug)
     window = ""
@@ -821,18 +830,26 @@ def overnight_page(w, summary, history: list[dict], host: dict, *,
         )
     )
 
+    # The schedule as the computer actually holds it, not as the page remembers asking for it.
+    scheduled = bool((schedule or {}).get("installed"))
+    at = (schedule or {}).get("when") or "23:00"
     short = max(min_examples - summary.trainable, 0)
-    if not nightly_on:
+    if nightly_on and not scheduled:
+        tonight = ("<b>Nothing will happen tonight.</b> The work is being kept, but this computer "
+                   "has no job in its scheduler to train on it. Turn it on again from the model's "
+                   "page, or run <code>grid train autopilot</code> yourself.")
+        tone = "warn"
+    elif not nightly_on:
         tonight = ("<b>Nothing is scheduled.</b> Turn it on from the model's page and every answer "
                    "your team corrects becomes an example.")
         tone = ""
     elif short:
-        tonight = (f"<b>Tonight it will wait.</b> {summary.trainable} examples ready, and it needs "
+        tonight = (f"<b>Tonight at {at} it will wait.</b> {summary.trainable} examples ready, and it needs "
                    f"{min_examples} before it will spend a night on them — {short} to go. They "
                    "accumulate as your team works; nothing for you to do.")
         tone = ""
     else:
-        tonight = (f"<b>Tonight it will train</b> on {summary.trainable} examples, then check "
+        tonight = (f"<b>Tonight at {at} it will train</b> on {summary.trainable} examples, then check "
                    "itself on work it has never seen. If it is not better, nothing changes and "
                    "you keep the model you have.")
         tone = "good"

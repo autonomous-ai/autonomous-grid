@@ -174,6 +174,23 @@ would have trained on base-model rollouts for every run.
   a button that cannot install a schedule must not claim to. Four of tonight's confirmed defects
   were sentences the code no longer honoured.
 
+- **D23 — The product installs its own schedule, per user, and reports what the loader said.**
+  "It improves overnight" is the whole promise, and handing someone a crontab line is the same as
+  saying it will not. `train/schedule.py` writes a LaunchAgent (macOS) or a `systemd --user` timer
+  (Linux) — one file, no administrator, deleted by the same command that made it. It is the one
+  place we reverse D22's earlier reading: the browser *may* write to the scheduler, because the
+  mechanism is per-user and reversible, but only if the page reports the loader's own complaint on
+  failure and leaves the toggle off. A schedule that does not exist must never render as one.
+  Verified by hand: installed on macOS 15, fired with `launchctl kickstart`, and the job logged
+  `SKIPPED: someone is using this machine` — the correct decision, and proof the argv, working
+  directory and environment survive a scheduled launch with no PATH and no shell profile.
+- **D24 — Two packs that are not a vertical.** "Sort into your own categories" (exact reward
+  against the team's own past choices, classes balanced at the smallest so guessing the commonest
+  cannot win) and "something else my team answers in writing" (two columns, similarity + format).
+  Support and sales were a demo of two teams at one kind of company; these two are the shape of
+  the claim. Both state which columns they guessed, because reading the answer as the question
+  trains the model backwards and nothing else in the flow would catch it.
+
 Runbook: `docs/two-node-training.md`.
 
 ## Consequences / open items

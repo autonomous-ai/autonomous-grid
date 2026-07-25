@@ -605,6 +605,7 @@ def _add_train(sub) -> None:
         cmd_train_nightly,
         cmd_train_packs,
         cmd_train_run,
+        cmd_train_schedule,
         cmd_train_serve,
         cmd_train_sft,
         cmd_train_ui,
@@ -724,6 +725,17 @@ def _add_train(sub) -> None:
                          help="Train even on battery or while the machine is in use.")
     nightly.add_argument("--history", action="store_true", help="Show recent nights instead.")
     nightly.set_defaults(handler=cmd_train_nightly)
+
+    schedule = train_sub.add_parser(
+        "schedule", help="Run the nightly cycle automatically (launchd on macOS, systemd on Linux)"
+    )
+    schedule.add_argument("action", nargs="?", choices=("status", "on", "off"), default="status",
+                          help="status (default), on = install it, off = remove it.")
+    schedule.add_argument("--at", default="23:00", help="Time of day to run, HH:MM (default 23:00).")
+    schedule.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    schedule.add_argument("--name", default=None,
+                          help="Label, if this machine schedules more than one model.")
+    schedule.set_defaults(handler=cmd_train_schedule)
 
     where = train_sub.add_parser("where", help="Which grids training can use (LAN and hosted)")
     where.set_defaults(handler=cmd_train_where)

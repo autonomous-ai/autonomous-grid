@@ -377,6 +377,7 @@ def register(app) -> None:
         a record.
         """
         from train import autopilot, hostsignals
+        from train import schedule as sched
         from train.capture import summarize
         from train.config import load_config
 
@@ -391,31 +392,40 @@ def register(app) -> None:
         return pages.overnight_page(
             w, summarize(days=30), rows, hostsignals.summary(),
             nightly_on=bool(w.meta.get("nightly")), min_examples=autopilot.MIN_EXAMPLES,
+            schedule=sched.status(slug=w.slug),
         )
 
     @app.post("/w/{slug}/nightly")
     async def nightly(slug: str, request: Request):
         """Turn unattended improvement on or off for this model.
 
-        Writing the schedule into someone's crontab from a web form is not ours to do, so this
-        records the intent, turns collecting on (there is nothing to learn from without it), and
-        shows the one line to paste. The autopilot verb does the work.
+        This used to record an intention and print a crontab line for her to paste, which is
+        another way of saying the model would never actually improve. It now installs a real
+        per-user job (train/schedule.py) and reports exactly what happened — including the
+        failure, because a page that claims a schedule that does not exist is the worst outcome
+        available here.
         """
         w = _load(slug)
         form = await _form(request)
         wanted = _one(form, "nightly", "on") == "on"
-        w.meta["nightly"] = wanted
-        w.save()
-        # Recording the intent and enabling collection is all this can honestly do from a browser:
-        # writing to someone's crontab or launchd from a web form is not ours to do. The page shows
-        # the one line to paste, and says so.
+        from train import schedule as sched
+
+        config = w.path / "grid-train.toml"
         if wanted:
             from train.capture import Policy, load_policy, save_policy
 
             policy = load_policy()
-            if not policy.enabled:
+            if not policy.enabled:      # nothing to learn from without it
                 save_policy(Policy(**{**dataclasses.asdict(policy), "enabled": True,
                                       "teachers": list(policy.teachers)}))
+            result = sched.install(w.path, slug=w.slug,
+                                   config=config if config.is_file() else None)
+        else:
+            result = sched.remove(slug=w.slug)
+        # The toggle follows what the scheduler actually did, not what was asked for.
+        w.meta["nightly"] = bool(wanted and result.ok)
+        w.meta["schedule"] = {"ok": result.ok, "detail": result.detail, "wanted": wanted}
+        w.save()
         return RedirectResponse(f"/w/{slug}/live", status_code=303)
 
     @app.get("/api/workspaces")

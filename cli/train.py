@@ -249,6 +249,48 @@ def cmd_train_autopilot(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_train_schedule(args: argparse.Namespace) -> int:
+    """Put the nightly cycle in this computer's own scheduler — or take it out.
+
+    `grid train autopilot` is written for cron, but asking a support manager to edit a crontab is
+    the same as telling her the model will not improve. This installs a per-user job instead.
+    """
+    from train import schedule as sched
+
+    workspace = Path.cwd()
+    config = Path(args.config).expanduser() if args.config else None
+    slug = args.name or workspace.name
+    try:
+        hour, minute = (int(part) for part in str(args.at).split(":", 1))
+    except ValueError:
+        raise SystemExit(f"grid train: --at wants HH:MM, got {args.at!r}") from None
+
+    if args.action == "status":
+        state = sched.status(slug=slug)
+        if state["installed"]:
+            print(f"On — {state['mechanism']} runs it every night at {state['when']}.")
+            print(f"  {state['where']}")
+            print("  Turn it off with `grid train schedule off`.")
+        else:
+            print("Off — nothing is scheduled for this model on this computer.")
+            print(sched.describe(workspace, slug=slug, hour=hour, minute=minute, config=config))
+            print("Turn it on with `grid train schedule on`.")
+        return 0
+
+    if args.action == "off":
+        result = sched.remove(slug=slug)
+        print(result.detail)
+        return 0 if result.ok else 1
+
+    print(sched.describe(workspace, slug=slug, hour=hour, minute=minute, config=config))
+    result = sched.install(workspace, slug=slug, hour=hour, minute=minute, config=config)
+    print(result.detail)
+    if result.ok:
+        print("It only trains when this computer is on mains power and not in use, and it only "
+              "serves a new model if it beats the one you have.")
+    return 0 if result.ok else 1
+
+
 def cmd_train_sft(args: argparse.Namespace) -> int:
     """Stage one: imitate the answers your team already wrote. Runs on a Mac with no GPU rig."""
     from train.config import load_config

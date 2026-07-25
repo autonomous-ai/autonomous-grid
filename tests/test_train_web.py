@@ -20,6 +20,13 @@ from train.web import build_app, prepare, workspace
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # HOME too, and the schedulers stubbed: turning on nightly now installs a real per-user job,
+    # and no test may write into the developer's own LaunchAgents.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from train import schedule as _schedule
+
+    monkeypatch.setattr(_schedule, "_launchctl", lambda *a: (0, ""))
+    monkeypatch.setattr(_schedule, "_systemctl", lambda *a: (0, ""))
     return TestClient(build_app(), follow_redirects=False)
 
 
@@ -386,7 +393,7 @@ def test_using_a_model_lands_on_a_page_that_says_it_is_live(client, tmp_path, mo
     assert "is answering now" in page
     assert "Point your tools at it" in page
     assert "OPENAI_BASE_URL" in page                      # the one line her engineer needs
-    assert "Start keeping the work" in page               # and the way to make it compound
+    assert "Improve it overnight" in page               # and the way to make it compound
 
 
 def test_the_live_page_redirects_when_nothing_is_serving_yet(client, tmp_path):
@@ -409,13 +416,42 @@ def test_turning_on_nightly_also_turns_on_collecting(client, tmp_path, monkeypat
     client.post(f"/w/{slug}/nightly", data={"nightly": "on"})
     assert capture.load_policy().enabled is True
     page = client.get(f"/w/{slug}/live").text
-    assert "Stop keeping the work" in page
-    # And it is honest about the one thing a web page cannot do: put a job in her scheduler.
-    assert "grid train autopilot" in page
-    assert "paste" in page
+    assert "Stop improving it overnight" in page
+
+    # And the job is really in the scheduler — not a line of crontab printed at her.
+    from train import schedule as sched
+
+    state = sched.status(slug=slug)
+    assert state["installed"] and state["when"] == "23:00"
+    assert "Installed" in page
 
     client.post(f"/w/{slug}/nightly", data={"nightly": "off"})
-    assert "Start keeping the work" in client.get(f"/w/{slug}/live").text
+    assert "Improve it overnight" in client.get(f"/w/{slug}/live").text
+    assert sched.status(slug=slug)["installed"] is False
+
+
+def test_a_scheduler_that_refuses_leaves_the_toggle_off(client, tmp_path, monkeypatch):
+    """The worst failure available here is a page that promises a night that will never come."""
+    from train import schedule as sched
+
+    slug = _served_workspace(client, tmp_path)
+    monkeypatch.setattr(
+        "train.deploy.deploy_adapter",
+        lambda adapter, nodes, name, **kw: [{"node": nodes[0], "ok": True, "detail": "ok"}],
+    )
+    client.post(f"/w/{slug}/use")
+    monkeypatch.setattr(sched, "install",
+                        lambda *a, **k: sched.Result(False, "the scheduler would not take it"))
+
+    client.post(f"/w/{slug}/nightly", data={"nightly": "on"})
+    page = client.get(f"/w/{slug}/live").text
+    assert "nothing is scheduled yet" in page
+    assert "the scheduler would not take it" in page
+    assert workspace.load(slug).meta["nightly"] is False   # the toggle follows reality
+    # Collecting still went on: the examples accumulate either way, and she can run it by hand.
+    from train import capture
+
+    assert capture.load_policy().enabled is True
 
 
 # --- scoring is a job, not a hanging request ------------------------------------------------
@@ -781,8 +817,9 @@ def test_overnight_page_says_what_tonight_will_do(client, tmp_path, monkeypatch)
         advice = "That is enough for a training run tonight."
 
     page = pages.overnight_page(w, Summary(), [], {"power": "on mains", "activity": "idle 900s"},
-                                nightly_on=True, min_examples=autopilot.MIN_EXAMPLES)
-    assert "Tonight it will train</b> on 640 examples" in page
+                                nightly_on=True, min_examples=autopilot.MIN_EXAMPLES,
+                                schedule={"installed": True, "when": "23:00"})
+    assert "Tonight at 23:00 it will train</b> on 640 examples" in page
     assert "on mains, idle 900s" in page
     assert "No nights yet" in page
     for jargon in ("GRPO", "LoRA", "adapter", "SFT", "rollout"):
@@ -803,8 +840,9 @@ def test_overnight_page_counts_down_instead_of_promising(client, tmp_path, monke
         advice = "It grows on its own as your team works."
 
     page = pages.overnight_page(w, Thin(), [], {"power": "on battery", "activity": "in use (2s ago)"},
-                                nightly_on=True, min_examples=120)
-    assert "Tonight it will wait" in page
+                                nightly_on=True, min_examples=120,
+                                schedule={"installed": True, "when": "02:00"})
+    assert "Tonight at 02:00 it will wait" in page
     assert "77 to go" in page                     # 120 - 43, said as a countdown not a failure
 
 
@@ -829,12 +867,33 @@ def test_overnight_page_shows_the_nights_that_were_refused(client, tmp_path, mon
         advice = "a"
 
     page = pages.overnight_page(w, S(), history, {"power": "on mains", "activity": "idle 100s"},
-                                nightly_on=True)
+                                nightly_on=True, schedule={"installed": True, "when": "23:00"})
     assert "not better" in page and "-0.004" in page
     assert "now serving" in page and "+0.062" in page
     assert "left it alone" in page
     # Newest night first: she reads the top of the table.
     assert page.index("2026-07-25") < page.index("2026-07-22")
+
+
+def test_overnight_page_calls_out_a_promise_the_computer_is_not_keeping(client, tmp_path,
+                                                                       monkeypatch):
+    """Collecting is on, but nothing is in the scheduler: say so instead of implying a night."""
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+
+    class S:
+        requests, trainable, edited, teacher_rows = 900, 900, 200, 100
+        first_seen = last_seen = ""
+        headline = "h"
+        advice = "a"
+
+    page = pages.overnight_page(w, S(), [], {"power": "on mains", "activity": "idle 100s"},
+                                nightly_on=True, schedule={"installed": False, "when": ""})
+    assert "Nothing will happen tonight" in page
+    assert "grid train autopilot" in page
 
 
 def test_the_live_page_links_to_the_overnight_record(client, tmp_path, monkeypatch):

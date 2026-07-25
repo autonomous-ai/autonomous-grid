@@ -172,12 +172,19 @@ and see a before/after card with a button that only appears if the model actuall
 the same `grid-train.toml` the CLI reads, so the two surfaces can't drift apart.
 
 **Every night, unattended:** `grid train nightly` runs one cycle — idle check, train, prove it on
-held-out work, ship it only if it won — and appends the outcome to a history file. Put it in cron
-and the office trains itself while it sleeps:
+held-out work, ship it only if it won — and appends the outcome to a history file. `grid train
+schedule on` puts it in the computer's own scheduler, so the office trains itself while it sleeps:
 
+```bash
+grid train schedule on --at 23:00   # a LaunchAgent on macOS, a systemd --user timer on Linux
+grid train schedule                 # is it on, where, and at what time
+grid train schedule off             # deletes the file it wrote; nothing else changes
 ```
-0 23 * * *  cd ~/support-model && grid train nightly
-```
+
+Per-user, no administrator, and reversible by the same command. The scheduled job runs with no
+PATH and no shell profile, which is why it is written with an absolute interpreter and an absolute
+working directory. Its output goes to `autopilot.log` beside the model. Anywhere without a
+per-user scheduler, the command prints the cron line instead of pretending it installed one.
 
 ## It can also learn from the work it is already doing
 
@@ -211,7 +218,8 @@ complained". Three signals, none of which costs anyone a minute of work.
 
 ```bash
 grid train collect --on          # keep the work; local files only, redacted, pruned
-grid train autopilot             # one unattended cycle — put it in cron
+grid train autopilot             # one unattended cycle
+grid train schedule on           # ...and have the computer run it every night
 grid train collect               # what has accumulated, in plain language
 ```
 
@@ -241,7 +249,8 @@ train/
 ├── deploy.py              hot-load an adapter onto serving nodes
 ├── ui.py                  read-only dashboard of runs and their curves
 ├── capture.py             learn from served work: store, redact, prune, weigh, build a dataset
-├── autopilot.py           the unattended loop over captured work (cron this)
+├── autopilot.py           the unattended loop over captured work
+├── schedule.py            put that loop in the user's own scheduler (launchd / systemd --user)
 ├── nightly.py             one unattended cycle: idle check → train → prove → ship or bin
 ├── sft.py                 stage one — imitate the answers your team already wrote
 ├── hostsignals.py         mains power + keyboard idle — the host outranks the scheduler
