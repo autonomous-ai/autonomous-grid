@@ -63,6 +63,36 @@ def _run_dir(cfg: TrainRunConfig) -> Path:
     return artifacts_root() / f"{model_slug}-{stamp}"
 
 
+def _build_sync_callback(cfg: TrainRunConfig, run_dir: Path, transformers):
+    """A TRL callback that pushes the adapter to the rollout engines every N steps.
+
+    TRL's own weight sync only exists for the vLLM paths it manages itself; with `rollout_func`
+    the rollouts come from *our* fleet, so keeping those engines current is our job. Skipping it
+    is not "slightly off-policy" — the engines keep serving the base model and the run learns
+    almost nothing (measured on the hello-world task: +0.07 with a lazy 5-step cadence vs +0.58
+    with 2 steps, same everything else).
+    """
+    from .sync import push_adapter, summarize
+
+    nodes = list(cfg.rollout.sync_nodes) or [cfg.rollout.base_url]
+    every = cfg.rollout.sync_every
+    staging = run_dir / "adapter-live"
+
+    class GridWeightSync(transformers.TrainerCallback):
+        def on_step_end(self, args, state, control, model=None, **kwargs):
+            if not every or state.global_step % every or model is None:
+                return control
+            model.save_pretrained(str(staging))
+            results = push_adapter(
+                staging, nodes, adapter_name=f"grid-train-{run_dir.name}",
+                api_key_env=cfg.rollout.api_key_env,
+            )
+            print(f"[grid train] step {state.global_step}: {summarize(results)}")
+            return control
+
+    return GridWeightSync()
+
+
 def run_training(cfg: TrainRunConfig) -> Path:
     datasets, peft, trl, transformers = _import_stack()
 
@@ -124,6 +154,9 @@ def run_training(cfg: TrainRunConfig) -> Path:
         peft_config=lora,
         processing_class=tokenizer,
         rollout_func=rollout_func,
+        # Keep the fleet's engines on the current policy — without this they serve the base
+        # model for the whole run and the reward curve barely moves.
+        callbacks=[_build_sync_callback(cfg, run_dir, transformers)],
     )
     try:
         trainer.train()

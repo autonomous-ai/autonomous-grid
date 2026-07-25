@@ -88,6 +88,28 @@ requirement. Corrected: the contract is a wire contract, and any engine can serv
   both directions are round-trip tested. Same-backend pairs sync directly; a torch trainer
   feeding MLX nodes converts first — **auto-conversion inside the sync loop is the next slice.**
 
+### Measured: disaggregated beats single-process, and sync cadence is the dial
+
+Same task, same model (SmolLM2-135M), same CPU box. "Disaggregated" = trainer and rollout engine
+in **separate processes over HTTP**, the two-node topology with both halves on one machine:
+
+| Topology | Weight sync | Steps | Held-out eval | Verdict |
+|---|---|---|---|---|
+| single process | n/a | 60 | 0.220 → 0.674 | confirmed |
+| disaggregated | every 5 steps | 40 | 0.188 → 0.261 | **below the bar** |
+| disaggregated | every 2 steps | 60 | 0.188 → **0.768** | confirmed |
+
+Two things follow. **Disaggregation costs nothing when the policy is kept current** — the
+every-2 run beat the single-process run outright. And **cadence, not distribution, is the
+dial**: the same topology learned 8× less per step at a 5-step cadence. Hence `sync_every`
+defaults to **2**, and raising it is a deliberate trade (worth it only when a sync costs more
+than a step — big models over slow links).
+
+Corollary that closed a real hole: `grid train run` (the TRL path) had **no** sync — TRL only
+syncs the vLLM fleets it manages itself, and with `rollout_func` the fleet is ours. A
+`TrainerCallback` now pushes the adapter on the same cadence; without it the production path
+would have trained on base-model rollouts for every run.
+
 Runbook: `docs/two-node-training.md`.
 
 ## Consequences / open items

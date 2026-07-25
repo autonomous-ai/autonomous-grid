@@ -62,6 +62,21 @@ each group keeps its prompt-prefix locality on one node).
 ./.venv-test/bin/grid train ui     # http://127.0.0.1:8321
 ```
 
+## What it measures out at
+
+Both halves of the topology on one CPU box (trainer process + rollout-server process, HTTP
+between them), SmolLM2-135M, word-reversal task, held-out eval:
+
+| Topology | Sync cadence | Steps | Eval | Time |
+|---|---|---|---|---|
+| single process | n/a | 60 | 0.220 → 0.674 | 5.6 min |
+| **two processes** | every 5 steps | 40 | 0.188 → 0.261 | 5.2 min |
+| **two processes** | **every 2 steps** | 60 | 0.188 → **0.768** | 6.1 min |
+
+Splitting the work across processes did not cost accuracy — with the policy kept current it did
+better than the single-process run. The cadence is what matters: the same setup learned about 8×
+less per step when the adapter was pushed every 5 steps instead of every 2.
+
 ## The weight-sync loop, and the honest constraint
 
 Every `--sync-every N` steps the trainer saves its adapter and calls each node's

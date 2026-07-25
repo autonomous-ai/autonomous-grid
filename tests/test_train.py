@@ -224,3 +224,73 @@ def test_split_holdout_seeded_and_bounded():
     # Tiny datasets keep at least half for training.
     train_c, eval_c = split_holdout([f"p{i}" for i in range(6)])
     assert len(eval_c) == 3 and len(train_c) == 3
+
+
+def test_rollout_config_sync_defaults(tmp_path):
+    """Weight sync is on by default, and defaults to the endpoint already configured."""
+    cfg = load_config(_write_config(tmp_path, MINIMAL_CONFIG))
+    assert cfg.rollout.sync_every == 2
+    assert cfg.rollout.sync_nodes == ()  # -> falls back to base_url at run time
+
+
+def test_rollout_config_sync_nodes_parse(tmp_path):
+    body = MINIMAL_CONFIG.replace(
+        'base_url = "http://127.0.0.1:8000/v1"',
+        'base_url = "http://127.0.0.1:8000/v1"\n'
+        'sync_every = 5\n'
+        'sync_nodes = ["http://mac1.local:8080/v1", "http://mac2.local:8080/v1"]',
+    )
+    cfg = load_config(_write_config(tmp_path, body))
+    assert cfg.rollout.sync_every == 5
+    assert cfg.rollout.sync_nodes == (
+        "http://mac1.local:8080/v1",
+        "http://mac2.local:8080/v1",
+    )
+
+
+def test_push_adapter_reports_and_skips_failures(tmp_path):
+    """One unreachable node must not fail the batch — a sleeping laptop can't kill a run."""
+    import httpx
+
+    from train.sync import push_adapter, summarize
+
+    adapter = tmp_path / "a"
+    adapter.mkdir()
+    (adapter / "adapter_model.safetensors").write_text("x", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "dead" in str(request.url):
+            raise httpx.ConnectError("no route to host")
+        return httpx.Response(200, json={"status": "applied"})
+
+    results = push_adapter(
+        adapter,
+        ["http://good.local:8080/v1", "http://dead.local:8080/v1"],
+        transport=httpx.MockTransport(handler),
+    )
+    assert [r["ok"] for r in results] == [True, False]
+    assert "unreachable" in results[1]["detail"]
+    assert summarize(results) == "1/2 nodes synced (1 skipped)"
+
+
+def test_push_adapter_falls_back_to_vllm_endpoint(tmp_path):
+    """A 404 on /reload_adapter means it isn't our MLX server — try vLLM's runtime LoRA API."""
+    import httpx
+
+    from train.sync import push_adapter
+
+    adapter = tmp_path / "a"
+    adapter.mkdir()
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/reload_adapter"):
+            return httpx.Response(404)
+        return httpx.Response(200, json={})
+
+    results = push_adapter(
+        adapter, ["http://vllm.local:8000/v1"], transport=httpx.MockTransport(handler)
+    )
+    assert results[0]["ok"] is True
+    assert paths == ["/reload_adapter", "/v1/load_lora_adapter"]

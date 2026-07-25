@@ -76,9 +76,10 @@ def main() -> int:
     parser.add_argument(
         "--sync-every",
         type=int,
-        default=10,
+        default=2,
         help="Push the adapter to the rollout nodes every N steps (0 = never, pure off-policy). "
-        "Without this the remote engines keep sampling the base model forever.",
+        "Cadence dominates the learning rate: measured on this task, every-5 climbed +0.07 "
+        "while every-2 climbed +0.58. Raise it only if a sync costs more than a step.",
     )
     args = parser.parse_args()
 

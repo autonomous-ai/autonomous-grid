@@ -339,6 +339,13 @@ RL fine-tuning is ~70-80% *sampling* — which is inference, which is what a gri
 grid generates the rollouts across its nodes; one machine holds the trainer; the trained LoRA
 adapter is pushed back to the serving nodes under a stable name, and `auto` keeps routing to it.
 
+Training needs **local** nodes: API nodes (`--api openai`, `--api codex`) can't serve rollouts —
+vendors return neither the token ids they sampled nor their logprobs, and you can't own an
+improvement to a model you rent. In a **hybrid** grid that turns into the useful loop: `auto`
+sends what the local model can't do yet to a frontier node, those tasks are exactly what tonight's
+training run consumes, and the frontier share shrinks as the local model catches up. See
+**[docs/topologies.md](docs/topologies.md)**.
+
 **Both backends are training-capable.** A rollout engine has to return the token ids it sampled
 and their logprobs — vLLM does this natively, and `grid train serve` does it from MLX, so an
 all-Apple-Silicon fleet needs no CUDA and no vLLM. A trainer on one backend can feed nodes on the
