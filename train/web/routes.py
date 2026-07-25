@@ -340,9 +340,13 @@ def register(app) -> None:
             return HTMLResponse(pages.error_page(
                 "Could not load it onto the machine", str(exc),
                 back=f"/w/{slug}/result"), status_code=400)
-        w.meta["serving"] = {"nodes": results, "name": cfg.deploy.adapter_name or w.slug}
-        w.save()
         failed = [r for r in results if not r["ok"]]
+        if any(r["ok"] for r in results):
+            # Recorded only for machines that really loaded it: otherwise the payoff page said
+            # "is answering now" about a model nothing was serving.
+            w.meta["serving"] = {"nodes": [r for r in results if r["ok"]],
+                                 "name": cfg.deploy.adapter_name or w.slug}
+            w.save()
         if failed:
             return HTMLResponse(pages.error_page(
                 "Trained, but not loaded everywhere",
@@ -376,6 +380,9 @@ def register(app) -> None:
         wanted = _one(form, "nightly", "on") == "on"
         w.meta["nightly"] = wanted
         w.save()
+        # Recording the intent and enabling collection is all this can honestly do from a browser:
+        # writing to someone's crontab or launchd from a web form is not ours to do. The page shows
+        # the one line to paste, and says so.
         if wanted:
             from train.capture import Policy, load_policy, save_policy
 

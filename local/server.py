@@ -259,18 +259,33 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
             await client.aclose()
             return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
 
+        # Streamed answers are captured too. Every chat interface streams, so skipping this branch
+        # meant the autopilot never saw the traffic that matters most. The accumulator is bounded
+        # and the store happens after the last chunk has already reached the client, so nothing
+        # here can slow a stream down.
+        collector = _StreamCollector(body) if _capture_enabled() else None
+
         async def stream_response():
             try:
                 async for chunk in engine_response.aiter_raw():
+                    if collector is not None:
+                        collector.feed(chunk)
                     yield chunk
             finally:
                 await engine_response.aclose()
                 await client.aclose()
+                if collector is not None:
+                    collector.store()
+
+        headers_stream = {}
+        if collector is not None:
+            headers_stream["X-Grid-Request-Id"] = collector.request_id
 
         return StreamingResponse(
             stream_response(),
             status_code=engine_response.status_code,
             media_type=engine_response.headers.get("content-type", "text/event-stream"),
+            headers=headers_stream or None,
         )
 
     try:
@@ -301,6 +316,82 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
 # A body larger than this is a file dump, not a training example — and parsing multi-megabyte JSON
 # a second time to look at it would be work done on a customer's request for nothing.
 _MAX_CAPTURE_BODY = 256 * 1024
+
+
+def _capture_enabled() -> bool:
+    try:
+        from train.capture import load_policy
+
+        return load_policy().enabled
+    except Exception:  # noqa: BLE001 — never let this decide anything about serving
+        return False
+
+
+class _StreamCollector:
+    """Reassembles a streamed answer so it can become a training example.
+
+    Two rules make this safe on a serving path: the buffer is bounded (a long stream stops being a
+    candidate example rather than growing without limit), and nothing is stored until after the
+    final chunk has been handed to the client.
+    """
+
+    def __init__(self, body: dict, limit: int = 16_000) -> None:
+        self.request_id = uuid.uuid4().hex[:16]
+        self._prompt = _prompt_text(body)
+        self._model = str(body.get("model") or "")
+        self._parts: list[str] = []
+        self._size = 0
+        self._limit = limit
+
+    def feed(self, chunk: bytes) -> None:
+        if self._size >= self._limit:
+            return
+        try:
+            text = chunk.decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            return
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                delta = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            piece = _stream_delta(delta)
+            if piece:
+                self._parts.append(piece)
+                self._size += len(piece)
+
+    def store(self) -> None:
+        try:
+            from train.capture import clip, record
+
+            answer = clip("".join(self._parts))
+            if self._prompt and answer:
+                record(clip(self._prompt), answer, model=self._model,
+                       request_id=self.request_id)
+        except Exception:  # noqa: BLE001 — a capture problem costs an example, never a response
+            return
+
+
+def _stream_delta(payload: dict) -> str:
+    """The text in one streamed chunk, whichever dialect it arrived in."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    delta = first.get("delta")
+    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+        return delta["content"]
+    if isinstance(first.get("text"), str):
+        return first["text"]
+    return ""
 
 
 def _capture_exchange(body: dict, engine_response: httpx.Response) -> str | None:

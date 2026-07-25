@@ -383,7 +383,7 @@ def test_using_a_model_lands_on_a_page_that_says_it_is_live(client, tmp_path, mo
     assert "is answering now" in page
     assert "Point your tools at it" in page
     assert "OPENAI_BASE_URL" in page                      # the one line her engineer needs
-    assert "Improve it every night" in page               # and the way to make it compound
+    assert "Start keeping the work" in page               # and the way to make it compound
 
 
 def test_the_live_page_redirects_when_nothing_is_serving_yet(client, tmp_path):
@@ -406,10 +406,13 @@ def test_turning_on_nightly_also_turns_on_collecting(client, tmp_path, monkeypat
     client.post(f"/w/{slug}/nightly", data={"nightly": "on"})
     assert capture.load_policy().enabled is True
     page = client.get(f"/w/{slug}/live").text
-    assert "Stop improving it nightly" in page
+    assert "Stop keeping the work" in page
+    # And it is honest about the one thing a web page cannot do: put a job in her scheduler.
+    assert "grid train autopilot" in page
+    assert "paste" in page
 
     client.post(f"/w/{slug}/nightly", data={"nightly": "off"})
-    assert "Improve it every night" in client.get(f"/w/{slug}/live").text
+    assert "Start keeping the work" in client.get(f"/w/{slug}/live").text
 
 
 # --- scoring is a job, not a hanging request ------------------------------------------------

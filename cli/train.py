@@ -179,7 +179,9 @@ def cmd_train_collect(args: argparse.Namespace) -> int:
     from train.capture import Policy, load_policy, prune, save_policy, summarize
 
     policy = load_policy()
-    if args.on or args.off or args.teacher or args.retain_days or args.sample is not None:
+    changing = (args.on or args.off or args.teacher or args.retain_days
+                or args.sample is not None or args.no_redact)
+    if changing:
         policy = Policy(
             enabled=True if args.on else (False if args.off else policy.enabled),
             sample=args.sample if args.sample is not None else policy.sample,

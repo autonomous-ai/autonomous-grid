@@ -132,7 +132,9 @@ def capability(machines: list[Machine] | None = None) -> Capability:
             True, True, "rl",
             "This computer can do both stages.",
             "It will learn from your examples first, then improve by trying and being scored.",
-            backend="mlx" if has_mlx else "torch",
+            # The feedback loop is the torch trainer, whatever else is installed. Saying "mlx" here
+            # offered MLX-packaged models to a torch run — a download that cannot load.
+            backend="torch",
         )
     if can_imitate:
         return Capability(

@@ -347,3 +347,64 @@ def test_feedback_validates_its_input():
     assert client.post("/v1/feedback", content=b"{not json").status_code == 400
     bad = client.post("/v1/feedback", json={"request_id": "a", "verdict": "great"}).json()
     assert "accepted" in bad["error"]["message"]   # says what the allowed verdicts are
+
+
+# --- streamed answers: how every chat interface actually talks --------------------------------
+
+def test_a_streamed_answer_is_captured_too():
+    """Every chat UI streams, so skipping this branch meant missing the traffic that matters."""
+    from local.server import _StreamCollector
+
+    _on()
+    collector = _StreamCollector({"messages": [{"role": "user", "content": "the ticket"}],
+                                  "model": "qwen-local"})
+    for piece in ("Sorry ", "about ", "the E07"):
+        chunk = b'data: ' + json.dumps({"choices": [{"delta": {"content": piece}}]}).encode() + b"\n\n"
+        collector.feed(chunk)
+    collector.feed(b"data: [DONE]\n\n")
+    collector.store()
+    capture.flush()
+
+    rows = [json.loads(line) for line in
+            next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()]
+    assert rows[0]["completion"] == "Sorry about the E07"
+    assert rows[0]["id"] == collector.request_id       # the id the client was handed mid-stream
+
+
+def test_a_streamed_answer_in_completions_dialect_is_captured():
+    from local.server import _StreamCollector
+
+    _on()
+    collector = _StreamCollector({"prompt": "the ticket", "model": "m"})
+    collector.feed(b'data: ' + json.dumps({"choices": [{"text": "hello"}]}).encode() + b"\n\n")
+    collector.store()
+    capture.flush()
+    assert capture.summarize().requests == 1
+
+
+def test_a_very_long_stream_stops_collecting_rather_than_growing():
+    from local.server import _StreamCollector
+
+    _on()
+    collector = _StreamCollector({"prompt": "p", "model": "m"}, limit=100)
+    for _ in range(50):
+        collector.feed(b'data: ' + json.dumps({"choices": [{"delta": {"content": "x" * 20}}]}).encode() + b"\n\n")
+    collector.store()
+    capture.flush()
+    row = json.loads(next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()[0])
+    assert len(row["completion"]) < 200      # bounded, not the full 1000 characters
+
+
+def test_junk_in_a_stream_is_ignored_not_fatal():
+    from local.server import _StreamCollector
+
+    _on()
+    collector = _StreamCollector({"prompt": "p", "model": "m"})
+    collector.feed(b"data: {not json\n\n")
+    collector.feed(b": keepalive\n\n")
+    collector.feed(b'data: ' + json.dumps({"choices": []}).encode() + b"\n\n")
+    collector.feed(b'data: ' + json.dumps({"choices": [{"delta": {"content": "ok"}}]}).encode() + b"\n\n")
+    collector.store()
+    capture.flush()
+    row = json.loads(next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()[0])
+    assert row["completion"] == "ok"

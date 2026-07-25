@@ -656,15 +656,20 @@ def live_step(w, serving: dict, summary=None, nightly_on: bool = False) -> str:
     where = ", ".join(html.escape(str(n.get("node", ""))) for n in nodes if n.get("ok"))
     collecting = ""
     if summary is not None:
+        # Honest about the one thing a web page cannot do for her: put a job in the schedule.
+        schedule = f"""<p class="small muted" style="margin-top:.9rem">One more step, once: paste
+this into your scheduler (or ask whoever set up this computer to) and it will run every night at
+eleven.</p>
+<pre class="log">0 23 * * *  cd {html.escape(str(w.path))} &amp;&amp; grid train autopilot</pre>"""
         collecting = f"""<div class="card"><h2>It keeps getting better</h2>
 <p class="small muted">{html.escape(summary.headline)} {html.escape(summary.advice)}</p>
 <form method="post" action="/w/{slug}/nightly" class="row">
 <button class="{'' if nightly_on else 'primary'}" type="submit" name="nightly"
  value="{'off' if nightly_on else 'on'}">
-{'Stop improving it nightly' if nightly_on else 'Improve it every night, automatically'}</button>
-<span class="small muted">{'On — it trains overnight when the machine is free and only'
- ' replaces itself if it wins.' if nightly_on else 'Trains overnight on what your team corrected'
- ' today, and only replaces itself if it wins.'}</span></form></div>"""
+{'Stop keeping the work' if nightly_on else 'Start keeping the work it does'}</button>
+<span class="small muted">{'On — every answer your team corrects becomes an example.'
+ if nightly_on else 'Every answer your team corrects becomes an example it can learn from.'}
+</span></form>{schedule if nightly_on else ''}</div>"""
 
     return shell("It's live", f"""
 <h1>{html.escape(w.name)} is answering now 🎉</h1>
