@@ -61,6 +61,35 @@ Written alongside the first slice on the `grid-rl` branch; normative for what sh
   torch/trl/peft/datasets; config, rollout parsing, rewards loading, and deploy run on the core
   CLI deps and carry the unit tests. The base install and every other command are unaffected.
 
+## Amendment (2026-07-25): the training rollout contract is not vLLM-only
+
+D2 said "vLLM engines serve training rollouts; llama.cpp/Ollama/MLX don't (yet)." That was a
+statement about which servers *happened* to expose ids+logprobs, and it read as a hardware
+requirement. Corrected: the contract is a wire contract, and any engine can serve it.
+
+- **D7 — Grid ships its own MLX rollout engine** (`train/mlx/rollout_server.py`): the same
+  `POST /v1/completions` with `logprobs` + `return_tokens_as_token_ids`, plus
+  `GET /v1/models` (so `grid join`'s existing MLX probe on port 8080 discovers it) and
+  `POST /reload_adapter`. It **fails closed with 400** when a caller omits the training fields —
+  a chat-shaped request must be told, not quietly served untrainable text. An Apple-Silicon Mac
+  is therefore a first-class *training* node, and an all-Mac fleet needs no CUDA and no vLLM.
+- **D8 — Held-out eval always runs on the trainer's own weights.** Found by running it: routing
+  eval through a remote engine reports whatever weights that node last loaded, so the eval line
+  sat frozen at 0.188 for an entire run while training was fine. `sample_group(..., local=True)`
+  is the eval path; remote is training-rollouts-only.
+- **D9 — Weight sync is mandatory, not an optimization** (`train/sync.py`): every N steps the
+  trainer saves its adapter and calls `/reload_adapter` (or vLLM's `/load_lora_adapter`) on each
+  node. Without it, remote engines sample the *base* model forever — the run limps off-policy
+  and the reward curve never moves (also observed, not theorized). Node failures are reported
+  and skipped, never fatal: one sleeping laptop must not kill a training run.
+- **D10 — Cross-backend fleets get an adapter converter** (`train/adapters.py`): peft and MLX
+  store the same low-rank pair with different key names and transposed layouts, so a file copy
+  silently fails to load. Conversion is exact, pure-numpy (no torch/mlx import needed), and
+  both directions are round-trip tested. Same-backend pairs sync directly; a torch trainer
+  feeding MLX nodes converts first — **auto-conversion inside the sync loop is the next slice.**
+
+Runbook: `docs/two-node-training.md`.
+
 ## Consequences / open items
 
 - **Security precondition for anything beyond a trusted bench:** local mode's unauthenticated

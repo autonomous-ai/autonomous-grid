@@ -113,13 +113,15 @@ class GridRolloutClient:
             raise RolloutError(f"rollout request failed: HTTP {response.status_code}: {detail}")
         return response.json()
 
-    def generate_group(self, prompt: str, n: int) -> list[Rollout]:
+    def generate_group(self, prompt: str, n: int, temperature: float | None = None) -> list[Rollout]:
         body = {
             "model": self._model,
             "prompt": prompt,
             "n": n,
             "max_tokens": self._cfg.max_tokens,
-            "temperature": self._cfg.temperature,
+            # temperature 0 = greedy on both vLLM and the MLX rollout server — the remote
+            # trainer's held-out eval path.
+            "temperature": self._cfg.temperature if temperature is None else temperature,
             "logprobs": 1,
             "return_tokens_as_token_ids": True,
         }

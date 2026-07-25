@@ -1,10 +1,14 @@
 """`grid train`: RL fine-tuning on the machines you already run (ADR 0019).
 
-Four verbs, one file of config:
-  init    write a starter grid-train.toml
-  doctor  readiness check — deps, rollout endpoint, data/rewards (no training, no downloads)
-  run     the climb: GRPO via TRL, rollouts served by the grid, adapter saved to artifacts
-  deploy  hot-load a trained adapter onto serving nodes (vLLM runtime LoRA)
+Verbs:
+  init             write a starter grid-train.toml (or install a task pack)
+  packs            list the bundled task packs
+  doctor           readiness check — deps, rollout endpoint, data/rewards (no training)
+  run              the climb: GRPO via TRL, rollouts served by the grid
+  serve            run THIS Mac as a rollout node (MLX; serves the training contract)
+  convert-adapter  move a LoRA adapter between torch/peft and MLX formats
+  deploy           hot-load a trained adapter onto serving nodes
+  ui               local read-only dashboard of runs and their curves
 """
 from __future__ import annotations
 
@@ -123,6 +127,30 @@ def cmd_train_deploy(args: argparse.Namespace) -> int:
 def _print_deploy(results: list[dict]) -> None:
     for r in results:
         print(f"  {'ok ' if r['ok'] else 'NO '}{r['node']}  ·  {r['detail']}")
+
+
+def cmd_train_convert(args: argparse.Namespace) -> int:
+    from train.adapters import convert, detect_format
+
+    source_format = detect_format(Path(args.source).expanduser())
+    written = convert(args.source, args.dest, to=args.to)
+    print(f"Converted {source_format} -> {written}: {args.dest}")
+    if written == "mlx":
+        print("Load it on a Mac rollout node: POST /reload_adapter {\"adapter_dir\": \"<dest>\"}")
+    return 0
+
+
+def cmd_train_serve(args: argparse.Namespace) -> int:
+    """Run the MLX rollout engine (Apple Silicon) — serves the training rollout contract."""
+    import uvicorn
+
+    from train.mlx.rollout_server import MlxEngine, build_app
+
+    print(f"Loading {args.model} …")
+    engine = MlxEngine(args.model, adapter_path=args.adapter_path)
+    print(f"grid train serve -> http://{args.host}:{args.port}/v1  (model: {args.model})")
+    uvicorn.run(build_app(engine), host=args.host, port=args.port, log_level="warning")
+    return 0
 
 
 def cmd_train_ui(args: argparse.Namespace) -> int:

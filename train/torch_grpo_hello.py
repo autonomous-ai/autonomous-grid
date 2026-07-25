@@ -65,6 +65,21 @@ def main() -> int:
     parser.add_argument("--eval-tasks", type=int, default=16)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--device", default="auto", help="auto | cuda | cpu")
+    parser.add_argument(
+        "--rollout-url",
+        default=None,
+        help="Serve rollouts remotely from this /v1 root (a grid endpoint or the MLX rollout "
+        "server) instead of sampling in-process. The remote engine MUST serve the same model. "
+        "Repeatable via --rollout-url a --rollout-url b to pool several nodes.",
+        action="append",
+    )
+    parser.add_argument(
+        "--sync-every",
+        type=int,
+        default=10,
+        help="Push the adapter to the rollout nodes every N steps (0 = never, pure off-policy). "
+        "Without this the remote engines keep sampling the base model forever.",
+    )
     args = parser.parse_args()
 
     torch, LoraConfig, get_peft_model, AutoModelForCausalLM, AutoTokenizer = _import_stack()
@@ -111,9 +126,53 @@ def main() -> int:
             add_generation_prompt=True,
         )
 
+    rollout_nodes = list(args.rollout_url or ())
+    remotes = []
+    if rollout_nodes:
+        from .config import RolloutConfig
+        from .rollout import GridRolloutClient
+
+        remotes = [
+            GridRolloutClient(
+                RolloutConfig(base_url=url, max_tokens=args.max_tokens), args.model
+            )
+            for url in rollout_nodes
+        ]
+    remote = remotes[0] if remotes else None
+
+    def sample_group_remote(prompt_ids: list[int], n: int, greedy: bool = False):
+        # The remote engine tokenizes the same chat text with the same model's tokenizer, so
+        # its sampled ids align with the trainer's vocabulary. Behavior logprobs come from the
+        # engine — the loss's clipped ratio handles the (bounded) off-policy gap.
+        # Round-robin across nodes by step so a pool shares the load; one group stays whole on
+        # one node (prompt-prefix locality).
+        text = tokenizer.decode(prompt_ids)
+        client = remotes[sample_group_remote.turn % len(remotes)]
+        sample_group_remote.turn += 1
+        rollouts = client.generate_group(text, n, temperature=0.0 if greedy else None)
+        return [(list(r.token_ids), list(r.logprobs), r.text) for r in rollouts]
+
+    sample_group_remote.turn = 0
+
+    def sync_adapter(step: int) -> str:
+        """Save the adapter and reload it on every rollout node."""
+        from .sync import push_adapter, summarize
+
+        staging = run_dir / "adapter-live"
+        model.save_pretrained(str(staging))
+        return summarize(push_adapter(staging, rollout_nodes))
+
     @torch.no_grad()
-    def sample_group(prompt_ids: list[int], n: int, greedy: bool = False):
-        """n completions batched: [(token_ids, behavior_logprobs, text)], eos-terminated."""
+    def sample_group(prompt_ids: list[int], n: int, greedy: bool = False, local: bool = False):
+        """n completions: [(token_ids, behavior_logprobs, text)], eos-terminated.
+
+        Training rollouts go remote when --rollout-url is set (the grid serves them).
+        `local=True` forces the trainer's own weights — used by the held-out eval, which MUST
+        measure the model being trained; measuring the remote engine would report the base
+        model's score forever (a frozen eval line, learned the hard way).
+        """
+        if remote is not None and not local:
+            return sample_group_remote(prompt_ids, n, greedy)
         model.eval()
         tokens = torch.tensor([prompt_ids] * n, device=device)
         past = None
@@ -183,7 +242,7 @@ def main() -> int:
     def evaluate() -> float:
         scores = []
         for user_text, target in eval_set:
-            (_, _, text) = sample_group(encode_prompt(user_text), 1, greedy=True)[0]
+            (_, _, text) = sample_group(encode_prompt(user_text), 1, greedy=True, local=True)[0]
             scores.append(reward(text, target))
         return sum(scores) / len(scores)
 
@@ -203,6 +262,9 @@ def main() -> int:
             record["loss"] = round(train_step(prompt_ids, group, advantages), 5)
         else:
             record["skipped"] = "no reward spread in group"
+        if rollout_nodes and args.sync_every and step % args.sync_every == 0:
+            record["sync"] = sync_adapter(step)
+            print(f"step {step:>3}  {record['sync']}")
         if step % args.eval_every == 0 or step == args.steps:
             final = evaluate()
             record["eval"] = round(final, 4)
@@ -213,11 +275,14 @@ def main() -> int:
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
 
+    for client in remotes:
+        client.close()
     model.save_pretrained(str(run_dir / "adapters"))
     (run_dir / "summary.json").write_text(
         json.dumps(
             {
                 "backend": f"torch/{device}",
+                "rollout_source": args.rollout_url or "in-process",
                 "model": args.model,
                 "steps": args.steps,
                 "baseline_eval": round(baseline, 4),

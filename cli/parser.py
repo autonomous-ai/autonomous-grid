@@ -595,11 +595,13 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
     )
 def _add_train(sub) -> None:
     from .train import (
+        cmd_train_convert,
         cmd_train_deploy,
         cmd_train_doctor,
         cmd_train_init,
         cmd_train_packs,
         cmd_train_run,
+        cmd_train_serve,
         cmd_train_ui,
     )
 
@@ -624,6 +626,24 @@ def _add_train(sub) -> None:
     ui = train_sub.add_parser("ui", help="Local dashboard: runs, reward/eval curves (read-only)")
     ui.add_argument("--port", type=int, default=8321)
     ui.set_defaults(handler=cmd_train_ui)
+
+    serve = train_sub.add_parser(
+        "serve", help="Run this Mac as a rollout node (MLX; serves the training contract)"
+    )
+    serve.add_argument("--model", default="mlx-community/SmolLM2-135M-Instruct")
+    serve.add_argument("--adapter-path", default=None, help="LoRA adapter dir (mlx_lm format)")
+    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--port", type=int, default=8080)
+    serve.set_defaults(handler=cmd_train_serve)
+
+    convert = train_sub.add_parser(
+        "convert-adapter", help="Convert a LoRA adapter between torch/peft and MLX formats"
+    )
+    convert.add_argument("source", help="Adapter directory to read")
+    convert.add_argument("dest", help="Directory to write")
+    convert.add_argument("--to", choices=("mlx", "peft"), default=None,
+                         help="Target format (default: the one the source is not)")
+    convert.set_defaults(handler=cmd_train_convert)
 
     doctor = train_sub.add_parser(
         "doctor", help="Readiness check: deps, rollout endpoint, data/rewards"
