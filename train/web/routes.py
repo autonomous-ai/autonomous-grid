@@ -470,7 +470,26 @@ def register(app) -> None:
             w, summarize(days=30), rows, hostsignals.summary(),
             nightly_on=bool(w.meta.get("nightly")), min_examples=autopilot.MIN_EXAMPLES,
             schedule=sched.status(slug=w.slug, workspace=w.path),
+            job=jobs.status(w.path),
         )
+
+    @app.post("/w/{slug}/tonight")
+    def tonight(slug: str):
+        """Run the unattended cycle now, by hand.
+
+        Waiting until 23:00 to discover whether any of this works is a poor way to learn a product,
+        and someone evaluating it will not wait a day. `--ignore-host` because she is asking for it
+        on the machine in front of her; every other guard — the minimum example count, the gate,
+        serving only on a win — is exactly as it is at 23:00.
+        """
+        w = _load(slug)
+        config = w.path / "grid-train.toml"
+        if not config.is_file():
+            return HTMLResponse(pages.error_page(
+                "Nothing to train yet", "This model has no run configuration — finish the setup "
+                "first.", back=f"/w/{slug}"), status_code=400)
+        jobs.start(w.path, config, verb="autopilot", job="run", extra=["--ignore-host"])
+        return RedirectResponse(f"/w/{slug}/progress", status_code=303)
 
     @app.post("/w/{slug}/nightly")
     async def nightly(slug: str, request: Request):

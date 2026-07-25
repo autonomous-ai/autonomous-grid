@@ -1155,3 +1155,53 @@ def test_a_four_letter_alias_does_not_hijack_a_longer_column(client, tmp_path):
     report, _ = prepare.prepare("sort-into-categories", rows, "z.csv")
     assert report.columns_used["the category"] == "status"
     assert len(report.distribution) == 3
+
+
+def test_you_can_run_tonights_cycle_now_when_there_is_enough_to_train_on(client, tmp_path,
+                                                                        monkeypatch):
+    """Nobody evaluating this product will wait until 23:00 to find out whether it works."""
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+
+    class Ready:
+        requests, trainable, edited, teacher_rows = 900, 640, 200, 100
+        first_seen = last_seen = ""
+        headline = "h"
+        advice = "a"
+
+    class Thin(Ready):
+        trainable = 12
+
+    host = {"power": "on mains", "activity": "idle 60s"}
+    ready = pages.overnight_page(w, Ready(), [], host, nightly_on=True, min_examples=120,
+                                 schedule={"installed": True, "when": "23:00", "mine": True})
+    assert "Train on it now instead of waiting" in ready
+    assert "even if someone is working on it" in ready      # what it costs, said plainly
+    assert "nothing is served unless it wins" in ready      # and what it does not change
+
+    # Not enough to learn from: offering it would only produce a refusal.
+    assert "Train on it now" not in pages.overnight_page(
+        w, Thin(), [], host, nightly_on=True, min_examples=120,
+        schedule={"installed": True, "when": "23:00", "mine": True})
+
+    # While it runs, the button becomes a status line rather than a second start.
+    running = pages.overnight_page(w, Ready(), [], host, nightly_on=True, min_examples=120,
+                                   schedule={"installed": True, "when": "23:00", "mine": True},
+                                   job={"running": True, "phase": "Learning from your examples."})
+    assert "Training now" in running and "Train on it now" not in running
+
+
+def test_training_now_starts_the_same_cycle_the_scheduler_would(client, tmp_path, monkeypatch):
+    started: dict = {}
+    monkeypatch.setattr("train.web.jobs.start",
+                        lambda path, config, **kw: started.update(kw) or {"running": True})
+    slug = _served_workspace(client, tmp_path)
+    workspace.write_config(workspace.load(slug), model="m", endpoint="http://x/v1", steps=10)
+
+    response = client.post(f"/w/{slug}/tonight")
+    assert response.status_code == 303
+    assert started["verb"] == "autopilot"                   # the same verb 23:00 runs
+    assert "--ignore-host" in started["extra"]              # she asked for it on this machine

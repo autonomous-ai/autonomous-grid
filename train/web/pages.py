@@ -902,7 +902,7 @@ def _night_words(row: dict) -> tuple[str, str, str]:
 
 def overnight_page(w, summary, history: list[dict], host: dict, *,
                    nightly_on: bool = False, min_examples: int = 120,
-                   schedule: dict | None = None) -> str:
+                   schedule: dict | None = None, job: dict | None = None) -> str:
     """What has been collected, what tonight will do, and what every past night did."""
     slug = html.escape(w.slug)
     window = ""
@@ -960,6 +960,21 @@ def overnight_page(w, summary, history: list[dict], host: dict, *,
         tone = "good"
     power, activity = html.escape(host.get("power", "unknown")), html.escape(host.get("activity", ""))
 
+    # Waiting until 23:00 to find out whether any of this works is a poor way to learn a product.
+    # Same cycle, started by hand, on the machine she is looking at — so it says what that costs.
+    running = bool((job or {}).get("running"))
+    if running:
+        now = (f'<p class="small"><span class="thinking">Training now — {html.escape(str((job or {}).get("phase") or "getting started"))}</span> '
+               f'· <a href="/w/{slug}/progress">watch it</a></p>')
+    elif summary.trainable >= min_examples:
+        now = (f'<form method="post" action="/w/{slug}/tonight" class="row">'
+               '<button type="submit">Train on it now instead of waiting</button>'
+               '<span class="small muted">Uses this computer for the next while, even if someone '
+               'is working on it. The same checks apply — nothing is served unless it wins.</span>'
+               '</form>')
+    else:
+        now = ""
+
     rows = ""
     for row in reversed(history):
         cls, title, explain = _night_words(row)
@@ -985,7 +1000,7 @@ own computers — nothing is sent anywhere.</p>
 <p class="small muted">{html.escape(summary.advice)}</p></div>
 <div class="card"><h2>Tonight</h2><p class="note {tone}">{tonight}</p>
 <p class="small muted">This computer right now: {power}, {activity}. A run waits for the machine to
-be on mains power and not in use, so nobody's laptop slows down mid-afternoon.</p></div>
+be on mains power and not in use, so nobody's laptop slows down mid-afternoon.</p>{now}</div>
 <div class="card"><h2>Every night so far</h2>
 <p class="small muted">Including the nights it trained and was refused — that is the gate working,
 not a fault.</p>{table}</div>
