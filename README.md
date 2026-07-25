@@ -349,7 +349,8 @@ training run consumes, and the frontier share shrinks as the local model catches
 **Both backends are training-capable.** A rollout engine has to return the token ids it sampled
 and their logprobs — vLLM does this natively, and `grid train serve` does it from MLX, so an
 all-Apple-Silicon fleet needs no CUDA and no vLLM. A trainer on one backend can feed nodes on the
-other via `grid train convert-adapter`. Two-machine walkthrough:
+other via `grid train convert-adapter`. Start here on one Mac:
+**[docs/start-on-a-mac.md](docs/start-on-a-mac.md)**; two-machine walkthrough:
 **[docs/two-node-training.md](docs/two-node-training.md)**; design and the honest limits:
 **[ADR 0019](docs/adr/0019-rl-training-plane.md)**.
 

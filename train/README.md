@@ -299,8 +299,9 @@ train/
 ```
 
 The CLI verbs live in `cli/train.py`. Design decisions and the honest limits are in
-[`docs/adr/0019-rl-training-plane.md`](../docs/adr/0019-rl-training-plane.md); the two-machine
-walkthrough is [`docs/two-node-training.md`](../docs/two-node-training.md); how inference routing
+[`docs/adr/0019-rl-training-plane.md`](../docs/adr/0019-rl-training-plane.md); the first-model
+walkthrough on one Mac is [`docs/start-on-a-mac.md`](../docs/start-on-a-mac.md); the two-machine
+version is [`docs/two-node-training.md`](../docs/two-node-training.md); how inference routing
 relates to all this is [`docs/topologies.md`](../docs/topologies.md).
 
 Heavy dependencies (torch, TRL, peft) live behind `pip install 'grid[train]'` and are imported
