@@ -50,6 +50,18 @@ def check(label: str, condition: bool, detail: str = "") -> None:
         failures.append(label)
 
 
+def queues_csv(per_class: int) -> str:
+    """A routing export: the text, and the queue a human put it in. The classify pack's answer key."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Text", "Queue"])
+    for i in range(per_class):
+        writer.writerow([f"I was charged twice for invoice INV-{4000 + i}", "billing"])
+        writer.writerow([f"Where is order AN-{9000 + i}? It has not moved in a week", "shipping"])
+        writer.writerow([f"Desk {i} shows E07 and will not raise", "technical"])
+    return buf.getvalue()
+
+
 def tickets_csv(n: int) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -233,6 +245,32 @@ def main() -> int:
         scores = graders[0](["Subject: x\n\nMy desk AN-284519 shows E07"],
                             completions_text=["Unplug it for 60 seconds, order AN-284519."])
         check("a grader returns a number", isinstance(scores[0], float), f"{scores[0]:.3f}")
+
+        print("\n3b · the sorting pack: an exact reward, end to end")
+        sorted_model = client.post("/new", data={"pack": "sort-into-categories"})
+        q_slug = sorted_model.headers["location"].rsplit("/", 1)[-1]
+        q_up = client.post(f"/w/{q_slug}/data",
+                           json={"filename": "queues.csv", "content": queues_csv(40)})
+        check("a routing export is accepted", q_up.status_code == 200 and q_up.json()["ok"])
+        q_page = client.get(f"/w/{q_slug}").text
+        check("it says which columns it guessed", "Columns we used:" in q_page and "queue" in q_page)
+        check("categories are balanced against the smallest", "balanced at 40" in q_page)
+        client.post(f"/w/{q_slug}/checks", data={"check": ["parseable"]})
+        q_w = workspace.load(q_slug)
+        q_config = workspace.write_config(q_w, model=MODEL, endpoint=base, steps=10)
+        q_cfg = load_config(q_config)
+        q_graders = {getattr(g, "__name__", "?"): g for g in load_reward_funcs(q_cfg.rewards, q_cfg.data)}
+        check("the locked grader is there whatever was ticked",
+              "reward_correct_category" in q_graders)
+        first = json.loads((q_w.path / "labels.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        right = q_graders["reward_correct_category"](
+            [first["prompt"]], completions_text=[f"CATEGORY: {first['label']}"])
+        wrong = q_graders["reward_correct_category"](
+            [first["prompt"]], completions_text=["CATEGORY: something else"])
+        check("the team's own choice scores 1.0 and anything else 0.0",
+              right == [1.0] and wrong == [0.0], f"{right} vs {wrong}")
+        check("a category, not an essay, is what it may emit",
+              "max_tokens = 24" in q_config.read_text(encoding="utf-8"))
 
         print("\n4 · doctor tells the truth about this machine")
         doctor = grid("train", "doctor", "--config", str(config_path), "--json", cwd=workdir, env=env)
