@@ -641,7 +641,8 @@ def _add_train(sub) -> None:
     )
     web.add_argument("--port", type=int, default=8322)
     web.add_argument("--host", default="127.0.0.1",
-                     help="0.0.0.0 to let colleagues on your network use it.")
+                     help="0.0.0.0 to let colleagues on your network use it — it then prints a "
+                          "link with a code in it, and only that link works.")
     web.set_defaults(handler=cmd_train_web)
 
     serve = train_sub.add_parser(
@@ -691,7 +692,7 @@ def _add_train(sub) -> None:
     collect.set_defaults(handler=cmd_train_collect)
 
     auto = train_sub.add_parser(
-        "autopilot", help="Improve a model from captured work, unattended (for cron)"
+        "autopilot", help="Improve a model from captured work, unattended (see `schedule`)"
     )
     auto.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     auto.add_argument("--days", type=int, default=30, help="How far back to draw examples from.")

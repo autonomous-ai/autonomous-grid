@@ -99,6 +99,18 @@ early on.
 Two things it will not do: train on the model's own unjudged output (that is how a model drifts
 into agreeing with itself), and train while you are using the machine or on battery.
 
+## Sharing it with a colleague
+
+```bash
+grid train web --host 0.0.0.0
+```
+
+It prints a link with a code in it. Send the whole link — only that link works, and the code changes
+every time you start it (set `GRID_TRAIN_WEB_TOKEN` to keep one). Anyone with the link can see this
+team's examples and start training runs on the machine, which is the point and also the reason the
+code exists: on a shared network, "nothing leaves your network" is not the same as "nobody else can
+see it".
+
 ## When something goes wrong
 
 | What you see | What it means |

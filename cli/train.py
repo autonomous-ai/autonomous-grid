@@ -469,9 +469,13 @@ def cmd_train_web(args: argparse.Namespace) -> int:
     like, train, and see the before/after before anything is served."""
     import uvicorn
 
-    from train.web import build_app
+    from train.web import access, build_app
 
-    print(f"grid train web -> http://127.0.0.1:{args.port}  (Ctrl-C to stop)")
-    print("Share it on your network with --host 0.0.0.0 (anyone who can reach it can train).")
-    uvicorn.run(build_app(), host=args.host, port=args.port, log_level="warning")
+    # Off loopback this page is on the office network, showing real tickets and able to start jobs
+    # on this machine. A token is the difference between "the person you sent the link to" and
+    # "anyone on the wifi".
+    token = access.resolve_token(args.host)
+    for line in access.share_lines(args.host, args.port, token):
+        print(line)
+    uvicorn.run(build_app(token), host=args.host, port=args.port, log_level="warning")
     return 0

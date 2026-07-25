@@ -14,11 +14,13 @@ Three rules the interface keeps:
 from __future__ import annotations
 
 
-def build_app():
+def build_app(token: str = ""):
+    """The app. `token` gates every page — required when this is bound off loopback (access.py)."""
     from fastapi import FastAPI
 
-    from . import routes
+    from . import access, routes
 
     app = FastAPI(title="grid train", docs_url=None, redoc_url=None)
     routes.register(app)
+    access.install(app, token)
     return app
