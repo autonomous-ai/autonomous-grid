@@ -27,8 +27,11 @@ def test_captured_examples_become_answer_keys_the_graders_can_use(tmp_path):
     rows = {json.loads(line)["prompt"]: json.loads(line)["reference"]
             for line in (rewards_dir / "refs.jsonl").read_text(encoding="utf-8").splitlines()}
     assert known == 2
-    assert rows["captured last week"] == "what the human sent"
-    assert rows["from the original export"] == "corrected since"    # tonight's version wins
+    assert rows["captured last week"] == "what the human sent"      # the gap is filled
+    # And the export's own reference is NOT displaced. A captured answer may be the model's own
+    # output that nobody objected to; using it as the answer key would make the model its own
+    # grader — the collapse the capture rules exist to prevent, arriving through the gate.
+    assert rows["from the original export"] == "old answer"
 
 
 def test_an_answer_key_pack_is_judged_on_work_that_has_an_answer_key(tmp_path):

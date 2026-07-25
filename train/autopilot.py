@@ -265,7 +265,11 @@ def merge_references(rewards_dir: Path, dataset: Path, *, keep: int = 20_000) ->
         return 0
     target = rewards_dir / "refs.jsonl"
     known: dict[str, str] = {}
-    for path in (target, source):        # source second: tonight's version wins
+    # The workspace's own file goes in LAST and wins. Those references are what a person wrote in
+    # the export; a captured one may be the model's own answer that nobody objected to (weight
+    # 0.6). Letting that overwrite a human's reply would quietly make the model its own answer key
+    # — the same collapse the capture rules exist to prevent, arriving through the gate instead.
+    for path in (source, target):
         if not path.is_file():
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
