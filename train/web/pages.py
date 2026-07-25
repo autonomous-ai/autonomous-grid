@@ -539,6 +539,49 @@ document.getElementById('askform').addEventListener('submit', () => {{
 """)
 
 
+_SCORED = __import__("re").compile(r"scored (\d+) of (\d+)")
+
+
+def scoring_step(w, job: dict) -> str:
+    """While both models answer the held-out work. A count, because minutes of nothing reads as
+    broken — and this page is where she is deciding whether to trust the tool at all."""
+    slug = html.escape(w.slug)
+    if job.get("state") == "failed":
+        return shell("Checking", steps_bar("done") + f"""
+<h1>Could not check it</h1>
+<div class="note warn"><b>{html.escape(job.get('reason') or 'The scoring run stopped.')}</b>
+The model itself is safe — nothing has been served.</div>
+<div class="row"><form method="post" action="/w/{slug}/check">
+<button class="primary" type="submit">Try checking again</button></form>
+<a class="btn ghost" href="/w/{slug}/progress">Back</a></div>
+<details><summary>Technical details</summary>
+<pre class="log">{html.escape(job.get('log_tail') or '')}</pre></details>
+""")
+    matches = _SCORED.findall(job.get("log_tail") or "")
+    done, total = (int(matches[-1][0]), int(matches[-1][1])) if matches else (0, 0)
+    progress = ""
+    if total:
+        # Two models answer every item, so the bar spans both passes.
+        pct = int(100 * min(done, total) / (total * 2)) + (50 if _second_pass(job) else 0)
+        progress = (f'<div class="bar"><i style="width:{min(pct, 99)}%"></i></div>'
+                    f'<p class="small muted">answered {done} of {total}'
+                    f'{" · second model" if _second_pass(job) else " · first model"}</p>')
+    return shell("Checking", steps_bar("done") + f"""
+<h1>Checking whether it is better <span class="chip live">working</span></h1>
+<p class="lede">Both models are answering the same held-back work — the ones this model never
+trained on. A couple of minutes.</p>
+<div class="card">{progress or '<p class="muted small">Starting…</p>'}</div>
+<div class="row"><a class="btn ghost" href="/">Leave it working</a></div>
+""", refresh=8)
+
+
+def _second_pass(job: dict) -> bool:
+    """Two models are scored in order; the log mentions the candidate once it starts."""
+    tail = job.get("log_tail") or ""
+    models = {line.rsplit(" with ", 1)[-1] for line in tail.splitlines() if " with " in line}
+    return len(models) > 1
+
+
 def result_step(w, card: dict | None, job: dict) -> str:
     if card is None:
         return shell("Result", steps_bar("done") + f"""

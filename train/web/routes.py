@@ -247,22 +247,28 @@ def register(app) -> None:
         w = _load(slug)
         card_path = w.path / "run" / "eval-card.json"
         card = json.loads(card_path.read_text(encoding="utf-8")) if card_path.is_file() else None
+        scoring = jobs.status(w.path, job="eval")
+        if scoring.get("state") == "running" or (scoring.get("state") == "failed" and not card):
+            return pages.scoring_step(w, scoring)
         return pages.result_step(w, card, jobs.status(w.path))
 
     @app.post("/w/{slug}/check")
     def check(slug: str):
-        """Score the trained model against the incumbent — the gate, run on demand."""
-        w = _load(slug)
-        from train.config import load_config
-        from train.evaluate import run_eval
+        """Score the trained model against the incumbent — the gate.
 
-        try:
-            cfg = load_config(w.path / "grid-train.toml")
-            adapter_name = w.meta.get("config", {}).get("adapter_name") or w.slug
-            run_eval(cfg, w.path / "run", adapter_name)
-        except SystemExit as exc:
+        Launched as a job, not run inside this request: scoring means generating an answer for
+        every held-out item with two models, which is minutes of white page if done here — and a
+        reload would start a second one racing the first over the same card file.
+        """
+        w = _load(slug)
+        config = w.path / "grid-train.toml"
+        if not config.is_file():
             return HTMLResponse(pages.error_page(
-                "Could not check it yet", str(exc), back=f"/w/{slug}/progress"), status_code=400)
+                "Nothing to check yet", "This model has not been trained.",
+                back=f"/w/{slug}"), status_code=400)
+        name = (w.meta.get("run") or {}).get("adapter_name") or w.slug
+        jobs.start(w.path, config, verb="eval", job="eval",
+                   extra=["--run", str(w.path / "run"), "--candidate", name])
         return RedirectResponse(f"/w/{slug}/result", status_code=303)
 
     @app.get("/w/{slug}/try", response_class=HTMLResponse)

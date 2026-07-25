@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from typing import ClassVar
 
 import pytest
 from fastapi.testclient import TestClient
@@ -264,7 +265,7 @@ def test_a_failed_run_says_so_and_offers_a_way_forward(tmp_path, monkeypatch):
         "Loading model\ngrid train: only 8 usable tickets — export a longer date range.\n",
         encoding="utf-8",
     )
-    (w.path / "job.json").write_text(_json.dumps({
+    (w.path / "run-job.json").write_text(_json.dumps({
         "pid": 999999, "started": time.time() - 90, "config": "x", "verb": "sft",
         "expected_steps": 600, "exit": 1, "ended": time.time(),
     }), encoding="utf-8")
@@ -293,7 +294,7 @@ def test_a_run_that_vanished_is_reported_as_stopped(tmp_path, monkeypatch):
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     w = workspace.create("x", "support-replies")
-    (w.path / "job.json").write_text(_json.dumps({
+    (w.path / "run-job.json").write_text(_json.dumps({
         "pid": 999999, "started": time.time() - 600, "config": "x", "verb": "run",
     }), encoding="utf-8")
     job = jobs.status(w.path)
@@ -409,3 +410,55 @@ def test_turning_on_nightly_also_turns_on_collecting(client, tmp_path, monkeypat
 
     client.post(f"/w/{slug}/nightly", data={"nightly": "off"})
     assert "Improve it every night" in client.get(f"/w/{slug}/live").text
+
+
+# --- scoring is a job, not a hanging request ------------------------------------------------
+
+def test_checking_shows_a_count_instead_of_a_white_page(client, tmp_path, monkeypatch):
+    """Scoring generates an answer per held-out item with TWO models — minutes, not seconds."""
+    started: list[dict] = []
+    monkeypatch.setattr(
+        "train.web.jobs.start",
+        lambda path, config, **kw: started.append({"path": path, **kw}) or {"running": True},
+    )
+    slug = _served_workspace(client, tmp_path)
+    (workspace_run := workspace.load(slug).path / "run").mkdir(parents=True, exist_ok=True)
+    (workspace_run / "eval-card.json").unlink(missing_ok=True)
+
+    response = client.post(f"/w/{slug}/check")
+    assert response.status_code == 303
+    # It launched a separate "eval" job rather than scoring inside the request.
+    assert started and started[0]["job"] == "eval" and started[0]["verb"] == "eval"
+    assert "--candidate" in started[0]["extra"]
+
+
+def test_scoring_page_reads_progress_from_the_log():
+    from train.web import workspace as ws
+    from train.web.pages import scoring_step
+
+    class FakeWorkspace:
+        slug = "support-replies"
+        name = "Support replies"
+        pack = "support-replies"
+        meta: ClassVar[dict] = {}
+
+    job = {"state": "running", "log_tail":
+           "[grid train] scored 11 of 30 with base/model\n"
+           "[grid train] scored 12 of 30 with base/model"}
+    page = scoring_step(FakeWorkspace(), job)
+    assert "answered 12 of 30" in page
+    assert "first model" in page
+    assert 'http-equiv="refresh"' in page          # it keeps itself up to date
+
+    both = {"state": "running", "log_tail":
+            "[grid train] scored 30 of 30 with base/model\n"
+            "[grid train] scored 4 of 30 with support-replies"}
+    assert "second model" in scoring_step(FakeWorkspace(), both)
+
+    failed = {"state": "failed", "reason": "The machine that answers is asleep.",
+              "log_tail": "boom"}
+    page = scoring_step(FakeWorkspace(), failed)
+    assert "Could not check it" in page
+    assert "nothing has been served" in page
+    assert "Try checking again" in page
+    assert ws is not None

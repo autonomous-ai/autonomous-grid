@@ -31,8 +31,8 @@ _EXIT_HINTS = {
 }
 
 
-def _state_file(workspace_path: Path) -> Path:
-    return workspace_path / "job.json"
+def _state_file(workspace_path: Path, job: str = "run") -> Path:
+    return workspace_path / f"{job}-job.json"
 
 
 def _run_dir(workspace_path: Path) -> Path:
@@ -40,18 +40,18 @@ def _run_dir(workspace_path: Path) -> Path:
 
 
 def start(workspace_path: Path, config_path: Path, *, verb: str = "run",
-          extra: list[str] | None = None, expected_steps: int = 0) -> dict:
+          extra: list[str] | None = None, expected_steps: int = 0, job: str = "run") -> dict:
     """Launch the run detached from this request. Returns the job record.
 
     `verb` is the training stage: "sft" imitates the answers a team already wrote and needs nothing
     but this machine; "run" is the feedback loop and needs an engine that can serve rollouts. The
     page decides which is possible before offering it (train/web/machines.py).
     """
-    existing = status(workspace_path)
+    existing = status(workspace_path, job=job)
     if existing.get("running"):
-        return existing
+        return existing              # one of each kind at a time: pressing twice is harmless
     _run_dir(workspace_path).mkdir(parents=True, exist_ok=True)
-    log_path = workspace_path / "run.log"
+    log_path = workspace_path / f"{job}.log"
     # Truncate: one workspace, one current run — history lives in the run dir's log.jsonl.
     handle = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
@@ -65,16 +65,17 @@ def start(workspace_path: Path, config_path: Path, *, verb: str = "run",
     )
     record = {"pid": process.pid, "started": time.time(), "config": str(config_path),
               "verb": verb, "expected_steps": expected_steps}
-    _write(workspace_path, record)
-    _reap_later(workspace_path, process, handle)
-    return status(workspace_path)
+    _write(workspace_path, record, job)
+    _reap_later(workspace_path, process, handle, job)
+    return status(workspace_path, job=job)
 
 
-def _write(workspace_path: Path, record: dict) -> None:
-    _state_file(workspace_path).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+def _write(workspace_path: Path, record: dict, job: str = "run") -> None:
+    _state_file(workspace_path, job).write_text(json.dumps(record, indent=2) + "\n",
+                                                encoding="utf-8")
 
 
-def _reap_later(workspace_path: Path, process: subprocess.Popen, handle) -> None:
+def _reap_later(workspace_path: Path, process: subprocess.Popen, handle, job: str = "run") -> None:
     """Wait on the child in the background and record how it ended.
 
     Without this the exit code is lost — the request that started the run is long gone — and the
@@ -87,14 +88,14 @@ def _reap_later(workspace_path: Path, process: subprocess.Popen, handle) -> None
         except OSError:
             pass
         try:
-            record = json.loads(_state_file(workspace_path).read_text(encoding="utf-8"))
+            record = json.loads(_state_file(workspace_path, job).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
         if record.get("pid") != process.pid:
             return                       # a newer run owns the file now
         record.update({"exit": code, "ended": time.time()})
         try:
-            _write(workspace_path, record)
+            _write(workspace_path, record, job)
         except OSError:
             pass
 
@@ -147,9 +148,9 @@ def estimate(steps_done: int, expected: int, elapsed_seconds: float) -> str:
     return f"about {hours:.1f} hours left"
 
 
-def status(workspace_path: Path) -> dict:
+def status(workspace_path: Path, job: str = "run") -> dict:
     """What the page needs: an honest state, how far along, the curve, and any error."""
-    state_path = _state_file(workspace_path)
+    state_path = _state_file(workspace_path, job)
     if not state_path.is_file():
         return {"exists": False, "running": False, "state": "none"}
     try:
@@ -166,7 +167,7 @@ def status(workspace_path: Path) -> dict:
                 points.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    log_path = workspace_path / "run.log"
+    log_path = workspace_path / f"{job}.log"
     tail = ""
     if log_path.is_file():
         tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-14:])
@@ -223,17 +224,17 @@ def _reason_from(log_tail: str) -> str:
     return ""
 
 
-def stop(workspace_path: Path) -> dict:
-    state_path = _state_file(workspace_path)
+def stop(workspace_path: Path, job: str = "run") -> dict:
+    state_path = _state_file(workspace_path, job)
     if state_path.is_file():
         try:
             pid = int(json.loads(state_path.read_text(encoding="utf-8")).get("pid", -1))
         except (OSError, json.JSONDecodeError, ValueError):
-            return status(workspace_path)
+            return status(workspace_path, job=job)
         if pid > 0 and _alive(pid):
             # The whole process group: the trainer may have spawned dataloader workers.
             try:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
-    return status(workspace_path)
+    return status(workspace_path, job=job)

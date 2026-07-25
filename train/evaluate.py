@@ -62,9 +62,12 @@ def score_model(
     client = GridRolloutClient(cfg.rollout, model, transport=transport)
     completions: list[str] = []
     try:
-        for prompt in prompts:
+        for index, prompt in enumerate(prompts, 1):
             rollout = client.generate_group(prompt, 1, temperature=0.0)[0]
             completions.append(rollout.text)
+            # Printed, not logged: scoring can take minutes and the page reads this to say
+            # "scored 12 of 30" instead of showing a blank screen.
+            print(f"[grid train] scored {index} of {len(prompts)} with {model}", flush=True)
     finally:
         client.close()
 
