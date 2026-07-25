@@ -172,6 +172,52 @@ def _print_deploy(results: list[dict]) -> None:
         print(f"  {'ok ' if r['ok'] else 'NO '}{r['node']}  ·  {r['detail']}")
 
 
+def cmd_train_nightly(args: argparse.Namespace) -> int:
+    """One unattended cycle: train, prove it on held-out work, ship it only if it won."""
+    from train.config import load_config
+    from train.nightly import history, run_cycle
+
+    cfg = load_config(args.config or DEFAULT_CONFIG)
+    if args.history:
+        rows = history(cfg)
+        if not rows:
+            print("No nights recorded yet.")
+            return 0
+        for row in rows:
+            mark = "ok " if row["ok"] else "-- "
+            delta = f"{row['delta']:+.3f}" if row.get("delta") is not None else "     "
+            print(f"  {mark}{row['started'][:16].replace('T', ' ')}  {delta}  "
+                  f"{row['stage']:<9} {row['detail']}")
+        return 0
+
+    result = run_cycle(cfg, check_host=not args.ignore_host, deploy=not args.no_deploy)
+    print(f"{result.stage.upper()}: {result.detail}")
+    if result.adapter:
+        print(f"Adapter: {result.adapter}")
+    return 0 if result.ok else 1
+
+
+def cmd_train_where(args: argparse.Namespace) -> int:
+    """Show the grids training can use, in either mode, and whether weights can reach the nodes."""
+    from train.endpoints import resolve
+    from train.hostsignals import summary
+
+    endpoints = resolve()
+    if not endpoints:
+        print("No grid found. `grid up` starts one for this network; `grid login` connects to "
+              "your hosted grid.")
+        return 1
+    for endpoint in endpoints:
+        print(f"{endpoint.mode:<7} {endpoint.label}")
+        print(f"        {endpoint.base_url}")
+        print(f"        adapter push: {'yes' if endpoint.can_push_adapters else 'NOT through the relay'}")
+        print(f"        {endpoint.note}")
+    host = summary()
+    print()
+    print(f"this machine: {host['power']} · {host['activity']}")
+    return 0
+
+
 def cmd_train_convert(args: argparse.Namespace) -> int:
     from train.adapters import convert, detect_format
 

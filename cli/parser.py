@@ -600,11 +600,13 @@ def _add_train(sub) -> None:
         cmd_train_doctor,
         cmd_train_eval,
         cmd_train_init,
+        cmd_train_nightly,
         cmd_train_packs,
         cmd_train_run,
         cmd_train_serve,
         cmd_train_ui,
         cmd_train_web,
+        cmd_train_where,
     )
 
     train = sub.add_parser("train", help="RL fine-tuning served by your grid (ADR 0019)")
@@ -665,6 +667,20 @@ def _add_train(sub) -> None:
     run = train_sub.add_parser("run", help="Run the training climb (GRPO via TRL)")
     run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     run.set_defaults(handler=cmd_train_run)
+
+    nightly = train_sub.add_parser(
+        "nightly", help="One unattended cycle: train, prove it, ship it only if it won"
+    )
+    nightly.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    nightly.add_argument("--no-deploy", action="store_true",
+                         help="Train and prove it, but don't serve it even on a pass.")
+    nightly.add_argument("--ignore-host", action="store_true",
+                         help="Train even on battery or while the machine is in use.")
+    nightly.add_argument("--history", action="store_true", help="Show recent nights instead.")
+    nightly.set_defaults(handler=cmd_train_nightly)
+
+    where = train_sub.add_parser("where", help="Which grids training can use (LAN and hosted)")
+    where.set_defaults(handler=cmd_train_where)
 
     ev = train_sub.add_parser(
         "eval", help="Score a trained model against the one you serve, on held-out work"
