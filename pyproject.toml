@@ -45,6 +45,8 @@ include = ["cli*", "shared*", "local*", "remote*", "doggi*", "train*"]
 [tool.setuptools.package-data]
 "shared.engine" = ["*.txt"]
 "shared.media" = ["workflows/*.json"]
+# Task-pack templates ship whole: config, data-prep, rewards, sample data, PACK.md.
+"train.packs" = ["*/PACK.md", "*/*.toml", "*/*.jsonl", "*/*.py"]
 
 [tool.ruff]
 target-version = "py311"

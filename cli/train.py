@@ -16,6 +16,15 @@ DEFAULT_CONFIG = "grid-train.toml"
 
 
 def cmd_train_init(args: argparse.Namespace) -> int:
+    if getattr(args, "pack", None):
+        from train.packs import install_pack
+
+        dest = Path(args.dest or args.pack)
+        installed = install_pack(args.pack, dest)
+        print(f"Installed pack {args.pack!r} -> {dest}/ ({len(installed)} files)")
+        print(f"Next: cd {dest} && cat README.md")
+        return 0
+
     from train.config import SAMPLE
 
     path = Path(args.config or DEFAULT_CONFIG)
@@ -24,6 +33,19 @@ def cmd_train_init(args: argparse.Namespace) -> int:
     path.write_text(SAMPLE, encoding="utf-8")
     print(f"Wrote {path}")
     print("Edit it (model, rollout endpoint, data, rewards), then: grid train doctor")
+    return 0
+
+
+def cmd_train_packs(args: argparse.Namespace) -> int:
+    from train.packs import available_packs
+
+    packs = available_packs()
+    if getattr(args, "json", False):
+        print(json.dumps(packs, indent=2))
+        return 0
+    print("Task packs (install with `grid train init --pack <name>`):")
+    for name, description in packs.items():
+        print(f"  {name:<18} {description}")
     return 0
 
 

@@ -594,15 +594,31 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
         help="Remote only: let your own engine serve this request.",
     )
 def _add_train(sub) -> None:
-    from .train import cmd_train_deploy, cmd_train_doctor, cmd_train_init, cmd_train_run
+    from .train import (
+        cmd_train_deploy,
+        cmd_train_doctor,
+        cmd_train_init,
+        cmd_train_packs,
+        cmd_train_run,
+    )
 
     train = sub.add_parser("train", help="RL fine-tuning served by your grid (ADR 0019)")
     train_sub = train.add_subparsers(dest="subcommand", required=True)
 
-    init = train_sub.add_parser("init", help="Write a starter grid-train.toml")
+    init = train_sub.add_parser("init", help="Write a starter grid-train.toml (or install a pack)")
     init.add_argument("--config", default=None, help="Path to write (default: ./grid-train.toml)")
     init.add_argument("--force", action="store_true", help="Overwrite an existing file.")
+    init.add_argument(
+        "--pack",
+        default=None,
+        help="Install a task pack instead (see `grid train packs`), e.g. support-replies.",
+    )
+    init.add_argument("--dest", default=None, help="Directory for --pack (default: ./<pack>/)")
     init.set_defaults(handler=cmd_train_init)
+
+    packs = train_sub.add_parser("packs", help="List bundled task packs for business data")
+    packs.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    packs.set_defaults(handler=cmd_train_packs)
 
     doctor = train_sub.add_parser(
         "doctor", help="Readiness check: deps, rollout endpoint, data/rewards"
