@@ -1,8 +1,13 @@
 # Grid topologies
 
 **Topology** = the shape of a grid: which kinds of node it has, and what each one is allowed to
-do. Grid has two node kinds, so there are three useful shapes — and the shape decides both what
-the grid can do and what it costs.
+do. Grid has two node kinds, so there are three useful shapes — and the shape decides what
+serving a request costs and where it happens.
+
+**Scope: this is a document about inference.** Training is not a topology choice — it runs on the
+local nodes, in every shape. Renting compute by the hour to train is the expensive way to do the
+one job idle office hardware is ideally suited to, and API nodes cannot train at any price (see
+below). So: *route inference however the economics favour; train locally, always.*
 
 | Node kind | What it is | Joined with |
 |---|---|---|
@@ -67,10 +72,14 @@ yours.
 
 ## Choosing
 
-- Have machines and sensitive data → **pure local**, and train.
-- Want one governed endpoint over vendor keys, no hardware → **pure API**, and know that
-  training is off the table until at least one local node joins.
-- Have machines *and* real hard problems → **hybrid**, and let training move the line.
+- Have machines and sensitive data → **pure local**. Cheapest to serve, and trains.
+- Want one governed endpoint over vendor keys, no hardware → **pure API**. Nothing to train on
+  until at least one local node joins.
+- Have machines *and* real hard problems → **hybrid**: serve from both, train on the local half,
+  and let training move the line.
+
+In all three, the training answer is the same — **local**. The topology decides your inference
+bill; it does not decide where learning happens.
 
 Training details: [two-node-training.md](two-node-training.md) ·
 [ADR 0019](adr/0019-rl-training-plane.md). Routing details:
