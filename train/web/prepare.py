@@ -214,25 +214,61 @@ def prepare(pack: str, text: str, filename: str) -> tuple[Report, list[dict]]:
     return preparer(_rows(text, filename))
 
 
+# The instruction each pack's model works under. Kept identical to the CLI packs' SYSTEM_PROMPT so
+# a model started in the browser and one started from a terminal learn the same job.
+SYSTEM_PROMPTS = {
+    "support-replies": (
+        "You are the support agent. Read the ticket and draft the reply to send. "
+        "Be specific to this ticket, resolve the issue, and keep the reply under 160 words."
+    ),
+    "sales-triage": (
+        "You triage inbound sales leads. Reply in EXACTLY this shape and nothing else:\n"
+        "PRIORITY: <hot|warm|cold>\nNEXT: <one concrete next action>"
+    ),
+}
+
+
 def write_task_files(pack: str, kept: list[dict], dest) -> None:
-    """Write what the trainer and the graders read: prompts.jsonl + refs/labels.jsonl."""
+    """Write what the trainer and the graders read.
+
+    Four files, because the ladder has two rungs: `prompts.jsonl` + `refs/labels.jsonl` feed the
+    RL pass, and **`sft.jsonl` feeds stage one** — imitation of the answers the team already wrote.
+    Stage one is the rung that runs on a Mac with no rollout server and no NVIDIA card, so leaving
+    it out of the browser path would have meant the interface could only offer the harder half.
+    """
     from pathlib import Path
 
     dest = Path(dest)
     (dest / "prompts.jsonl").write_text(
         "".join(json.dumps({"prompt": row["prompt"]}) + "\n" for row in kept), encoding="utf-8"
     )
+    system = SYSTEM_PROMPTS.get(pack, "")
     if pack == "support-replies":
         (dest / "refs.jsonl").write_text(
             "".join(json.dumps({"prompt": r["prompt"], "reference": r["reference"]}) + "\n"
                     for r in kept),
             encoding="utf-8",
         )
+        answers = [(r["prompt"], r["reference"]) for r in kept]
     else:
         (dest / "labels.jsonl").write_text(
             "".join(json.dumps({"prompt": r["prompt"], "label": r["label"]}) + "\n" for r in kept),
             encoding="utf-8",
         )
+        # The lead pack's ideal answer is the shape the graders check, with the true priority in it.
+        answers = [(r["prompt"], f"PRIORITY: {r['label']}\nNEXT: ") for r in kept]
+
+    (dest / "sft.jsonl").write_text(
+        "".join(
+            json.dumps({"messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": answer},
+            ]}) + "\n"
+            for prompt, answer in answers
+        ),
+        encoding="utf-8",
+    )
 
 
 def slugify(name: str) -> str:

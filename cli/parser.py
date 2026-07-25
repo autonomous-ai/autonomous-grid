@@ -604,6 +604,7 @@ def _add_train(sub) -> None:
         cmd_train_packs,
         cmd_train_run,
         cmd_train_serve,
+        cmd_train_sft,
         cmd_train_ui,
         cmd_train_web,
         cmd_train_where,
@@ -667,6 +668,15 @@ def _add_train(sub) -> None:
     run = train_sub.add_parser("run", help="Run the training climb (GRPO via TRL)")
     run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     run.set_defaults(handler=cmd_train_run)
+
+    sft = train_sub.add_parser(
+        "sft", help="Stage one: learn from the replies your team already wrote (works on a Mac)"
+    )
+    sft.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    sft.add_argument("--backend", choices=("auto", "mlx", "torch"), default="auto",
+                     help="auto picks MLX on Apple Silicon, torch elsewhere.")
+    sft.add_argument("--iters", type=int, default=None, help="Training iterations (MLX path).")
+    sft.set_defaults(handler=cmd_train_sft)
 
     nightly = train_sub.add_parser(
         "nightly", help="One unattended cycle: train, prove it, ship it only if it won"

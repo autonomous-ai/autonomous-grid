@@ -172,6 +172,20 @@ def _print_deploy(results: list[dict]) -> None:
         print(f"  {'ok ' if r['ok'] else 'NO '}{r['node']}  ·  {r['detail']}")
 
 
+def cmd_train_sft(args: argparse.Namespace) -> int:
+    """Stage one: imitate the answers your team already wrote. Runs on a Mac with no GPU rig."""
+    from train.config import load_config
+    from train.sft import pick_backend, run_sft
+
+    cfg = load_config(args.config or DEFAULT_CONFIG)
+    backend = pick_backend(args.backend)
+    print(f"Learning from your examples on {backend} — this is the imitation stage.")
+    adapter = run_sft(cfg, backend=args.backend, iters=args.iters)
+    print(f"Adapter saved: {adapter}")
+    print("Next: `grid train run` sharpens it with feedback, or `grid train eval` scores it now.")
+    return 0
+
+
 def cmd_train_nightly(args: argparse.Namespace) -> int:
     """One unattended cycle: train, prove it on held-out work, ship it only if it won."""
     from train.config import load_config
