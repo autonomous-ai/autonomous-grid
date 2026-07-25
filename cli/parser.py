@@ -595,6 +595,8 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
     )
 def _add_train(sub) -> None:
     from .train import (
+        cmd_train_autopilot,
+        cmd_train_collect,
         cmd_train_convert,
         cmd_train_deploy,
         cmd_train_doctor,
@@ -668,6 +670,38 @@ def _add_train(sub) -> None:
     run = train_sub.add_parser("run", help="Run the training climb (GRPO via TRL)")
     run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     run.set_defaults(handler=cmd_train_run)
+
+    collect = train_sub.add_parser(
+        "collect", help="Learn from the work the grid already does (off until you turn it on)"
+    )
+    collect.add_argument("--on", action="store_true", help="Start keeping served requests.")
+    collect.add_argument("--off", action="store_true", help="Stop keeping them.")
+    collect.add_argument("--teacher", action="append", default=[],
+                         help="A model whose answers count as teaching examples (repeatable).")
+    collect.add_argument("--retain-days", type=int, default=0, help="How long to keep them.")
+    collect.add_argument("--sample", type=float, default=None,
+                         help="Fraction of requests to keep (1.0 = all).")
+    collect.add_argument("--no-redact", action="store_true",
+                         help="Store text as-is instead of scrubbing emails/phones/cards.")
+    collect.add_argument("--prune", action="store_true", help="Delete files past the window now.")
+    collect.add_argument("--days", type=int, default=30, help="Window to summarise.")
+    collect.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    collect.set_defaults(handler=cmd_train_collect)
+
+    auto = train_sub.add_parser(
+        "autopilot", help="Improve a model from captured work, unattended (for cron)"
+    )
+    auto.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    auto.add_argument("--days", type=int, default=30, help="How far back to draw examples from.")
+    auto.add_argument("--min-examples", type=int, default=120,
+                      help="Refuse to train on less than this.")
+    auto.add_argument("--stage", choices=("auto", "sft", "rl"), default="auto",
+                      help="auto = imitate the corrections (needs no rollout engine).")
+    auto.add_argument("--no-deploy", action="store_true", help="Prove it but don't serve it.")
+    auto.add_argument("--ignore-host", action="store_true",
+                      help="Run even on battery or while the machine is in use.")
+    auto.add_argument("--history", action="store_true", help="Show recent cycles instead.")
+    auto.set_defaults(handler=cmd_train_autopilot)
 
     sft = train_sub.add_parser(
         "sft", help="Stage one: learn from the replies your team already wrote (works on a Mac)"

@@ -254,12 +254,18 @@ def _jsonl_logger(transformers, path: Path):
 
 # --- the entry point ------------------------------------------------------------------------
 
-def run_sft(cfg: TrainRunConfig, *, backend: str = "auto", iters: int | None = None) -> Path:
-    """Train stage one and return the adapter directory."""
+def run_sft(cfg: TrainRunConfig, *, backend: str = "auto", iters: int | None = None,
+            run_dir: Path | str | None = None) -> Path:
+    """Train stage one and return the adapter directory.
+
+    `run_dir` lets a caller put the artifacts where its readers already look — the browser's
+    progress page and the dashboard both watch `run/log.jsonl`, so a run started from a browser
+    must land there rather than in a timestamped sibling nobody is watching.
+    """
     started = time.time()
     examples = load_examples(sft_data_file(cfg))
     chosen = pick_backend(backend)
-    run_dir = _run_dir(cfg, chosen)
+    run_dir = Path(run_dir).expanduser() if run_dir else _run_dir(cfg, chosen)
     run_dir.mkdir(parents=True, exist_ok=True)
     if cfg.source_path.is_file():
         shutil.copy2(cfg.source_path, run_dir / "config.toml")

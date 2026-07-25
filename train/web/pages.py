@@ -90,6 +90,26 @@ svg.curve{width:100%;height:auto;display:block;margin:.6rem 0}
 .muted{color:var(--ink2)}.small{font-size:.88rem}
 .row{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;margin-top:1.2rem}
 .empty{color:var(--ink2);padding:2rem 0;text-align:center}
+/* the playground: ask your own model something */
+textarea{font:inherit;width:100%;min-height:8.5rem;padding:.7rem .8rem;border:1px solid var(--rule2);
+  border-radius:3px;background:var(--paper);color:var(--ink);resize:vertical;line-height:1.55}
+.chips{display:flex;gap:.4rem;flex-wrap:wrap;margin:.6rem 0 0}
+.chips button{font-size:.82rem;padding:.3rem .65rem;color:var(--ink2)}
+.answers{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1.2rem}
+@media(max-width:720px){.answers{grid-template-columns:1fr}}
+.answer{background:var(--card);border:1px solid var(--rule);padding:1rem 1.1rem}
+.answer.mine{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue) inset}
+.answer h3{margin:0 0 .5rem;font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--ink2);font-weight:600;display:flex;justify-content:space-between;gap:.6rem}
+.answer.mine h3{color:var(--blue)}
+.answer p{margin:0;white-space:pre-wrap;line-height:1.62}
+.answer .took{font:11px var(--mono);color:var(--ink3);letter-spacing:0;text-transform:none}
+.answer .bad{color:var(--orange)}
+.thinking{color:var(--ink2)}
+.thinking:after{content:'';display:inline-block;width:.5em;height:.5em;margin-left:.4em;
+  border-radius:50%;background:var(--blue);animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.thinking:after{animation:none;opacity:.6}}
 """
 
 
@@ -126,10 +146,12 @@ def home(workspaces: list, nodes: dict) -> str:
             f"<tr><td><a href='/w/{html.escape(w.slug)}'>{html.escape(w.name)}</a></td>"
             f"<td class='muted small'>{html.escape(PACK_TITLES.get(w.pack, w.pack))}</td>"
             f"<td>{_stage_chip(w)}</td>"
-            f"<td class='muted small'>{html.escape(str(w.meta.get('updated', ''))[:16].replace('T', ' '))}</td></tr>"
+            f"<td class='muted small'>{html.escape(str(w.meta.get('updated', ''))[:16].replace('T', ' '))}</td>"
+            f"<td>{_row_action(w)}</td></tr>"
             for w in workspaces
         )
-        table = f"""<table><tr><th>model</th><th>learning to</th><th>state</th><th>updated</th></tr>
+        table = f"""<table><tr><th>model</th><th>learning to</th><th>state</th><th>updated</th>
+<th></th></tr>
 {rows}</table>"""
     else:
         table = ('<p class="empty">No models yet. Teaching one takes about ten minutes of your '
@@ -142,6 +164,16 @@ starts serving anyone once it has beaten the model you use today on work it has 
 <div class="row"><a class="btn primary" href="/new">Teach a new model</a>
 <a class="btn ghost" href="/machines">See the machines helping ({nodes.get('count', 0)})</a></div>
 """)
+
+
+def _row_action(w) -> str:
+    """The most useful next click for this model, right in the list."""
+    if w.stage == "done":
+        return (f"<a href='/w/{html.escape(w.slug)}/try'>Try it</a> · "
+                f"<a href='/w/{html.escape(w.slug)}/result'>Result</a>")
+    if w.stage == "running":
+        return f"<a href='/w/{html.escape(w.slug)}/progress'>Watch</a>"
+    return f"<a href='/w/{html.escape(w.slug)}'>Continue</a>"
 
 
 def _stage_chip(w) -> str:
@@ -330,10 +362,18 @@ def running_step(w, job: dict) -> str:
 
 
 def curve_svg(points: list[dict]) -> str:
-    """The one chart that matters: score per attempt, with its trend."""
-    series = [(p["step"], p["reward_mean"]) for p in points if "reward_mean" in p]
+    """The one chart that matters — and it plots whichever signal this run produces.
+
+    A feedback run scores each attempt (higher is better). An imitation run reports how far off it
+    is (lower is better). Showing "no scores yet" through an entire imitation run — which is the
+    path a Mac takes — was a blank chart all night, so the axis follows the data.
+    """
+    rising = [(p["step"], p["reward_mean"]) for p in points if "reward_mean" in p]
+    falling = [(p["step"], p["loss"]) for p in points if "loss" in p and "reward_mean" not in p]
+    series, better = (rising, "higher is better") if rising else (falling, "lower is better")
     if not series:
-        return '<p class="muted small">No scores yet — the first attempts take a minute.</p>'
+        return ('<p class="muted small">Nothing to plot yet — the first minute is spent getting '
+                'the model ready.</p>')
     w, h, pad = 640, 150, 26
     max_step = max(s for s, _ in series) or 1
     hi = max(max(v for _, v in series), 1.0)
@@ -360,11 +400,72 @@ def curve_svg(points: list[dict]) -> str:
 <polyline points="{trend}" fill="none" stroke="var(--blue)" stroke-width="2.5"/>
 <text x="{w - 54}" y="{y(smooth[-1][1]) + 4:.1f}" font-size="12" fill="var(--blue)"
  font-family="var(--mono)">{smooth[-1][1]:.2f}</text>
-<text x="{pad}" y="{h - 6}" font-size="11" fill="var(--ink3)" font-family="var(--mono)">attempts</text>
+<text x="{pad}" y="{h - 6}" font-size="11" fill="var(--ink3)" font-family="var(--mono)">attempts · {better}</text>
 </svg>"""
 
 
 # --- step 5: result -----------------------------------------------------------------------
+
+def try_step(w, samples: list[str], prompt: str = "", answers: list | None = None,
+             *, serving: bool = True) -> str:
+    """The playground: paste a piece of work, see both models answer it.
+
+    Everything else in the product is *about* a model; this is where she meets it. Her own held-out
+    work is one click away so the first thing she tries is real, and the two answers sit side by
+    side because that comparison is the argument.
+    """
+    chips = "".join(
+        f'<button type="button" class="btn" data-fill="{html.escape(s, quote=True)}">'
+        f'Use one of my {"tickets" if w.pack == "support-replies" else "leads"} ({i + 1})</button>'
+        for i, s in enumerate(samples)
+    )
+    if answers is None:
+        panels = ""
+    elif not answers:
+        panels = '<div class="note warn">Type something first.</div>'
+    else:
+        panels = '<div class="answers">' + "".join(
+            f'<div class="answer{" mine" if i else ""}"><h3>{html.escape(a.label)}'
+            f'<span class="took">{a.seconds}s</span></h3>'
+            + (f"<p>{html.escape(a.text) or '<em>(it said nothing)</em>'}</p>" if a.ok
+               else f'<p class="bad">{html.escape(a.error)}</p>')
+            + "</div>"
+            for i, a in enumerate(answers)
+        ) + "</div>"
+
+    warning = "" if serving else """<div class="note warn"><b>Only the original model is loaded</b>
+Press “Start using this model” on the result page and the comparison will show both.</div>"""
+
+    return shell("Try it", f"""
+<h1>Try it out</h1>
+<p class="lede">Paste a real piece of work and see what your model says — next to what you use
+today. It answers on your own machine; nothing is sent anywhere.</p>
+{warning}
+<form method="post" action="/w/{html.escape(w.slug)}/try" class="card" id="askform">
+  <label class="field"><span>The work you'd hand it</span>
+  <textarea name="prompt" id="prompt" placeholder="Paste a ticket, or use one of yours below…"
+   required>{html.escape(prompt)}</textarea></label>
+  <div class="chips">{chips}</div>
+  <div class="row"><button class="primary" type="submit" id="ask">Show me the answer</button>
+  <a class="btn ghost" href="/w/{html.escape(w.slug)}/result">Back to the result</a></div>
+</form>
+{panels}
+<script>
+for (const chip of document.querySelectorAll('.chips button')) {{
+  chip.addEventListener('click', () => {{
+    document.getElementById('prompt').value = chip.dataset.fill;
+    document.getElementById('prompt').focus();
+  }});
+}}
+document.getElementById('askform').addEventListener('submit', () => {{
+  const button = document.getElementById('ask');
+  button.disabled = true;
+  button.textContent = 'Thinking…';
+  button.className = 'primary thinking';
+}});
+</script>
+""")
+
 
 def result_step(w, card: dict | None, job: dict) -> str:
     if card is None:
@@ -397,9 +498,11 @@ same held-back examples.</p></div>""")
     )
     verdict_cls = "good" if passed else "warn"
     action = (f"""<form method="post" action="/w/{html.escape(w.slug)}/use">
-<button class="primary" type="submit">Start using this model</button></form>"""
+<button class="primary" type="submit">Start using this model</button></form>
+<a class="btn" href="/w/{html.escape(w.slug)}/try">Try it on a real one first</a>"""
               if passed else
-              """<a class="btn" href="/new">Try again with more examples</a>""")
+              f"""<a class="btn" href="/w/{html.escape(w.slug)}/try">See what it says anyway</a>
+<a class="btn ghost" href="/new">Try again with more examples</a>""")
     return shell("Result", steps_bar("done") + f"""
 <h1>{'It is better' if passed else 'Not better yet'}</h1>
 <div class="note {verdict_cls}"><b>{html.escape(card['verdict'])}</b>

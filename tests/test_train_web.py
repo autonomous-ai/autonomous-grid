@@ -222,10 +222,19 @@ def test_api_workspaces_lists_state(client):
     assert rows[0]["stage"] == "data"
 
 
-def test_curve_svg_renders_a_trend_and_handles_empty():
+def test_curve_plots_whichever_signal_the_run_produces():
+    """A feedback run scores attempts; an imitation run reports loss. The Mac path is the second
+    one, and it used to render "no scores yet" for an entire night."""
     from train.web.pages import curve_svg
 
-    assert "No scores yet" in curve_svg([])
-    svg = curve_svg([{"step": i, "reward_mean": i / 20} for i in range(1, 21)])
-    assert svg.count("<polyline") == 2   # raw scores plus the smoothed trend
-    assert "aria-label" in svg
+    empty = curve_svg([])
+    assert "Nothing to plot yet" in empty
+
+    rising = curve_svg([{"step": i, "reward_mean": i / 20} for i in range(1, 21)])
+    assert rising.count("<polyline") == 2      # raw scores plus the smoothed trend
+    assert "higher is better" in rising
+    assert "aria-label" in rising
+
+    falling = curve_svg([{"step": i * 5, "loss": 4.0 - i * 0.1} for i in range(1, 15)])
+    assert falling.count("<polyline") == 2
+    assert "lower is better" in falling

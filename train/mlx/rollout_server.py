@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import threading
+from pathlib import Path
 
 
 def _import_mlx():
@@ -49,7 +50,17 @@ class MlxEngine:
         self.model_id = model_id
         self.model, self.tokenizer = load(model_id, adapter_path=adapter_path)
         self._adapter_applied = adapter_path is not None
+        self.adapter_name = "" if adapter_path is None else Path(adapter_path).name
         self._lock = threading.Lock()
+
+    def served_names(self) -> tuple[str, ...]:
+        """Every name this engine may honestly answer for.
+
+        The base model, and — once an adapter is applied — the name it was loaded under. An adapter
+        changes the weights, so it is a different model and gets its own name; that is what lets a
+        trainer ask for "before" and "after" on one machine and get two different answers.
+        """
+        return tuple(name for name in (self.model_id, self.adapter_name) if name)
 
     def generate(self, prompt: str | list[int], n: int, max_tokens: int, temperature: float):
         """n samples -> [(token_ids, logprobs, text)]; temperature 0 = greedy.
@@ -82,10 +93,8 @@ class MlxEngine:
                 results.append((ids, lps, self.tokenizer.decode(ids, skip_special_tokens=True)))
         return results
 
-    def reload_adapter(self, adapter_dir: str) -> str:
+    def reload_adapter(self, adapter_dir: str, name: str = "") -> str:
         """Apply (first call) or refresh (subsequent calls) LoRA adapter weights in place."""
-        from pathlib import Path
-
         weights = Path(adapter_dir).expanduser() / "adapters.safetensors"
         if not weights.is_file():
             raise FileNotFoundError(f"no adapters.safetensors in {adapter_dir}")
@@ -97,7 +106,30 @@ class MlxEngine:
                 self._adapter_applied = True
             else:
                 self.model.load_weights(str(weights), strict=False)
+        self.adapter_name = name or Path(adapter_dir).name
         return "applied"
+
+
+def _served(engine) -> tuple[str, ...]:
+    """The names an engine answers for, tolerating engines that only expose `model_id`.
+
+    build_app documents a minimal engine interface (generate / reload_adapter / model_id), and a
+    stand-in that meets exactly that must keep working — so the richer capability is optional.
+    """
+    names = getattr(engine, "served_names", None)
+    if callable(names):
+        return tuple(names())
+    return (engine.model_id,)
+
+
+def _takes_name(engine) -> bool:
+    """Older/stand-in engines only take a directory; ours also takes the name to serve it under."""
+    import inspect
+
+    try:
+        return "name" in inspect.signature(engine.reload_adapter).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def build_app(engine):
@@ -113,10 +145,22 @@ def build_app(engine):
 
     @app.get("/v1/models")
     def models() -> JSONResponse:
-        return JSONResponse({"object": "list", "data": [{"id": engine.model_id, "object": "model"}]})
+        return JSONResponse({"object": "list",
+                             "data": [{"id": name, "object": "model"} for name in _served(engine)]})
 
     @app.post("/v1/completions")
     def completions(body: dict) -> JSONResponse:
+        # Answer only for the weights we actually hold. This engine loads one model (plus whatever
+        # adapter was last applied), and it used to ignore the requested name entirely — so asking
+        # for "the trained model" and "the old model" returned the SAME weights, and a before/after
+        # comparison came back a confident +0.000. Failing closed makes that impossible to miss.
+        asked, served = body.get("model"), _served(engine)
+        if isinstance(asked, str) and asked and asked not in served:
+            raise HTTPException(
+                404,
+                f"this machine is serving {', '.join(served)} — not {asked!r}. "
+                "Load it first (POST /reload_adapter), or ask for what is here.",
+            )
         prompt = body.get("prompt")
         # Token ids or text — ids are what a trainer should send (vLLM accepts both too).
         if isinstance(prompt, list):
@@ -158,7 +202,9 @@ def build_app(engine):
         if not adapter_dir:
             raise HTTPException(400, "adapter_dir is required")
         try:
-            status = engine.reload_adapter(adapter_dir)
+            name = body.get("name") or body.get("lora_name") or ""
+            status = engine.reload_adapter(adapter_dir, name) if _takes_name(engine) \
+                else engine.reload_adapter(adapter_dir)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
         return JSONResponse({"status": status})

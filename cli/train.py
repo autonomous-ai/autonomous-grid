@@ -15,6 +15,7 @@ Verbs:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 from pathlib import Path
 
@@ -99,13 +100,14 @@ def cmd_train_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config or DEFAULT_CONFIG)
     adapter_dir = run_training(cfg)
     print(f"Adapter saved: {adapter_dir}")
-    if cfg.deploy.nodes:
-        from train.deploy import deploy_adapter
-
-        results = deploy_adapter(adapter_dir, cfg.deploy.nodes, cfg.deploy.adapter_name)
-        _print_deploy(results)
-    else:
-        print("Deploy it with: grid train deploy --adapter", adapter_dir)
+    # Training NEVER serves the result on its own. It used to: whenever [deploy].nodes was set,
+    # a finished run pushed the fresh adapter straight onto the serving machines — which made the
+    # product's central promise ("nothing reaches anyone until it beats what you have") false, and
+    # made the browser's own reassuring sentence a lie. Proving it is a separate, deliberate act.
+    print("\nIt has not been served to anyone yet — prove it first:")
+    print(f"  grid train deploy --gate --adapter {adapter_dir}")
+    print("That scores it against the model you're serving on work it never trained on, and only "
+          "loads it if it won.")
     return 0
 
 
@@ -170,6 +172,79 @@ def cmd_train_deploy(args: argparse.Namespace) -> int:
 def _print_deploy(results: list[dict]) -> None:
     for r in results:
         print(f"  {'ok ' if r['ok'] else 'NO '}{r['node']}  ·  {r['detail']}")
+
+
+def cmd_train_collect(args: argparse.Namespace) -> int:
+    """Turn on (or off) learning from the work the grid is already doing."""
+    from train.capture import Policy, load_policy, prune, save_policy, summarize
+
+    policy = load_policy()
+    if args.on or args.off or args.teacher or args.retain_days or args.sample is not None:
+        policy = Policy(
+            enabled=True if args.on else (False if args.off else policy.enabled),
+            sample=args.sample if args.sample is not None else policy.sample,
+            retain_days=args.retain_days or policy.retain_days,
+            redact=False if args.no_redact else policy.redact,
+            teachers=tuple(args.teacher) if args.teacher else policy.teachers,
+        )
+        save_policy(policy)
+        print("Collecting is ON." if policy.enabled else "Collecting is OFF.")
+        if policy.enabled:
+            print(f"  kept for {policy.retain_days} days on this machine, "
+                  f"{'redacted' if policy.redact else 'NOT redacted'}, "
+                  f"{int(policy.sample * 100)}% of requests")
+            if policy.teachers:
+                print(f"  answers from {', '.join(policy.teachers)} count as teaching examples")
+        print()
+
+    if args.prune:
+        print(f"Removed {prune(policy)} day file(s) past the retention window.")
+
+    summary = summarize(days=args.days)
+    if getattr(args, "json", False):
+        print(json.dumps({**dataclasses.asdict(summary), "headline": summary.headline,
+                          "advice": summary.advice}, indent=2))
+        return 0
+    print(summary.headline)
+    print(f"  {summary.advice}")
+    if summary.requests:
+        print(f"\n  requests kept   {summary.requests}")
+        print(f"  with a verdict  {summary.judged}"
+              f"  (sent as-is {summary.accepted} · edited {summary.edited} · "
+              f"discarded {summary.rejected})")
+        print(f"  from a teacher  {summary.teacher_rows}")
+        print(f"  ready to learn  {summary.trainable}")
+        if summary.models:
+            top = sorted(summary.models.items(), key=lambda kv: -kv[1])[:4]
+            print("  models          " + ", ".join(f"{m} ({n})" for m, n in top))
+    return 0
+
+
+def cmd_train_autopilot(args: argparse.Namespace) -> int:
+    """One unattended cycle over captured work: build tonight's data, train, prove, ship or bin."""
+    from train.autopilot import history, run_cycle
+    from train.config import load_config
+
+    cfg = load_config(args.config or DEFAULT_CONFIG)
+    if args.history:
+        rows = history(cfg)
+        if not rows:
+            print("No autopilot cycles recorded yet.")
+            return 0
+        for row in rows:
+            mark = "ok " if row["ok"] else "-- "
+            delta = f"{row['delta']:+.3f}" if row.get("delta") is not None else "      "
+            print(f"  {mark}{row['started'][:16].replace('T', ' ')}  {delta}  "
+                  f"{row['examples']:>5} ex  {row['stage']:<9} {row['detail']}")
+        return 0
+
+    result = run_cycle(cfg, days=args.days, min_examples=args.min_examples,
+                       check_host=not args.ignore_host, deploy=not args.no_deploy,
+                       stage=args.stage)
+    print(f"{result.stage.upper()}: {result.detail}")
+    if result.adapter:
+        print(f"Adapter: {result.adapter}")
+    return 0 if result.ok else 1
 
 
 def cmd_train_sft(args: argparse.Namespace) -> int:

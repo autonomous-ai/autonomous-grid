@@ -170,6 +170,41 @@ def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
     async def completions(request: Request):
         return await _proxy_openai(app, "completions", request)
 
+    @app.post("/v1/feedback")
+    async def feedback(request: Request):
+        """What the human did with an answer — the one signal that makes unattended training honest.
+
+        An app quotes back the `X-Grid-Request-Id` it received and says whether the answer was sent
+        as-is, edited (with the corrected text — the most valuable row we can store), or discarded.
+        No-ops when capture is off, so instrumenting an app is safe before anyone opts in.
+        """
+        try:
+            payload = json.loads(await request.body() or b"{}")
+        except json.JSONDecodeError:
+            return _openai_error(400, "Request body is not valid JSON", "invalid_json")
+        if not isinstance(payload, dict):
+            return _openai_error(400, "Request body must be a JSON object", "invalid_request")
+        request_id = payload.get("request_id") or payload.get("id")
+        verdict = payload.get("verdict")
+        if not isinstance(request_id, str) or not request_id:
+            return _openai_error(400, "request_id is required", "invalid_request")
+
+        from train.capture import VERDICTS, load_policy, record_feedback
+
+        if not isinstance(verdict, str) or verdict not in VERDICTS:
+            return _openai_error(
+                400, f"verdict must be one of: {', '.join(VERDICTS)}", "invalid_request"
+            )
+        if not load_policy().enabled:
+            # Not an error: an instrumented app shouldn't break because the owner hasn't opted in.
+            return {"stored": False, "reason": "collecting is off on this grid"}
+        final_text = payload.get("final_text")
+        stored = record_feedback(
+            request_id, verdict,
+            final_text=final_text if isinstance(final_text, str) else "",
+        )
+        return {"stored": bool(stored)}
+
     @app.post("/v1/media/image/generate")
     async def media_image_generate(request: Request):
         path = "media/image/generate"
@@ -244,11 +279,73 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     except httpx.RequestError as exc:
         return _openai_error(502, f"Engine request failed: {exc}", "engine_error")
 
+    headers_out = {}
+    if engine_response.status_code == 200:
+        # Learning from the work the grid is already doing (train/capture.py). Off unless the owner
+        # turned it on, local-file-only, and wrapped so that nothing about it can fail a customer's
+        # request — a capture problem must cost an example, never an answer.
+        captured = _capture_exchange(body, engine_response)
+        if captured:
+            # The id an app quotes back on POST /v1/feedback to say what the human did with this
+            # answer — the signal that makes unattended training honest.
+            headers_out["X-Grid-Request-Id"] = captured
+
     return Response(
         content=engine_response.content,
         status_code=engine_response.status_code,
         media_type=engine_response.headers.get("content-type", "application/json"),
+        headers=headers_out or None,
     )
+
+
+def _capture_exchange(body: dict, engine_response: httpx.Response) -> str | None:
+    """Best-effort: store this prompt/answer pair if capture is enabled. Never raises."""
+    try:
+        from train.capture import load_policy, record
+
+        policy = load_policy()
+        if not policy.enabled:
+            return None
+        prompt = _prompt_text(body)
+        answer = _answer_text(engine_response.json())
+        if not prompt or not answer:
+            return None
+        return record(prompt, answer, model=str(body.get("model") or ""), policy=policy)
+    except Exception:  # noqa: BLE001 — serving must be unaffected by anything in here
+        return None
+
+
+def _prompt_text(body: dict) -> str:
+    """The request's text, whichever dialect it arrived in."""
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        return prompt
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        # The last user turn is the work; earlier turns are context we don't train on directly.
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content
+    return ""
+
+
+def _answer_text(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    if isinstance(first.get("text"), str):
+        return first["text"]
+    message = first.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), str):
+        return message["content"]
+    return ""
 
 
 async def _proxy_media(

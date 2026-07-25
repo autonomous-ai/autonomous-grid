@@ -209,6 +209,34 @@ def register(app) -> None:
                 "Could not check it yet", str(exc), back=f"/w/{slug}/progress"), status_code=400)
         return RedirectResponse(f"/w/{slug}/result", status_code=303)
 
+    @app.get("/w/{slug}/try", response_class=HTMLResponse)
+    def try_form(slug: str):
+        w = _load(slug)
+        from train.web.playground import sample_prompts
+
+        return pages.try_step(w, sample_prompts(w.path / "run"),
+                              serving=bool(w.meta.get("serving")))
+
+    @app.post("/w/{slug}/try", response_class=HTMLResponse)
+    async def try_ask(slug: str, request: Request):
+        """Ask both models the same thing. Never 500s: a sleeping machine is a sentence, not a
+        stack trace (train/web/playground.py::detail_of)."""
+        w = _load(slug)
+        form = await _form(request)
+        prompt = _one(form, "prompt")
+        from train.config import load_config
+        from train.web.playground import compare, sample_prompts
+
+        try:
+            cfg = load_config(w.path / "grid-train.toml")
+        except SystemExit as exc:
+            return HTMLResponse(pages.error_page(
+                "Nothing to try yet", str(exc), back=f"/w/{slug}"), status_code=400)
+        trained = (w.meta.get("serving") or {}).get("name") or ""
+        answers = compare(cfg, prompt, trained)
+        return pages.try_step(w, sample_prompts(w.path / "run"), prompt=prompt, answers=answers,
+                              serving=bool(trained))
+
     @app.post("/w/{slug}/use")
     def use(slug: str):
         """Deploy — but only if the card says it won. The gate is not a suggestion."""
