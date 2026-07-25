@@ -186,6 +186,18 @@ PATH and no shell profile, which is why it is written with an absolute interpret
 working directory. Its output goes to `autopilot.log` beside the model. Anywhere without a
 per-user scheduler, the command prints the cron line instead of pretending it installed one.
 
+**Already in a helpdesk?** `grid train pull` fetches the examples instead of asking someone to
+export them — for whoever administers the tool, on a schedule if they like:
+
+```bash
+export ZENDESK_API_TOKEN=…      # never written to disk, never printed
+grid train pull zendesk --subdomain acme --email me@acme.com
+grid train pull hubspot         # deals + their stage: the answer key for lead triage
+```
+
+It writes raw rows to a JSONL, which then goes through exactly the same preparation, column
+guessing and refusals as an uploaded file — one code path decides whether data is trainable.
+
 ## It can also learn from the work it is already doing
 
 Everything above assumes someone exports a file and starts a run. The end state is that nobody
@@ -251,6 +263,7 @@ train/
 ├── capture.py             learn from served work: store, redact, prune, weigh, build a dataset
 ├── autopilot.py           the unattended loop over captured work
 ├── schedule.py            put that loop in the user's own scheduler (launchd / systemd --user)
+├── connectors.py          pull examples from Zendesk / HubSpot (env-var tokens, never stored)
 ├── nightly.py             one unattended cycle: idle check → train → prove → ship or bin
 ├── sft.py                 stage one — imitate the answers your team already wrote
 ├── hostsignals.py         mains power + keyboard idle — the host outranks the scheduler

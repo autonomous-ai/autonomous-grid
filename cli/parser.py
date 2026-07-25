@@ -604,6 +604,7 @@ def _add_train(sub) -> None:
         cmd_train_init,
         cmd_train_nightly,
         cmd_train_packs,
+        cmd_train_pull,
         cmd_train_run,
         cmd_train_schedule,
         cmd_train_serve,
@@ -725,6 +726,18 @@ def _add_train(sub) -> None:
                          help="Train even on battery or while the machine is in use.")
     nightly.add_argument("--history", action="store_true", help="Show recent nights instead.")
     nightly.set_defaults(handler=cmd_train_nightly)
+
+    pull = train_sub.add_parser(
+        "pull", help="Pull examples straight from Zendesk or HubSpot into a local file"
+    )
+    pull.add_argument("source", choices=("zendesk", "hubspot"))
+    pull.add_argument("--out", default=None, help="Where to write (default: <source>-export.jsonl)")
+    pull.add_argument("--subdomain", default=None, help="Zendesk: the bit before .zendesk.com")
+    pull.add_argument("--email", default=None, help="Zendesk: the account email for the API token")
+    pull.add_argument("--max-rows", type=int, default=5000, help="Stop after this many rows.")
+    pull.add_argument("--status", default="solved",
+                      help="Zendesk: which tickets to take (default solved).")
+    pull.set_defaults(handler=cmd_train_pull)
 
     schedule = train_sub.add_parser(
         "schedule", help="Run the nightly cycle automatically (launchd on macOS, systemd on Linux)"

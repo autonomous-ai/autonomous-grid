@@ -249,6 +249,38 @@ def cmd_train_autopilot(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_train_pull(args: argparse.Namespace) -> int:
+    """Pull examples out of a helpdesk or CRM, into the same file shape an export would give.
+
+    For whoever administers the tool. The token comes from the environment and is never written
+    down; what lands on disk is rows, which then go through the same preparation and the same
+    honest refusals as an uploaded file.
+    """
+    from train.connectors import PULLERS, ConnectorError, write_jsonl
+
+    out = Path(args.out) if args.out else Path(f"{args.source}-export.jsonl")
+    try:
+        if args.source == "zendesk":
+            if not args.subdomain or not args.email:
+                raise SystemExit("grid train: zendesk needs --subdomain and --email")
+            pulled = PULLERS["zendesk"](args.subdomain, args.email, max_rows=args.max_rows,
+                                        status=args.status)
+        else:
+            pulled = PULLERS[args.source](max_rows=args.max_rows)
+    except ConnectorError as exc:
+        raise SystemExit(f"grid train: {exc}") from None
+
+    write_jsonl(pulled, out)
+    print(f"{pulled.detail}\nWrote {out}")
+    if pulled.truncated:
+        print(f"Stopped at {args.max_rows} rows — raise --max-rows for more history.")
+    if not pulled.rows:
+        print("Nothing usable came back. Check the account has the history you expect.")
+        return 1
+    print("Next: upload it in `grid train web`, or point [data] at it and run `grid train sft`.")
+    return 0
+
+
 def cmd_train_schedule(args: argparse.Namespace) -> int:
     """Put the nightly cycle in this computer's own scheduler — or take it out.
 

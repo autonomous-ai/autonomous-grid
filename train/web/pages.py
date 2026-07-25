@@ -91,6 +91,10 @@ svg.curve{width:100%;height:auto;display:block;margin:.6rem 0}
 .muted{color:var(--ink2)}.small{font-size:.88rem}
 .row{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;margin-top:1.2rem}
 .empty{color:var(--ink2);padding:2rem 0;text-align:center}
+details.card>summary{cursor:pointer;font-weight:500;list-style:none}
+details.card>summary::-webkit-details-marker{display:none}
+details.card>summary:before{content:'＋ ';color:var(--ink3);font-family:var(--mono)}
+details.card[open]>summary:before{content:'－ '}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr));gap:1px;
   background:var(--rule);border:1px solid var(--rule);margin:0 0 1rem}
 .tile{background:var(--card);padding:.9rem 1rem}
@@ -350,6 +354,7 @@ CRM or a spreadsheet all work. It stays on this computer.</p>
   <button class="primary" id="go" type="button">Check my file</button>
   <span id="status" class="small muted" style="margin-left:.7rem"></span>
 </div>
+{export_help(w.pack)}
 {banner}
 <script>
 const go = document.getElementById('go'), input = document.getElementById('file'),
@@ -368,6 +373,54 @@ go.addEventListener('click', async () => {{
 }});
 </script>
 """)
+
+
+# The step everything else depends on is the one we give the least help with: getting the file
+# out of the tool she already uses. These are the menu paths as of mid-2026 — wrong in a year, and
+# still better than "export your tickets", which is where a first-time run actually stalls.
+EXPORT_HELP = {
+    "support-replies": [
+        ("Zendesk", ("Admin Center → Reporting → Export → “Tickets”, CSV. Keep the columns "
+                    "Subject, Description, Public reply and Status.")),
+        ("Intercom", ("Settings → Data → Export → Conversations, CSV. Keep the customer message "
+                     "and the teammate reply.")),
+        ("Freshdesk", "Admin → Tickets → Export, CSV. Tick Description and the last public note."),
+        ("Help Scout", "Reports → Export → Conversations. Keep the customer note and the reply."),
+        ("A spreadsheet", ("Two columns is enough: the customer's message, and the reply you sent. "
+                          "File → Download → CSV.")),
+    ],
+    "sales-triage": [
+        ("HubSpot", ("Contacts → Export, or Deals → Export. Keep the first message or notes, and "
+                    "the deal stage (Closed won / Closed lost).")),
+        ("Salesforce", ("Reports → new report on Leads or Opportunities, add Description and "
+                       "Stage, then Export → Details Only, CSV.")),
+        ("Pipedrive", "Deals → … → Export data. Keep the deal notes and the status."),
+        ("A spreadsheet", "One row per enquiry: what they wrote, and what happened to it."),
+    ],
+    "sort-into-categories": [
+        ("Zendesk", ("Export tickets and keep the Description plus whichever field you sort by — "
+                    "Group, Form, or a tag.")),
+        ("A helpdesk or CRM", ("Export anything with the text and the field your team sets by "
+                              "hand: queue, category, priority, reason code.")),
+        ("A spreadsheet", "Two columns: the text, and the category someone chose for it."),
+    ],
+    "any-task": [
+        ("Email", ("Most mail clients export a mailbox as CSV, or paste into a sheet: what came "
+                  "in, what you sent back.")),
+        ("A shared inbox or form", "Export the submissions and the responses your team wrote."),
+        ("A spreadsheet", "Two columns: the work that came in, and what your team wrote back."),
+    ],
+}
+
+
+def export_help(pack: str) -> str:
+    rows = EXPORT_HELP.get(pack) or EXPORT_HELP["any-task"]
+    items = "".join(f"<tr><td class='nowrap'><b>{html.escape(tool)}</b></td>"
+                    f"<td class='small muted'>{html.escape(how)}</td></tr>" for tool, how in rows)
+    return f"""<details class="card"><summary>Where do I get that file?</summary>
+<table style="margin-top:.8rem">{items}</table>
+<p class="small muted">Any file with the right two columns works — the tool it came from does not
+matter, and neither do extra columns.</p></details>"""
 
 
 # --- step 2: checks ------------------------------------------------------------------------

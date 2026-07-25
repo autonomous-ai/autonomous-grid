@@ -916,3 +916,17 @@ def test_the_overnight_page_survives_an_unreadable_config(client, tmp_path, monk
     page = client.get(f"/w/{w.slug}/overnight")
     assert page.status_code == 200
     assert "No nights yet" in page.text
+
+
+def test_the_data_page_says_where_to_get_the_file(client, tmp_path):
+    """The step everything depends on is the one we gave the least help with."""
+    from train.web import pages
+
+    created = client.post("/new", data={"pack": "support-replies"})
+    slug = created.headers["location"].split("/w/")[1].split("/")[0]
+    page = client.get(f"/w/{slug}").text
+    assert "Where do I get that file?" in page
+    assert "Zendesk" in page and "Admin Center" in page
+    # Every pack gets its own list, and none of them assumes she has a helpdesk at all.
+    for pack in pages.PACK_TITLES:
+        assert "spreadsheet" in pages.export_help(pack)
