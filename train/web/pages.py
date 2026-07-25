@@ -159,8 +159,7 @@ def home(workspaces: list, nodes: dict) -> str:
 <th></th></tr>
 {rows}</table>"""
     else:
-        table = ('<p class="empty">No models yet. Teaching one takes about ten minutes of your '
-                 "time, plus a night of your computers'.</p>")
+        return first_run(nodes)
     return shell("Your models", f"""
 <h1>Your models</h1>
 <p class="lede">A model here is trained on your own examples, by your own computers, and it only
@@ -168,6 +167,50 @@ starts serving anyone once it has beaten the model you use today on work it has 
 <div class="card">{table}</div>
 <div class="row"><a class="btn primary" href="/new">Teach a new model</a>
 <a class="btn ghost" href="/machines">See the machines helping ({nodes.get('count', 0)})</a></div>
+""")
+
+
+def first_run(nodes: dict) -> str:
+    """The first screen anyone sees. It has one job: make the idea land in twenty seconds.
+
+    Not a marketing page — she is already here. What she needs is what this is, what it will ask of
+    her, and honest word on whether this computer can do it.
+    """
+    from .machines import capability
+
+    cap = capability()
+    ready = (f"""<div class="note good"><b>This computer is ready</b>
+{html.escape(cap.detail)}</div>""" if cap.ready else
+             f"""<div class="note warn"><b>{html.escape(cap.headline)}</b>
+{html.escape(cap.detail)}</div>""")
+
+    return shell("Teach a model", f"""
+<h1>Teach a model to do one job the way your team does it</h1>
+<p class="lede">Give it a few hundred examples of work your team has already done — resolved
+tickets, leads you closed — and it learns to do that one job in your voice. It trains on your own
+computers, so nothing leaves your network, and it costs a night of machines that were idle anyway.</p>
+
+<div class="grid2">
+  <div class="card"><h2>1 · Your examples</h2>
+  <p class="small muted">Export what your team already answered. A CSV or JSONL from your helpdesk,
+  CRM or a spreadsheet — we work out the columns. You will see exactly what it is going to learn
+  from before anything starts.</p></div>
+  <div class="card"><h2>2 · What good looks like</h2>
+  <p class="small muted">Tick what matters: sounds like your team, uses the details of the ticket,
+  ready to send. This is the part only you can decide, and it is the part that makes the model
+  yours.</p></div>
+  <div class="card"><h2>3 · It proves itself</h2>
+  <p class="small muted">When it finishes, it answers work it has never seen — beside the model you
+  use today. If it is not better, it does not get used. You press the button, or nobody does.</p></div>
+</div>
+
+{ready}
+
+<div class="row"><a class="btn primary" href="/new">Start — about ten minutes of your time</a>
+<a class="btn ghost" href="/machines">What computers do I have?</a></div>
+<p class="small muted" style="margin-top:1.4rem">You will need: an export of a few hundred pieces
+of work your team has done, and one computer left switched on. No graphics card required for the
+first stage, no account, no keys.</p>
 """)
 
 
@@ -348,10 +391,11 @@ def machines_step(w, machines: list, cap, models: list[dict], chosen_model: str 
 <label class="field"><span>Address of a machine that is already serving</span>
 <input type="text" name="endpoint" placeholder="http://a-machine.local:8080/v1"></label></details>"""
     else:
-        machine_block = """<div class="note warn"><b>Nothing is serving models on this computer</b>
-That is fine for this stage — it learns from your examples locally. To have other machines help,
-run <code>grid train serve</code> on them.</div>
-<input type="hidden" name="endpoint" value="">"""
+        # No hidden field: /start already falls back to this machine when nothing was chosen, and
+        # an empty input only served to put the word "endpoint" in front of her.
+        machine_block = """<div class="note"><b>It will learn on this computer</b>
+Nothing else is serving models right now, which is fine for this stage. To have other machines
+help, someone can run <code>grid train serve</code> on them.</div>"""
 
     # Same idea for the model: the page shows what it costs her, the server owns the mapping to a
     # real model, and nothing a form can say becomes a download URL.

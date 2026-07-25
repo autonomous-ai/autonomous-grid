@@ -102,8 +102,11 @@ def test_leads_report_refuses_when_a_class_is_tiny():
 # --- the wizard, end to end ---------------------------------------------------------------
 
 def test_full_wizard_to_the_point_of_training(client, tmp_path):
-    assert client.get("/").status_code == 200
-    assert "Teach a new model" in client.get("/").text
+    # With no models yet, the front page explains the idea rather than showing an empty table.
+    landing = client.get("/")
+    assert landing.status_code == 200
+    assert "one job the way your team does it" in landing.text
+    assert "ten minutes of your time" in landing.text
 
     created = client.post("/new", data={"pack": "support-replies", "name": "Support replies"})
     assert created.status_code == 303
@@ -559,3 +562,25 @@ def test_a_crash_that_left_a_partial_model_is_not_called_finished(tmp_path, monk
     job = jobs.status(w.path)
     assert job["state"] == "failed"
     assert "memory" in job["reason"]          # 137 = killed; a smaller model is the fix
+
+
+def test_the_first_screen_explains_itself(client):
+    """Whoever opens this has never seen it. Twenty seconds to land the idea."""
+    page = client.get("/").text
+    # What it is, what it asks of her, and what it will not do.
+    assert "Your examples" in page and "What good looks like" in page
+    assert "It proves itself" in page
+    assert "nothing leaves your network" in page
+    assert "If it is not better, it does not get used" in page
+    # And an honest word about this computer, whatever the answer is.
+    assert ("This computer is ready" in page) or ("One thing to install first" in page)
+    for jargon in ("GRPO", "LoRA", "adapter", "endpoint", "rollout", "reinforcement"):
+        assert jargon not in page
+
+
+def test_the_front_page_lists_models_once_there_are_any(client, tmp_path):
+    client.post("/new", data={"pack": "support-replies", "name": "Support replies"})
+    page = client.get("/").text
+    assert "Your models" in page
+    assert "Support replies" in page
+    assert "one job the way your team does it" not in page   # the explainer steps aside
