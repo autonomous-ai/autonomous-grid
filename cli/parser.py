@@ -604,6 +604,7 @@ def _add_train(sub) -> None:
         cmd_train_run,
         cmd_train_serve,
         cmd_train_ui,
+        cmd_train_web,
     )
 
     train = sub.add_parser("train", help="RL fine-tuning served by your grid (ADR 0019)")
@@ -627,6 +628,14 @@ def _add_train(sub) -> None:
     ui = train_sub.add_parser("ui", help="Local dashboard: runs, reward/eval curves (read-only)")
     ui.add_argument("--port", type=int, default=8321)
     ui.set_defaults(handler=cmd_train_ui)
+
+    web = train_sub.add_parser(
+        "web", help="Open the point-and-click interface (for non-engineers)"
+    )
+    web.add_argument("--port", type=int, default=8322)
+    web.add_argument("--host", default="127.0.0.1",
+                     help="0.0.0.0 to let colleagues on your network use it.")
+    web.set_defaults(handler=cmd_train_web)
 
     serve = train_sub.add_parser(
         "serve", help="Run this Mac as a rollout node (MLX; serves the training contract)"

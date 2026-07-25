@@ -111,7 +111,9 @@ def attach_data(workspace: Workspace, filename: str, content: str) -> prepare.Re
         prepare.write_task_files(workspace.pack, kept, workspace.path)
     workspace.meta["upload"] = {"filename": filename, "bytes": len(content.encode("utf-8"))}
     workspace.meta["report"] = dataclasses.asdict(report)
-    workspace.meta["stage"] = "checks" if report.ok else "data"
+    # Stage stays on "data" even when the report is good: the report page IS the deliverable of
+    # this step, and the reader advances by clicking, not by the upload succeeding.
+    workspace.meta["stage"] = "data"
     workspace.save()
     return report
 

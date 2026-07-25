@@ -9,6 +9,8 @@ Verbs:
   convert-adapter  move a LoRA adapter between torch/peft and MLX formats
   deploy           hot-load a trained adapter onto serving nodes
   ui               local read-only dashboard of runs and their curves
+  eval             score a trained model against the one you serve (the gate)
+  web              the point-and-click interface for non-engineers
 """
 from __future__ import annotations
 
@@ -201,4 +203,17 @@ def cmd_train_ui(args: argparse.Namespace) -> int:
 
     print(f"grid train ui -> http://127.0.0.1:{args.port}  (Ctrl-C to stop)")
     uvicorn.run(build_app(), host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
+
+
+def cmd_train_web(args: argparse.Namespace) -> int:
+    """The interface for people who don't use a terminal: upload examples, pick what good looks
+    like, train, and see the before/after before anything is served."""
+    import uvicorn
+
+    from train.web import build_app
+
+    print(f"grid train web -> http://127.0.0.1:{args.port}  (Ctrl-C to stop)")
+    print("Share it on your network with --host 0.0.0.0 (anyone who can reach it can train).")
+    uvicorn.run(build_app(), host=args.host, port=args.port, log_level="warning")
     return 0

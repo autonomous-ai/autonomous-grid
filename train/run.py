@@ -63,6 +63,32 @@ def _run_dir(cfg: TrainRunConfig) -> Path:
     return artifacts_root() / f"{model_slug}-{stamp}"
 
 
+def _build_log_callback(run_dir: Path, transformers):
+    """Append one JSON line per logged step to `log.jsonl`.
+
+    The same file the hello worlds write and `grid train ui` reads, so a real run shows a live
+    curve in the dashboard and the web interface without either knowing anything about TRL.
+    """
+    log_path = run_dir / "log.jsonl"
+
+    class GridJsonlLog(transformers.TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if not logs:
+                return control
+            record = {"step": state.global_step}
+            # TRL names the group mean `reward`; the dashboard's key is `reward_mean`.
+            for source, target in (("reward", "reward_mean"), ("loss", "loss"),
+                                   ("kl", "kl"), ("reward_std", "reward_std")):
+                if source in logs:
+                    record[target] = round(float(logs[source]), 5)
+            if len(record) > 1:
+                with log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record) + "\n")
+            return control
+
+    return GridJsonlLog()
+
+
 def _build_sync_callback(cfg: TrainRunConfig, run_dir: Path, transformers):
     """A TRL callback that pushes the adapter to the rollout engines every N steps.
 
@@ -156,7 +182,10 @@ def run_training(cfg: TrainRunConfig) -> Path:
         rollout_func=rollout_func,
         # Keep the fleet's engines on the current policy — without this they serve the base
         # model for the whole run and the reward curve barely moves.
-        callbacks=[_build_sync_callback(cfg, run_dir, transformers)],
+        callbacks=[
+            _build_sync_callback(cfg, run_dir, transformers),
+            _build_log_callback(run_dir, transformers),
+        ],
     )
     try:
         trainer.train()
