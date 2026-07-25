@@ -76,7 +76,8 @@ th,td{text-align:left;padding:.45rem .8rem .45rem 0;border-bottom:1px solid var(
 th{font:600 11px var(--mono);letter-spacing:.09em;text-transform:uppercase;color:var(--ink2)}
 td.n{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
 .up{color:var(--good)}.down{color:var(--orange)}
-.chip{display:inline-block;font:11px var(--mono);letter-spacing:.06em;text-transform:uppercase;
+.nowrap{white-space:nowrap}
+.chip{display:inline-block;white-space:nowrap;font:11px var(--mono);letter-spacing:.06em;text-transform:uppercase;
   padding:.15em .5em;border:1px solid currentColor;border-radius:2px;color:var(--ink2)}
 .chip.live{color:var(--blue)}.chip.ok{color:var(--good)}.chip.bad{color:var(--orange)}
 .sample{background:var(--wash);border:1px solid var(--rule);padding:.8rem .9rem;margin:.6rem 0;
@@ -90,6 +91,11 @@ svg.curve{width:100%;height:auto;display:block;margin:.6rem 0}
 .muted{color:var(--ink2)}.small{font-size:.88rem}
 .row{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;margin-top:1.2rem}
 .empty{color:var(--ink2);padding:2rem 0;text-align:center}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr));gap:1px;
+  background:var(--rule);border:1px solid var(--rule);margin:0 0 1rem}
+.tile{background:var(--card);padding:.9rem 1rem}
+.tile b{display:block;font:600 1.6rem/1.2 var(--mono);font-variant-numeric:tabular-nums}
+.tile span{display:block;font-size:.82rem;color:var(--ink2);margin-top:.15rem}
 .bar{height:6px;background:var(--wash);border-radius:99px;overflow:hidden;margin:0 0 .5rem}
 .bar i{display:block;height:100%;background:var(--blue);transition:width .6s ease}
 @media(prefers-reduced-motion:reduce){.bar i{transition:none}}
@@ -743,7 +749,9 @@ eleven.</p>
 {'Stop keeping the work' if nightly_on else 'Start keeping the work it does'}</button>
 <span class="small muted">{'On — every answer your team corrects becomes an example.'
  if nightly_on else 'Every answer your team corrects becomes an example it can learn from.'}
-</span></form>{schedule if nightly_on else ''}</div>"""
+</span></form>{schedule if nightly_on else ''}
+<p class="small" style="margin-top:.9rem"><a href="/w/{slug}/overnight">See what it has collected
+and what every night did &rarr;</a></p></div>"""
 
     return shell("It's live", f"""
 <h1>{html.escape(w.name)} is answering now 🎉</h1>
@@ -768,8 +776,100 @@ def _pretty(grader: str) -> str:
         "format": "Ready to send",
         "judge": "Tone (rated locally)",
         "correct_priority": "Gets the priority right",
+        "correct_category": "Picks the right category",
         "parseable": "Readable by your tools",
     }.get(grader, grader.replace("_", " "))
+
+
+# --- the overnight page: the autonomous half, made visible ----------------------------------
+# Unattended improvement is the point of the product and the easiest thing in it to distrust. The
+# fix is not a promise on a card; it is a page that shows the store filling, says what tonight
+# will do, and lists every past night — including the ones that trained and were refused.
+
+# Chip label short enough to stay on one line; the sentence beside it carries the meaning.
+_STAGE_WORDS = {
+    "deployed": ("ok", "now serving",
+                 "It beat the model you were using on held-back work, so it took over."),
+    "proved": ("ok", "better",
+               "It won on held-back work. Nothing was swapped in automatically."),
+    "trained": ("", "not better",
+                ("It learned something but could not beat what you already serve, so nothing "
+                 "changed — you kept the model you had. This is the gate doing its job.")),
+    "waiting": ("", "waiting", ""),
+    "skipped": ("", "left it alone", ""),
+    "failed": ("bad", "didn't finish", ""),
+}
+
+
+def overnight_page(w, summary, history: list[dict], host: dict, *,
+                   nightly_on: bool = False, min_examples: int = 120) -> str:
+    """What has been collected, what tonight will do, and what every past night did."""
+    slug = html.escape(w.slug)
+    window = ""
+    if summary.first_seen and summary.last_seen:
+        window = (f"<p class='small muted'>From {html.escape(summary.first_seen[:16].replace('T', ' '))} "
+                  f"to {html.escape(summary.last_seen[:16].replace('T', ' '))}.</p>")
+
+    # The store, in the four numbers that decide whether tonight happens.
+    tiles = "".join(
+        f"<div class='tile'><b>{value}</b><span>{html.escape(label)}</span></div>"
+        for label, value in (
+            ("requests kept", summary.requests),
+            ("ready to learn from", summary.trainable),
+            ("your team corrected", summary.edited),
+            ("answered by a stronger model", summary.teacher_rows),
+        )
+    )
+
+    short = max(min_examples - summary.trainable, 0)
+    if not nightly_on:
+        tonight = ("<b>Nothing is scheduled.</b> Turn it on from the model's page and every answer "
+                   "your team corrects becomes an example.")
+        tone = ""
+    elif short:
+        tonight = (f"<b>Tonight it will wait.</b> {summary.trainable} examples ready, and it needs "
+                   f"{min_examples} before it will spend a night on them — {short} to go. They "
+                   "accumulate as your team works; nothing for you to do.")
+        tone = ""
+    else:
+        tonight = (f"<b>Tonight it will train</b> on {summary.trainable} examples, then check "
+                   "itself on work it has never seen. If it is not better, nothing changes and "
+                   "you keep the model you have.")
+        tone = "good"
+    power, activity = html.escape(host.get("power", "unknown")), html.escape(host.get("activity", ""))
+
+    rows = ""
+    for row in reversed(history):
+        cls, title, explain = _STAGE_WORDS.get(row.get("stage", ""), ("", row.get("stage", "?"), ""))
+        delta = row.get("delta")
+        numeric = isinstance(delta, (int, float)) and not isinstance(delta, bool)
+        change = f"{delta:+.3f}" if numeric else "—"
+        move = ("up" if delta > 0 else "down") if numeric and delta else ""
+        when = html.escape(str(row.get("started", ""))[:16].replace("T", " "))
+        rows += (f"<tr><td class='small nowrap'>{when}</td>"
+                 f"<td><span class='chip {cls}'>{html.escape(title)}</span></td>"
+                 f"<td class='n'>{row.get('examples') or '—'}</td>"
+                 f"<td class='n {move}'>{change}</td>"
+                 f"<td class='small muted'>{html.escape(explain or str(row.get('detail', '')))}</td></tr>")
+    table = (f"""<table><tr><th>night</th><th>what happened</th><th>examples</th><th>change</th>
+<th>&nbsp;</th></tr>{rows}</table>"""
+             if rows else '<p class="empty">No nights yet. The first one writes a line here.</p>')
+
+    return shell("Overnight", f"""
+<h1>What it does overnight</h1>
+<p class="lede">{html.escape(summary.headline)} Everything below happened, or will happen, on your
+own computers — nothing is sent anywhere.</p>
+<div class="card"><div class="tiles">{tiles}</div>{window}
+<p class="small muted">{html.escape(summary.advice)}</p></div>
+<div class="card"><h2>Tonight</h2><p class="note {tone}">{tonight}</p>
+<p class="small muted">This computer right now: {power}, {activity}. A run waits for the machine to
+be on mains power and not in use, so nobody's laptop slows down mid-afternoon.</p></div>
+<div class="card"><h2>Every night so far</h2>
+<p class="small muted">Including the nights it trained and was refused — that is the gate working,
+not a fault.</p>{table}</div>
+<div class="row"><a class="btn ghost" href="/w/{slug}/live">Back to the model</a>
+<a class="btn ghost" href="/">Your models</a></div>
+""")
 
 
 def machines_page(nodes: dict) -> str:

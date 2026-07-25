@@ -755,3 +755,105 @@ def test_a_manager_can_walk_the_whole_wizard_with_her_own_categories(client, tmp
     workspace.write_config(workspace.load(slug), model="m", endpoint="http://x/v1", steps=10)
     toml = (workspace.load(slug).path / "grid-train.toml").read_text(encoding="utf-8")
     assert "max_tokens = 24" in toml                    # a category, not an essay
+
+
+# --- the overnight page: the unattended half, made visible ---------------------------------
+
+def _serving(w):
+    w.meta["serving"] = {"name": w.slug, "nodes": [{"node": "studio", "ok": True}]}
+    w.meta["nightly"] = True
+    w.meta["stage"] = "serving"
+    w.save()
+
+
+def test_overnight_page_says_what_tonight_will_do(client, tmp_path, monkeypatch):
+    from train import autopilot
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("Support replies", "support-replies")
+    _serving(w)
+
+    class Summary:
+        requests, trainable, edited, teacher_rows = 900, 640, 210, 120
+        first_seen, last_seen = "2026-07-01T09:00:00", "2026-07-25T18:30:00"
+        headline = "640 examples ready to learn from, out of 900 requests."
+        advice = "That is enough for a training run tonight."
+
+    page = pages.overnight_page(w, Summary(), [], {"power": "on mains", "activity": "idle 900s"},
+                                nightly_on=True, min_examples=autopilot.MIN_EXAMPLES)
+    assert "Tonight it will train</b> on 640 examples" in page
+    assert "on mains, idle 900s" in page
+    assert "No nights yet" in page
+    for jargon in ("GRPO", "LoRA", "adapter", "SFT", "rollout"):
+        assert jargon not in page
+
+
+def test_overnight_page_counts_down_instead_of_promising(client, tmp_path, monkeypatch):
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("q", "sort-into-categories")
+    _serving(w)
+
+    class Thin:
+        requests, trainable, edited, teacher_rows = 60, 43, 40, 3
+        first_seen = last_seen = ""
+        headline = "43 examples ready to learn from, out of 60 requests."
+        advice = "It grows on its own as your team works."
+
+    page = pages.overnight_page(w, Thin(), [], {"power": "on battery", "activity": "in use (2s ago)"},
+                                nightly_on=True, min_examples=120)
+    assert "Tonight it will wait" in page
+    assert "77 to go" in page                     # 120 - 43, said as a countdown not a failure
+
+
+def test_overnight_page_shows_the_nights_that_were_refused(client, tmp_path, monkeypatch):
+    """A refused night is the gate working. Hiding it would make the record look too good."""
+    from train.web import pages
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+    history = [
+        {"started": "2026-07-22T23:00:00", "stage": "waiting", "examples": 40, "detail": "..."},
+        {"started": "2026-07-23T23:00:00", "stage": "trained", "examples": 300, "delta": -0.004},
+        {"started": "2026-07-24T23:00:00", "stage": "deployed", "examples": 480, "delta": 0.062},
+        {"started": "2026-07-25T23:00:00", "stage": "skipped", "detail": "on battery"},
+    ]
+
+    class S:
+        requests, trainable, edited, teacher_rows = 900, 480, 200, 100
+        first_seen = last_seen = ""
+        headline = "h"
+        advice = "a"
+
+    page = pages.overnight_page(w, S(), history, {"power": "on mains", "activity": "idle 100s"},
+                                nightly_on=True)
+    assert "not better" in page and "-0.004" in page
+    assert "now serving" in page and "+0.062" in page
+    assert "left it alone" in page
+    # Newest night first: she reads the top of the table.
+    assert page.index("2026-07-25") < page.index("2026-07-22")
+
+
+def test_the_live_page_links_to_the_overnight_record(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+    live = client.get(f"/w/{w.slug}/live").text
+    assert f"/w/{w.slug}/overnight" in live
+    page = client.get(f"/w/{w.slug}/overnight")
+    assert page.status_code == 200
+    assert "What it does overnight" in page.text
+
+
+def test_the_overnight_page_survives_an_unreadable_config(client, tmp_path, monkeypatch):
+    """The history lives behind the run config. A broken one must not take the page down."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("s", "support-replies")
+    _serving(w)
+    (w.path / "grid-train.toml").write_text("this is not toml {{{", encoding="utf-8")
+    page = client.get(f"/w/{w.slug}/overnight")
+    assert page.status_code == 200
+    assert "No nights yet" in page.text

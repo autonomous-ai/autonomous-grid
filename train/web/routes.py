@@ -367,6 +367,32 @@ def register(app) -> None:
         return pages.live_step(w, serving, summarize(days=30),
                                nightly_on=bool(w.meta.get("nightly")))
 
+    @app.get("/w/{slug}/overnight", response_class=HTMLResponse)
+    def overnight(slug: str):
+        """The unattended half, made visible: the store, tonight's plan, every past night.
+
+        Nothing here is new machinery — `capture.summarize()` and `autopilot.history()` already
+        answered these questions on the command line. The gap was that the person who owns the
+        model could not see any of it, which makes "it improves overnight" a claim rather than
+        a record.
+        """
+        from train import autopilot, hostsignals
+        from train.capture import summarize
+        from train.config import load_config
+
+        w = _load(slug)
+        rows: list[dict] = []
+        config_path = w.path / "grid-train.toml"
+        if config_path.is_file():
+            try:
+                rows = autopilot.history(load_config(config_path))
+            except (SystemExit, OSError, ValueError):
+                rows = []          # an unreadable config must not hide the rest of the page
+        return pages.overnight_page(
+            w, summarize(days=30), rows, hostsignals.summary(),
+            nightly_on=bool(w.meta.get("nightly")), min_examples=autopilot.MIN_EXAMPLES,
+        )
+
     @app.post("/w/{slug}/nightly")
     async def nightly(slug: str, request: Request):
         """Turn unattended improvement on or off for this model.
