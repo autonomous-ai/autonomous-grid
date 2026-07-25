@@ -110,6 +110,35 @@ syncs the vLLM fleets it manages itself, and with `rollout_func` the fleet is ou
 `TrainerCallback` now pushes the adapter on the same cadence; without it the production path
 would have trained on base-model rollouts for every run.
 
+### Later decisions (2026-07-25, same day)
+
+- **D11 — Two deployments, one command surface.** LAN mode (one building; the local proxy is the
+  endpoint; the trainer can push adapters straight to nodes) and relay mode (offices apart; nodes
+  poll the hosted relay outbound, which is what lets a laptop elsewhere serve without an open
+  port). `train/endpoints.py` resolves either without anyone pasting a URL, and states the honest
+  asymmetry rather than hiding it: **through the relay the trainer cannot reach the nodes to push
+  new weights**, so relay-mode training either keeps its serving machines reachable (same office,
+  VPN) or runs off-policy at a real cost in learning speed. Relay-side artifact distribution is
+  phase 2 and lives in the closed repo.
+- **D12 — Training is local, in every topology.** The three grid shapes describe where *inference*
+  is served and what it costs (`docs/topologies.md`). Training is not a topology choice: API nodes
+  cannot train at any price, and renting compute by the hour is the expensive way to do the one job
+  idle office hardware suits.
+- **D13 — The nightly cycle is one process per night, in a fixed order.** Idle check → train →
+  prove → ship-only-on-a-pass (`train/nightly.py`). Not a daemon: cron and launchd are better
+  schedulers than anything shipped here, and a process that exits is one an operator can reason
+  about at 3am. A night that produces nothing better is a *success for the customer* — production
+  is untouched — and a non-zero exit for the operator.
+- **D14 — Host priority is code, not prose** (`train/hostsignals.py`). Mains power and keyboard idle
+  gate every unattended run; unknown counts as free so a machine that cannot report never vetoes
+  the feature. This is the commitment server-oriented orchestrators don't make, and training is
+  where it becomes load-bearing: a run is sustained 100% duty, not a burst.
+- **D15 — A browser interface, same engine** (`train/web/`). The CLI stays the engineer's surface;
+  `grid train web` gives a support or sales manager the same five steps with the vocabulary of
+  their job. It writes an ordinary `grid-train.toml` and launches an ordinary `grid train run`
+  subprocess — a test pins that the CLI can load what the browser generated, so the two surfaces
+  can never drift into separate products.
+
 Runbook: `docs/two-node-training.md`.
 
 ## Consequences / open items

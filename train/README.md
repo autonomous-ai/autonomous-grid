@@ -159,10 +159,24 @@ Nothing here needs a GPU, a key, or an account. The first command is a complete 
 python -m train.torch_grpo_hello     # any machine — CPU is fine, ~6 minutes
 python -m train.mlx.grpo_hello       # the same, natively on Apple Silicon (pip install mlx-lm)
 
+grid train where                     # which grids training can use (LAN and hosted)
 grid train ui                        # watch the curves → http://127.0.0.1:8321
 grid train serve                     # turn this Mac into a rollout worker
 grid train packs                     # start from your own data
 grid train init --pack sales-triage
+```
+
+**Not an engineer?** `grid train web` is the same engine with five steps and none of the
+vocabulary: upload an export, tick what a good answer looks like, pick machines, watch the curve,
+and see a before/after card with a button that only appears if the model actually won. It writes
+the same `grid-train.toml` the CLI reads, so the two surfaces can't drift apart.
+
+**Every night, unattended:** `grid train nightly` runs one cycle — idle check, train, prove it on
+held-out work, ship it only if it won — and appends the outcome to a history file. Put it in cron
+and the office trains itself while it sleeps:
+
+```
+0 23 * * *  cd ~/support-model && grid train nightly
 ```
 
 ## The code
@@ -183,6 +197,9 @@ train/
 ├── evaluate.py            the gate: score incumbent vs candidate, write the eval card
 ├── deploy.py              hot-load an adapter onto serving nodes
 ├── ui.py                  read-only dashboard of runs and their curves
+├── nightly.py             one unattended cycle: idle check → train → prove → ship or bin
+├── hostsignals.py         mains power + keyboard idle — the host outranks the scheduler
+├── endpoints.py           find the grid in either mode (LAN or hosted relay)
 ├── packs/                 business-data starting points (config + prep + graders + samples)
 │   ├── support_replies/    tickets → drafted replies (imitate first, then sharpen)
 │   └── sales_triage/       leads → priority, checked against what actually closed
@@ -201,8 +218,6 @@ lazily, so the rest of the CLI — and every test in this repo — runs without 
 
 Said plainly, because this branch is open and someone will look.
 
-- **The gate exists; deployment is not yet wired to refuse on its own.** `grid train eval` and
-  `grid train deploy --gate` are in; the nightly path that runs them unattended is next.
 - **Nothing captures traffic yet.** The first two stations of §4 are a design: turning live grid
   requests into tasks, and joining real outcomes to them, is what makes the loop continuous
   rather than a run you launch by hand.
