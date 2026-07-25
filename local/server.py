@@ -298,16 +298,27 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
     )
 
 
+# A body larger than this is a file dump, not a training example — and parsing multi-megabyte JSON
+# a second time to look at it would be work done on a customer's request for nothing.
+_MAX_CAPTURE_BODY = 256 * 1024
+
+
 def _capture_exchange(body: dict, engine_response: httpx.Response) -> str | None:
-    """Best-effort: store this prompt/answer pair if capture is enabled. Never raises."""
+    """Best-effort: store this prompt/answer pair if capture is enabled. Never raises, never waits.
+
+    The expensive parts (redaction, the append) happen on capture's own writer thread; what runs
+    here is a policy check, one JSON parse of a bounded body, and two string clips.
+    """
     try:
-        from train.capture import load_policy, record
+        from train.capture import clip, load_policy, record
 
         policy = load_policy()
         if not policy.enabled:
             return None
-        prompt = _prompt_text(body)
-        answer = _answer_text(engine_response.json())
+        if len(engine_response.content) > _MAX_CAPTURE_BODY:
+            return None
+        prompt = clip(_prompt_text(body))
+        answer = clip(_answer_text(engine_response.json()))
         if not prompt or not answer:
             return None
         return record(prompt, answer, model=str(body.get("model") or ""), policy=policy)

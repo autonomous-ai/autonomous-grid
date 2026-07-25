@@ -25,6 +25,13 @@ def _on(**kwargs) -> capture.Policy:
     return policy
 
 
+@pytest.fixture(autouse=True)
+def _flush_writes():
+    """Appends go to a background writer, so anything reading straight after writing waits."""
+    yield
+    capture.flush()
+
+
 # --- policy: off unless someone opts in ----------------------------------------------------
 
 def test_capture_is_off_until_turned_on():
@@ -63,6 +70,7 @@ def test_redaction_scrubs_the_obvious_identifiers():
 def test_captured_rows_are_redacted_by_default():
     _on()
     capture.record("ticket from bob@example.com", "we emailed bob@example.com", model="m")
+    capture.flush()
     row = json.loads(next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()[0])
     assert "bob@example.com" not in row["prompt"] + row["completion"]
 
@@ -70,6 +78,7 @@ def test_captured_rows_are_redacted_by_default():
 def test_redaction_can_be_turned_off_deliberately():
     _on(redact=False)
     capture.record("ticket from bob@example.com", "ok", model="m")
+    capture.flush()
     row = json.loads(next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()[0])
     assert "bob@example.com" in row["prompt"]
 
@@ -189,7 +198,8 @@ def test_prune_drops_old_days_only():
     from datetime import date, timedelta
 
     _on(retain_days=3)
-    old = capture.capture_dir() / f"traffic-{(date.today() - timedelta(days=10)).isoformat()}.jsonl"
+    stale_day = (date.today() - timedelta(days=10)).isoformat()  # noqa: DTZ011 — local day, as the store uses
+    old = capture.capture_dir() / f"traffic-{stale_day}.jsonl"
     old.parent.mkdir(parents=True, exist_ok=True)
     old.write_text('{"id":"x"}\n', encoding="utf-8")
     capture.record("today", "answer", model="m")
@@ -227,6 +237,7 @@ def test_capture_failure_cannot_break_serving(monkeypatch):
 
     class FakeResponse:
         status_code = 200
+        content = b'{"choices": [{"text": "an answer"}]}'
 
         def json(self):
             return {"choices": [{"text": "an answer"}]}
@@ -241,6 +252,7 @@ def test_capture_hook_returns_an_id_apps_can_quote_back():
 
     class FakeResponse:
         status_code = 200
+        content = b'{"choices": [{"message": {"content": "the answer"}}]}'
 
         def json(self):
             return {"choices": [{"message": {"content": "the answer"}}]}
@@ -250,6 +262,53 @@ def test_capture_hook_returns_an_id_apps_can_quote_back():
     )
     assert request_id and len(request_id) == 16
     assert capture.summarize().requests == 1
+
+
+def test_an_enormous_answer_is_not_stored_at_all():
+    """A five-megabyte file dump is not a training example, and parsing it twice on a customer's
+    request would be work done for nothing."""
+    from local import server
+
+    _on()
+    big = json.dumps({"choices": [{"text": "x" * 400_000}]}).encode()
+
+    class HugeResponse:
+        status_code = 200
+        content = big
+
+        def json(self):
+            return json.loads(big)
+
+    assert server._capture_exchange({"prompt": "p", "model": "m"}, HugeResponse()) is None
+    assert capture.summarize().requests == 0
+
+
+def test_a_long_answer_is_clipped_rather_than_stored_whole():
+    _on()
+    capture.record("a ticket", "y" * 50_000, model="m")
+    capture.flush()
+    row = json.loads(next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()[0])
+    assert len(row["completion"]) < capture.MAX_TEXT + 40
+    assert row["completion"].endswith("…[trimmed]")
+
+
+def test_redaction_cannot_be_used_to_stall_the_grid():
+    """An unauthenticated LAN request used to buy ~34 seconds of blocked event loop per 100 KB."""
+    import time
+
+    _on()
+    started = time.time()
+    capture.record_feedback("rid", "edited", final_text="A" * 200_000)
+    capture.flush()
+    assert time.time() - started < 1.0
+
+
+def test_sampling_actually_drops_requests():
+    """`time.time_ns() % 1000` is always 0 on macOS, so the old sampling kept everything."""
+    _on(sample=0.0)
+    for i in range(40):
+        capture.record(f"t{i}", "a", model="m")
+    assert capture.summarize().requests == 0
 
 
 # --- the feedback endpoint, through the real server ---------------------------------------

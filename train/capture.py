@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import queue
+import random
 import re
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -86,12 +89,29 @@ def save_policy(policy: Policy) -> Path:
 # Not a compliance tool and not claimed as one — a coarse net over the obvious identifiers, so a
 # captured ticket doesn't sit on disk with a customer's card number in it. Order matters: cards
 # before phones, or a 16-digit card partially matches as a phone number.
+# Every quantifier is bounded. An unbounded `+` before the required "@" made this quadratic: on a
+# long opaque token (a hash, a base64 blob) the engine retried the whole run at every offset —
+# measured 5.4s for 40k characters, 4x per doubling, which an unauthenticated LAN request could
+# aim at the serving proxy's event loop. RFC 5321 caps a local part at 64 and each label at 63, so
+# the bounds cost nothing real.
 _PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
-    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]{2,}"), "[email]"),
+    (re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}\.[\w.]{2,24}"), "[email]"),
     (re.compile(r"\b(?:\d[ -]?){13,19}\b"), "[card]"),
     (re.compile(r"(?<!\w)(?:\+?\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?)?\d{3,4}[ .-]\d{3,4}(?:[ .-]\d{3,4})?(?!\w)"), "[phone]"),
-    (re.compile(r"\b(?:sk|pk|ghp|xox[bp])[-_][A-Za-z0-9_-]{12,}\b"), "[secret]"),
+    (re.compile(r"\b(?:sk|pk|ghp|xox[bp])[-_][A-Za-z0-9_-]{12,64}\b"), "[secret]"),
 )
+
+# What one stored example may weigh. A 5 MB answer is not a training example, it is a file dump —
+# and storing it means a gigabyte of JSONL that later gets read into memory whole.
+MAX_TEXT = 8_000
+
+
+def clip(text: str, limit: int = MAX_TEXT) -> str:
+    """Bound the text before anything scans it. Order matters: redacting first and clipping after
+    means the cap protects nothing, which is how a 100 KB feedback body became 49 seconds of work.
+    """
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + " …[trimmed]"
 
 
 def redact(text: str) -> str:
@@ -109,10 +129,49 @@ def _day_file(kind: str, when: date | None = None) -> Path:
     return capture_dir() / f"{kind}-{day}.jsonl"
 
 
+_WRITES: queue.Queue = queue.Queue(maxsize=256)
+_WRITER: threading.Thread | None = None
+_WRITER_LOCK = threading.Lock()
+
+
+def _writer_loop() -> None:
+    while True:
+        path, row = _WRITES.get()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError:
+            pass                      # a full or read-only disk costs an example, nothing more
+        finally:
+            _WRITES.task_done()
+
+
 def _append(path: Path, row: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    """Hand the row to a single background writer.
+
+    One thread, so appends stay ordered and never interleave a torn line; a bounded queue, so a
+    stalled disk drops examples instead of growing memory; and no I/O on the caller's thread,
+    because the caller is often a serving path holding a customer's request open.
+    """
+    global _WRITER
+    with _WRITER_LOCK:
+        if _WRITER is None or not _WRITER.is_alive():
+            _WRITER = threading.Thread(target=_writer_loop, name="grid-capture-writer",
+                                       daemon=True)
+            _WRITER.start()
+    try:
+        _WRITES.put_nowait((path, row))
+    except queue.Full:
+        pass                          # busier than the disk can keep up with: drop this one
+
+
+def flush(timeout: float = 5.0) -> None:
+    """Wait for queued writes — for tests, and for anything that reads straight after writing."""
+    deadline = time.time() + timeout
+    while not _WRITES.empty() and time.time() < deadline:
+        time.sleep(0.005)
+    _WRITES.join()
 
 
 def record(prompt: str, completion: str, *, model: str, policy: Policy | None = None,
@@ -126,10 +185,12 @@ def record(prompt: str, completion: str, *, model: str, policy: Policy | None = 
     policy = policy or load_policy()
     if not policy.enabled or not prompt.strip() or not completion.strip():
         return None
-    # Deterministic-ish sampling without importing random into a serving path.
-    if policy.sample < 1.0 and (time.time_ns() % 1000) / 1000.0 >= policy.sample:
+    # A real draw. The previous trick — `time.time_ns() % 1000` — is always 0 on macOS, whose
+    # clock has microsecond resolution, so `--sample 0.1` silently kept everything.
+    if policy.sample < 1.0 and random.random() >= policy.sample:
         return None
     request_id = request_id or uuid.uuid4().hex[:16]
+    prompt, completion = clip(prompt), clip(completion)
     _append(_day_file("traffic"), {
         "id": request_id,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -149,11 +210,12 @@ def record_feedback(request_id: str, verdict: str, *, final_text: str = "",
     if verdict not in VERDICTS:
         return False
     policy = policy or load_policy()
+    final_text = clip(final_text)
     _append(_day_file("feedback"), {
         "id": request_id,
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "verdict": verdict,
-        "final_text": (redact(final_text) if policy.redact else final_text)[:20000],
+        "final_text": redact(final_text) if policy.redact else final_text,
     })
     return True
 
@@ -161,6 +223,10 @@ def record_feedback(request_id: str, verdict: str, *, final_text: str = "",
 # --- reading --------------------------------------------------------------------------------
 
 def _read_days(kind: str, days: int) -> list[dict]:
+    # Reads see prior writes. Appends are queued on a writer thread, so anything that reads the
+    # store — a summary, tonight's dataset — waits for what is already in flight rather than
+    # quietly missing the last few minutes of work.
+    flush()
     rows: list[dict] = []
     root = capture_dir()
     if not root.is_dir():
