@@ -145,12 +145,26 @@ def cmd_train_run(args: argparse.Namespace) -> int:
 
 
 def cmd_train_eval(args: argparse.Namespace) -> int:
+    """The gate. Given an adapter on disk, it is loaded for checking — never scored by name.
+
+    Asking the endpoint for the candidate's *serving name* scores whatever weights it already
+    holds, which is the incumbent (or nothing at all on the first run). That was live here and in
+    the browser's Check button after the same bug was fixed in the unattended paths.
+    """
     from train.config import load_config
-    from train.evaluate import run_eval
+    from train.evaluate import CandidateNotLoaded, prove_candidate, run_eval
 
     cfg = load_config(args.config or DEFAULT_CONFIG)
     run_dir = Path(args.run).expanduser()
-    result = run_eval(cfg, run_dir, args.candidate, base_model=args.base)
+    adapter = Path(args.adapter).expanduser() if args.adapter else run_dir / "adapter"
+    if adapter.is_dir():
+        try:
+            result = prove_candidate(cfg, run_dir, adapter, args.candidate)
+        except CandidateNotLoaded as exc:
+            raise SystemExit(f"grid train: {exc}") from None
+    else:
+        # No adapter on disk: the caller is scoring something the engine already serves by name.
+        result = run_eval(cfg, run_dir, args.candidate, base_model=args.base)
     _print_eval(result, run_dir)
     return 0 if result["passed"] else 1
 

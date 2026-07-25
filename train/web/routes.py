@@ -304,8 +304,12 @@ def register(app) -> None:
                 "Nothing to check yet", "This model has not been trained.",
                 back=f"/w/{slug}"), status_code=400)
         name = (w.meta.get("run") or {}).get("adapter_name") or w.slug
+        # --adapter, so the gate loads the trained weights for checking. Without it the endpoint
+        # was asked for `name`, which is the model already serving under that name — the same
+        # "scored the wrong model" defect fixed in the unattended paths, still live here.
         jobs.start(w.path, config, verb="eval", job="eval",
-                   extra=["--run", str(w.path / "run"), "--candidate", name])
+                   extra=["--run", str(w.path / "run"), "--candidate", name,
+                          "--adapter", str(w.path / "run" / "adapter")])
         return RedirectResponse(f"/w/{slug}/result", status_code=303)
 
     @app.get("/w/{slug}/try", response_class=HTMLResponse)

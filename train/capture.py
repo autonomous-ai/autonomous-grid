@@ -361,7 +361,11 @@ def build_examples(days: int = 30, *, include_accepted: bool = True,
     traffic = _read_days("traffic", days)
     if models:
         wanted = {str(m) for m in models}
-        traffic = [row for row in traffic if row.get("model") in wanted]
+        # Teacher rows are recorded under the TEACHER's name (that is what answered), so filtering
+        # on our own model's name would drop exactly the examples distillation depends on — the
+        # hard requests a stronger model handled, which are the most valuable rows in the store.
+        traffic = [row for row in traffic
+                   if row.get("model") in wanted or row.get("teacher")]
     feedback = {row["id"]: row for row in _read_days("feedback", days) if row.get("id")}
     examples: list[Example] = []
     for row in traffic:

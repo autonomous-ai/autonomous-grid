@@ -408,3 +408,28 @@ def test_junk_in_a_stream_is_ignored_not_fatal():
     capture.flush()
     row = json.loads(next(capture.capture_dir().glob("traffic-*.jsonl")).read_text().splitlines()[0])
     assert row["completion"] == "ok"
+
+
+def test_a_model_filter_keeps_the_teacher_rows(tmp_path, monkeypatch):
+    """Teacher rows are stored under the TEACHER's name — that is what answered.
+
+    Filtering captured traffic to "this model's own work" therefore dropped exactly the examples
+    distillation depends on: the hard requests a stronger model handled.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from train import capture
+
+    capture.save_policy(capture.Policy(enabled=True, teachers=("gpt-5",)))
+    capture.record(prompt="easy one", completion="fine", model="support-v1", request_id="a")
+    capture.record(prompt="hard one", completion="a much better answer", model="gpt-5",
+                   request_id="b")          # a teacher by policy, not by flag
+    capture.record(prompt="someone else's", completion="x", model="routing-v1", request_id="c")
+    capture.flush()
+    capture.record_feedback("a", verdict="accepted")
+    capture.flush()
+
+    ours = capture.build_examples(models=("support-v1",))
+    kept = {e.prompt: e.source for e in ours}
+    assert kept.get("hard one") == "teacher"          # the whole point of a teacher
+    assert "easy one" in kept
+    assert "someone else's" not in kept               # another model's work still excluded

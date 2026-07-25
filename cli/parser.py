@@ -761,7 +761,12 @@ def _add_train(sub) -> None:
         "eval", help="Score a trained model against the one you serve, on held-out work"
     )
     ev.add_argument("--run", required=True, help="Run directory under ~/.grid/artifacts/train/")
-    ev.add_argument("--candidate", required=True, help="Model/adapter name the endpoint serves it as")
+    ev.add_argument("--candidate", required=True,
+                    help="The name customers use for this model (what the winner will serve as)")
+    ev.add_argument("--adapter", default=None,
+                    help="The trained adapter to check (default: <run>/adapter). It is loaded "
+                         "under a checking name AFTER the incumbent is scored, so the comparison "
+                         "is between two different models rather than one model twice.")
     ev.add_argument("--base", default=None, help="Incumbent model name (default: the config's model)")
     ev.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     ev.set_defaults(handler=cmd_train_eval)
