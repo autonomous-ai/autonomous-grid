@@ -598,6 +598,7 @@ def _add_train(sub) -> None:
         cmd_train_convert,
         cmd_train_deploy,
         cmd_train_doctor,
+        cmd_train_eval,
         cmd_train_init,
         cmd_train_packs,
         cmd_train_run,
@@ -656,7 +657,22 @@ def _add_train(sub) -> None:
     run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
     run.set_defaults(handler=cmd_train_run)
 
+    ev = train_sub.add_parser(
+        "eval", help="Score a trained model against the one you serve, on held-out work"
+    )
+    ev.add_argument("--run", required=True, help="Run directory under ~/.grid/artifacts/train/")
+    ev.add_argument("--candidate", required=True, help="Model/adapter name the endpoint serves it as")
+    ev.add_argument("--base", default=None, help="Incumbent model name (default: the config's model)")
+    ev.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    ev.set_defaults(handler=cmd_train_eval)
+
     deploy = train_sub.add_parser("deploy", help="Hot-load a trained adapter onto serving nodes")
+    deploy.add_argument(
+        "--gate",
+        action="store_true",
+        help="Refuse to deploy unless it beats the model you already serve on held-out work.",
+    )
+    deploy.add_argument("--run", default=None, help="Run directory for --gate (default: the adapter's parent)")
     deploy.add_argument("--adapter", required=True, help="Adapter directory (contains adapter_config.json)")
     deploy.add_argument("--node", action="append", help="Serving node /v1 root (repeatable).")
     deploy.add_argument("--name", default=None, help="Adapter name to serve under.")

@@ -107,18 +107,59 @@ def cmd_train_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train_eval(args: argparse.Namespace) -> int:
+    from train.config import load_config
+    from train.evaluate import run_eval
+
+    cfg = load_config(args.config or DEFAULT_CONFIG)
+    run_dir = Path(args.run).expanduser()
+    result = run_eval(cfg, run_dir, args.candidate, base_model=args.base)
+    _print_eval(result, run_dir)
+    return 0 if result["passed"] else 1
+
+
+def _print_eval(result: dict, run_dir: Path) -> None:
+    before, after = result["before"], result["after"]
+    width = max((len(n) for n in after["per_grader"]), default=6)
+    print(f"Held-out work: {after['n']} items it never trained on\n")
+    print(f"  {'check':<{width}}  {'serving':>8}  {'trained':>8}  {'change':>8}")
+    for name in sorted(after["per_grader"]):
+        b = before["per_grader"].get(name, 0.0)
+        a = after["per_grader"][name]
+        print(f"  {name:<{width}}  {b:>8.3f}  {a:>8.3f}  {a - b:>+8.3f}")
+    print(f"  {'overall':<{width}}  {before['overall']:>8.3f}  {after['overall']:>8.3f}  "
+          f"{result['delta']:>+8.3f}")
+    print(f"\n{'PASS' if result['passed'] else 'HOLD'} — {result['verdict']}")
+    print(f"Card: {run_dir / 'eval-card.html'}")
+
+
 def cmd_train_deploy(args: argparse.Namespace) -> int:
+    from train.config import load_config
     from train.deploy import deploy_adapter
 
     nodes = tuple(args.node or ())
     name = args.name
-    if args.config or not (nodes and name):
+    cfg = None
+    if args.config or args.gate or not (nodes and name):
         # Fill the gaps from config when present; explicit flags win.
-        from train.config import load_config
-
         cfg = load_config(args.config or DEFAULT_CONFIG)
         nodes = nodes or cfg.deploy.nodes
         name = name or cfg.deploy.adapter_name
+
+    if args.gate:
+        # The gate: prove it on held-out work first. The candidate must already be loadable
+        # under `name` on the endpoint — deploy to a staging name, or run this after a plain
+        # deploy and before pointing traffic at it.
+        from train.evaluate import run_eval
+
+        run_dir = Path(args.run or Path(args.adapter).expanduser().parent)
+        result = run_eval(cfg, run_dir, name)
+        _print_eval(result, run_dir)
+        if not result["passed"]:
+            print("\nRefusing to deploy: it did not beat the model you are already serving.")
+            return 1
+        print()
+
     results = deploy_adapter(args.adapter, nodes, name)
     _print_deploy(results)
     return 0 if all(r["ok"] for r in results) else 1
