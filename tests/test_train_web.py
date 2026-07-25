@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -1044,3 +1045,53 @@ def test_a_mailbox_export_is_not_trained_to_answer_with_a_timestamp(client, tmp_
         "any-task", "".join(_json.dumps(r) + "\n" for r in rows), "mailbox.jsonl")
     assert report.columns_used["what your team wrote"] == "reply body"
     assert kept[0]["reference"].startswith("Approved this morning")
+
+
+# --- the way back ---------------------------------------------------------------------------
+
+def test_serving_a_model_keeps_the_one_it_replaced(client, tmp_path, monkeypatch):
+    """"Start using this model" replaced what her team relies on, and had no undo."""
+    slug = _served_workspace(client, tmp_path)
+    loaded: list[str] = []
+    monkeypatch.setattr(
+        "train.deploy.deploy_adapter",
+        lambda adapter, nodes, name, **kw: loaded.append(str(adapter))
+        or [{"node": nodes[0], "ok": True, "detail": "ok"}],
+    )
+
+    client.post(f"/w/{slug}/use")
+    first = workspace.load(slug).meta["serving"]
+    assert first["adapter"] and Path(first["adapter"]).is_dir()
+    assert first["replaced"] == ""                     # nothing came before it
+    page = client.get(f"/w/{slug}/live").text
+    assert "first model you have served here" in page
+    assert "restarting the engine" in page             # honest about what going back would need
+
+    # Train and serve a second one: now there is something to go back to.
+    (workspace.load(slug).path / "run" / "adapter").mkdir(parents=True, exist_ok=True)
+    client.post(f"/w/{slug}/use")
+    second = workspace.load(slug).meta["serving"]
+    assert second["replaced"] == first["adapter"]
+    assert second["adapter"] != first["adapter"]       # the copy, not the live run directory
+    page = client.get(f"/w/{slug}/live").text
+    assert "Go back to the previous model" in page
+
+    client.post(f"/w/{slug}/revert")
+    now = workspace.load(slug).meta["serving"]
+    assert now["adapter"] == first["adapter"]
+    assert loaded[-1] == first["adapter"]              # the old weights really went to the node
+    page = client.get(f"/w/{slug}/live").text
+    assert "You went back to the previous model" in page
+
+
+def test_going_back_with_nothing_to_go_back_to_says_so(client, tmp_path, monkeypatch):
+    slug = _served_workspace(client, tmp_path)
+    monkeypatch.setattr(
+        "train.deploy.deploy_adapter",
+        lambda adapter, nodes, name, **kw: [{"node": nodes[0], "ok": True, "detail": "ok"}],
+    )
+    client.post(f"/w/{slug}/use")
+    response = client.post(f"/w/{slug}/revert")
+    assert response.status_code == 400
+    assert "nothing to go back to" in response.text
+    assert "stays as it is" in response.text           # and nothing was lost

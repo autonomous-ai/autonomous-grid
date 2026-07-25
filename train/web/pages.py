@@ -814,6 +814,28 @@ def live_step(w, serving: dict, summary=None, nightly_on: bool = False) -> str:
 <p class="small" style="margin-top:.9rem"><a href="/w/{slug}/overnight">See what it has collected
 and what every night did &rarr;</a></p></div>"""
 
+    # The way back. Every other button in this flow is undone by not pressing it again; this one
+    # replaced the model her team relies on, and the gate — good as it is — is one comparison on
+    # held-back work. Real use finds things it cannot.
+    previous = (serving.get("replaced") or "").strip()
+    reverted = (serving.get("reverted_from") or "").strip()
+    if previous:
+        back = f"""<div class="card"><h2>If it turns out worse in real use</h2>
+<p class="small muted">The comparison it passed was on held-back work. That catches a lot and not
+everything, so the model you had before this one is kept — putting it back takes a second and
+changes nothing about your examples or your checks.</p>
+<form method="post" action="/w/{slug}/revert">
+<button type="submit">Go back to the previous model</button></form></div>"""
+    elif reverted:
+        back = """<div class="note"><b>You went back to the previous model.</b>
+It is the one answering now. Training again starts from your examples as they are.</div>"""
+    else:
+        back = """<div class="card"><h2>If it turns out worse in real use</h2>
+<p class="small muted">This is the first model you have served here, so what came before it is the
+starting model. Going back to that one means restarting the engine on that machine — ask whoever
+set it up for <code>grid train serve</code>. From the next model onward, going back is a button
+here.</p></div>"""
+
     return shell("It's live", f"""
 <h1>{html.escape(w.name)} is answering now 🎉</h1>
 <p class="lede">Your team's own model, trained on your own examples, running on your own
@@ -824,6 +846,7 @@ helpdesk to use these two lines.</p>
 <pre class="log">OPENAI_BASE_URL={html.escape((w.meta.get('config') or {}).get('endpoint', ''))}
 model: {name}</pre></div>
 {collecting}
+{back}
 <div class="row"><a class="btn primary" href="/w/{slug}/try">Try it on another ticket</a>
 <a class="btn" href="/w/{slug}/result">See the before and after</a>
 <a class="btn ghost" href="/">Your models</a></div>

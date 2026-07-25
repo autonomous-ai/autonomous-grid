@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import time
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -92,6 +93,31 @@ async def _form(request) -> dict[str, list[str]]:
 def _one(form: dict[str, list[str]], key: str, default: str = "") -> str:
     values = form.get(key) or []
     return values[0].strip() if values else default
+
+
+def _keep_a_copy(w, adapter: Path) -> str:
+    """Copy the adapter aside before it becomes the served one.
+
+    `run/adapter` is overwritten by the next training run, so without this the "go back" button
+    would point at whatever was trained most recently — which is the thing being reverted.
+    """
+    import shutil
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    root = Path(w.path) / "served"
+    kept = root / stamp
+    # Two deploys inside one second would otherwise land in the same folder, and "the previous
+    # model" would point at the model being replaced — a revert button that does nothing.
+    suffix = 2
+    while kept.exists():
+        kept = root / f"{stamp}-{suffix}"
+        suffix += 1
+    try:
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(adapter, kept, dirs_exist_ok=True)
+    except OSError:
+        return str(adapter)      # better a live pointer than none; the revert page checks it
+    return str(kept)
 
 
 def register(app) -> None:
@@ -344,8 +370,12 @@ def register(app) -> None:
         if any(r["ok"] for r in results):
             # Recorded only for machines that really loaded it: otherwise the payoff page said
             # "is answering now" about a model nothing was serving.
+            previous = (w.meta.get("serving") or {}).get("adapter", "")
+            kept = _keep_a_copy(w, adapter)
             w.meta["serving"] = {"nodes": [r for r in results if r["ok"]],
-                                 "name": cfg.deploy.adapter_name or w.slug}
+                                 "name": cfg.deploy.adapter_name or w.slug,
+                                 "adapter": kept, "replaced": previous,
+                                 "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
             w.save()
         if failed:
             return HTMLResponse(pages.error_page(
@@ -353,6 +383,49 @@ def register(app) -> None:
                 "; ".join(f"{r['node']}: {r['detail']}" for r in failed),
                 back=f"/w/{slug}/result"), status_code=502)
         w.meta["stage"] = "serving"
+        w.save()
+        return RedirectResponse(f"/w/{slug}/live", status_code=303)
+
+    @app.post("/w/{slug}/revert")
+    def revert(slug: str):
+        """Put back the model that was serving before this one.
+
+        Every other button here is reversible by not pressing it again. "Start using this model"
+        was not: it replaced what her team relies on, and the only route back was a terminal. The
+        gate is good but it is one comparison on held-back work — real use finds things it cannot,
+        and the answer to that has to be a button, not a support ticket.
+        """
+        w = _load(slug)
+        serving = w.meta.get("serving") or {}
+        previous = serving.get("replaced") or ""
+        if not previous or not Path(previous).is_dir():
+            return HTMLResponse(pages.error_page(
+                "There is nothing to go back to",
+                "This is the first model you have served here, so what came before it is the "
+                "starting model — putting that back means restarting the engine on that machine "
+                "(`grid train serve`). Everything you uploaded and every check stays as it is.",
+                back=f"/w/{slug}/live"), status_code=400)
+
+        from train.config import load_config
+        from train.deploy import deploy_adapter
+
+        try:
+            cfg = load_config(w.path / "grid-train.toml")
+            results = deploy_adapter(Path(previous), cfg.deploy.nodes or (cfg.rollout.base_url,),
+                                     serving.get("name") or w.slug)
+        except SystemExit as exc:
+            return HTMLResponse(pages.error_page("Could not put it back", str(exc),
+                                                 back=f"/w/{slug}/live"), status_code=400)
+        if not any(r["ok"] for r in results):
+            return HTMLResponse(pages.error_page(
+                "Could not put it back",
+                "; ".join(f"{r['node']}: {r['detail']}" for r in results),
+                back=f"/w/{slug}/live"), status_code=502)
+        w.meta["serving"] = {"nodes": [r for r in results if r["ok"]],
+                             "name": serving.get("name") or w.slug,
+                             "adapter": previous, "replaced": "",
+                             "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                             "reverted_from": serving.get("adapter", "")}
         w.save()
         return RedirectResponse(f"/w/{slug}/live", status_code=303)
 
