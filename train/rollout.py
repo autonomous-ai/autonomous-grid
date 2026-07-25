@@ -113,7 +113,12 @@ class GridRolloutClient:
             raise RolloutError(f"rollout request failed: HTTP {response.status_code}: {detail}")
         return response.json()
 
-    def generate_group(self, prompt: str, n: int, temperature: float | None = None) -> list[Rollout]:
+    def generate_group(
+        self, prompt: str | list[int], n: int, temperature: float | None = None
+    ) -> list[Rollout]:
+        """`prompt` may be token ids — preferred for training, since the engine then conditions
+        on exactly the prefix the trainer trains on (text round-trips are not identity for
+        every tokenizer). vLLM and Grid's MLX rollout server both accept either form."""
         body = {
             "model": self._model,
             "prompt": prompt,

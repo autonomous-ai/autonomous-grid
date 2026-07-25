@@ -145,11 +145,11 @@ def main() -> int:
         # its sampled ids align with the trainer's vocabulary. Behavior logprobs come from the
         # engine — the loss's clipped ratio handles the (bounded) off-policy gap.
         # Round-robin across nodes by step so a pool shares the load; one group stays whole on
-        # one node (prompt-prefix locality).
-        text = tokenizer.decode(prompt_ids)
+        # one node (prompt-prefix locality). Token ids go over the wire, not text — the engine
+        # then conditions on exactly the prefix this trainer trains on.
         client = remotes[sample_group_remote.turn % len(remotes)]
         sample_group_remote.turn += 1
-        rollouts = client.generate_group(text, n, temperature=0.0 if greedy else None)
+        rollouts = client.generate_group(prompt_ids, n, temperature=0.0 if greedy else None)
         return [(list(r.token_ids), list(r.logprobs), r.text) for r in rollouts]
 
     sample_group_remote.turn = 0

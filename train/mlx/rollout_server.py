@@ -9,6 +9,10 @@ the ids the engine actually sampled) and `logprobs` (the sampling-time logprob o
 the behavior policy in the loss). The response shape is exactly what `train/rollout.py`
 parses, so a trainer pointed at this server or at vLLM sees no difference.
 
+`prompt` accepts token ids as well as text — ids are what a trainer should send, since a
+text round-trip is not identity for every tokenizer and any drift means the engine sampled
+under a different prefix than the trainer trains on.
+
 Also serves `GET /v1/models` (so `grid join` detects it — MLX probe, port 8080) and
 `POST /reload_adapter` (hot-reload LoRA weights from a directory `mlx_lm` saved — same-format
 adapters only; a torch/peft adapter does not load here).
@@ -47,11 +51,15 @@ class MlxEngine:
         self._adapter_applied = adapter_path is not None
         self._lock = threading.Lock()
 
-    def generate(self, prompt: str, n: int, max_tokens: int, temperature: float):
-        """n samples -> [(token_ids, logprobs, text)]; temperature 0 = greedy."""
+    def generate(self, prompt: str | list[int], n: int, max_tokens: int, temperature: float):
+        """n samples -> [(token_ids, logprobs, text)]; temperature 0 = greedy.
+
+        `prompt` may be token ids (preferred for training: no re-tokenization, so the engine
+        conditions on exactly the prefix the trainer will train on) or text.
+        """
         mx = self._mx
         eos_ids = set(self.tokenizer.eos_token_ids)
-        prompt_ids = self.tokenizer.encode(prompt)
+        prompt_ids = prompt if isinstance(prompt, list) else self.tokenizer.encode(prompt)
         results = []
         with self._lock:
             for _ in range(n):
@@ -110,8 +118,12 @@ def build_app(engine):
     @app.post("/v1/completions")
     def completions(body: dict) -> JSONResponse:
         prompt = body.get("prompt")
-        if not isinstance(prompt, str) or not prompt:
-            raise HTTPException(400, "prompt (string) is required")
+        # Token ids or text — ids are what a trainer should send (vLLM accepts both too).
+        if isinstance(prompt, list):
+            if not prompt or not all(isinstance(t, int) for t in prompt):
+                raise HTTPException(400, "prompt as a list must be non-empty token ids")
+        elif not isinstance(prompt, str) or not prompt:
+            raise HTTPException(400, "prompt (string or token-id list) is required")
         if not body.get("logprobs") or not body.get("return_tokens_as_token_ids"):
             # Fail loud, not degraded: a trainer that forgot the flags must find out now.
             raise HTTPException(

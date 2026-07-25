@@ -79,6 +79,22 @@ def test_round_trip_group_sampling(engine_and_client):
     assert (n, max_tokens, temperature) == (3, 40, 1.0)
 
 
+def test_prompt_token_ids_pass_through_untokenized(engine_and_client):
+    engine, transport = engine_and_client
+    client = _client(transport)
+    client.generate_group([7, 8, 9], 1)
+    client.close()
+    # The engine receives the ids verbatim: no decode/re-encode round trip in the training path.
+    assert engine.calls[0][0] == [7, 8, 9]
+
+
+def test_server_rejects_bad_token_id_list():
+    server = TestClient(build_app(FakeEngine()))
+    base = {"logprobs": 1, "return_tokens_as_token_ids": True}
+    assert server.post("/v1/completions", json={**base, "prompt": []}).status_code == 400
+    assert server.post("/v1/completions", json={**base, "prompt": ["a"]}).status_code == 400
+
+
 def test_round_trip_greedy_for_eval(engine_and_client):
     engine, transport = engine_and_client
     client = _client(transport)
