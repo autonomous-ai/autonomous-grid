@@ -600,6 +600,7 @@ def _add_train(sub) -> None:
         cmd_train_init,
         cmd_train_packs,
         cmd_train_run,
+        cmd_train_ui,
     )
 
     train = sub.add_parser("train", help="RL fine-tuning served by your grid (ADR 0019)")
@@ -619,6 +620,10 @@ def _add_train(sub) -> None:
     packs = train_sub.add_parser("packs", help="List bundled task packs for business data")
     packs.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     packs.set_defaults(handler=cmd_train_packs)
+
+    ui = train_sub.add_parser("ui", help="Local dashboard: runs, reward/eval curves (read-only)")
+    ui.add_argument("--port", type=int, default=8321)
+    ui.set_defaults(handler=cmd_train_ui)
 
     doctor = train_sub.add_parser(
         "doctor", help="Readiness check: deps, rollout endpoint, data/rewards"

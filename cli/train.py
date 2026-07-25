@@ -123,3 +123,13 @@ def cmd_train_deploy(args: argparse.Namespace) -> int:
 def _print_deploy(results: list[dict]) -> None:
     for r in results:
         print(f"  {'ok ' if r['ok'] else 'NO '}{r['node']}  ·  {r['detail']}")
+
+
+def cmd_train_ui(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from train.ui import build_app
+
+    print(f"grid train ui -> http://127.0.0.1:{args.port}  (Ctrl-C to stop)")
+    uvicorn.run(build_app(), host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
