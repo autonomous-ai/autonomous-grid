@@ -179,6 +179,49 @@ and the office trains itself while it sleeps:
 0 23 * * *  cd ~/support-model && grid train nightly
 ```
 
+## It can also learn from the work it is already doing
+
+Everything above assumes someone exports a file and starts a run. The end state is that nobody
+has to: a business runs its grid, and its models get better on their own.
+
+```mermaid
+flowchart LR
+  W["work goes through the grid<br/>every answer is a candidate example"]
+  V{"what happened next?"}
+  E["a person EDITED it<br/><b>their version is the truth</b>"]
+  T["a stronger model answered<br/><b>a target, free of charge</b>"]
+  A["sent as-is<br/>good enough"]
+  X["discarded, or nobody said<br/><b>never imitated</b>"]
+  N["overnight: train on what earned it"]
+  G{"beat what we serve?"}
+  W --> V
+  V --> E --> N
+  V --> T --> N
+  V --> A --> N
+  V --> X
+  N --> G
+  G -- yes --> S["serve it"]
+  G -- "no" --> D["bin it, production untouched"]
+```
+
+The rule that keeps this honest is the box on the right: **a model's own unjudged output is stored
+but never trained on.** Imitating your own guesses is how a model drifts, so an example has to earn
+its place — a human's correction outranks a stronger model's answer, which outranks "nobody
+complained". Three signals, none of which costs anyone a minute of work.
+
+```bash
+grid train collect --on          # keep the work; local files only, redacted, pruned
+grid train autopilot             # one unattended cycle — put it in cron
+grid train collect               # what has accumulated, in plain language
+```
+
+Apps report the third signal by quoting back the `X-Grid-Request-Id` header they got with an
+answer:
+
+```bash
+curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"what we really sent"}'
+```
+
 ## The code
 
 ```
@@ -197,13 +240,20 @@ train/
 ├── evaluate.py            the gate: score incumbent vs candidate, write the eval card
 ├── deploy.py              hot-load an adapter onto serving nodes
 ├── ui.py                  read-only dashboard of runs and their curves
+├── capture.py             learn from served work: store, redact, prune, weigh, build a dataset
+├── autopilot.py           the unattended loop over captured work (cron this)
 ├── nightly.py             one unattended cycle: idle check → train → prove → ship or bin
+├── sft.py                 stage one — imitate the answers your team already wrote
 ├── hostsignals.py         mains power + keyboard idle — the host outranks the scheduler
 ├── endpoints.py           find the grid in either mode (LAN or hosted relay)
 ├── packs/                 business-data starting points (config + prep + graders + samples)
 │   ├── support_replies/    tickets → drafted replies (imitate first, then sharpen)
 │   └── sales_triage/       leads → priority, checked against what actually closed
 └── web/                   the browser interface for people who don't use a terminal
+    ├── machines.py         what this computer can finish; the choices, without a URL in sight
+    ├── playground.py       ask your model and today's model the same thing
+    ├── prepare.py          whatever came out of Zendesk/HubSpot → tasks + an honest report
+    └── jobs.py             run lifecycle: honest states, ETA, phase
 ```
 
 The CLI verbs live in `cli/train.py`. Design decisions and the honest limits are in
