@@ -9,6 +9,7 @@ import argparse
 
 from local import runtime
 from shared._version import __version__
+
 from ._constants import (
     VALID_I2V_ASPECT_RATIOS,
     VALID_I2V_DURATIONS,
@@ -17,9 +18,6 @@ from ._constants import (
 from .agent import cmd_agent_install, cmd_agent_status
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
-from .remote_grid import cmd_remote_members
-from .remote_price import cmd_remote_price
-from .remote_router import AdvisorsAction, MAX_ADVISORS, cmd_remote_router, parse_advisor_token
 from .engine import (
     cmd_engine_install,
     cmd_engine_list,
@@ -39,6 +37,14 @@ from .grid import (
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
+from .remote_grid import cmd_remote_members
+from .remote_price import cmd_remote_price
+from .remote_router import (
+    MAX_ADVISORS,
+    AdvisorsAction,
+    cmd_remote_router,
+    parse_advisor_token,
+)
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 
@@ -72,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_price(sub)
     _add_router(sub)
     _add_engine_setup(sub)
+    _add_train(sub)
 
     return parser
 
@@ -586,3 +593,31 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Remote only: let your own engine serve this request.",
     )
+def _add_train(sub) -> None:
+    from .train import cmd_train_deploy, cmd_train_doctor, cmd_train_init, cmd_train_run
+
+    train = sub.add_parser("train", help="RL fine-tuning served by your grid (ADR 0019)")
+    train_sub = train.add_subparsers(dest="subcommand", required=True)
+
+    init = train_sub.add_parser("init", help="Write a starter grid-train.toml")
+    init.add_argument("--config", default=None, help="Path to write (default: ./grid-train.toml)")
+    init.add_argument("--force", action="store_true", help="Overwrite an existing file.")
+    init.set_defaults(handler=cmd_train_init)
+
+    doctor = train_sub.add_parser(
+        "doctor", help="Readiness check: deps, rollout endpoint, data/rewards"
+    )
+    doctor.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    doctor.set_defaults(handler=cmd_train_doctor)
+
+    run = train_sub.add_parser("run", help="Run the training climb (GRPO via TRL)")
+    run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    run.set_defaults(handler=cmd_train_run)
+
+    deploy = train_sub.add_parser("deploy", help="Hot-load a trained adapter onto serving nodes")
+    deploy.add_argument("--adapter", required=True, help="Adapter directory (contains adapter_config.json)")
+    deploy.add_argument("--node", action="append", help="Serving node /v1 root (repeatable).")
+    deploy.add_argument("--name", default=None, help="Adapter name to serve under.")
+    deploy.add_argument("--config", default=None, help="Fill nodes/name from a run config.")
+    deploy.set_defaults(handler=cmd_train_deploy)
