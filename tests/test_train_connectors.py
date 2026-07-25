@@ -145,7 +145,7 @@ def test_a_runaway_cursor_cannot_loop_forever(monkeypatch):
 def test_a_rate_limited_ticket_is_not_recorded_as_having_no_reply(monkeypatch):
     """The dangerous version: 5,000 tickets behind a 429 all look like tickets nobody answered."""
     monkeypatch.setenv("ZENDESK_API_TOKEN", "t0ken")
-    monkeypatch.setattr(connectors, "_wait", lambda retry_after: None)
+    monkeypatch.setattr(connectors._Budget, "wait", lambda self, retry_after: True)
     seen = {"comments": 0}
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -195,3 +195,49 @@ def test_a_partial_pull_never_reads_as_a_complete_one(monkeypatch):
     assert pulled.truncated and not pulled.complete
     assert "safety limit" in pulled.detail
     assert "PARTIAL" in pulled.trustworthy
+
+
+def test_a_rate_limited_pull_stops_instead_of_sleeping_through_the_night(monkeypatch):
+    """One 30-second cap per ticket is not a limit: ten thousand rate-limited tickets is
+    eighty-three hours of silent sleeping, and the file at the end is empty."""
+    monkeypatch.setenv("ZENDESK_API_TOKEN", "t0ken")
+    slept: list[float] = []
+    monkeypatch.setattr("time.sleep", slept.append)      # the real budget, no real waiting
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if "/comments.json" in request.url.path:
+            return httpx.Response(429, headers={"retry-after": "60"}, json={})
+        return httpx.Response(200, json={
+            "results": [{"id": i, "subject": "s", "description": "d", "status": "solved"}
+                        for i in range(100)],
+            "next_page": "https://acme.zendesk.com/api/v2/search.json?page=2"})
+
+    pulled = connectors.pull_zendesk("acme", "me@acme.com", transport=_transport(handle))
+    assert pulled.rows == []
+    assert pulled.unreadable == connectors._GIVE_UP_AFTER      # gave up inside the first page
+    assert pulled.pages == 1
+    assert "rate-limiting us" in pulled.detail
+    assert not pulled.complete
+    assert sum(slept) <= connectors._WAIT_BUDGET               # the whole pull, not per ticket
+
+
+def test_dropped_tickets_make_a_pull_incomplete_even_at_the_end_of_the_history(monkeypatch):
+    monkeypatch.setenv("ZENDESK_API_TOKEN", "t0ken")
+    reply = "Unplug the desk for sixty seconds and hold the down button until it recalibrates."
+    calls = {"n": 0}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if "/comments.json" in request.url.path:
+            calls["n"] += 1
+            if "/tickets/1/" in request.url.path:              # this one never reads, retry or not
+                return httpx.Response(500, json={})
+            return httpx.Response(200, json={"comments": [
+                {"public": True, "body": "customer"}, {"public": True, "body": reply}]})
+        return httpx.Response(200, json={"results": [
+            {"id": 1, "subject": "s", "description": "d", "status": "solved"},
+            {"id": 2, "subject": "s", "description": "d", "status": "solved"}]})
+
+    pulled = connectors.pull_zendesk("acme", "me@acme.com", transport=_transport(handle))
+    assert len(pulled.rows) == 1 and pulled.unreadable == 1
+    assert not pulled.complete                                 # a ticket is missing from the file
+    assert "could not be read" in pulled.detail

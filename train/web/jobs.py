@@ -16,7 +16,6 @@ import os
 import re
 import signal
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -54,9 +53,13 @@ def start(workspace_path: Path, config_path: Path, *, verb: str = "run",
     log_path = workspace_path / f"{job}.log"
     # Truncate: one workspace, one current run — history lives in the run dir's log.jsonl.
     handle = log_path.open("w", encoding="utf-8")
+    # Not [sys.executable, "-m", "cli", ...]: on the shipped Linux binary there is no Python at
+    # runtime, so Popen succeeds, the child exits 2 on "-m", and the page blames the model choice
+    # for a broken launcher. Same helper the scheduler and every other subprocess here uses.
+    from train.schedule import _cli_argv
+
     process = subprocess.Popen(
-        [sys.executable, "-m", "cli", "train", verb, "--config", str(config_path),
-         *(extra or [])],
+        [*_cli_argv(), "train", verb, "--config", str(config_path), *(extra or [])],
         stdout=handle,
         stderr=subprocess.STDOUT,
         cwd=str(workspace_path),

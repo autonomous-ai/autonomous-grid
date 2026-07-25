@@ -26,6 +26,8 @@ import os
 from pathlib import Path
 
 _PAGE_LIMIT = 100          # pages, not rows: a stop so a bad cursor cannot loop forever
+_WAIT_BUDGET = 120.0       # seconds of rate-limit waiting for a whole pull, not per item
+_GIVE_UP_AFTER = 25        # consecutive unreadable items before we stop and say so
 
 
 @dataclasses.dataclass(frozen=True)
@@ -37,6 +39,7 @@ class Pulled:
     detail: str
     unreadable: int = 0        # rows we fetched but could not complete (rate limits, hiccups)
     complete: bool = True      # False when the vendor stopped us short of the history
+    fetched: int = 0           # rows the vendor handed us, before any were dropped
 
     @property
     def trustworthy(self) -> str:
@@ -99,8 +102,12 @@ def pull_zendesk(subdomain: str, email: str, *, max_rows: int = 5000, status: st
     auth = (f"{email}/token", token)
     rows: list[dict] = []
     unreadable = 0
+    in_a_row = 0
+    fetched = 0
     pages = 0
     hit_page_limit = False
+    gave_up = False
+    budget = _Budget()
     url = f"{base}/search.json"
     params = {"query": f"type:ticket status:{status}", "sort_by": "created_at", "sort_order": "desc"}
     with _client(transport, auth=auth) as client:
@@ -114,10 +121,18 @@ def pull_zendesk(subdomain: str, email: str, *, max_rows: int = 5000, status: st
             body = response.json()
             pages += 1
             for ticket in body.get("results", []) or []:
-                reply = _zendesk_reply(client, base, ticket.get("id"))
+                fetched += 1
+                reply = _zendesk_reply(client, base, ticket.get("id"), budget)
                 if reply is UNREADABLE:
                     unreadable += 1
+                    in_a_row += 1
+                    if in_a_row >= _GIVE_UP_AFTER:
+                        # The vendor is refusing, not hiccuping. Grinding on to page 100 produces
+                        # a file that looks like history and is mostly absence.
+                        gave_up = True
+                        break
                     continue
+                in_a_row = 0
                 rows.append({
                     "subject": ticket.get("subject") or "",
                     "description": ticket.get("description") or "",
@@ -126,25 +141,32 @@ def pull_zendesk(subdomain: str, email: str, *, max_rows: int = 5000, status: st
                 })
                 if len(rows) >= max_rows:
                     break
+            if gave_up:
+                break
             url, params = body.get("next_page"), None
             if url and pages >= _PAGE_LIMIT:
                 hit_page_limit = True
     kept = [row for row in rows if row["reply"]]
-    stopped_early = len(rows) >= max_rows or hit_page_limit
+    stopped_early = fetched >= max_rows or hit_page_limit or gave_up
     detail = f"{len(kept)} solved tickets with a public reply, from {pages} page(s)."
-    if hit_page_limit:
+    if gave_up:
+        detail += (f" Stopped after {_GIVE_UP_AFTER} tickets in a row we could not read — the "
+                   "vendor is rate-limiting us. Run it again later; nothing was lost.")
+    elif hit_page_limit:
         detail += (f" Stopped at the {_PAGE_LIMIT}-page safety limit — there is more history than "
                    "this file contains.")
     if unreadable:
         detail += f" {unreadable} ticket(s) could not be read and were left out."
-    return Pulled("zendesk", kept, pages, stopped_early, detail,
-                  unreadable=unreadable, complete=not stopped_early)
+    # Unreadable rows make a pull incomplete even when we reach the end: the file is missing
+    # tickets the account has, which is exactly what "complete" is asked about.
+    return Pulled("zendesk", kept, pages, stopped_early, detail, unreadable=unreadable,
+                  complete=not stopped_early and not unreadable, fetched=fetched)
 
 
 UNREADABLE = object()      # distinct from "": we could not read it, vs it genuinely had no reply
 
 
-def _zendesk_reply(client, base: str, ticket_id):
+def _zendesk_reply(client, base: str, ticket_id, budget=None):
     """The first public agent comment — or UNREADABLE if we could not find out.
 
     Returning "" for a rate-limited or failed fetch is the dangerous version: 5,000 tickets behind
@@ -167,23 +189,42 @@ def _zendesk_reply(client, base: str, ticket_id):
                 if comment.get("public") and (comment.get("body") or "").strip():
                     return comment["body"].strip()
             return ""                       # read it; there was genuinely no public reply
-        if response.status_code == 429 and attempt == 0:
-            _wait(response.headers.get("retry-after"))
+        if attempt == 0 and (response.status_code == 429 or response.status_code >= 500):
+            # A rate limit and a server hiccup both deserve one retry; only the rate limit costs
+            # waiting time, and only against the whole pull's budget.
+            if (response.status_code == 429 and budget is not None
+                    and not budget.wait(response.headers.get("retry-after"))):
+                break                       # out of patience; the caller counts this unreadable
             continue
         break
     return UNREADABLE
 
 
-def _wait(retry_after: str | None) -> None:
-    """Honour Retry-After, within reason. A vendor asking for an hour is a reason to stop, not
-    to sleep through the night."""
-    import time
+class _Budget:
+    """How long this pull may spend waiting, in total.
 
-    try:
-        seconds = min(float(retry_after or 2), 30.0)
-    except ValueError:
-        seconds = 2.0
-    time.sleep(max(seconds, 0.0))
+    A per-item cap is not a limit. Thirty seconds, applied once per ticket across ten thousand
+    rate-limited tickets, is eighty-three hours of silent sleeping — the scheduled pull that hit it
+    was still going when the next night's started, and it wrote nothing.
+    """
+
+    def __init__(self, seconds: float = _WAIT_BUDGET) -> None:
+        self.left = seconds
+
+    def wait(self, retry_after: str | None) -> bool:
+        """Sleep if we can still afford it. False means the budget is spent — stop pulling."""
+        import time
+
+        if self.left <= 0:
+            return False
+        try:
+            asked = float(retry_after or 2)
+        except ValueError:
+            asked = 2.0
+        seconds = max(min(asked, 30.0, self.left), 0.0)
+        self.left -= max(seconds, 1.0)      # a zero-length wait still costs, so this terminates
+        time.sleep(seconds)
+        return True
 
 
 # --- HubSpot ------------------------------------------------------------------------------------
@@ -232,7 +273,8 @@ def pull_hubspot(*, max_rows: int = 5000, transport=None,
     if hit_page_limit:
         detail += (f" Stopped at the {_PAGE_LIMIT}-page safety limit — there is more history than "
                    "this file contains.")
-    return Pulled("hubspot", rows, pages, stopped_early, detail, complete=not stopped_early)
+    return Pulled("hubspot", rows, pages, stopped_early, detail, complete=not stopped_early,
+                  fetched=len(rows))
 
 
 # --- writing what we pulled ---------------------------------------------------------------------

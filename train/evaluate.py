@@ -215,33 +215,82 @@ def prove_candidate(
     holds, so on every night after the first the gate scored **last night's** adapter and then
     deployed tonight's, never scored. The verdict was true of a model that was not the one shipped.
 
-    So: load the candidate under a staging name first, score that, and only then re-deploy it under
-    the name customers use. The staging name is reused each night, so nothing accumulates on the
-    node, and the incumbent is the adapter actually being served when one is loaded — "better than
-    what we already serve" is the question, not "better than the base model".
+    The fix for that was to load the candidate under a staging name and score *that* — which broke
+    the product's primary engine, because **Grid's own MLX server holds exactly one set of
+    weights**. `reload_adapter` mutates the model in place and the name is only a label, so the
+    staging load replaced the incumbent, the probe for the incumbent's name then failed, the
+    comparison fell back to the base model id — which now answered with the candidate's weights —
+    and every night scored a model against itself. Greedy decoding made that exactly +0.000, so an
+    all-Mac office would have been told its model lost, every night, forever.
+
+    Hence the order below, which is the only one that is correct on a one-slot engine and on a
+    many-slot one alike:
+
+      1. **Score the incumbent first**, before anything is loaded. Whatever the node is serving now
+         is what the customer has, and it can only be measured while it is still there.
+      2. Then load the candidate and score it.
+      3. If it lost, put the incumbent's weights back — a one-slot engine is now holding a model
+         nobody approved, under a name nobody asked for, and "nothing changed tonight" has to be
+         true rather than merely printed.
     """
-    from .deploy import deploy_adapter
+    from .deploy import deploy_adapter, last_deployed, record_deploy
+    from .rewards import load_reward_funcs
     from .rollout import probe_endpoint
 
     nodes = tuple(nodes or cfg.deploy.nodes or (cfg.rollout.base_url,))
     staged = f"{serving_name}-candidate"
-    outcomes = deploy_adapter(adapter_dir, nodes, staged, transport=transport)
-    if not any(o.get("ok") for o in outcomes):
-        detail = "; ".join(f"{o['node']} ({o.get('detail', '')})" for o in outcomes)
-        raise CandidateNotLoaded(f"no node would load it for checking: {detail}")
+    prompts = load_eval_prompts(run_dir)
+    reward_funcs = load_reward_funcs(cfg.rewards, cfg.data)
 
-    # Compare against what is actually being served, when that is a trained model; a name the
-    # engine does not hold would 404 mid-eval and read as "could not be checked".
     incumbent = cfg.rollout_model
     if serving_name != incumbent:
         probe = probe_endpoint(cfg.rollout, serving_name, transport=transport)
         if probe.get("ok"):
             incumbent = serving_name
+    before = score_model(cfg, incumbent, prompts, reward_funcs, transport=transport)
 
-    result = run_eval(cfg, run_dir, staged, base_model=incumbent, transport=transport)
+    outcomes = deploy_adapter(adapter_dir, nodes, staged, transport=transport)
+    loaded = [o for o in outcomes if o.get("ok")]
+    if not loaded:
+        detail = "; ".join(f"{o['node']} ({o.get('detail', '')})" for o in outcomes)
+        raise CandidateNotLoaded(f"no node would load it for checking: {detail}")
+
+    after = score_model(cfg, staged, prompts, reward_funcs, transport=transport)
+    result = compare(before, after)
+    result["run"] = run_dir.name
     result["staged_as"] = staged
     result["incumbent"] = incumbent
+
+    if not result["passed"]:
+        result["restored"] = _put_back(
+            cfg, nodes, serving_name, last_deployed(serving_name), transport=transport)
+        if not result["restored"]:
+            result["verdict"] += (
+                f" — note: the checking copy is still loaded on {', '.join(n['node'] for n in loaded)}"
+                f", so restart the engine or redeploy {serving_name} before relying on it")
+    else:
+        record_deploy(staged, adapter_dir)      # so a later refusal knows what to put back
+
+    write_card(result, run_dir)
     return result
+
+
+def _put_back(cfg, nodes, serving_name: str, adapter, *, transport=None) -> bool:
+    """Restore the model that was serving before the check. True if it is back.
+
+    On an engine with one weight slot the check itself displaces the customer's model. Leaving it
+    displaced after a refusal would mean the interface's "nothing changed" was false in the one
+    case it matters most — the night the candidate was worse.
+    """
+    if not adapter or not Path(adapter).is_dir():
+        return False
+    from .deploy import DeployError, deploy_adapter
+
+    try:
+        outcomes = deploy_adapter(adapter, nodes, serving_name, transport=transport)
+    except (DeployError, SystemExit):
+        return False
+    return any(o.get("ok") for o in outcomes)
 
 
 def run_eval(

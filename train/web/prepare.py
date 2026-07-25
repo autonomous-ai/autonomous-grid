@@ -92,33 +92,58 @@ def _rows(text: str, filename: str) -> list[dict]:
 
 
 # Aliases that name the right thing often enough to keep, and the wrong thing often enough that
-# anything else should win first:
+# anything else should win first. Weakness is PER FIELD, because the same word is ambiguous in one
+# place and the answer key in another:
 #   "sent"   — in a mailbox export this is the TIMESTAMP, not the reply. Read as the answer, the
 #              model is trained to emit "2026-07-01 10:04:11 +0700" for every request.
-#   "status" — present in essentially every helpdesk export, and almost never the field a team
-#              sorts by. A routing model trained on it learns to predict "solved".
-_WEAK = {"sent", "final", "status", "state", "result", "type", "priority"}
+#   "status" — almost never the field a team sorts BY (a routing model trained on it predicts
+#              "solved"), and almost always the field that says whether a deal closed or a ticket
+#              was resolved. Demoting it everywhere made lead triage pick the pipeline *stage*
+#              instead, which collapsed a won/lost history into one class and still reported
+#              "balanced — the most reliable kind of training we can do".
+_WEAK: dict[str, frozenset[str]] = {
+    "answer": frozenset({"sent", "final", "result", "notes", "summary"}),
+    "label": frozenset({"status", "state", "type", "priority"}),
+    "work": frozenset({"item", "content"}),
+}
+
+# Short aliases match a whole word only. "form" (added for Zendesk's ticket form) is four letters
+# and lives inside "information" and "platform"; as a substring it hijacked the category column.
+_SHORT_ALIAS = 6
+
+
+def _mentions(column: str, alias: str) -> bool:
+    if len(alias) >= _SHORT_ALIAS:
+        return alias in column
+    return alias in re.split(r"[^a-z0-9]+", column)
 
 
 def _pick(rows: list[dict], field: str) -> str | None:
     """Which column in this export is our `field`?
 
-    Strong aliases beat weak ones, exact beats substring, and within a tier the alias order above
-    decides. A wrong guess here is not a crash: it is a night of training on the wrong column and
-    a model that confidently answers with a timestamp — so the page also prints what was chosen.
+    Order: **every exact match before any partial one**, and within each pass, strong aliases
+    before weak. That ordering is the whole point — with the passes the other way round, a strong
+    alias hiding inside another word ("resolution" inside "resolution date") beat a literal column
+    called "result", which recreated the timestamp-as-answer bug this ranking exists to prevent.
+
+    A wrong guess here is not a crash. It is a night of training on the wrong column, so the page
+    also prints which columns were chosen.
     """
     if not rows:
         return None
     keys = list(rows[0].keys())
-    strong = [a for a in _ALIASES[field] if a not in _WEAK]
-    weak = [a for a in _ALIASES[field] if a in _WEAK]
-    for aliases in (strong, weak):
+    weak = _WEAK.get(field, frozenset())
+    strong_aliases = [a for a in _ALIASES[field] if a not in weak]
+    weak_aliases = [a for a in _ALIASES[field] if a in weak]
+
+    for aliases in (strong_aliases, weak_aliases):      # pass one: exact column names
         for alias in aliases:
             if alias in keys:
                 return alias
+    for aliases in (strong_aliases, weak_aliases):      # pass two: mentioned in a column name
         for alias in aliases:
             for key in keys:
-                if alias in key:
+                if _mentions(key, alias):
                     return key
     return None
 
@@ -208,7 +233,10 @@ def prepare_leads(rows: list[dict]) -> tuple[Report, list[dict]]:
         buckets[label].append({"prompt": prompt, "label": label})
 
     counts = {k: len(v) for k, v in buckets.items()}
-    floor = min((c for c in counts.values() if c), default=0)
+    # Over ALL three outcomes, including the ones with nothing in them. Skipping the empties let a
+    # single-class export report "180 leads, balanced at 180 per group" — a set with nothing to
+    # learn from, whose grader then scores a constant answer 1.0 and sails through the gate.
+    floor = min(counts.get(name, 0) for name in OUTCOME_LABELS)
     kept = [row for rows_ in buckets.values() for row in rows_[:floor]]
     samples = [{"prompt": k["prompt"][:300], "reference": k["label"]} for k in kept[:3]]
     columns = {"lead": lead_col, "outcome": outcome_col}

@@ -128,7 +128,9 @@ def plan(workspace: Path, *, slug: str = "model", hour: int = 23, minute: int = 
     system = system or platform.system()
     command = _command(workspace, config)
     when = f"every night at {hour:02d}:{minute:02d}"
-    cron = f"{minute} {hour} * * *  cd {workspace} && grid train autopilot"
+    # Quoted for the same reason ExecStart is: cron hands this to a shell, and "My Models" would
+    # arrive as two arguments to cd.
+    cron = f"{minute} {hour} * * *  cd {shlex.quote(str(workspace))} && grid train autopilot"
     if system == "Darwin":
         return Plan(True, "launchd", _plist_path(slug), command, when, cron)
     if system == "Linux" and shutil.which("systemctl"):
@@ -188,10 +190,17 @@ def _install_launchd(workspace: Path, plan_: Plan, slug: str, hour: int, minute:
         # Take the file away again. status() reads the file, so leaving a rejected plist behind
         # would make the page say "on" for a job that will never run — the exact lie this module
         # exists to avoid.
-        _unlink(path)
-        return Result(False,
-                      f"the scheduler would not take it: {message or code}. "
-                      "Running `launchctl load -w " + str(path) + "` in Terminal usually says why.")
+        # Keep the rejected file where status() will not read it, so the complaint can point at
+        # something that exists. Telling someone to load a path we just unlinked is worse than
+        # saying nothing.
+        rejected = path.with_suffix(".plist.rejected")
+        try:
+            path.replace(rejected)
+        except OSError:
+            _unlink(path)
+            rejected = None
+        where = f" The file we tried is at {rejected}." if rejected else ""
+        return Result(False, f"the scheduler would not take it: {message or code}.{where}")
     return Result(True, f"Installed. macOS will run it {plan_.when}, and log to "
                         f"{workspace / 'autopilot.log'}.", path)
 
@@ -267,11 +276,23 @@ WantedBy=timers.target
 # --- the three verbs ---------------------------------------------------------------------------
 
 def install(workspace: Path, *, slug: str = "model", hour: int = 23, minute: int = 0,
-            config: Path | None = None) -> Result:
-    """Put the nightly cycle in the user's own scheduler. Never raises."""
+            config: Path | None = None, force: bool = False) -> Result:
+    """Put the nightly cycle in the user's own scheduler. Never raises.
+
+    The ownership check lives HERE, not in a caller. It was in the CLI only, and the browser's
+    toggle called straight past it — so pressing one button in one folder silently took over
+    another folder's nightly job and told nobody. A guard one layer up is a guard the next caller
+    forgets.
+    """
     workspace = Path(workspace).expanduser().resolve()
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         return Result(False, f"{hour:02d}:{minute:02d} is not a time of day")
+    existing = status(slug=slug, workspace=workspace)
+    if existing["installed"] and not existing.get("mine", True) and not force:
+        return Result(False,
+                      "a nightly job with this name already runs in "
+                      f"{existing.get('workspace')}. Turning it on here would replace it — rename "
+                      "this model, or turn that one off first.")
     plan_ = plan(workspace, slug=slug, hour=hour, minute=minute, config=config)
     if not plan_.supported:
         return Result(False,
@@ -323,9 +344,13 @@ def status(*, slug: str = "model", system: str | None = None,
         owner = ""
         service = _unit_path(slug, "service")
         if service.is_file():
-            for line in service.read_text(encoding="utf-8").splitlines():
-                if line.startswith("X-GridWorkspace="):
-                    owner = line.split("=", 1)[1].strip()
+            # WorkingDirectory first: every version of this file has written it, so units installed
+            # before X-GridWorkspace existed are still attributable. Reading only the new key made
+            # the whole guard inert for anyone who upgraded instead of reinstalling.
+            for key in ("WorkingDirectory=", "X-GridWorkspace="):
+                for line in service.read_text(encoding="utf-8").splitlines():
+                    if line.startswith(key):
+                        owner = owner or line.split("=", 1)[1].strip()
         return _with_owner({"installed": True, "mechanism": "systemd", "where": str(path), "when": when,
                 "workspace": owner}, workspace)
     return _with_owner({"installed": False, "mechanism": "none", "where": "", "when": ""}, workspace)
@@ -340,9 +365,20 @@ def _with_owner(state: dict, workspace: Path | str | None) -> dict:
     return state
 
 
-def remove(*, slug: str = "model", system: str | None = None) -> Result:
-    """Undo exactly what install() did."""
+def remove(*, slug: str = "model", system: str | None = None,
+           workspace: Path | str | None = None, force: bool = False) -> Result:
+    """Undo exactly what install() did — and only if it is ours to undo.
+
+    Without the check, following the CLI's own advice ("turn it off with `grid train schedule
+    off`") from the wrong folder deleted a different model's schedule and reported success.
+    """
     system = system or platform.system()
+    if workspace is not None and not force:
+        state = status(slug=slug, system=system, workspace=workspace)
+        if state["installed"] and not state.get("mine", True):
+            return Result(False,
+                          f"that nightly job belongs to {state.get('workspace')}, not here. Turn "
+                          "it off from that folder.")
     if system == "Darwin":
         path = _plist_path(slug)
         if not path.is_file():

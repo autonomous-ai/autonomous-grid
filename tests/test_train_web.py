@@ -1095,3 +1095,63 @@ def test_going_back_with_nothing_to_go_back_to_says_so(client, tmp_path, monkeyp
     assert response.status_code == 400
     assert "nothing to go back to" in response.text
     assert "stays as it is" in response.text           # and nothing was lost
+
+
+def test_the_column_ranking_never_lets_a_partial_match_beat_an_exact_one(client, tmp_path):
+    """The regression my own fix introduced: strong-substring outranked weak-exact, so
+    "resolution date" (a timestamp) beat a column literally called "result"."""
+    import json as _json
+
+    from train.web import prepare
+
+    rows = [{"Task": f"job {i}", "Result": "Approved and shipped, tracking sent to the customer.",
+             "Resolution date": "2026-07-01 10:04:11 +0700"} for i in range(300)]
+    report, kept = prepare.prepare(
+        "any-task", "".join(_json.dumps(r) + "\n" for r in rows), "sheet.jsonl")
+    assert report.columns_used["what your team wrote"] == "result"
+    assert not kept[0]["reference"].startswith("2026")
+
+
+def test_status_stays_the_answer_key_where_it_is_the_answer_key(client, tmp_path):
+    """Demoting "status" everywhere made lead triage pick the pipeline *stage* instead, which
+    collapsed a won/lost history into one class — and still called it balanced."""
+    import json as _json
+
+    from train.web import prepare
+
+    rows = []
+    for i in range(120):
+        rows.append({"title": f"deal {i}", "lead": "We need 30 desks, budget approved",
+                     "status": "Closed Won", "stage": "Negotiations Started"})
+        rows.append({"title": f"deal {i}b", "lead": "Just browsing, no budget",
+                     "status": "No response", "stage": "Contact Made"})
+    report, _ = prepare.prepare(
+        "sales-triage", "".join(_json.dumps(r) + "\n" for r in rows), "pipedrive.jsonl")
+    assert report.columns_used["outcome"] == "status"
+    assert set(report.distribution) >= {"hot", "cold"}
+    assert report.distribution.get("hot", 0) > 0 and report.distribution.get("cold", 0) > 0
+
+
+def test_a_single_class_export_is_refused_not_called_balanced(client, tmp_path):
+    """Every label identical means there is nothing to learn — and a grader that scores a constant
+    answer 1.0, which sails through the gate."""
+    import json as _json
+
+    from train.web import prepare
+
+    rows = [{"lead": f"enquiry {i}", "outcome": "Qualified"} for i in range(300)]
+    report, _ = prepare.prepare(
+        "sales-triage", "".join(_json.dumps(r) + "\n" for r in rows), "crm.jsonl")
+    assert not report.ok
+    assert report.distribution.get("hot", 0) == 0
+
+
+def test_a_four_letter_alias_does_not_hijack_a_longer_column(client, tmp_path):
+    """"form" was added for Zendesk's ticket form, and lives inside "information" and "platform"."""
+    from train.web import prepare
+
+    rows = "Subject,Description,Additional information,Status\n" + "".join(
+        f"s{i},desc {i},notes,{['billing', 'shipping', 'warranty'][i % 3]}\n" for i in range(300))
+    report, _ = prepare.prepare("sort-into-categories", rows, "z.csv")
+    assert report.columns_used["the category"] == "status"
+    assert len(report.distribution) == 3

@@ -314,7 +314,9 @@ def cmd_train_pull(args: argparse.Namespace) -> int:
     print(f"{pulled.detail}\nWrote {out}")
     if pulled.trustworthy:
         print(f"Take care: {pulled.trustworthy}.")
-    if len(pulled.rows) >= args.max_rows:
+    if pulled.fetched >= args.max_rows:
+        # Gated on what the vendor handed us: tickets with no public reply are dropped after the
+        # cap is counted, so len(rows) is nearly always below it and the hint never printed.
         print(f"Stopped at {args.max_rows} rows — raise --max-rows for more history.")
     print("Next: upload it in `grid train web`, or point [data] at it and run `grid train sft`.")
     return 0
@@ -342,9 +344,12 @@ def cmd_train_schedule(args: argparse.Namespace) -> int:
             print(f"On — {state['mechanism']} runs it every night at {state['when']}.")
             print(f"  {state['where']}")
             if not state.get("mine", True):
+                # Do NOT then tell them to turn it off from here: that used to delete another
+                # folder's job and report success.
                 print(f"  Careful: that job runs in {state.get('workspace')}, not here. "
-                      "Installing from this folder would replace it — use --name to keep both.")
-            print("  Turn it off with `grid train schedule off`.")
+                      "Turn it off from that folder, or use --name to schedule this one too.")
+            else:
+                print("  Turn it off with `grid train schedule off`.")
         else:
             print("Off — nothing is scheduled for this model on this computer.")
             print(sched.describe(workspace, slug=slug, hour=hour, minute=minute, config=config))
@@ -352,15 +357,10 @@ def cmd_train_schedule(args: argparse.Namespace) -> int:
         return 0
 
     if args.action == "off":
-        result = sched.remove(slug=slug)
+        result = sched.remove(slug=slug, workspace=workspace)
         print(result.detail)
         return 0 if result.ok else 1
 
-    existing = sched.status(slug=slug, workspace=workspace)
-    if existing["installed"] and not existing.get("mine", True):
-        raise SystemExit(
-            f"grid train: a nightly job with this name already runs in {existing.get('workspace')}. "
-            "Use --name to schedule this one alongside it, or turn that one off first.")
     print(sched.describe(workspace, slug=slug, hour=hour, minute=minute, config=config))
     result = sched.install(workspace, slug=slug, hour=hour, minute=minute, config=config)
     print(result.detail)

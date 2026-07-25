@@ -50,26 +50,29 @@ def stubs(tmp_path, monkeypatch):
 
 
 def _eval_returning(passed: bool, delta: float, monkeypatch, calls):
-    def fake_eval(cfg, run_dir, candidate, **kwargs):
-        calls.append(f"eval:{candidate}")
+    """Stand in for the gate itself.
+
+    These tests are about the CYCLE — idle check, train, prove, ship-only-on-a-pass — so the gate
+    is stubbed at its own seam. What the gate does internally (score the incumbent before the
+    candidate displaces it, put it back on a refusal) is tested against a real one-slot engine in
+    tests/test_train_prove.py.
+    """
+    def fake_prove(cfg, run_dir, adapter_dir, serving_name, **kwargs):
+        calls.append(f"deploy:{serving_name}-candidate")
+        calls.append(f"eval:{serving_name}-candidate")
         return {"passed": passed, "delta": delta,
-                "verdict": "better by +0.2" if passed else "no meaningful gain (+0.00)"}
+                "verdict": "better by +0.2" if passed else "no meaningful gain (+0.00)",
+                "staged_as": f"{serving_name}-candidate", "incumbent": serving_name}
 
-    monkeypatch.setattr("train.evaluate.run_eval", fake_eval)
+    monkeypatch.setattr("train.evaluate.prove_candidate", fake_prove)
 
 
-def _deploy_returning(ok: bool, monkeypatch, calls, *, staging_ok: bool = True):
-    """`staging_ok` lets a test load the candidate for checking but fail the real deploy."""
+def _deploy_returning(ok: bool, monkeypatch, calls):
     def fake_deploy(adapter_dir, nodes, name, **kwargs):
         calls.append(f"deploy:{name}")
-        good = staging_ok if name.endswith("-candidate") else ok
-        return [{"node": n, "ok": good, "detail": "serving" if good else "unreachable"}
-                for n in nodes]
+        return [{"node": n, "ok": ok, "detail": "serving" if ok else "unreachable"} for n in nodes]
 
     monkeypatch.setattr("train.deploy.deploy_adapter", fake_deploy)
-    # The gate asks whether the serving name is a thing this engine holds. Answer without a socket.
-    monkeypatch.setattr("train.rollout.probe_endpoint",
-                        lambda cfg, model, **kw: {"ok": True, "detail": "", "model": model})
 
 
 def test_happy_night_trains_proves_then_deploys_in_that_order(stubs, monkeypatch):

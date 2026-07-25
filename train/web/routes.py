@@ -494,7 +494,7 @@ def register(app) -> None:
             result = sched.install(w.path, slug=w.slug,
                                    config=config if config.is_file() else None)
         else:
-            result = sched.remove(slug=w.slug)
+            result = sched.remove(slug=w.slug, workspace=w.path)
         # The toggle follows what the scheduler actually did, not what was asked for.
         w.meta["nightly"] = bool(wanted and result.ok)
         w.meta["schedule"] = {"ok": result.ok, "detail": result.detail, "wanted": wanted}

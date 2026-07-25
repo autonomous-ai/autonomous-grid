@@ -55,4 +55,47 @@ def deploy_adapter(
     for result in results:
         if result["ok"]:
             result["detail"] = f"serving as {adapter_name!r}"
+    if any(r["ok"] for r in results):
+        record_deploy(adapter_name, adapter_dir)
     return results
+
+
+# --- what each name was last loaded from ---------------------------------------------------
+# Engines cannot be asked "which weights are you holding". Without a record, a check that has to
+# displace the customer's model (a one-slot engine — Grid's own MLX server is one) has nothing to
+# put back when the candidate loses.
+
+def _ledger_path() -> Path:
+    from .run import artifacts_root
+
+    return artifacts_root() / "deployed.json"
+
+
+def record_deploy(adapter_name: str, adapter_dir: str | Path) -> None:
+    """Remember that `adapter_name` is now this directory. Never raises: a lost note is not
+    a reason to fail a deploy that worked."""
+    import json
+
+    path = _ledger_path()
+    try:
+        known = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        if not isinstance(known, dict):
+            known = {}
+        known[adapter_name] = str(Path(adapter_dir).expanduser().resolve())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(known, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
+def last_deployed(adapter_name: str) -> Path | None:
+    """Where `adapter_name` was last loaded from, if we know and it is still there."""
+    import json
+
+    path = _ledger_path()
+    try:
+        known = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    where = known.get(adapter_name) if isinstance(known, dict) else None
+    return Path(where) if where and Path(where).is_dir() else None
