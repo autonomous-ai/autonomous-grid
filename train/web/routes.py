@@ -123,9 +123,11 @@ def register(app) -> None:
         return RedirectResponse(f"/w/{created.slug}", status_code=303)
 
     @app.get("/w/{slug}", response_class=HTMLResponse)
-    def workspace_page(slug: str):
+    def workspace_page(slug: str, step: str = ""):
         w = _load(slug)
-        stage = w.stage
+        # `?step=` lets any earlier step be revisited: adding examples or changing the checks must
+        # never mean starting a new model from scratch.
+        stage = step or w.stage
         if stage == "data":
             return pages.data_step(w)
         if stage == "checks":
@@ -136,7 +138,17 @@ def register(app) -> None:
             machines = find_machines()
             cap = capability(machines)
             return pages.machines_step(w, machines, cap, _model_choices(cap.backend))
+        if stage in ("done", "serving"):
+            return RedirectResponse(f"/w/{slug}/result", status_code=303)
         return RedirectResponse(f"/w/{slug}/progress", status_code=303)
+
+    @app.get("/w/{slug}/again")
+    def again(slug: str):
+        """Train this model again — same examples, same checks, a fresh run."""
+        w = _load(slug)
+        w.meta["stage"] = "machines"
+        w.save()
+        return RedirectResponse(f"/w/{slug}", status_code=303)
 
     @app.post("/w/{slug}/data")
     async def upload(slug: str, request: Request):
@@ -206,7 +218,8 @@ def register(app) -> None:
         extra = ["--run-dir", str(w.path / "run")] if verb == "sft" else []
         if verb == "sft":
             extra += ["--iters", str(chosen_effort["iters"])]
-        jobs.start(w.path, config, verb=verb, extra=extra)
+        jobs.start(w.path, config, verb=verb, extra=extra,
+                   expected_steps=chosen_effort["steps" if verb == "run" else "iters"])
         w.meta["stage"] = "running"
         w.meta["run"] = {"verb": verb, "effort": chosen_effort["id"], "model": model,
                          "endpoint": endpoint, "expected_steps": chosen_effort["steps"]}

@@ -90,6 +90,9 @@ svg.curve{width:100%;height:auto;display:block;margin:.6rem 0}
 .muted{color:var(--ink2)}.small{font-size:.88rem}
 .row{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap;margin-top:1.2rem}
 .empty{color:var(--ink2);padding:2rem 0;text-align:center}
+.bar{height:6px;background:var(--wash);border-radius:99px;overflow:hidden;margin:0 0 .5rem}
+.bar i{display:block;height:100%;background:var(--blue);transition:width .6s ease}
+@media(prefers-reduced-motion:reduce){.bar i{transition:none}}
 /* the playground: ask your own model something */
 textarea{font:inherit;width:100%;min-height:8.5rem;padding:.7rem .8rem;border:1px solid var(--rule2);
   border-radius:3px;background:var(--paper);color:var(--ink);resize:vertical;line-height:1.55}
@@ -378,25 +381,56 @@ you have seen the before-and-after and pressed the button yourself.</p>
 # --- step 4: running ---------------------------------------------------------------------
 
 def running_step(w, job: dict) -> str:
+    """What is happening, how long is left, and — if it stopped — why, with a way forward.
+
+    The version of this page that said "learning now" forever after a dead trainer was worse than
+    an error: she waits all night and never trusts the tool again. Every state here ends in an
+    action.
+    """
     if not job.get("exists"):
-        return shell("Learning", steps_bar("running") + """
-<h1>Nothing running yet</h1><p class="lede">This model has not been started.</p>""")
-    live = job["running"]
-    chip = '<span class="chip live">learning now</span>' if live else (
-        '<span class="chip ok">finished</span>' if job["finished_ok"] else '<span class="chip bad">stopped</span>')
+        return shell("Learning", steps_bar("running") + f"""
+<h1>Nothing running yet</h1>
+<p class="lede">This model has not been started.</p>
+<div class="row"><a class="btn primary" href="/w/{html.escape(w.slug)}">Set it going</a></div>""")
+
+    state = job.get("state", "running")
+    slug = html.escape(w.slug)
     curve = curve_svg(job["points"])
-    action = (f"""<form method="post" action="/w/{html.escape(w.slug)}/stop">
-<button type="submit">Stop</button></form>""" if live else
-              f"""<a class="btn primary" href="/w/{html.escape(w.slug)}/result">See whether it's better</a>""")
+    progress = ""
+    if job.get("expected_steps") and job["steps_done"]:
+        done = min(job["steps_done"], job["expected_steps"])
+        pct = int(100 * done / job["expected_steps"])
+        progress = (f'<div class="bar"><i style="width:{pct}%"></i></div>'
+                    f'<p class="small muted">step {done} of {job["expected_steps"]}'
+                    + (f" · {html.escape(job['eta'])}" if job.get("eta") else "") + "</p>")
+
+    if state == "running":
+        chip = '<span class="chip live">learning now</span>'
+        lede = (f"{html.escape(job.get('phase') or 'Working.')} "
+                f"{job['minutes']} minutes in so far.")
+        action = (f"""<form method="post" action="/w/{slug}/stop">
+<button type="submit">Stop</button></form>
+<a class="btn ghost" href="/">Leave it running</a>""")
+    elif state == "done":
+        chip = '<span class="chip ok">finished</span>'
+        lede = f"Done in {job['minutes']} minutes. The next step is to see whether it is better."
+        action = f"""<a class="btn primary" href="/w/{slug}/result">See whether it's better</a>
+<a class="btn" href="/w/{slug}/try">Try it on a real one</a>"""
+    else:
+        chip = '<span class="chip bad">stopped</span>'
+        lede = html.escape(job.get("reason") or "It stopped before finishing.")
+        action = f"""<a class="btn primary" href="/w/{slug}/again">Start again</a>
+<a class="btn" href="/w/{slug}/checks">Change what good looks like</a>
+<a class="btn ghost" href="/w/{slug}?step=data">Add more examples</a>"""
+
     return shell("Learning", steps_bar("running") + f"""
 <h1>{html.escape(w.name)} {chip}</h1>
-<p class="lede">{job['steps_done']} attempts so far · {job['minutes']} minutes in.
-{'Scores drift up and down between attempts — the trend is what matters.' if live else ''}</p>
-<div class="card">{curve}</div>
-<div class="row">{action}<a class="btn ghost" href="/">Back to your models</a></div>
-<h2>What the machines are saying</h2>
-<pre class="log">{html.escape(job['log_tail'] or 'starting…')}</pre>
-""", refresh=15 if live else 0)
+<p class="lede">{lede}</p>
+<div class="card">{progress}{curve}</div>
+<div class="row">{action}</div>
+<details><summary>Technical details</summary>
+<pre class="log">{html.escape(job['log_tail'] or 'starting…')}</pre></details>
+""", refresh=15 if state == "running" else 0)
 
 
 def curve_svg(points: list[dict]) -> str:

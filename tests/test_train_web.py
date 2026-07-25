@@ -246,3 +246,91 @@ def test_curve_plots_whichever_signal_the_run_produces():
     falling = curve_svg([{"step": i * 5, "loss": 4.0 - i * 0.1} for i in range(1, 15)])
     assert falling.count("<polyline") == 2
     assert "lower is better" in falling
+
+
+# --- honest run state: a dead trainer must never read as "learning" ------------------------
+
+def test_a_failed_run_says_so_and_offers_a_way_forward(tmp_path, monkeypatch):
+    """The page that said "learning now" for eleven hours after a crash was worse than an error."""
+    import json as _json
+    import time
+
+    from train.web import jobs, pages, workspace
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("Support replies", "support-replies")
+    (w.path / "run").mkdir(parents=True, exist_ok=True)
+    (w.path / "run.log").write_text(
+        "Loading model\ngrid train: only 8 usable tickets — export a longer date range.\n",
+        encoding="utf-8",
+    )
+    (w.path / "job.json").write_text(_json.dumps({
+        "pid": 999999, "started": time.time() - 90, "config": "x", "verb": "sft",
+        "expected_steps": 600, "exit": 1, "ended": time.time(),
+    }), encoding="utf-8")
+
+    job = jobs.status(w.path)
+    assert job["state"] == "failed"
+    assert job["running"] is False
+    # It quotes the trainer's own plain sentence rather than inventing one from an exit code
+    # (sentence-cased for display).
+    assert "8 usable tickets" in job["reason"]
+    assert job["reason"].startswith("Only")
+
+    page = pages.running_step(w, job)
+    assert "stopped" in page
+    assert "8 usable tickets" in page
+    assert "Start again" in page and "Change what good looks like" in page
+    assert "learning now" not in page
+    assert 'http-equiv="refresh"' not in page      # a stopped run must not keep polling
+
+
+def test_a_run_that_vanished_is_reported_as_stopped(tmp_path, monkeypatch):
+    import json as _json
+    import time
+
+    from train.web import jobs, workspace
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("x", "support-replies")
+    (w.path / "job.json").write_text(_json.dumps({
+        "pid": 999999, "started": time.time() - 600, "config": "x", "verb": "run",
+    }), encoding="utf-8")
+    job = jobs.status(w.path)
+    assert job["state"] == "stopped"
+    assert "asleep" in job["reason"] or "ended" in job["reason"]
+
+
+def test_progress_page_estimates_time_and_names_the_phase():
+    from train.web.jobs import describe_phase, estimate
+
+    assert estimate(0, 600, 5) == ""                      # too early to guess
+    assert "minutes left" in estimate(60, 600, 300)
+    assert "hours left" in estimate(10, 600, 600)
+    assert estimate(600, 600, 100) == ""                  # finished: nothing to estimate
+    assert "starting model" in describe_phase("Downloading shards: 2.1G/8.0GB")
+    assert "up to date" in describe_phase("[grid train] step 8: 4/4 nodes synced")
+    assert "your examples" in describe_phase("Iter 30: Train loss 2.1")
+    assert describe_phase("") == "Getting started."
+
+
+def test_nothing_is_trapped(client):
+    """Every earlier step stays reachable — changing your mind must not mean starting over."""
+    created = client.post("/new", data={"pack": "support-replies", "name": "Support replies"})
+    slug = created.headers["location"].rsplit("/", 1)[-1]
+    client.post(f"/w/{slug}/data", json={"filename": "e.csv", "content": _tickets_csv(300)})
+    client.get(f"/w/{slug}/checks")
+    client.post(f"/w/{slug}/checks", data={"check": ["similarity"]})
+
+    from train.web import workspace
+
+    w = workspace.load(slug)
+    w.meta["stage"] = "done"
+    w.save()
+    # A finished model lands on its result, not on a progress page for a run that ended.
+    assert client.get(f"/w/{slug}").headers["location"].endswith("/result")
+    # And the earlier steps are still there.
+    assert "Add your examples" in client.get(f"/w/{slug}?step=data").text
+    assert "good answer look like" in client.get(f"/w/{slug}/checks").text
+    assert client.get(f"/w/{slug}/again").status_code == 303
+    assert workspace.load(slug).stage == "machines"
