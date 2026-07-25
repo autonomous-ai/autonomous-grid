@@ -133,8 +133,16 @@ def test_full_wizard_to_the_point_of_training(client, tmp_path):
     assert "def reward_grounding" not in rewards      # unticked → not generated
     assert "def reward_judge" not in rewards          # off by default: it costs time and a judge
 
-    page = client.get(f"/w/{slug}")
-    assert "Which computers should do the work" in page.text
+    # The machines step asks nothing an engineer would have to answer. The collapsed "Somewhere
+    # else" block is the deliberate escape hatch and may speak in addresses; the main flow may not.
+    page = client.get(f"/w/{slug}").text
+    main_flow = page.split("Somewhere else")[0]
+    assert "Where should it learn?" in page
+    assert "How long to give it" in page
+    for engineer_words in ("/v1", "attempts)", "Qwen/Qwen3", "endpoint", "GRPO", "LoRA", "adapter"):
+        assert engineer_words not in main_flow, f"{engineer_words!r} leaked into the main flow"
+    # And what she does see is a choice with a cost attached.
+    assert "Recommended" in page and "GB" in page
 
     # Starting writes a config the CLI could run by hand — then launches it.
     config_text = workspace.write_config(

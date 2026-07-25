@@ -50,12 +50,31 @@ def _nodes() -> dict:
     return {"count": len(nodes), "nodes": nodes, "trainable": trainable, "summary": summary}
 
 
-def _default_models(pack: str) -> list[str]:
-    """Small instruct models that fit the job; the first is the default."""
-    if pack == "sales-triage":
-        return ["Qwen/Qwen3-4B-Instruct-2507", "Qwen/Qwen2.5-1.5B-Instruct",
-                "HuggingFaceTB/SmolLM2-135M-Instruct"]
-    return ["Qwen/Qwen3-4B-Instruct-2507", "Qwen/Qwen3-8B", "Qwen/Qwen2.5-1.5B-Instruct"]
+def _model_choices(backend: str) -> list[dict]:
+    """The starting models, described by what they cost her rather than by repository id.
+
+    A repo id like "Qwen/Qwen3-4B-Instruct-2507" is meaningless to the person choosing, and the
+    thing she actually needs to weigh is download size against quality. MLX and torch want
+    differently packaged weights, so the list depends on which trainer will run.
+    """
+    if backend == "mlx":
+        return [
+            {"id": "mlx-community/Qwen2.5-1.5B-Instruct-4bit", "label": "Small and quick",
+             "size": "1 GB", "detail": "Fine for sorting and short replies. Trains in minutes."},
+            {"id": "mlx-community/Qwen3-4B-Instruct-2507-4bit", "label": "Recommended",
+             "size": "2.5 GB", "detail": "The usual choice for drafting replies.",
+             "default": True},
+            {"id": "mlx-community/Qwen3-8B-4bit", "label": "Best quality",
+             "size": "5 GB", "detail": "Noticeably better writing; wants 32 GB of memory."},
+        ]
+    return [
+        {"id": "HuggingFaceTB/SmolLM2-135M-Instruct", "label": "Tiny — for trying this out",
+         "size": "0.3 GB", "detail": "Learns fast, writes poorly. Good for a first pass."},
+        {"id": "Qwen/Qwen2.5-1.5B-Instruct", "label": "Small and quick",
+         "size": "3 GB", "detail": "Fine for sorting and short replies."},
+        {"id": "Qwen/Qwen3-4B-Instruct-2507", "label": "Recommended",
+         "size": "8 GB", "detail": "The usual choice for drafting replies.", "default": True},
+    ]
 
 
 async def _form(request) -> dict[str, list[str]]:
@@ -112,11 +131,11 @@ def register(app) -> None:
         if stage == "checks":
             return pages.checks_step(w, workspace.CHECKS[w.pack])
         if stage == "machines":
-            return pages.machines_step(
-                w, _nodes(),
-                {"models": _default_models(w.pack), "model": _default_models(w.pack)[0],
-                 "endpoint": "http://127.0.0.1:8080/v1"},
-            )
+            from train.web.machines import capability, find_machines
+
+            machines = find_machines()
+            cap = capability(machines)
+            return pages.machines_step(w, machines, cap, _model_choices(cap.backend))
         return RedirectResponse(f"/w/{slug}/progress", status_code=303)
 
     @app.post("/w/{slug}/data")
@@ -155,19 +174,42 @@ def register(app) -> None:
     async def start(slug: str, request: Request):
         w = _load(slug)
         form = await _form(request)
-        endpoint = _one(form, "endpoint")
-        model = _one(form, "model")
-        try:
-            steps = max(20, min(2000, int(_one(form, "steps", "120") or 120)))
-        except ValueError:
-            steps = 120
-        if not endpoint or not model:
+        from train.web.machines import capability, effort, find_machines
+
+        machines = find_machines()
+        cap = capability(machines)
+        if not cap.ready:
             return HTMLResponse(pages.error_page(
-                "Missing a detail", "Both the starting model and the grid address are needed.",
+                "Almost ready", cap.detail, back=f"/w/{slug}"), status_code=400)
+
+        choices = _model_choices(cap.backend)
+        picked_model = _one(form, "model")
+        model = ""
+        if picked_model.isdigit() and int(picked_model) < len(choices):
+            model = choices[int(picked_model)]["id"]
+        if not model:
+            return HTMLResponse(pages.error_page(
+                "Pick a starting model", "Choose one of the options and press Start again.",
                 back=f"/w/{slug}"), status_code=400)
-        config = workspace.write_config(w, model=model, endpoint=endpoint, steps=steps)
-        jobs.start(w.path, config)
+        # The form sends the chosen option's position; only this side knows the addresses.
+        endpoint = ""
+        picked = _one(form, "machine")
+        if picked.isdigit() and int(picked) < len(machines):
+            endpoint = machines[int(picked)].url
+        endpoint = endpoint or _one(form, "endpoint") or (
+            machines[0].url if machines else "http://127.0.0.1:8080/v1")
+        chosen_effort = effort(_one(form, "effort", "evening"))
+
+        config = workspace.write_config(w, model=model, endpoint=endpoint,
+                                       steps=chosen_effort["steps"])
+        verb = "sft" if cap.recommended == "sft" else "run"
+        extra = ["--run-dir", str(w.path / "run")] if verb == "sft" else []
+        if verb == "sft":
+            extra += ["--iters", str(chosen_effort["iters"])]
+        jobs.start(w.path, config, verb=verb, extra=extra)
         w.meta["stage"] = "running"
+        w.meta["run"] = {"verb": verb, "effort": chosen_effort["id"], "model": model,
+                         "endpoint": endpoint, "expected_steps": chosen_effort["steps"]}
         w.save()
         return RedirectResponse(f"/w/{slug}/progress", status_code=303)
 

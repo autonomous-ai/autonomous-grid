@@ -23,8 +23,14 @@ def _run_dir(workspace_path: Path) -> Path:
     return workspace_path / "run"
 
 
-def start(workspace_path: Path, config_path: Path) -> dict:
-    """Launch the run detached from this request. Returns the job record."""
+def start(workspace_path: Path, config_path: Path, *, verb: str = "run",
+          extra: list[str] | None = None) -> dict:
+    """Launch the run detached from this request. Returns the job record.
+
+    `verb` is the training stage: "sft" imitates the answers a team already wrote and needs nothing
+    but this machine; "run" is the feedback loop and needs an engine that can serve rollouts. The
+    page decides which is possible before offering it (train/web/machines.py).
+    """
     existing = status(workspace_path)
     if existing.get("running"):
         return existing
@@ -33,14 +39,16 @@ def start(workspace_path: Path, config_path: Path) -> dict:
     # Truncate: one workspace, one current run — history lives in the run dir's log.jsonl.
     handle = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
-        [sys.executable, "-m", "cli", "train", "run", "--config", str(config_path)],
+        [sys.executable, "-m", "cli", "train", verb, "--config", str(config_path),
+         *(extra or [])],
         stdout=handle,
         stderr=subprocess.STDOUT,
         cwd=str(workspace_path),
         start_new_session=True,  # survives the server; Ctrl-C on the server won't kill training
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
-    record = {"pid": process.pid, "started": time.time(), "config": str(config_path)}
+    record = {"pid": process.pid, "started": time.time(), "config": str(config_path),
+              "verb": verb}
     _state_file(workspace_path).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return status(workspace_path)
 
@@ -76,6 +84,7 @@ def status(workspace_path: Path) -> dict:
     return {
         "exists": True,
         "running": running,
+        "verb": record.get("verb", "run"),
         "pid": record["pid"],
         "started": record["started"],
         "minutes": round((time.time() - record["started"]) / 60, 1),

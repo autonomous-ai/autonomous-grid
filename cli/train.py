@@ -255,7 +255,7 @@ def cmd_train_sft(args: argparse.Namespace) -> int:
     cfg = load_config(args.config or DEFAULT_CONFIG)
     backend = pick_backend(args.backend)
     print(f"Learning from your examples on {backend} — this is the imitation stage.")
-    adapter = run_sft(cfg, backend=args.backend, iters=args.iters)
+    adapter = run_sft(cfg, backend=args.backend, iters=args.iters, run_dir=args.run_dir)
     print(f"Adapter saved: {adapter}")
     print("Next: `grid train run` sharpens it with feedback, or `grid train eval` scores it now.")
     return 0

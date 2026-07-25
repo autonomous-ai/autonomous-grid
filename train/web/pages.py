@@ -305,35 +305,73 @@ it, and it keeps what scores well — so what you tick here is what it learns to
 
 # --- step 3: machines ---------------------------------------------------------------------
 
-def machines_step(w, nodes: dict, defaults: dict) -> str:
-    if nodes.get("trainable"):
-        node_note = f"""<div class="note good"><b>{nodes['count']} machine(s) ready</b>
-{html.escape(nodes['summary'])}</div>"""
-        disabled = ""
+def machines_step(w, machines: list, cap, models: list[dict], chosen_model: str = "") -> str:
+    """Which computers, how long — and nothing she would have to ask an engineer about.
+
+    Gone from this screen: the grid's address, the model's repository id, and a number of
+    "attempts". Each was a question only an engineer can answer, and each was a place to stop.
+    """
+    if not cap.ready:
+        return shell("Machines", steps_bar("machines") + f"""
+<h1>{html.escape(cap.headline)}</h1>
+<div class="note warn"><b>Almost ready</b>{html.escape(cap.detail)}</div>
+<div class="row"><a class="btn" href="/w/{html.escape(w.slug)}">Back</a>
+<a class="btn ghost" href="/w/{html.escape(w.slug)}/checks">Change what good looks like</a></div>
+""")
+
+    if machines:
+        # The value is the option's position, not its address: she never reads a URL, and a
+        # tampered form can't aim the trainer at an arbitrary host.
+        options = "".join(
+            f"""<label class="pick"><input type="radio" name="machine" value="{i}"
+{' checked' if i == 0 else ''}>
+<b>{html.escape(m.label)}</b>
+<small>{html.escape(m.detail)}{'' if m.serves_training else ' · can answer, but cannot run the feedback stage'}</small></label>"""
+            for i, m in enumerate(machines)
+        )
+        machine_block = f"""<h2>Which computer answers</h2>{options}
+<details><summary>Somewhere else</summary>
+<label class="field"><span>Address of a machine that is already serving</span>
+<input type="text" name="endpoint" placeholder="http://a-machine.local:8080/v1"></label></details>"""
     else:
-        node_note = f"""<div class="note warn"><b>No machine here can run the training yet</b>
-{html.escape(nodes['summary'])} Start one with <code>grid train serve</code> on a Mac, or point the
-address below at a machine that is already serving.</div>"""
-        disabled = ""  # allow anyway: the address may be a machine we can't see from here
-    options = "".join(
-        f'<option value="{html.escape(m)}"{" selected" if m == defaults["model"] else ""}>'
-        f"{html.escape(m)}</option>" for m in defaults["models"]
+        machine_block = """<div class="note warn"><b>Nothing is serving models on this computer</b>
+That is fine for this stage — it learns from your examples locally. To have other machines help,
+run <code>grid train serve</code> on them.</div>
+<input type="hidden" name="endpoint" value="">"""
+
+    # Again the position, not the identifier: the page shows what it costs her, and the server
+    # owns the mapping to a real model — so nothing a form can say becomes a download URL.
+    model_options = "".join(
+        f"""<label class="pick"><input type="radio" name="model" value="{i}"
+{' checked' if m['id'] == chosen_model or (not chosen_model and m.get('default')) else ''}>
+<span class="tag">{html.escape(m['size'])}</span>
+<b>{html.escape(m['label'])}</b>
+<small>{html.escape(m['detail'])}</small></label>"""
+        for i, m in enumerate(models)
     )
+    from .machines import EFFORT_CHOICES
+
+    effort_options = "".join(
+        f"""<label class="pick"><input type="radio" name="effort" value="{c['id']}"
+{' checked' if c.get('default') else ''}>
+<b>{html.escape(c['label'])}</b><small>{html.escape(c['detail'])}</small></label>"""
+        for c in EFFORT_CHOICES
+    )
+
     return shell("Machines", steps_bar("machines") + f"""
-<h1>Which computers should do the work?</h1>
-<p class="lede">Training runs on machines you own. It is heaviest overnight, when nobody is waiting
-on them.</p>
-{node_note}
-<form method="post" action="/w/{html.escape(w.slug)}/start" class="card">
-  <label class="field"><span>The model to start from</span><select name="model">{options}</select></label>
-  <label class="field"><span>Where your machines answer (the grid's address)</span>
-  <input type="text" name="endpoint" value="{html.escape(defaults['endpoint'])}"></label>
-  <label class="field"><span>How long to try (attempts)</span>
-  <input type="number" name="steps" value="120" min="20" max="2000" step="10"></label>
-  <button class="primary" type="submit"{disabled}>Start learning</button>
+<h1>Where should it learn?</h1>
+<p class="lede">{html.escape(cap.headline)} {html.escape(cap.detail)}</p>
+<form method="post" action="/w/{html.escape(w.slug)}/start">
+  <div class="card">{machine_block}</div>
+  <div class="card"><h2>Which model to start from</h2>
+  <p class="small muted">A smaller one is faster and needs less space; a larger one usually writes
+  better. It downloads once.</p>{model_options}</div>
+  <div class="card"><h2>How long to give it</h2>{effort_options}</div>
+  <div class="row"><button class="primary" type="submit">Start learning</button>
+  <a class="btn ghost" href="/w/{html.escape(w.slug)}/checks">Back</a></div>
 </form>
-<p class="small muted">You can close this page. Training keeps going, and nothing is served to
-anyone until it has proven itself.</p>
+<p class="small muted">You can close this page — it keeps going. Nothing is served to anyone until
+you have seen the before-and-after and pressed the button yourself.</p>
 """)
 
 

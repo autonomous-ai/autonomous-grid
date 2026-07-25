@@ -710,6 +710,8 @@ def _add_train(sub) -> None:
     sft.add_argument("--backend", choices=("auto", "mlx", "torch"), default="auto",
                      help="auto picks MLX on Apple Silicon, torch elsewhere.")
     sft.add_argument("--iters", type=int, default=None, help="Training iterations (MLX path).")
+    sft.add_argument("--run-dir", default=None,
+                     help="Where to write adapter/log/run.json (default: a timestamped folder).")
     sft.set_defaults(handler=cmd_train_sft)
 
     nightly = train_sub.add_parser(
