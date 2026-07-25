@@ -42,6 +42,19 @@ def artifacts_root() -> Path:
     return paths.grid_home() / "artifacts" / "train"
 
 
+def split_holdout(
+    prompts: list[str], fraction: float = 0.1, minimum: int = 4, seed: int = 1729
+) -> tuple[list[str], list[str]]:
+    """Seeded (train, eval) split. The eval slice is max(fraction, minimum) but never so large
+    that training starves — tiny datasets keep at least half for training."""
+    import random
+
+    shuffled = list(prompts)
+    random.Random(seed).shuffle(shuffled)
+    n_eval = min(max(int(len(shuffled) * fraction), minimum), len(shuffled) // 2)
+    return shuffled[n_eval:], shuffled[:n_eval]
+
+
 def _run_dir(cfg: TrainRunConfig) -> Path:
     if cfg.trainer.output_dir:
         return Path(cfg.trainer.output_dir).expanduser()
@@ -69,6 +82,15 @@ def run_training(cfg: TrainRunConfig) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     # The config is the run's record; copy it in before anything can fail.
     shutil.copy2(cfg.source_path, run_dir / "config.toml")
+
+    # Held-out split BEFORE training, always, seeded: "is the model actually better" is only
+    # answerable against prompts the trainer never saw. The eval slice is written into the run
+    # record; training proceeds on the rest.
+    train_prompts, eval_prompts = split_holdout(prompts)
+    (run_dir / "eval_prompts.jsonl").write_text(
+        "".join(json.dumps({"prompt": p}) + "\n" for p in eval_prompts), encoding="utf-8"
+    )
+    prompts = train_prompts
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(cfg.model_name)
     rollout_func = build_rollout_func(cfg.rollout, cfg.rollout_model, tokenizer)
@@ -116,7 +138,8 @@ def run_training(cfg: TrainRunConfig) -> Path:
                 "model": cfg.model_name,
                 "rollout_endpoint": cfg.rollout.base_url,
                 "steps": cfg.trainer.steps,
-                "prompts": len(prompts),
+                "train_prompts": len(prompts),
+                "eval_prompts": len(eval_prompts),
                 "trainer": dataclasses.asdict(cfg.trainer),
                 "adapter": str(adapter_dir),
                 "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

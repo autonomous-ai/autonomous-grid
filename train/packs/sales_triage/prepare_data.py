@@ -99,6 +99,17 @@ def main() -> int:
     if unknown:
         print(f"  unmapped outcomes skipped: {dict(unknown)} — extend OUTCOME_TO_LABEL")
     print("Files: prompts.jsonl, labels.jsonl, sft.jsonl")
+    # The honest verdict beats a wasted training night: refuse to bless a doomed run.
+    if floor < 10:
+        print(f"VERDICT: NOT ENOUGH DATA — the smallest class has {floor} leads (balancing caps "
+              "every class there). You want 30+ per class; export more history or coarsen "
+              "OUTCOME_TO_LABEL before training.")
+        return 1
+    if floor < 30:
+        print(f"VERDICT: MARGINAL ({floor} per class). A run may move the needle; also compare "
+              "against a prompted base model before trusting the result.")
+    else:
+        print(f"VERDICT: GOOD TO GO ({floor} per class, {len(kept)} total).")
     return 0
 
 

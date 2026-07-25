@@ -80,7 +80,18 @@ def main() -> int:
 
     print(f"prepare_data: {len(kept)} tickets -> prompts.jsonl, sft.jsonl, refs.jsonl "
           f"({skipped} skipped)")
-    print("Next: SFT on sft.jsonl first; then `grid train run` for the RL pass.")
+    # The honest verdict beats a wasted training night: refuse to bless a doomed run.
+    if len(kept) < 50:
+        print(f"VERDICT: NOT ENOUGH DATA — {len(kept)} usable tickets. SFT wants 100+, the RL "
+              "pass a few hundred. Export more history (or lower --min-reply-words) before "
+              "spending a night training.")
+        return 1
+    if len(kept) < 200:
+        print(f"VERDICT: OK FOR A FIRST SFT PASS ({len(kept)} tickets). RL will be marginal at "
+              "this size — do SFT on sft.jsonl first and judge that before the RL night.")
+    else:
+        print(f"VERDICT: GOOD TO GO ({len(kept)} tickets). SFT on sft.jsonl first, then "
+              "`grid train run`.")
     return 0
 
 

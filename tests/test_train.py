@@ -210,3 +210,17 @@ def test_deploy_explains_missing_runtime_lora(tmp_path):
 def test_deploy_rejects_non_adapter(tmp_path):
     with pytest.raises(SystemExit, match="adapter_config.json"):
         deploy_adapter(tmp_path, ["http://a.test/v1"], "climb-1")
+
+
+def test_split_holdout_seeded_and_bounded():
+    from train.run import split_holdout
+
+    prompts = [f"p{i}" for i in range(100)]
+    train_a, eval_a = split_holdout(prompts)
+    train_b, eval_b = split_holdout(prompts)
+    assert (train_a, eval_a) == (train_b, eval_b)  # seeded: same split every run
+    assert len(eval_a) == 10 and len(train_a) == 90
+    assert not set(train_a) & set(eval_a)
+    # Tiny datasets keep at least half for training.
+    train_c, eval_c = split_holdout([f"p{i}" for i in range(6)])
+    assert len(eval_c) == 3 and len(train_c) == 3
