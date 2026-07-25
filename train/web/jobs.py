@@ -180,12 +180,23 @@ def status(workspace_path: Path, job: str = "run") -> dict:
 
     if running:
         state, reason = "running", ""
-    elif has_adapter and (exit_code in (0, None)):
-        state, reason = "done", ""
-    elif exit_code:
+    elif record.get("stopped_by_user"):
+        # A deliberate Stop is not a crash. SIGTERM surfaces as exit -15, which is truthy, so
+        # without this the page told her the run "stopped unexpectedly (code -15)".
+        state = "stopped"
+        reason = "You stopped it. Nothing was served, and your examples and checks are unchanged."
+    elif exit_code not in (0, None):
+        # Trust the exit code over the artifacts: a crash can leave a half-written adapter behind,
+        # and calling that "finished" would send her to a gate that scores a broken model.
         state = "failed"
         reason = _reason_from(tail) or _EXIT_HINTS.get(
             exit_code, f"It stopped unexpectedly (code {exit_code}).")
+    elif has_adapter:
+        state, reason = "done", ""
+    elif exit_code == 0:
+        state = "failed"
+        reason = (_reason_from(tail)
+                  or "It finished without producing a model. The log below says why.")
     else:
         state = "stopped"
         reason = ("It stopped before finishing — the computer may have gone to sleep, or the "
@@ -228,9 +239,16 @@ def stop(workspace_path: Path, job: str = "run") -> dict:
     state_path = _state_file(workspace_path, job)
     if state_path.is_file():
         try:
-            pid = int(json.loads(state_path.read_text(encoding="utf-8")).get("pid", -1))
+            record = json.loads(state_path.read_text(encoding="utf-8"))
+            pid = int(record.get("pid", -1))
         except (OSError, json.JSONDecodeError, ValueError):
             return status(workspace_path, job=job)
+        # Recorded before the signal, so the page can tell "you stopped it" from "it died".
+        record["stopped_by_user"] = True
+        try:
+            _write(workspace_path, record, job)
+        except OSError:
+            pass
         if pid > 0 and _alive(pid):
             # The whole process group: the trainer may have spawned dataloader workers.
             try:

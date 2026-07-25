@@ -462,3 +462,97 @@ def test_scoring_page_reads_progress_from_the_log():
     assert "nothing has been served" in page
     assert "Try checking again" in page
     assert ws is not None
+
+
+# --- the confirmed findings from the adversarial review, pinned -----------------------------
+
+def test_the_machine_she_chose_is_the_machine_that_runs(client, tmp_path, monkeypatch):
+    """A bare index could mean a different machine if the list re-sorted between draw and submit."""
+    from train.web.machines import Capability, Machine
+
+    started: dict = {}
+    monkeypatch.setattr("train.web.jobs.start",
+                        lambda path, config, **kw: started.update(kw) or {"running": True})
+
+    first = Machine("http://one.local/v1", "Ollama on this computer", "a model", "ollama", False)
+    second = Machine("http://two.local/v1", "vLLM on this computer", "a model", "vllm", True)
+    monkeypatch.setattr("train.web.machines.find_machines", lambda: [first, second])
+    monkeypatch.setattr("train.web.machines.capability",
+                        lambda machines=None: Capability(True, False, "sft", "h", "d", "torch"))
+
+    created = client.post("/new", data={"pack": "support-replies", "name": "x"})
+    slug = created.headers["location"].rsplit("/", 1)[-1]
+    client.post(f"/w/{slug}/data", json={"filename": "e.csv", "content": _tickets_csv(300)})
+    client.get(f"/w/{slug}/checks")
+    client.post(f"/w/{slug}/checks", data={"check": ["similarity"]})
+
+    # She picks the second machine; the list then re-sorts under her.
+    monkeypatch.setattr("train.web.machines.find_machines", lambda: [second, first])
+    client.post(f"/w/{slug}/start", data={"machine": "vLLM on this computer", "model": "0",
+                                          "effort": "quick"})
+    config = (workspace.load(slug).path / "grid-train.toml").read_text(encoding="utf-8")
+    assert "two.local" in config          # the one she chose, not the one now at that position
+
+
+def test_a_typed_address_cannot_rewrite_the_config(client, tmp_path):
+    """Free text reached a TOML file; a quote or newline used to be able to rewrite the rest."""
+    from train.config import load_config
+
+    created = client.post("/new", data={"pack": "support-replies", "name": "x"})
+    slug = created.headers["location"].rsplit("/", 1)[-1]
+    client.post(f"/w/{slug}/data", json={"filename": "e.csv", "content": _tickets_csv(300)})
+    client.get(f"/w/{slug}/checks")
+    client.post(f"/w/{slug}/checks", data={"check": ["similarity"]})
+    nasty = 'http://x/v1"\nsteps = 99999\nevil = "'
+    client.post(f"/w/{slug}/start", data={"endpoint": nasty, "model": "0", "effort": "quick"})
+
+    w = workspace.load(slug)
+    cfg = load_config(w.path / "grid-train.toml")
+    assert cfg.rollout.base_url == nasty          # stored verbatim, as one string
+    assert cfg.trainer.steps != 99999             # and it did not become configuration
+
+
+def test_the_machines_step_needs_examples_behind_it(client, tmp_path):
+    created = client.post("/new", data={"pack": "support-replies", "name": "x"})
+    slug = created.headers["location"].rsplit("/", 1)[-1]
+    response = client.get(f"/w/{slug}?step=machines")
+    assert response.status_code == 400
+    assert "Add your examples first" in response.text
+
+
+def test_stopping_a_run_is_not_reported_as_a_crash(tmp_path, monkeypatch):
+    import json as _json
+    import time
+
+    from train.web import jobs, pages, workspace
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("x", "support-replies")
+    (w.path / "run-job.json").write_text(_json.dumps({
+        "pid": 999999, "started": time.time() - 60, "config": "c", "verb": "sft",
+        "stopped_by_user": True, "exit": -15, "ended": time.time(),
+    }), encoding="utf-8")
+    job = jobs.status(w.path)
+    assert job["state"] == "stopped"
+    assert "You stopped it" in job["reason"]
+    assert "code -15" not in pages.running_step(w, job)
+
+
+def test_a_crash_that_left_a_partial_model_is_not_called_finished(tmp_path, monkeypatch):
+    import json as _json
+    import time
+
+    from train.web import jobs, workspace
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    w = workspace.create("x", "support-replies")
+    adapter = w.path / "run" / "adapter"
+    adapter.mkdir(parents=True)
+    (adapter / "half-written.safetensors").write_text("...", encoding="utf-8")
+    (w.path / "run-job.json").write_text(_json.dumps({
+        "pid": 999999, "started": time.time() - 60, "config": "c", "verb": "sft",
+        "exit": 137, "ended": time.time(),
+    }), encoding="utf-8")
+    job = jobs.status(w.path)
+    assert job["state"] == "failed"
+    assert "memory" in job["reason"]          # 137 = killed; a smaller model is the fix

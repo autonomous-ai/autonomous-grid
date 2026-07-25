@@ -103,7 +103,14 @@ def register(app) -> None:
 
     @app.get("/", response_class=HTMLResponse)
     def home():
-        return pages.home(workspace.list_all(), _nodes())
+        # Ask each workspace's job what is true now. The stage in meta.json was written when a run
+        # STARTED, so a crashed trainer left the list saying "learning" indefinitely — the exact
+        # failure jobs.py exists to prevent.
+        rows = []
+        for w in workspace.list_all():
+            live = jobs.status(w.path) if w.stage in ("running", "done") else {}
+            rows.append((w, live.get("state", "")))
+        return pages.home(rows, _nodes())
 
     @app.get("/machines", response_class=HTMLResponse)
     def machines():
@@ -134,6 +141,11 @@ def register(app) -> None:
         if stage == "checks":
             return pages.checks_step(w, workspace.CHECKS[w.pack])
         if stage == "machines":
+            if not w.report.get("ok"):
+                return HTMLResponse(pages.error_page(
+                    "Add your examples first",
+                    "There is nothing to learn from yet, so there is nothing to start.",
+                    back=f"/w/{slug}?step=data"), status_code=400)
             from train.web.machines import capability, find_machines
 
             machines = find_machines()
@@ -204,11 +216,10 @@ def register(app) -> None:
             return HTMLResponse(pages.error_page(
                 "Pick a starting model", "Choose one of the options and press Start again.",
                 back=f"/w/{slug}"), status_code=400)
-        # The form sends the chosen option's position; only this side knows the addresses.
-        endpoint = ""
-        picked = _one(form, "machine")
-        if picked.isdigit() and int(picked) < len(machines):
-            endpoint = machines[int(picked)].url
+        # She chose a label; the server maps it to an address. Immune to the list re-sorting
+        # between the page being drawn and Start being pressed.
+        label = _one(form, "machine")
+        endpoint = next((m.url for m in machines if m.label == label), "")
         endpoint = endpoint or _one(form, "endpoint") or (
             machines[0].url if machines else "http://127.0.0.1:8080/v1")
         chosen_effort = effort(_one(form, "effort", "evening"))
@@ -319,10 +330,16 @@ def register(app) -> None:
         from train.config import load_config
         from train.deploy import deploy_adapter
 
-        cfg = load_config(w.path / "grid-train.toml")
-        adapter = Path(w.path) / "run" / "adapter"
-        results = deploy_adapter(adapter, cfg.deploy.nodes or (cfg.rollout.base_url,),
-                                 cfg.deploy.adapter_name or w.slug)
+        try:
+            cfg = load_config(w.path / "grid-train.toml")
+            adapter = Path(w.path) / "run" / "adapter"
+            results = deploy_adapter(adapter, cfg.deploy.nodes or (cfg.rollout.base_url,),
+                                     cfg.deploy.adapter_name or w.slug)
+        except SystemExit as exc:
+            # Same contract as /check and /try: a machine problem is a sentence, not a 500.
+            return HTMLResponse(pages.error_page(
+                "Could not load it onto the machine", str(exc),
+                back=f"/w/{slug}/result"), status_code=400)
         w.meta["serving"] = {"nodes": results, "name": cfg.deploy.adapter_name or w.slug}
         w.save()
         failed = [r for r in results if not r["ok"]]

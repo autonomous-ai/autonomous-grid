@@ -317,6 +317,20 @@ def write_checks(workspace: Workspace, chosen: list[str]) -> Path:
     return path
 
 
+def _toml_string(value: str) -> str:
+    """A TOML basic string. The endpoint arrives as free text from the "somewhere else" box, and
+    bare interpolation let a quote or a newline rewrite the rest of the config."""
+    escaped = (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
 def write_config(workspace: Workspace, *, model: str, endpoint: str, steps: int,
                  sync_nodes: list[str] | None = None) -> Path:
     """Write the same grid-train.toml an engineer would hand-write."""
@@ -325,21 +339,21 @@ def write_config(workspace: Workspace, *, model: str, endpoint: str, steps: int,
 # This is an ordinary run config — `grid train run --config <this file>` works from a terminal.
 
 [model]
-name = "{model}"
+name = {_toml_string(model)}
 
 [rollout]
-base_url = "{endpoint}"
+base_url = {_toml_string(endpoint)}
 api_key_env = "GRID_TRAIN_API_KEY"
 max_tokens = {_MAX_TOKENS.get(workspace.pack, 200)}
 temperature = 1.0
 sync_every = 2
-sync_nodes = [{", ".join(f'"{n}"' for n in nodes)}]
+sync_nodes = [{", ".join(_toml_string(n) for n in nodes)}]
 
 [data]
-prompts_jsonl = "{(workspace.path / "prompts.jsonl").as_posix()}"
+prompts_jsonl = {_toml_string((workspace.path / "prompts.jsonl").as_posix())}
 
 [rewards]
-python_file = "{(workspace.path / "rewards.py").as_posix()}"
+python_file = {_toml_string((workspace.path / "rewards.py").as_posix())}
 
 [trainer]
 group_size = 8
@@ -348,11 +362,11 @@ learning_rate = 1e-5
 lora_rank = 16
 lora_alpha = 32
 save_every_steps = 25
-output_dir = "{(workspace.path / "run").as_posix()}"
+output_dir = {_toml_string((workspace.path / "run").as_posix())}
 
 [deploy]
-adapter_name = "{workspace.slug}"
-nodes = [{", ".join(f'"{n}"' for n in nodes)}]
+adapter_name = {_toml_string(workspace.slug)}
+nodes = [{", ".join(_toml_string(n) for n in nodes)}]
 '''
     path = workspace.path / "grid-train.toml"
     path.write_text(toml, encoding="utf-8")

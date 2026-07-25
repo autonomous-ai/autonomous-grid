@@ -254,6 +254,33 @@ def _jsonl_logger(transformers, path: Path):
 
 # --- the entry point ------------------------------------------------------------------------
 
+def write_holdout(examples: list[dict], run_dir: Path, *, fraction: float = 0.1,
+                  minimum: int = 4, seed: int = 1729) -> int:
+    """Reserve some examples the run never sees, and record their prompts for the gate.
+
+    Without this an imitation run finishes with nothing to be judged against, and the browser flow
+    dead-ends one click before its payoff: trained, unprovable, unservable. Same seeded split the
+    feedback path uses, so "held-out" means the same thing on both rungs.
+    """
+    import random
+
+    shuffled = list(examples)
+    random.Random(seed).shuffle(shuffled)
+    count = min(max(int(len(shuffled) * fraction), minimum), len(shuffled) // 2)
+    held = shuffled[:count]
+    prompts = []
+    for row in held:
+        # The user turn is the work; the assistant turn is the answer we are withholding.
+        for message in row["messages"]:
+            if message.get("role") == "user" and isinstance(message.get("content"), str):
+                prompts.append(message["content"])
+                break
+    (run_dir / "eval_prompts.jsonl").write_text(
+        "".join(json.dumps({"prompt": p}) + "\n" for p in prompts), encoding="utf-8"
+    )
+    return len(prompts)
+
+
 def run_sft(cfg: TrainRunConfig, *, backend: str = "auto", iters: int | None = None,
             run_dir: Path | str | None = None) -> Path:
     """Train stage one and return the adapter directory.
@@ -270,15 +297,21 @@ def run_sft(cfg: TrainRunConfig, *, backend: str = "auto", iters: int | None = N
     if cfg.source_path.is_file():
         shutil.copy2(cfg.source_path, run_dir / "config.toml")
 
-    adapter = (run_sft_mlx(cfg, examples, run_dir, iters=iters) if chosen == "mlx"
-               else run_sft_torch(cfg, examples, run_dir))
+    # Held out BEFORE training, and excluded from it: "is it better" is only answerable on work the
+    # model has not seen.
+    held = write_holdout(examples, run_dir)
+    learn_from = examples[held:] if held < len(examples) else examples
+
+    adapter = (run_sft_mlx(cfg, learn_from, run_dir, iters=iters) if chosen == "mlx"
+               else run_sft_torch(cfg, learn_from, run_dir))
 
     (run_dir / "run.json").write_text(
         json.dumps({
             "stage": "sft",
             "backend": chosen,
             "model": cfg.model_name,
-            "examples": len(examples),
+            "examples": len(learn_from),
+            "held_out": held,
             "adapter": str(adapter),
             "minutes": round((time.time() - started) / 60, 1),
             "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

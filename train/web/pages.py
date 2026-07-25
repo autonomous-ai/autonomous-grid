@@ -144,14 +144,16 @@ def steps_bar(current: str) -> str:
 # --- home ----------------------------------------------------------------------------------
 
 def home(workspaces: list, nodes: dict) -> str:
+    """`workspaces` is a list of (workspace, live_state) — the state comes from the job, not from
+    what was written when the run started."""
     if workspaces:
         rows = "".join(
             f"<tr><td><a href='/w/{html.escape(w.slug)}'>{html.escape(w.name)}</a></td>"
             f"<td class='muted small'>{html.escape(PACK_TITLES.get(w.pack, w.pack))}</td>"
-            f"<td>{_stage_chip(w)}</td>"
+            f"<td>{_stage_chip(w, live)}</td>"
             f"<td class='muted small'>{html.escape(str(w.meta.get('updated', ''))[:16].replace('T', ' '))}</td>"
-            f"<td>{_row_action(w)}</td></tr>"
-            for w in workspaces
+            f"<td>{_row_action(w, live)}</td></tr>"
+            for w, live in workspaces
         )
         table = f"""<table><tr><th>model</th><th>learning to</th><th>state</th><th>updated</th>
 <th></th></tr>
@@ -169,9 +171,11 @@ starts serving anyone once it has beaten the model you use today on work it has 
 """)
 
 
-def _row_action(w) -> str:
+def _row_action(w, live: str = "") -> str:
     """The most useful next click for this model, right in the list."""
-    if w.stage == "done":
+    if live in ("failed", "stopped"):
+        return f"<a href='/w/{html.escape(w.slug)}/progress'>See why</a>"
+    if w.stage in ("done", "serving") or live == "done":
         return (f"<a href='/w/{html.escape(w.slug)}/try'>Try it</a> · "
                 f"<a href='/w/{html.escape(w.slug)}/result'>Result</a>")
     if w.stage == "running":
@@ -179,13 +183,17 @@ def _row_action(w) -> str:
     return f"<a href='/w/{html.escape(w.slug)}'>Continue</a>"
 
 
-def _stage_chip(w) -> str:
-    stage = w.stage
-    if stage == "running":
+def _stage_chip(w, live: str = "") -> str:
+    """What is true right now — the live job state wins over the stage recorded at start."""
+    if live in ("failed", "stopped"):
+        return '<span class="chip bad">stopped</span>'
+    if live == "running":
         return '<span class="chip live">learning</span>'
-    if stage == "done":
+    if w.stage == "serving":
+        return '<span class="chip ok">live</span>'
+    if w.stage == "done" or live == "done":
         return '<span class="chip ok">ready</span>'
-    return f'<span class="chip">{html.escape(STEP_LABELS.get(stage, stage)).lower()}</span>'
+    return f'<span class="chip">{html.escape(STEP_LABELS.get(w.stage, w.stage)).lower()}</span>'
 
 
 PACK_TITLES = {
@@ -323,11 +331,14 @@ def machines_step(w, machines: list, cap, models: list[dict], chosen_model: str 
 """)
 
     if machines:
-        # The value is the option's position, not its address: she never reads a URL, and a
-        # tampered form can't aim the trainer at an arbitrary host.
+        # The value is the machine's LABEL — the words she actually read — and the server maps it
+        # back to an address. Not a URL (she never sees one, and a tampered form cannot aim the
+        # trainer at an arbitrary host) and not a bare index either: between drawing this page and
+        # pressing Start, a machine can appear or vanish and re-sort the list, so a position could
+        # silently mean a different machine than the one she chose.
         options = "".join(
-            f"""<label class="pick"><input type="radio" name="machine" value="{i}"
-{' checked' if i == 0 else ''}>
+            f"""<label class="pick"><input type="radio" name="machine"
+ value="{html.escape(m.label, quote=True)}"{' checked' if i == 0 else ''}>
 <b>{html.escape(m.label)}</b>
 <small>{html.escape(m.detail)}{'' if m.serves_training else ' · can answer, but cannot run the feedback stage'}</small></label>"""
             for i, m in enumerate(machines)
@@ -342,8 +353,8 @@ That is fine for this stage — it learns from your examples locally. To have ot
 run <code>grid train serve</code> on them.</div>
 <input type="hidden" name="endpoint" value="">"""
 
-    # Again the position, not the identifier: the page shows what it costs her, and the server
-    # owns the mapping to a real model — so nothing a form can say becomes a download URL.
+    # Same idea for the model: the page shows what it costs her, the server owns the mapping to a
+    # real model, and nothing a form can say becomes a download URL.
     model_options = "".join(
         f"""<label class="pick"><input type="radio" name="model" value="{i}"
 {' checked' if m['id'] == chosen_model or (not chosen_model and m.get('default')) else ''}>

@@ -44,7 +44,11 @@ def push_adapter(
         try:
             with httpx.Client(headers=headers, timeout=timeout, transport=transport) as client:
                 response = client.post(
-                    f"{root}/reload_adapter", json={"adapter_dir": adapter_dir}
+                    f"{root}/reload_adapter",
+                    # `name` is what the engine will answer for afterwards. Omitting it left the
+                    # engine serving the adapter under its directory name while the gate asked for
+                    # the model's name — a 404 exactly at the moment of payoff.
+                    json={"adapter_dir": adapter_dir, "name": adapter_name},
                 )
                 if response.status_code == 404:
                     # Not an MLX rollout server — try vLLM's runtime-LoRA API.
