@@ -39,13 +39,18 @@ with greedy decoding, per grader. A candidate that gains less than 0.01 overall,
 0.02 on any single grader, does not get served. Refusing is the normal, healthy outcome and the
 interface says so.
 
-Three defects in that gate were found and fixed the night before this release, and they are worth
-stating plainly because they are the kind that pass a test suite: the imitation rung's "held-out"
-slice overlapped the training set (8 rows in 10), the unattended cycle scored the model already
-being served rather than the candidate, and a night that lost was recorded with the same word as a
-night that won. The measured climbs below are unaffected — they come from the feedback rung, whose
-split was always correct — but any imitation number produced before this release was partly
-memorisation.
+Several defects in that gate were found and fixed in the two nights before this release, and they
+are worth stating plainly because they are the kind that pass a test suite: the imitation rung's
+"held-out" slice overlapped the training set (8 rows in 10); the unattended cycle scored the model
+already being served rather than the candidate; a night that lost was recorded with the same word
+as a night that won; and the first repair for that third one assumed a candidate could be loaded
+beside the incumbent, which is impossible on Grid's own MLX engine — it holds one set of weights —
+so it briefly made every night score a model against itself at exactly +0.000.
+
+The gate now scores the incumbent first, while it is still what the node holds, then loads the
+candidate and scores that, and restores the incumbent if the candidate lost. The measured climbs
+below are unaffected — they come from the feedback rung, whose split was always correct — but any
+imitation number produced before this release was partly memorisation.
 
 **It improves overnight.** `grid train collect --on` keeps the work the grid does (locally,
 redacted, pruned). `grid train autopilot` turns that into a night's training. `grid train schedule
@@ -70,7 +75,7 @@ same wall clock only because the weights moved often enough.
 
 ## Numbers a room should hear
 
-- 1,043 tests green.
+- 1,070 tests green.
 - The whole training plane is 62 files and about 10,600 lines, in `train/`.
 - One unauthenticated request could stall a grid for 49 seconds before v0.4.0. It can't now
   (bounded quantifiers, clip-before-scan, a body cap, and a background writer).
