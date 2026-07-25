@@ -147,7 +147,9 @@ def test_a_refused_night_puts_the_customers_model_back(setup):
                              transport=transport)
     assert not result["passed"]
     assert result["restored"] is True
-    assert engine.weights == "night-1"                         # the customer's model is back
+    # The ledger keeps a COPY (run/adapter is overwritten by the next training run), so the
+    # restored directory is that copy — what matters is that the weights are the incumbent's.
+    assert engine.weights.startswith("2026") or engine.weights == "night-1"
     assert engine.name == "support-v1"                         # answering to its own name again
 
 
@@ -164,7 +166,7 @@ def test_when_it_cannot_be_put_back_the_verdict_says_so(setup):
     result = prove_candidate(setup["cfg"], setup["run_dir"], worse, "support-v1",
                              transport=transport)
     assert not result["passed"] and result["restored"] is False
-    assert "restart the engine or redeploy support-v1" in result["verdict"]
+    assert "restart the engine or deploy support-v1" in result["verdict"]
 
 
 def test_the_first_night_compares_against_the_base_model(setup):
@@ -193,3 +195,38 @@ def test_a_node_that_will_not_load_it_is_not_a_pass(setup):
         prove_candidate(setup["cfg"], setup["run_dir"], setup["adapter"]("night-2"), "support-v1",
                         transport=httpx.MockTransport(refuse))
     assert engine.weights == "night-1"          # and the customer's model is untouched
+
+
+def test_a_passing_check_leaves_the_customers_name_answering(setup):
+    """A check is an observation. Restoring only on a refusal left the node answering to
+    "<name>-candidate" after a PASS, so the name customers point at 404'd until someone pressed
+    a button that might be hours away."""
+    from train.deploy import record_deploy
+
+    engine = OneSlotEngine()
+    engine.weights, engine.name = "night-1", "support-v1"
+    record_deploy("support-v1", setup["adapter"]("night-1"))
+    transport = httpx.MockTransport(engine.handler)
+
+    result = prove_candidate(setup["cfg"], setup["run_dir"], setup["adapter"]("night-2"),
+                             "support-v1", transport=transport)
+    assert result["passed"]                       # the candidate won...
+    assert engine.name == "support-v1"            # ...and the node is still answering customers
+    assert result["restored"] is True
+
+
+def test_the_ledger_survives_the_run_directory_being_retrained(setup):
+    """The ledger used to hold a path, and the path was run/adapter — overwritten by the next
+    training run. "Restore what was serving" then re-served the model that had just lost."""
+    from train.deploy import last_deployed, record_deploy
+
+    live = setup["tmp"] / "run" / "adapter"
+    live.mkdir(parents=True)
+    (live / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (live / "adapters.safetensors").write_text("the good model", encoding="utf-8")
+    record_deploy("support-v1", live)
+
+    (live / "adapters.safetensors").write_text("tonight's worse model", encoding="utf-8")
+    kept = last_deployed("support-v1")
+    assert kept is not None and kept != live
+    assert (kept / "adapters.safetensors").read_text(encoding="utf-8") == "the good model"

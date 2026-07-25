@@ -233,7 +233,7 @@ def prove_candidate(
          nobody approved, under a name nobody asked for, and "nothing changed tonight" has to be
          true rather than merely printed.
     """
-    from .deploy import deploy_adapter, last_deployed, record_deploy
+    from .deploy import deploy_adapter, last_deployed
     from .rewards import load_reward_funcs
     from .rollout import probe_endpoint
 
@@ -249,30 +249,63 @@ def prove_candidate(
             incumbent = serving_name
     before = score_model(cfg, incumbent, prompts, reward_funcs, transport=transport)
 
+    # From here the node may be holding the candidate instead of the customer's model, so every
+    # exit from this block goes through the restore. A check is supposed to be an observation.
     outcomes = deploy_adapter(adapter_dir, nodes, staged, transport=transport)
     loaded = [o for o in outcomes if o.get("ok")]
     if not loaded:
         detail = "; ".join(f"{o['node']} ({o.get('detail', '')})" for o in outcomes)
         raise CandidateNotLoaded(f"no node would load it for checking: {detail}")
 
-    after = score_model(cfg, staged, prompts, reward_funcs, transport=transport)
-    result = compare(before, after)
+    try:
+        after = score_model(cfg, staged, prompts, reward_funcs, transport=transport)
+        result = compare(before, after)
+    finally:
+        # Always, and whatever happened. Restoring only on a refusal left the node answering to
+        # "<name>-candidate" after a PASS — so the name customers point at 404'd until someone
+        # pressed a button that might be minutes or hours away — and left it displaced entirely if
+        # scoring raised. The winner is deployed by the caller, once, after this returns.
+        put_back = _put_back(cfg, nodes, serving_name, last_deployed(serving_name),
+                             transport=transport)
+
     result["run"] = run_dir.name
     result["staged_as"] = staged
     result["incumbent"] = incumbent
-
-    if not result["passed"]:
-        result["restored"] = _put_back(
-            cfg, nodes, serving_name, last_deployed(serving_name), transport=transport)
-        if not result["restored"]:
-            result["verdict"] += (
-                f" — note: the checking copy is still loaded on {', '.join(n['node'] for n in loaded)}"
-                f", so restart the engine or redeploy {serving_name} before relying on it")
-    else:
-        record_deploy(staged, adapter_dir)      # so a later refusal knows what to put back
+    result["restored"] = put_back
+    # Which weights this verdict is about. Without it, a card written for last week's adapter
+    # authorises whatever is in run/adapter today — press "check", retrain, press "use".
+    result["adapter"] = str(Path(adapter_dir).expanduser().resolve())
+    result["adapter_fingerprint"] = _fingerprint(adapter_dir)
+    if not put_back:
+        result["verdict"] += (
+            f" — note: the checking copy is still loaded on {', '.join(n['node'] for n in loaded)}"
+            f", so restart the engine or deploy {serving_name} before relying on it")
 
     write_card(result, run_dir)
     return result
+
+
+def _fingerprint(adapter_dir) -> str:
+    """Which weights these are — a hash of the bytes, not of the file's size and timestamp.
+
+    Size-and-mtime is the cheap version and it collides exactly where it matters: two runs a
+    second apart producing files of the same length, which is what an adapter of a fixed rank
+    does on every run. Reading the file costs a fraction of a second, once per check.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    found = False
+    for path in sorted(Path(adapter_dir).glob("*.safetensors")):
+        try:
+            with path.open("rb") as handle:
+                digest.update(path.name.encode())
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            found = True
+        except OSError:
+            continue
+    return digest.hexdigest()[:16] if found else ""
 
 
 def _put_back(cfg, nodes, serving_name: str, adapter, *, transport=None) -> bool:
@@ -283,6 +316,10 @@ def _put_back(cfg, nodes, serving_name: str, adapter, *, transport=None) -> bool
     case it matters most — the night the candidate was worse.
     """
     if not adapter or not Path(adapter).is_dir():
+        return False
+    if Path(adapter).resolve() == Path(cfg.trainer.output_dir or ".").resolve() / "run" / "adapter":
+        # Belt and braces: the ledger keeps copies precisely so this cannot happen, but restoring
+        # from the live training directory would put back the model that just lost.
         return False
     from .deploy import DeployError, deploy_adapter
 

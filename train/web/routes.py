@@ -359,10 +359,21 @@ def register(app) -> None:
 
         from train.config import load_config
         from train.deploy import deploy_adapter
+        from train.evaluate import _fingerprint
+
+        adapter = Path(w.path) / "run" / "adapter"
+        judged = card.get("adapter_fingerprint")
+        if judged and adapter.is_dir() and _fingerprint(adapter) != judged:
+            # The card is about different weights than the ones on disk — a run finished after the
+            # check. Serving these would mean the customer gets a model nothing has measured.
+            return HTMLResponse(pages.error_page(
+                "This model changed after it was checked",
+                "It has been trained again since that comparison, so the result on the previous "
+                "page is not about the model that would be served. Check it again first.",
+                back=f"/w/{slug}/result"), status_code=409)
 
         try:
             cfg = load_config(w.path / "grid-train.toml")
-            adapter = Path(w.path) / "run" / "adapter"
             results = deploy_adapter(adapter, cfg.deploy.nodes or (cfg.rollout.base_url,),
                                      cfg.deploy.adapter_name or w.slug)
         except SystemExit as exc:

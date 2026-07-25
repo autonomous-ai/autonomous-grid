@@ -198,13 +198,18 @@ def cmd_train_deploy(args: argparse.Namespace) -> int:
         name = name or cfg.deploy.adapter_name
 
     if args.gate:
-        # The gate: prove it on held-out work first. The candidate must already be loadable
-        # under `name` on the endpoint — deploy to a staging name, or run this after a plain
-        # deploy and before pointing traffic at it.
-        from train.evaluate import run_eval
+        # The gate: prove it on held-out work first — the ADAPTER on disk, loaded for checking.
+        # This used to score `name`, which is whatever the endpoint already holds under that name:
+        # the incumbent, or nothing at all. It was the last caller still doing that after the
+        # unattended paths and `grid train eval` were fixed.
+        from train.evaluate import CandidateNotLoaded, prove_candidate
 
         run_dir = Path(args.run or Path(args.adapter).expanduser().parent)
-        result = run_eval(cfg, run_dir, name)
+        try:
+            result = prove_candidate(cfg, run_dir, Path(args.adapter).expanduser(), name,
+                                     nodes=nodes)
+        except CandidateNotLoaded as exc:
+            raise SystemExit(f"grid train: {exc}") from None
         _print_eval(result, run_dir)
         if not result["passed"]:
             print("\nRefusing to deploy: it did not beat the model you are already serving.")

@@ -72,20 +72,52 @@ def _ledger_path() -> Path:
 
 
 def record_deploy(adapter_name: str, adapter_dir: str | Path) -> None:
-    """Remember that `adapter_name` is now this directory. Never raises: a lost note is not
-    a reason to fail a deploy that worked."""
-    import json
+    """Remember what `adapter_name` is now — as a COPY, not a pointer.
 
+    Training writes into `run/adapter` and the next run overwrites it, so a ledger of paths would
+    say "the model that was serving" and mean "whatever was trained most recently" — which is the
+    model being replaced. Restoring from that puts back the thing that just lost.
+
+    Never raises: a lost note is not a reason to fail a deploy that worked.
+    """
+    import json
+    import shutil
+    import time
+
+    source = Path(adapter_dir).expanduser().resolve()
     path = _ledger_path()
     try:
+        keep = path.parent / "served" / _slug(adapter_name) / time.strftime("%Y%m%d-%H%M%S")
+        suffix = 2
+        while keep.exists():                     # two deploys in one second must not collide
+            keep = keep.with_name(f"{keep.name}-{suffix}")
+            suffix += 1
+        keep.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, keep)
         known = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
         if not isinstance(known, dict):
             known = {}
-        known[adapter_name] = str(Path(adapter_dir).expanduser().resolve())
-        path.parent.mkdir(parents=True, exist_ok=True)
+        known[adapter_name] = str(keep)
         path.write_text(json.dumps(known, indent=2) + "\n", encoding="utf-8")
+        _prune_kept(keep.parent)
     except (OSError, ValueError):
         pass
+
+
+def _slug(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name).strip("-") or "model"
+
+
+def _prune_kept(folder: Path, keep_last: int = 3) -> None:
+    """Adapters are ~80 MB. Keep the current one and a couple to fall back to."""
+    try:
+        copies = sorted((p for p in folder.iterdir() if p.is_dir()), reverse=True)
+    except OSError:
+        return
+    import shutil
+
+    for old in copies[keep_last:]:
+        shutil.rmtree(old, ignore_errors=True)
 
 
 def last_deployed(adapter_name: str) -> Path | None:

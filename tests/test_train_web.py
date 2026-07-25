@@ -1205,3 +1205,32 @@ def test_training_now_starts_the_same_cycle_the_scheduler_would(client, tmp_path
     assert response.status_code == 303
     assert started["verb"] == "autopilot"                   # the same verb 23:00 runs
     assert "--ignore-host" in started["extra"]              # she asked for it on this machine
+
+
+def test_a_model_retrained_after_its_check_cannot_be_served_on_the_old_card(client, tmp_path,
+                                                                           monkeypatch):
+    """Check, retrain, press "Start using this model" — and the customer gets weights that
+    nothing has ever measured."""
+    import json as _json
+
+    slug = _served_workspace(client, tmp_path)
+    monkeypatch.setattr(
+        "train.deploy.deploy_adapter",
+        lambda adapter, nodes, name, **kw: [{"node": nodes[0], "ok": True, "detail": "ok"}],
+    )
+    w = workspace.load(slug)
+    adapter = w.path / "run" / "adapter"
+    adapter.mkdir(parents=True, exist_ok=True)
+    (adapter / "adapter_model.safetensors").write_text("the checked weights", encoding="utf-8")
+
+    from train.evaluate import _fingerprint
+
+    card = _json.loads((w.path / "run" / "eval-card.json").read_text(encoding="utf-8"))
+    card["adapter_fingerprint"] = _fingerprint(adapter)
+    (w.path / "run" / "eval-card.json").write_text(_json.dumps(card), encoding="utf-8")
+    assert client.post(f"/w/{slug}/use").status_code == 303      # matches: allowed
+
+    (adapter / "adapter_model.safetensors").write_text("trained again since", encoding="utf-8")
+    blocked = client.post(f"/w/{slug}/use")
+    assert blocked.status_code == 409
+    assert "changed after it was checked" in blocked.text
