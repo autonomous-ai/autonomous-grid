@@ -139,6 +139,41 @@ would have trained on base-model rollouts for every run.
   subprocess — a test pins that the CLI can load what the browser generated, so the two surfaces
   can never drift into separate products.
 
+### 2026-07-26: learning from served work, and what "unattended" is allowed to mean
+
+- **D16 — A model's own unjudged output is never trained on** (`train/capture.py`). Served requests
+  are stored as candidate examples, but only three signals make one trainable, and each costs a
+  human nothing: **a correction** (the person edited the answer — their version is ground truth,
+  weight 1.0), **a teacher** (a stronger model answered a hard request — 0.8), and **acceptance**
+  (sent as-is — 0.6). Discarded answers are kept for the record and never imitated; unjudged ones
+  never become examples at all. This is the line that makes "zero human intervention" honest rather
+  than a euphemism for a model drifting into agreement with itself.
+- **D17 — Capture is off until someone turns it on, local-file-only, redacted, and pruned.** No
+  upload, no aggregation, one JSONL per day on the machine that served the request. `POST
+  /v1/feedback` + an `X-Grid-Request-Id` header let an app report what the human did; it no-ops
+  when collecting is off so instrumenting an app is safe before anyone opts in.
+- **D18 — Nothing about capture may ever be on a customer's critical path.** Learned the hard way:
+  a quadratic redaction pattern plus a cap applied *after* scanning made one unauthenticated
+  request worth ~34 seconds of blocked event loop. The rules now: bound every quantifier, clip
+  before you scan, refuse bodies too large to be examples, and do the writing on a bounded
+  background queue where a stalled disk costs examples rather than latency.
+- **D19 — Autopilot refuses more often than it runs** (`train/autopilot.py`). It waits when there is
+  too little to learn from (waiting is a *correct* outcome, not a failure), leaves a machine alone
+  when someone is using it, and ships only past the same eval gate as every other path. A night that
+  produced nothing better is a success for the customer and a non-zero exit for the operator.
+- **D20 — Both training stages write the same artifacts, including a held-out set.** An imitation
+  run reserves a seeded 10% before training and excludes it, so "is it better" is answerable on
+  either rung and the browser flow cannot dead-end one click from its payoff.
+- **D21 — The browser and the CLI are one product.** The browser writes an ordinary
+  `grid-train.toml` and launches an ordinary `grid train` subprocess; a test pins that the CLI loads
+  what the browser generated. Options are submitted as the *labels she read*, never as addresses,
+  model ids or list positions — so nothing a form can say becomes a download URL or a host to aim a
+  trainer at, and a list that re-sorts between draw and submit cannot silently change her choice.
+- **D22 — Every screen must survive being read literally.** "Nothing is served until you press the
+  button" means training never deploys; "learning now" must be false the moment the trainer dies;
+  a button that cannot install a schedule must not claim to. Four of tonight's confirmed defects
+  were sentences the code no longer honoured.
+
 Runbook: `docs/two-node-training.md`.
 
 ## Consequences / open items
