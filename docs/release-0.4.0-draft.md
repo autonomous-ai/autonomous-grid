@@ -39,6 +39,14 @@ with greedy decoding, per grader. A candidate that gains less than 0.01 overall,
 0.02 on any single grader, does not get served. Refusing is the normal, healthy outcome and the
 interface says so.
 
+Three defects in that gate were found and fixed the night before this release, and they are worth
+stating plainly because they are the kind that pass a test suite: the imitation rung's "held-out"
+slice overlapped the training set (8 rows in 10), the unattended cycle scored the model already
+being served rather than the candidate, and a night that lost was recorded with the same word as a
+night that won. The measured climbs below are unaffected — they come from the feedback rung, whose
+split was always correct — but any imitation number produced before this release was partly
+memorisation.
+
 **It improves overnight.** `grid train collect --on` keeps the work the grid does (locally,
 redacted, pruned). `grid train autopilot` turns that into a night's training. `grid train schedule
 on` puts it in the computer's own scheduler — a LaunchAgent on macOS, a `systemd --user` timer on
@@ -62,7 +70,7 @@ same wall clock only because the weights moved often enough.
 
 ## Numbers a room should hear
 
-- 1,026 tests green.
+- 1,043 tests green.
 - The whole training plane is 62 files and about 10,600 lines, in `train/`.
 - One unauthenticated request could stall a grid for 49 seconds before v0.4.0. It can't now
   (bounded quantifiers, clip-before-scan, a body cap, and a background writer).
