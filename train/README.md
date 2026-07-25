@@ -133,6 +133,26 @@ until it beats the incumbent on held-back work) and **the source of truth** (rew
 world — a resolved ticket, a passing test — never from the model marking its own homework, which
 drifts and collapses).
 
+### What "prove it" has to be careful about
+
+The gate is one comparison, and it is easy to make it lie to yourself in ways that leave every
+test green. Three of them were real defects in this code, found and fixed on 26 July, and each is
+worth knowing about if you build one of these:
+
+* **The held-out set has to be the rows the trainer never saw.** Ours shuffled to choose what to
+  withhold and then sliced the original list to choose what to train on — 8 of every 10 "unseen"
+  prompts had been trained on. One split, both halves, and a test that asserts the two sets are
+  disjoint.
+* **Score the candidate, not the name.** A serving node resolves a model name to whatever weights
+  it already holds, so asking it for "support-replies" right after training a new adapter scores
+  *last night's* model. The candidate is loaded under a staging name, scored there, and only then
+  takes the serving name.
+* **A grader with no answer key returns a neutral score — for both models.** That is not a safe
+  default; it is a silent ceiling where the gate can only ever say "no meaningful gain". Either
+  give the grader tonight's references, or judge on a slice that has them.
+
+None of these makes a run crash. They make it *mean* something else.
+
 ## 5. What we measured
 
 One CPU-only Intel iMac — no GPU at all — SmolLM2-135M, and the word-reversal task from the test
