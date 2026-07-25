@@ -1,6 +1,7 @@
 """The routes. Thin: every handler reads a workspace, calls one thing, renders one page."""
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -324,7 +325,42 @@ def register(app) -> None:
                 "Trained, but not loaded everywhere",
                 "; ".join(f"{r['node']}: {r['detail']}" for r in failed),
                 back=f"/w/{slug}/result"), status_code=502)
-        return RedirectResponse("/", status_code=303)
+        w.meta["stage"] = "serving"
+        w.save()
+        return RedirectResponse(f"/w/{slug}/live", status_code=303)
+
+    @app.get("/w/{slug}/live", response_class=HTMLResponse)
+    def live(slug: str):
+        w = _load(slug)
+        serving = w.meta.get("serving")
+        if not serving:
+            return RedirectResponse(f"/w/{slug}/result", status_code=303)
+        from train.capture import summarize
+
+        return pages.live_step(w, serving, summarize(days=30),
+                               nightly_on=bool(w.meta.get("nightly")))
+
+    @app.post("/w/{slug}/nightly")
+    async def nightly(slug: str, request: Request):
+        """Turn unattended improvement on or off for this model.
+
+        Writing the schedule into someone's crontab from a web form is not ours to do, so this
+        records the intent, turns collecting on (there is nothing to learn from without it), and
+        shows the one line to paste. The autopilot verb does the work.
+        """
+        w = _load(slug)
+        form = await _form(request)
+        wanted = _one(form, "nightly", "on") == "on"
+        w.meta["nightly"] = wanted
+        w.save()
+        if wanted:
+            from train.capture import Policy, load_policy, save_policy
+
+            policy = load_policy()
+            if not policy.enabled:
+                save_policy(Policy(**{**dataclasses.asdict(policy), "enabled": True,
+                                      "teachers": list(policy.teachers)}))
+        return RedirectResponse(f"/w/{slug}/live", status_code=303)
 
     @app.get("/api/workspaces")
     def api_workspaces():

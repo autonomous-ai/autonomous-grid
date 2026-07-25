@@ -334,3 +334,78 @@ def test_nothing_is_trapped(client):
     assert "good answer look like" in client.get(f"/w/{slug}/checks").text
     assert client.get(f"/w/{slug}/again").status_code == 303
     assert workspace.load(slug).stage == "machines"
+
+
+# --- the payoff: it is live, and it keeps improving -----------------------------------------
+
+def _served_workspace(client, tmp_path):
+    """A workspace whose model passed and was deployed."""
+    import json as _json
+
+    from train.web import workspace
+
+    created = client.post("/new", data={"pack": "support-replies", "name": "Support replies"})
+    slug = created.headers["location"].rsplit("/", 1)[-1]
+    client.post(f"/w/{slug}/data", json={"filename": "e.csv", "content": _tickets_csv(300)})
+    client.get(f"/w/{slug}/checks")
+    client.post(f"/w/{slug}/checks", data={"check": ["similarity"]})
+    w = workspace.load(slug)
+    workspace.write_config(w, model="m", endpoint="http://127.0.0.1:8080/v1", steps=60)
+    run = w.path / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "eval-card.json").write_text(_json.dumps({
+        "passed": True, "delta": 0.19, "verdict": "better by +0.190 — safe to serve",
+        "before": {"per_grader": {"similarity": 0.6}, "overall": 0.6, "samples": [], "n": 30},
+        "after": {"per_grader": {"similarity": 0.8}, "overall": 0.8, "samples": [], "n": 30},
+    }), encoding="utf-8")
+    adapter = run / "adapter"
+    adapter.mkdir(exist_ok=True)
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_text("x", encoding="utf-8")
+    return slug
+
+
+def test_using_a_model_lands_on_a_page_that_says_it_is_live(client, tmp_path, monkeypatch):
+    slug = _served_workspace(client, tmp_path)
+
+    # Deploying talks to machines; stub that, not the decision to allow it.
+    monkeypatch.setattr(
+        "train.deploy.deploy_adapter",
+        lambda adapter, nodes, name, **kw: [
+            {"node": n, "ok": True, "detail": f"serving as {name!r}"} for n in nodes],
+    )
+    response = client.post(f"/w/{slug}/use")
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("/live")
+
+    page = client.get(f"/w/{slug}/live").text
+    assert "is answering now" in page
+    assert "Point your tools at it" in page
+    assert "OPENAI_BASE_URL" in page                      # the one line her engineer needs
+    assert "Improve it every night" in page               # and the way to make it compound
+
+
+def test_the_live_page_redirects_when_nothing_is_serving_yet(client, tmp_path):
+    slug = _served_workspace(client, tmp_path)
+    assert client.get(f"/w/{slug}/live").headers["location"].endswith("/result")
+
+
+def test_turning_on_nightly_also_turns_on_collecting(client, tmp_path, monkeypatch):
+    """There is nothing to learn from overnight unless the work is being kept."""
+    from train import capture
+
+    slug = _served_workspace(client, tmp_path)
+    monkeypatch.setattr(
+        "train.deploy.deploy_adapter",
+        lambda adapter, nodes, name, **kw: [{"node": nodes[0], "ok": True, "detail": "ok"}],
+    )
+    client.post(f"/w/{slug}/use")
+    assert capture.load_policy().enabled is False
+
+    client.post(f"/w/{slug}/nightly", data={"nightly": "on"})
+    assert capture.load_policy().enabled is True
+    page = client.get(f"/w/{slug}/live").text
+    assert "Stop improving it nightly" in page
+
+    client.post(f"/w/{slug}/nightly", data={"nightly": "off"})
+    assert "Improve it every night" in client.get(f"/w/{slug}/live").text

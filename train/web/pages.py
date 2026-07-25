@@ -590,6 +590,44 @@ Measured on {card['after']['n']} held-back examples it never trained on.</div>
 """)
 
 
+def live_step(w, serving: dict, summary=None, nightly_on: bool = False) -> str:
+    """Where she lands after pressing "Start using this model".
+
+    The moment the product pays off should look like something, and it should tell her three
+    things: it is answering now, how to point her tools at it, and that it will keep improving.
+    """
+    slug = html.escape(w.slug)
+    name = html.escape(serving.get("name") or w.slug)
+    nodes = serving.get("nodes") or []
+    where = ", ".join(html.escape(str(n.get("node", ""))) for n in nodes if n.get("ok"))
+    collecting = ""
+    if summary is not None:
+        collecting = f"""<div class="card"><h2>It keeps getting better</h2>
+<p class="small muted">{html.escape(summary.headline)} {html.escape(summary.advice)}</p>
+<form method="post" action="/w/{slug}/nightly" class="row">
+<button class="{'' if nightly_on else 'primary'}" type="submit" name="nightly"
+ value="{'off' if nightly_on else 'on'}">
+{'Stop improving it nightly' if nightly_on else 'Improve it every night, automatically'}</button>
+<span class="small muted">{'On — it trains overnight when the machine is free and only'
+ ' replaces itself if it wins.' if nightly_on else 'Trains overnight on what your team corrected'
+ ' today, and only replaces itself if it wins.'}</span></form></div>"""
+
+    return shell("It's live", f"""
+<h1>{html.escape(w.name)} is answering now 🎉</h1>
+<p class="lede">Your team's own model, trained on your own examples, running on your own
+computers. {('Loaded on ' + where + '.') if where else ''}</p>
+<div class="card"><h2>Point your tools at it</h2>
+<p class="small muted">Anything that speaks the OpenAI API works — ask whoever set up your
+helpdesk to use these two lines.</p>
+<pre class="log">OPENAI_BASE_URL={html.escape((w.meta.get('config') or {}).get('endpoint', ''))}
+model: {name}</pre></div>
+{collecting}
+<div class="row"><a class="btn primary" href="/w/{slug}/try">Try it on another ticket</a>
+<a class="btn" href="/w/{slug}/result">See the before and after</a>
+<a class="btn ghost" href="/">Your models</a></div>
+""")
+
+
 def _pretty(grader: str) -> str:
     return {
         "similarity": "Sounds like your team",
