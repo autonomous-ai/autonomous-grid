@@ -249,16 +249,17 @@ f.wheel(CX, CY, R, [
     ("Computers", LABEL_TEXT),
 ], hub_r=250, hub_lines=("INTELLIGENCE",), fs=CORE_FS, start=0, arc=INK)
 
-# The second loop forks off the rim, runs over the top, and rejoins the wheel at
-# Models — domain-specific models ARE models, so that is the station they feed.
-# What it bypasses is Computers: this is the way to more models that does not
-# need anyone to buy hardware.
-f.dot(448, 393)
+# The second loop leaves from Employees — they are the ones who connect a system —
+# runs over the top, and rejoins the wheel at Models, because domain-specific
+# models ARE models. What it bypasses is Computers: this is the way to more
+# models that does not need anyone to buy hardware. The dot sits where the branch
+# and the rim part company, which is what makes a fork read as a fork.
+f.dot(390, 516)
 f.block(286, 244, ("Connectors",), LABEL_TEXT, CORE_FS)
 f.block(800, 90, ("Domain-specific", "data"), LABEL_TEXT, CORE_FS)
 f.block(1376, 248, ("Domain-specific", "models"), LABEL_TEXT, CORE_FS)
 
-f.bow(448, 393, 350, 292, lift=-26, colour=INK, width=RIM)
+f.bow(390, 516, 318, 302, lift=-22, colour=INK, width=RIM)
 f.bow(400, 214, 624, 112, lift=-30, colour=INK, width=RIM)
 f.bow(980, 106, 1196, 186, lift=-26, colour=INK, width=RIM)
 f.bow(1466, 336, 1300, 576, lift=-44, colour=INK, width=RIM)

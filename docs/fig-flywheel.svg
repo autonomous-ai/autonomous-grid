@@ -42,13 +42,13 @@
   <path d="M922 228 A430 430 0 0 1 1217 534" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
   <circle cx="800" cy="640" r="250" fill="#5d579d"/>
   <text x="800" y="651" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">INTELLIGENCE</text>
-  <circle cx="448" cy="393" r="9" fill="#2b2b29"/>
+  <circle cx="390" cy="516" r="9" fill="#2b2b29"/>
   <text x="286" y="256" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Connectors</text>
   <text x="800" y="80" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Domain-specific</text>
   <text x="800" y="124" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">data</text>
   <text x="1376" y="238" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Domain-specific</text>
   <text x="1376" y="282" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">models</text>
-  <path d="M448 393 Q380 361 350 292" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M390 516 Q333 416 318 302" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
   <path d="M400 214 Q500 136 624 112" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
   <path d="M980 106 Q1097 122 1196 186" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
   <path d="M1466 336 Q1419 481 1300 576" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
