@@ -57,7 +57,7 @@
   <text x="572" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
   <path d="M572 579 L572 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="716" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="830" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 3090</text>
+  <text x="830" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
   <path d="M830 579 L830 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="974" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="1088" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>

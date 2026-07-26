@@ -220,7 +220,7 @@ my = 720
 # lines that crossed, to say a thing the row already says.
 # Five, spread the full width: the fleet is the point of the page and a huddle of
 # three under the trainer left half the frame empty saying nothing.
-FLEET = ("MacBook Pro", "Mac Studio", "Mac mini", "RTX 3090", "RTX 5090")
+FLEET = ("MacBook Pro", "Mac Studio", "Mac mini", "RTX 6000", "RTX 5090")
 fspan = len(FLEET) * MW + (len(FLEET) - 1) * 26
 fx0 = (1700 - fspan) / 2
 for i, name in enumerate(FLEET):
@@ -234,10 +234,12 @@ f.label(tcx - 96, 352, "a task,", "several attempts", anchor="end")
 f.arrow(tcx + 64, oy - H / 2 - 14, tcx + 64, y + H / 2 + 12)
 f.label(tcx + 96, 340, "the attempts, and", "the token ids they sampled", anchor="start")
 
+# Each arrow leaves its own point along the orchestrator's edge. Five lines from
+# one pixel is a knot; five from a spread edge is a distribution, which is what
+# this actually is.
 for i in range(len(FLEET)):
     bx = fx0 + MW / 2 + i * (MW + 26)
-    f.arrow(tcx, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True,
-            curve=0 if abs(bx - tcx) < 40 else 82)
+    f.arrow(tcx - 120 + i * 60, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True)
 f.label(1700 - M, my + H / 2 + 56, "placed on whichever machine is free", anchor="end")
 f.write(f"{OUT}/train-architecture.svg")
 
@@ -370,7 +372,7 @@ f.panel(M, 1660 - M, gy, "Your grid", ["Inference", "Training"])
 for cx in app_x:
     f.arrow(cx, gy - 176 / 2 - 12, cx, app_y + H / 2 + 14)
 
-MACH = ["Mac Studio", "Mac mini", "RTX 3090", "MacBook Pro", "RTX 5090"]
+MACH = ["Mac Studio", "Mac mini", "RTX 6000", "MacBook Pro", "RTX 5090"]
 mw = max(box_w(m) for m in MACH)
 mspan = len(MACH) * mw + (len(MACH) - 1) * 30
 mx0 = (1660 - mspan) / 2

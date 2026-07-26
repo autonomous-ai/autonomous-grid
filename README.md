@@ -11,7 +11,7 @@
 
 [**Quickstart**](#quickstart) · [Inference](#inference) · [Training](#training) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
-<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one grid. The grid is a single box with two halves inside it — inference and training. Underneath, the computers you already own — a Mac Studio, a Mac mini, an RTX 3090, a MacBook Pro, an RTX 5090 — join it, running MLX, Ollama, vLLM, LM Studio and ComfyUI." width="860">
+<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one grid. The grid is a single box with two halves inside it — inference and training. Underneath, the computers you already own — a Mac Studio, a Mac mini, an RTX 6000, a MacBook Pro, an RTX 5090 — join it, running MLX, Ollama, vLLM, LM Studio and ComfyUI." width="860">
 
 </div>
 

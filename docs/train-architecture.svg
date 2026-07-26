@@ -58,7 +58,7 @@
   <rect x="715" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="850" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
   <rect x="1011" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1146" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 3090</text>
+  <text x="1146" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
   <rect x="1307" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="1442" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 5090</text>
   <path d="M466 295 L466 423" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -67,10 +67,10 @@
   <path d="M594 423 L594 295" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <text x="626" y="340" text-anchor="start" fill="#2b2b29" font-size="24">the attempts, and</text>
   <text x="626" y="368" text-anchor="start" fill="#2b2b29" font-size="24">the token ids they sampled</text>
-  <path d="M530 515 C612 515, 176 673, 258 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <path d="M530 515 L554 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <path d="M530 515 C612 515, 768 673, 850 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <path d="M530 515 C612 515, 1064 673, 1146 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <path d="M530 515 C612 515, 1360 673, 1442 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M410 515 L258 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M470 515 L554 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M530 515 L850 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M590 515 L1146 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M650 515 L1442 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <text x="1600" y="809" text-anchor="end" fill="#2b2b29" font-size="24">placed on whichever machine is free</text>
 </svg>
