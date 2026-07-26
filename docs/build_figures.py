@@ -235,8 +235,8 @@ f.write(f"{OUT}/train-architecture.svg")
 #   selection -> more models          traffic -> more employees
 #   customer experience -> superhuman work
 #   the second loop: connectors -> domain-specific data -> domain-specific models
-f = Fig(1660, 1180)
-CX, CY, R = 800, 640, 430
+f = Fig(1700, 1180)
+CX, CY, R = 800, 680, 400
 INK = LABEL_TEXT
 
 # Nouns, not quantities. The reference says Sellers, Selection, Traffic — never
@@ -247,22 +247,28 @@ f.wheel(CX, CY, R, [
     ("Superhuman work", LABEL_TEXT),
     ("Employees", LABEL_TEXT),
     ("Computers", LABEL_TEXT),
-], hub_r=250, hub_lines=("INTELLIGENCE",), fs=CORE_FS, start=0, arc=INK)
+], hub_r=240, hub_lines=("DOMAIN-SPECIFIC", "INTELLIGENCE"), fs=CORE_FS, start=0,
+   arc=INK)
 
 # The second loop leaves from Employees — they are the ones who connect a system —
-# runs over the top, and rejoins the wheel at Models, because domain-specific
-# models ARE models. What it bypasses is Computers: this is the way to more
-# models that does not need anyone to buy hardware. The dot sits where the branch
-# and the rim part company, which is what makes a fork read as a fork.
-f.dot(390, 516)
-f.block(286, 244, ("Connectors",), LABEL_TEXT, CORE_FS)
-f.block(800, 90, ("Domain-specific", "data"), LABEL_TEXT, CORE_FS)
-f.block(1376, 248, ("Domain-specific", "models"), LABEL_TEXT, CORE_FS)
+# and rejoins the wheel at Models, because your own models ARE models. The words
+# "domain-specific" appear once, in the hub: three times and the drawing looks
+# like it knows one adjective.
+# What it bypasses is Computers: this is the way to more models that needs nobody
+# to buy hardware.
+#
+# Two things about the drawing. The branch and the rim leave as two separate
+# arrows with air between them rather than from a shared dot: a junction reads as
+# a knot at this line weight. And the whole loop is held a clear band away from
+# the rim, because two curves running close together read as one thick curve.
+f.block(252, 220, ("Connected systems",), LABEL_TEXT, CORE_FS)
+f.block(800, 118, ("Your data",), LABEL_TEXT, CORE_FS)
+f.block(1396, 230, ("Your models",), LABEL_TEXT, CORE_FS)
 
-f.bow(390, 516, 318, 302, lift=-22, colour=INK, width=RIM)
-f.bow(400, 214, 624, 112, lift=-30, colour=INK, width=RIM)
-f.bow(980, 106, 1196, 186, lift=-26, colour=INK, width=RIM)
-f.bow(1466, 336, 1300, 576, lift=-44, colour=INK, width=RIM)
+f.bow(330, 600, 268, 288, lift=-20, colour=INK, width=RIM)
+f.bow(404, 186, 668, 132, lift=-26, colour=INK, width=RIM)
+f.bow(936, 132, 1252, 190, lift=-28, colour=INK, width=RIM)
+f.bow(1470, 292, 1256, 610, lift=-46, colour=INK, width=RIM)
 
 f.write(f"{OUT}/fig-flywheel.svg")
 

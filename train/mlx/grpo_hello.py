@@ -225,23 +225,35 @@ def main() -> int:
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(history[0]) + "\n")
 
+    # Where the time actually goes. The premise of putting training on a grid is that sampling
+    # dominates and sampling is the part that fans out; that split is quoted from the field
+    # (README section 3) rather than measured here, and never on this backend at all. Timing the
+    # two phases costs nothing and turns the claim into something each run reports about itself.
+    spent = {"sample_s": 0.0, "update_s": 0.0, "eval_s": 0.0}
+
     for step in range(1, args.steps + 1):
         user_text, target = make_task(rng, args.min_words, args.max_words)
         prompt_ids = encode_prompt(user_text)
         completions, rewards = [], []
+        t0 = time.time()
         for _ in range(args.group_size):
             ids, lps, text = sample(prompt_ids)
             completions.append((ids, lps))
             rewards.append(reward(text, target))
+        spent["sample_s"] += time.time() - t0
         advantages = group_advantages(rewards)
         mean_reward = sum(rewards) / len(rewards)
         record = {"step": step, "reward_mean": round(mean_reward, 4)}
         if any(advantages):
+            t0 = time.time()
             record["loss"] = round(train_step(prompt_ids, completions, advantages), 5)
+            spent["update_s"] += time.time() - t0
         else:
             record["skipped"] = "no reward spread in group"
         if step % args.eval_every == 0 or step == args.steps:
+            t0 = time.time()
             record["eval"] = round(evaluate(), 4)
+            spent["eval_s"] += time.time() - t0
             print(
                 f"step {step:>3}  reward {mean_reward:.3f}  eval {record['eval']:.3f}  "
                 f"({time.time() - started:.0f}s)"
@@ -260,6 +272,13 @@ def main() -> int:
                 "baseline_eval": round(baseline, 4),
                 "final_eval": round(final, 4),
                 "minutes": round((time.time() - started) / 60, 1),
+                "sample_s": round(spent["sample_s"], 1),
+                "update_s": round(spent["update_s"], 1),
+                "eval_s": round(spent["eval_s"], 1),
+                # Of the work that a grid could split, how much is the part that fans out.
+                "sampling_share": round(
+                    spent["sample_s"] / max(spent["sample_s"] + spent["update_s"], 1e-9), 3
+                ),
             },
             indent=2,
         )
@@ -267,6 +286,12 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"\nBaseline {baseline:.3f} -> final {final:.3f}   artifacts: {run_dir}")
+    print(
+        f"time: sampling {spent['sample_s']:.0f}s · update {spent['update_s']:.0f}s · "
+        f"eval {spent['eval_s']:.0f}s  ->  sampling is "
+        f"{100 * spent['sample_s'] / max(spent['sample_s'] + spent['update_s'], 1e-9):.0f}% "
+        f"of the splittable work"
+    )
     # Ceiling-aware verdict: a strong base model can leave <0.15 of headroom; near-perfect
     # final performance is a pass even when the delta is small.
     verdict = (final - baseline >= 0.15) or (final >= 0.95 and final > baseline)

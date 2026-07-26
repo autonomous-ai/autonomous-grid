@@ -5,6 +5,17 @@ weights never leave your network. About 8,900 lines of Python across 38 files, o
 torch side and mlx-lm on the Apple side, and one command finishes a complete training run on a
 laptop CPU in about six minutes.
 
+First, why train anything at all. The models you can rent are general and they are very good. They
+also know nothing about you — not your codebase, not last quarter's tickets, not the way your team
+actually writes a reply. Waiting for a bigger general model does not close that gap, because the
+information was never on the internet to begin with. It is sitting in your systems.
+
+Domain-specific intelligence is what is on the other side of that gap: a small model that has seen
+how your work actually goes. It is worse than the frontier at everything and better than the
+frontier at your thing, which is the trade you want, because most of what your team does all day is
+your thing. The weights are yours, so nobody deprecates them, reprices them or swaps them out from
+under you. And the data they learned from never left the building.
+
 Here is the whole idea. Reinforcement learning is roughly 75% sampling; sampling is inference;
 inference is what a grid already does. So the expensive part of training is work your fleet is
 already good at, and the only new thing is one machine that adjusts weights.
@@ -62,6 +73,13 @@ maths, is the hard part of this product. You will spend your time on the grader.
 Count the compute in that step. Writing eight attempts runs the model eight times; adjusting the
 weights happens once. Profiling across the field puts sampling at 70–82% of the total, and sampling
 is plain inference — which a grid already spreads across machines.
+
+Our own runs come out higher. Every run now times its two phases and writes the split into its
+`summary.json`, and on an M2 Max sampling is **86–92%** of the work a grid could divide — 48s of
+sampling against 8s of weight-adjusting on one seed, 92s against 8s on another. Some of that margin
+is ours to give back: the group is sampled one completion at a time, so a batched sampler would
+narrow it. It does mean the case for spreading this across machines is stronger on Apple Silicon
+than the field number suggests, not weaker.
 
 Every machine below is one you own. A grid can also hold frontier API nodes, and for *serving*
 answers that mix is often right: easy work local, hard work out to a vendor. Those nodes cannot
@@ -270,7 +288,7 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. A second loop forks off the wheel at employees and runs over the top — connectors, then domain-specific data, then domain-specific models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading DOMAIN-SPECIFIC INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. A second loop forks off the wheel at employees and runs over the top — connected systems, then your data, then your models — before rejoining the wheel at models.">
 </p>
 
 **The ring is the whole business in four words.** Computers run models. Models make the work
@@ -283,7 +301,7 @@ because they are the ones who connect a system — the cheapest thing on this pa
 general model into one that knows your tickets, your repos, your deals. That data is not one undifferentiated pile — it arrives sorted by the job
 that produced it, which is what makes a model *for that job* possible rather than one model asked
 to be good at everything. Those are models too, so the loop rejoins the wheel where models do. What
-it skips is the station that needs someone to buy something.
+it skips is the one station that needs somebody to buy something.
 
 ## The code
 
