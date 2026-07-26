@@ -175,7 +175,7 @@ def flush(timeout: float = 5.0) -> None:
 
 
 def record(prompt: str, completion: str, *, model: str, policy: Policy | None = None,
-           node: str = "", request_id: str | None = None) -> str | None:
+           node: str = "", request_id: str | None = None, ref: str = "") -> str | None:
     """Store one served request. Returns its id, or None if policy says don't.
 
     Best-effort by contract: the caller is a serving path, and nothing here may ever be the reason
@@ -200,6 +200,9 @@ def record(prompt: str, completion: str, *, model: str, policy: Policy | None = 
         "completion": redact(completion) if policy.redact else completion,
         # A teacher row is one a stronger model answered: its answer is a target, not a guess.
         "teacher": model in policy.teachers,
+        # What this answer was about, if the app said (X-Grid-Ref). It is what lets us ask the
+        # helpdesk later what actually happened, instead of waiting to be told (train/outcomes.py).
+        "ref": str(ref or ""),
     })
     return request_id
 

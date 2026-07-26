@@ -519,6 +519,7 @@ grid train collect [--on | --off] [--teacher <model>]... [--sample <f>] [--retai
 grid train autopilot [--stage auto|sft|rl] [--min-examples <n>] [--days <n>]
                      [--no-deploy] [--ignore-host] [--history] [--config <path>]
 grid train nightly [--no-deploy] [--ignore-host] [--history] [--config <path>]
+grid train outcomes zendesk --subdomain <s> --email <e> [--days 7] [--dry-run]
 grid train schedule [status|on|off] [--at HH:MM] [--name <label>] [--config <path>]
 
 grid train serve [--model <id>] [--adapter-path <dir>] [--host <h>] [--port <p>]
@@ -589,6 +590,15 @@ outranks **sent as-is** (0.6); a **rejected** answer is kept for the record and 
 **a model's own unjudged output is never trained on**, which is the rule that stops a model
 agreeing with itself into drift. Apps report the human's verdict by quoting back the
 `X-Grid-Request-Id` header they got with the answer to `POST /v1/feedback`.
+
+`grid train outcomes` closes the loop without asking anyone to click anything. The helpdesk
+already holds the reply that was actually sent and whether the ticket stayed solved, so this reads
+it back and writes the same three verdicts a person would: sent as we wrote it (weaker), rewritten
+by a person (their text becomes the truth), or never sent — never imitated. It joins an answer to a
+record only when it can prove they are the same piece of work: an app can send
+`X-Grid-Ref: zendesk:12345` with the request, and failing that the reference is read out of the
+prompt — but only when exactly one candidate id is there, because a wrong join teaches the model
+somebody else's answer. **A person's verdict is never overwritten by this.**
 
 `autopilot` is one cycle: check the machine is free, build tonight's dataset from captured work,
 refuse below `--min-examples` (120 by default — waiting is the correct outcome, not a failure),

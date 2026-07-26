@@ -299,7 +299,10 @@ async def _proxy_openai(app: FastAPI, endpoint_path: str, request: Request) -> R
         # Learning from the work the grid is already doing (train/capture.py). Off unless the owner
         # turned it on, local-file-only, and wrapped so that nothing about it can fail a customer's
         # request — a capture problem must cost an example, never an answer.
-        captured = _capture_exchange(body, engine_response)
+        # X-Grid-Ref ties this answer to the record it is about (a ticket, a deal), so the
+        # nightly cycle can ask that system what happened instead of waiting to be told.
+        captured = _capture_exchange(body, engine_response,
+                                     request.headers.get("x-grid-ref", ""))
         if captured:
             # The id an app quotes back on POST /v1/feedback to say what the human did with this
             # answer — the signal that makes unattended training honest.
@@ -394,7 +397,7 @@ def _stream_delta(payload: dict) -> str:
     return ""
 
 
-def _capture_exchange(body: dict, engine_response: httpx.Response) -> str | None:
+def _capture_exchange(body: dict, engine_response: httpx.Response, ref: str = "") -> str | None:
     """Best-effort: store this prompt/answer pair if capture is enabled. Never raises, never waits.
 
     The expensive parts (redaction, the append) happen on capture's own writer thread; what runs
@@ -412,7 +415,8 @@ def _capture_exchange(body: dict, engine_response: httpx.Response) -> str | None
         answer = clip(_answer_text(engine_response.json()))
         if not prompt or not answer:
             return None
-        return record(prompt, answer, model=str(body.get("model") or ""), policy=policy)
+        return record(prompt, answer, model=str(body.get("model") or ""), policy=policy,
+                      ref=ref)
     except Exception:  # noqa: BLE001 — serving must be unaffected by anything in here
         return None
 

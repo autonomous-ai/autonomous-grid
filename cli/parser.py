@@ -603,6 +603,7 @@ def _add_train(sub) -> None:
         cmd_train_eval,
         cmd_train_init,
         cmd_train_nightly,
+        cmd_train_outcomes,
         cmd_train_packs,
         cmd_train_pull,
         cmd_train_run,
@@ -742,6 +743,18 @@ def _add_train(sub) -> None:
     pull.add_argument("--status", default="solved",
                       help="Zendesk: which tickets to take (default solved).")
     pull.set_defaults(handler=cmd_train_pull)
+
+    outcomes = train_sub.add_parser(
+        "outcomes", help="Ask the helpdesk what actually happened, and record it as feedback"
+    )
+    outcomes.add_argument("source", choices=("zendesk",))
+    outcomes.add_argument("--subdomain", default=None, help="Zendesk: the bit before .zendesk.com")
+    outcomes.add_argument("--email", default=None, help="Zendesk: the account email for the token")
+    outcomes.add_argument("--days", type=int, default=7,
+                          help="How far back to look for answers to judge.")
+    outcomes.add_argument("--dry-run", action="store_true",
+                          help="Say what it would record, and record nothing.")
+    outcomes.set_defaults(handler=cmd_train_outcomes)
 
     schedule = train_sub.add_parser(
         "schedule", help="Run the nightly cycle automatically (launchd on macOS, systemd on Linux)"

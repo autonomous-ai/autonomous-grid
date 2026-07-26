@@ -341,6 +341,39 @@ def cmd_train_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train_outcomes(args: argparse.Namespace) -> int:
+    """Ask the system of record what happened to the answers we served, and write it down.
+
+    This is the station that makes the loop continuous without asking anyone to click anything: the
+    helpdesk already holds the reply that was actually sent and whether the ticket stayed solved.
+    """
+    from train.connectors import ConnectorError
+    from train.outcomes import join, refs_needed, zendesk_records
+
+    if args.source == "zendesk" and not (args.subdomain and args.email):
+        raise SystemExit("grid train: zendesk needs --subdomain and --email")
+
+    refs = refs_needed(args.source, days=args.days)
+    if not refs:
+        print("Nothing to join: no captured answer in that window carries a reference we trust.")
+        print("Have your app send `X-Grid-Ref: zendesk:<ticket id>` with each request, or make "
+              "sure the ticket number is in the text you send.")
+        return 0
+    try:
+        records = zendesk_records(args.subdomain, args.email, refs)
+    except ConnectorError as exc:
+        raise SystemExit(f"grid train: {exc}") from None
+
+    result = join(args.source, records, days=args.days, dry_run=args.dry_run)
+    print(result.summary())
+    if args.dry_run:
+        print("(dry run — nothing was recorded)")
+    elif result.written:
+        print("Those count as examples tonight: a reply a person rewrote is ground truth, one sent "
+              "as we wrote it is weaker, and one never sent is never imitated.")
+    return 0
+
+
 def cmd_train_schedule(args: argparse.Namespace) -> int:
     """Put the nightly cycle in this computer's own scheduler — or take it out.
 
