@@ -32,24 +32,24 @@
     </marker>
   </defs>
   <rect width="1580" height="730" fill="#fff"/>
-  <rect x="100" y="267" width="177" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="188" y="309" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The trainer</text>
-  <rect x="607" y="267" width="247" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="730" y="309" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The orchestrator</text>
-  <path d="M289 300 L593 300" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="442" y="274" text-anchor="middle" fill="#2b2b29" font-size="22">one task, several attempts</text>
-  <rect x="974" y="147" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1084" y="189" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">MacBook Pro</text>
-  <path d="M866 286 C930 286, 896 180, 960 180" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <rect x="974" y="267" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1084" y="309" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Mac Studio</text>
-  <path d="M866 300 L960 300" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <rect x="974" y="387" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1084" y="429" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">RTX box</text>
-  <path d="M866 314 C930 314, 896 420, 960 420" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <text x="1084" y="499" text-anchor="middle" fill="#2b2b29" font-size="22">placed on whichever machine is free</text>
-  <path d="M1206 420 L1322 420 L1322 604 L188 604 L188 347" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="636" y="648" text-anchor="middle" fill="#2b2b29" font-size="22">completions, and the token ids they sampled</text>
-  <path d="M188 255 L188 96 L1084 96 L1084 133" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <text x="636" y="62" text-anchor="middle" fill="#2b2b29" font-size="22">the adapter, straight to every machine, every two steps</text>
+  <rect x="100" y="267" width="193" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="196" y="309" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">The trainer</text>
+  <rect x="623" y="267" width="271" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="758" y="309" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">The orchestrator</text>
+  <path d="M305 300 L609 300" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="458" y="274" text-anchor="middle" fill="#2b2b29" font-size="24">one task, several attempts</text>
+  <rect x="1014" y="147" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1124" y="189" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>
+  <path d="M906 286 C970 286, 936 180, 1000 180" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="1014" y="267" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1124" y="309" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac Studio</text>
+  <path d="M906 300 L1000 300" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="1014" y="387" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1124" y="429" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX box</text>
+  <path d="M906 314 C970 314, 936 420, 1000 420" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="1124" y="499" text-anchor="middle" fill="#2b2b29" font-size="24">placed on whichever machine is free</text>
+  <path d="M1246 420 L1362 420 L1362 604 L196 604 L196 347" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="660" y="648" text-anchor="middle" fill="#2b2b29" font-size="24">completions, and the token ids they sampled</text>
+  <path d="M196 255 L196 96 L1124 96 L1124 133" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="660" y="62" text-anchor="middle" fill="#2b2b29" font-size="24">the adapter, straight to every machine, every two steps</text>
 </svg>

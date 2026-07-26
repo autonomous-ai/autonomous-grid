@@ -20,8 +20,8 @@ STROKE = 2
 RIM = 3           # the flywheel rim — heavier than an edge so a ring reads as one wheel
 CORE_FS = 35      # a station on the driving loop — the only text at this size
 SAT_FS = 21       # a station on a feeder loop, subordinate to the core by size and colour
-NODE_FS = 25      # node label
-LABEL_FS = 22     # edge label
+NODE_FS = 28      # node label
+LABEL_FS = 24     # edge label
 PAD = 22          # horizontal padding inside a box
 
 FONT = "Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif"
@@ -111,10 +111,16 @@ class Fig:
         return w
 
     def band(self, x1, x2, cy, label, kind="green"):
-        """A stretch of time. Same tokens as a node; the width carries the hours."""
+        """A stretch of time. Same tokens as a node; the width carries the hours.
+
+        `night` is the one filled block in the whole set, and it is not decoration:
+        the figure's subject IS day against night, so the contrast does work no
+        caption can. Nothing else may use it.
+        """
         fill, line, text = {
             "green": (GREEN_FILL, GREEN_LINE, GREEN_TEXT),
             "purple": (PURPLE_FILL, PURPLE_LINE, PURPLE_TEXT),
+            "night": (PURPLE_TEXT, PURPLE_TEXT, "#ffffff"),
         }[kind]
         self.parts.append(
             f'<rect x="{x1:.0f}" y="{cy - H / 2:.0f}" width="{x2 - x1:.0f}" height="{H}" '
@@ -123,6 +129,32 @@ class Fig:
             f'<text x="{(x1 + x2) / 2:.0f}" y="{cy + 9:.0f}" text-anchor="middle" fill="{text}" '
             f'font-size="{NODE_FS}" font-weight="600">{label}</text>')
         self._saw(x2, cy + H / 2)
+
+    def panel(self, x1, x2, cy, title, halves, h=176):
+        """One thing with two halves inside it.
+
+        The only container in the set, and it earns being one: the grid is a
+        single address, and serving and training are two jobs it does — drawing
+        them as three peers would say there are three things.
+        """
+        self.parts.append(
+            f'<rect x="{x1:.0f}" y="{cy - h / 2:.0f}" width="{x2 - x1:.0f}" height="{h}" '
+            f'fill="{PURPLE_FILL}" stroke="{PURPLE_LINE}" stroke-width="{BORDER}"/>')
+        self.parts.append(
+            f'<text x="{(x1 + x2) / 2:.0f}" y="{cy - h / 2 + 42:.0f}" text-anchor="middle" '
+            f'fill="{PURPLE_TEXT}" font-size="{NODE_FS}" font-weight="700">{title}</text>')
+        iw = max(box_w(t) for t in halves) + 96
+        gap = 44
+        left = (x1 + x2) / 2 - (len(halves) * iw + (len(halves) - 1) * gap) / 2
+        for i, t in enumerate(halves):
+            cx = left + iw / 2 + i * (iw + gap)
+            self.parts.append(
+                f'<rect x="{cx - iw / 2:.0f}" y="{cy + 6:.0f}" width="{iw:.0f}" height="{H}" '
+                f'fill="#fff" stroke="{PURPLE_LINE}" stroke-width="{BORDER}"/>')
+            self.parts.append(
+                f'<text x="{cx:.0f}" y="{cy + 6 + 42:.0f}" text-anchor="middle" '
+                f'fill="{PURPLE_TEXT}" font-size="{NODE_FS}" font-weight="600">{t}</text>')
+        self._saw(x2, cy + h / 2)
 
     def axis(self, x1, x2, y, ticks):
         """A time line with labelled ticks — hours, so the width means something."""
@@ -346,7 +378,11 @@ class Fig:
             self.parts.append(
                 f'<text x="{cx:.0f}" y="{cy + i * 28:.0f}" text-anchor="{anchor}" '
                 f'fill="{LABEL_TEXT}" font-size="{LABEL_FS}">{ln}</text>')
-            self._saw(cx + text_w(ln, LABEL_FS) / 2, cy + i * 28)
+            # measure where the text actually ends, which depends on the anchor —
+            # otherwise an end-anchored label inflates the page by half its width
+            w = text_w(ln, LABEL_FS)
+            self._saw(cx + (0 if anchor == "end" else w if anchor == "start" else w / 2),
+                      cy + i * 28)
 
     # ---- output -------------------------------------------------------
     def svg(self):

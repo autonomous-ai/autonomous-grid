@@ -133,24 +133,22 @@ f.label((tcx + mcx) / 2, 62, "the adapter, straight to every machine, every two 
 f.write(f"{OUT}/fig-fleet.svg")
 
 # ----------------------------------------------------------- fig-day-night
-# One job only: show that the same machines run two shifts. The gate, the climb
-# and what gets served are explained by the other figures — not again here.
-f = Fig(1600, 400)
+# One job only: the same machines run two shifts. Day is pale and night is filled
+# — the only solid block in the set, because here the contrast IS the subject and
+# it says what two captions used to. "day shift"/"night shift" came out with it.
+f = Fig(1600, 430)
 X0, X1 = 100, 1500
 PER_HOUR = (X1 - X0) / 24
 at = lambda hour: X0 + ((hour - 9) % 24) * PER_HOUR   # the day starts at 09:00
-band_y = 140
-f.band(X0, at(17) - 6, band_y, "Serving")
-f.band(at(17) + 6, X1, band_y, "Training", kind="purple")
-f.label((X0 + at(17)) / 2, band_y - 56, "day shift")
-f.label((at(17) + X1) / 2, band_y - 56, "night shift")
-f.label((X0 + at(17)) / 2, band_y + 74, "people work, every answer kept")
-f.label((at(17) + X1) / 2, band_y + 74, "idle machines, the model gets better")
-f.label((X0 + at(17)) / 2, band_y + 106, "8 hours")
-f.label((at(17) + X1) / 2, band_y + 106, "16 hours")
-f.axis(X0, X1, 300, [(X0, "09:00"), (at(17), "17:00"), (at(0), "00:00"), (X1, "09:00")])
-f.arrow(X1, 390, X0, 390, dashed=True)
-f.label((X0 + X1) / 2, 428, "and again tomorrow, on a better model")
+band_y = 132
+f.band(X0, at(17) - 6, band_y, "Inference")
+f.band(at(17) + 6, X1, band_y, "Training", kind="night")
+f.label((X0 + X1) / 2, band_y - 60, "the same machines, two shifts")
+f.label((X0 + at(17)) / 2, band_y + 76, "8 hours · people work, every answer kept")
+f.label((at(17) + X1) / 2, band_y + 76, "16 hours · idle machines, the model gets better")
+f.axis(X0, X1, 268, [(X0, "09:00"), (at(17), "17:00"), (at(0), "00:00"), (X1, "09:00")])
+f.arrow(X1, 356, X0, 356, dashed=True)
+f.label((X0 + X1) / 2, 394, "and again tomorrow, on a better model")
 f.write(f"{OUT}/fig-day-night.svg")
 
 # --------------------------------------------------------------- fig-earns
@@ -183,7 +181,7 @@ f.write(f"{OUT}/fig-earns.svg")
 # is the story — tasks in, adapter out, gate decides. The fleet sits underneath
 # the trainer because it is not a stage in that line, it is what the trainer
 # reaches for and gets answers back from.
-f = Fig(1700, 830)
+f = Fig(1700, 880)
 y = 250
 ww = box_w("Your tasks") - 8
 wcx = M + ww / 2
@@ -195,13 +193,13 @@ f.box(tcx, y, "The trainer", kind="purple", w=tw2)
 f.arrow(wcx + ww / 2 + 12, y, tcx - tw2 / 2 - 14, y)
 
 gw = box_w("The gate")
-gcx = tcx + tw2 / 2 + 300 + gw / 2
+gcx = tcx + tw2 / 2 + 430 + gw / 2
 f.box(gcx, y, "The gate", kind="purple", w=gw)
 f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
 f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 26, "an adapter")
 
 ow = box_w("Served") - 8
-ocx = gcx + gw / 2 + GAP + ow / 2
+ocx = gcx + gw / 2 + 190 + ow / 2
 f.term(ocx, y - 110, "Served", w=ow)
 f.term(ocx, y + 110, "Binned", w=ow)
 f.arrow(gcx + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 110, curve=60)
@@ -215,13 +213,18 @@ f.label(gcx + gw / 2 + 70, y + 162, "not better")
 ocw = box_w("The orchestrator")
 oy = 470
 f.box(tcx, oy, "The orchestrator", kind="purple", w=ocw)
-MW = 236
-my = 700
+MW = 270
+my = 720
 # Set close enough to touch: three boxes in a contiguous strip read as one fleet,
 # so one pair of arrows can address the group. Fanning to each of them meant six
 # lines that crossed, to say a thing the row already says.
-for bx, name in zip((tcx - 250, tcx, tcx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
-    f.box(bx, my, name, w=MW)
+# Five, spread the full width: the fleet is the point of the page and a huddle of
+# three under the trainer left half the frame empty saying nothing.
+FLEET = ("MacBook Pro", "Mac Studio", "Mac mini", "RTX 3090", "RTX 5090")
+fspan = len(FLEET) * MW + (len(FLEET) - 1) * 26
+fx0 = (1700 - fspan) / 2
+for i, name in enumerate(FLEET):
+    f.box(fx0 + MW / 2 + i * (MW + 26), my, name, w=MW)
 
 # Both directions live in the gap between the trainer and the orchestrator,
 # stacked directly above one another. The trainer never speaks to a machine: it
@@ -231,12 +234,12 @@ f.label(tcx - 96, 352, "a task,", "several attempts", anchor="end")
 f.arrow(tcx + 64, oy - H / 2 - 14, tcx + 64, y + H / 2 + 12)
 f.label(tcx + 96, 340, "the attempts, and", "the token ids they sampled", anchor="start")
 
-for bx in (tcx - 250, tcx, tcx + 250):
+for i in range(len(FLEET)):
+    bx = fx0 + MW / 2 + i * (MW + 26)
     f.arrow(tcx, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True,
-            curve=0 if bx == tcx else 74)
-f.label(tcx + 330, my - 84, "placed on whichever", "machine is free", anchor="start")
+            curve=0 if abs(bx - tcx) < 40 else 82)
+f.label(1700 - M, my + H / 2 + 56, "placed on whichever machine is free", anchor="end")
 f.write(f"{OUT}/train-architecture.svg")
-f.write(f"{OUT}/fig-training.svg")
 
 # -------------------------------------------------------------- fig-flywheel
 # Amazon's flywheel, station for station. Two loops, because theirs is two, and
@@ -322,15 +325,15 @@ f.write(f"{OUT}/fig-flywheel.svg")
 # as one system: one line across the top, the fleet underneath the thing that
 # places work on it. Simpler than training because there is no gate and no
 # adapter — a request goes out, an answer comes back.
-f = Fig(1220, 540)
-y = 200
+f = Fig(1350, 470)
+y = 152
 aw3 = box_w("Your apps") - 8
 acx = M + aw3 / 2
 f.term(acx, y, "Your apps", w=aw3)
 f.label(acx, y + 66, "OpenClaw · Hermes", "your own code")
 
 ocw2 = box_w("The orchestrator")
-occx = acx + aw3 / 2 + 300 + ocw2 / 2
+occx = acx + aw3 / 2 + 460 + ocw2 / 2
 f.box(occx, y, "The orchestrator", kind="purple", w=ocw2)
 f.arrow(acx + aw3 / 2 + 12, y - 18, occx - ocw2 / 2 - 14, y - 18)
 f.label((acx + aw3 / 2 + occx - ocw2 / 2) / 2, y - 40, "one OpenAI-compatible endpoint")
@@ -338,15 +341,48 @@ f.arrow(occx - ocw2 / 2 - 14, y + 18, acx + aw3 / 2 + 12, y + 18)
 f.label((acx + aw3 / 2 + occx - ocw2 / 2) / 2, y + 58, "the answer")
 
 MW2 = 236
-my2 = 450
+my2 = 372
 for bx, name in zip((occx - 250, occx, occx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
     f.box(bx, my2, name, w=MW2)
 f.arrow(occx - 64, y + H / 2 + 12, occx - 64, my2 - H / 2 - 14)
 f.arrow(occx + 64, my2 - H / 2 - 14, occx + 64, y + H / 2 + 12)
-f.label(occx - 96, 322, "whichever computer", "serves that model", anchor="end")
+f.label(occx - 96, 262, "whichever computer", "serves that model", anchor="end")
 f.write(f"{OUT}/fig-inference.svg")
 
-print("wrote eight figures")
+# ---------------------------------------------------------------- home-grid
+# The front-page picture: what talks to the grid, what the grid is, and what it
+# runs on. The grid is one box with two halves rather than two boxes, because it
+# is one address — serving and training are jobs it does, not peers of it.
+f = Fig(1660, 790)
+APPS = ["Grid Desktop", "OpenClaw", "Hermes", "Your own app"]
+aw4 = max(box_w(a) for a in APPS) - 8
+span = len(APPS) * aw4 + (len(APPS) - 1) * 56
+ax0 = (1660 - span) / 2
+app_y = 96
+app_x = []
+for i, a in enumerate(APPS):
+    cx = ax0 + aw4 / 2 + i * (aw4 + 56)
+    f.term(cx, app_y, a, w=aw4)
+    app_x.append(cx)
+
+gy = 344
+f.panel(M, 1660 - M, gy, "Your grid", ["Inference", "Training"])
+for cx in app_x:
+    f.arrow(cx, gy - 176 / 2 - 12, cx, app_y + H / 2 + 14)
+
+MACH = ["Mac Studio", "Mac mini", "RTX 3090", "MacBook Pro", "RTX 5090"]
+mw = max(box_w(m) for m in MACH)
+mspan = len(MACH) * mw + (len(MACH) - 1) * 30
+mx0 = (1660 - mspan) / 2
+mach_y = 624
+for i, m in enumerate(MACH):
+    cx = mx0 + mw / 2 + i * (mw + 30)
+    f.box(cx, mach_y, m, w=mw)
+    f.arrow(cx, mach_y - H / 2 - 12, cx, gy + 176 / 2 + 14)
+f.label(1660 / 2, mach_y + 78, "MLX · Ollama · vLLM · LM Studio · ComfyUI — the engines you already run")
+f.write(f"{OUT}/home-grid.svg")
+
+print("wrote nine figures")
 # NOTE: this writes SVGs only. The README embeds the PNGs beside them, and nothing
 # here regenerates those — a redrawn figure keeps showing the old picture on the
 # page, with nothing failing. Converting on mtime does not work, because every run

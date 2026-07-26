@@ -11,14 +11,14 @@
 
 [**Quickstart**](#quickstart) · [Inference](#inference) · [Training](#training) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
-<img src="docs/home-grid.png" alt="Your Home Grid sits above your computers — OpenClaw, Hermes, and your own apps call one endpoint; Grid routes each request to whichever computer serves the model" width="860">
+<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one grid. The grid is a single box with two halves inside it — inference and training. Underneath, the computers you already own — a Mac Studio, a Mac mini, an RTX 3090, a MacBook Pro, an RTX 5090 — join it, running MLX, Ollama, vLLM, LM Studio and ComfyUI." width="860">
 
 </div>
 
 Grid pools the computers you already have — your Mac, your NVIDIA desktop, the workstation in the
 corner — behind **one OpenAI-compatible endpoint**, and does two things with them.
 
-**Serving.** Each request routes to whichever computer runs the right model. The inference servers
+**Inference.** Each request routes to whichever computer runs the right model. The inference servers
 you already run — Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI — stay exactly where they are.
 Grid only ties them together.
 
@@ -263,7 +263,7 @@ your repos, your deals — on the same machines, where the data, the attempts an
 leave your network.
 
 <p align="center">
-<img src="docs/fig-training.png" width="880" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator places each task on whichever of a MacBook Pro, Mac Studio or RTX box is free, and the attempts come back with the token ids they sampled.">
+<img src="docs/train-architecture.png" width="880" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator places each task on whichever of a MacBook Pro, Mac Studio or RTX box is free, and the attempts come back with the token ids they sampled.">
 </p>
 
 Why bother, when the models you can rent are so good? Because they know nothing about you, and

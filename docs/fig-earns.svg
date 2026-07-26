@@ -32,22 +32,22 @@
     </marker>
   </defs>
   <rect width="900" height="508" fill="#fff"/>
-  <rect x="100" y="217" width="184" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="192" y="259" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">One answer</text>
-  <rect x="484" y="52" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="614" y="94" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">You rewrote it</text>
-  <path d="M296 250 C406 250, 360 85, 470 85" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="438" y="93" text-anchor="end" fill="#2b2b29" font-size="22">1.0</text>
-  <rect x="484" y="162" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="614" y="204" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">A stronger model</text>
-  <path d="M296 250 C406 250, 360 195, 470 195" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="438" y="203" text-anchor="end" fill="#2b2b29" font-size="22">0.8</text>
-  <rect x="484" y="272" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="614" y="314" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">You sent it as-is</text>
-  <path d="M296 250 C406 250, 360 305, 470 305" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="438" y="313" text-anchor="end" fill="#2b2b29" font-size="22">0.6</text>
-  <rect x="484" y="382" width="260" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="614" y="424" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">You binned it</text>
-  <path d="M296 250 C406 250, 360 415, 470 415" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <text x="438" y="423" text-anchor="end" fill="#2b2b29" font-size="22">never imitated</text>
+  <rect x="100" y="217" width="202" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="201" y="259" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">One answer</text>
+  <rect x="502" y="52" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="632" y="94" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">You rewrote it</text>
+  <path d="M314 250 C424 250, 378 85, 488 85" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="456" y="93" text-anchor="end" fill="#2b2b29" font-size="24">1.0</text>
+  <rect x="502" y="162" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="632" y="204" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">A stronger model</text>
+  <path d="M314 250 C424 250, 378 195, 488 195" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="456" y="203" text-anchor="end" fill="#2b2b29" font-size="24">0.8</text>
+  <rect x="502" y="272" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="632" y="314" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">You sent it as-is</text>
+  <path d="M314 250 C424 250, 378 305, 488 305" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="456" y="313" text-anchor="end" fill="#2b2b29" font-size="24">0.6</text>
+  <rect x="502" y="382" width="260" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="632" y="424" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">You binned it</text>
+  <path d="M314 250 C424 250, 378 415, 488 415" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="456" y="423" text-anchor="end" fill="#2b2b29" font-size="24">never imitated</text>
 </svg>

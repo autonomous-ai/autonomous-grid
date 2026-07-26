@@ -23,6 +23,7 @@ tinted paper with ink on it, never as a block of colour.
 | | value | used for |
 |---|---|---|
 | **arrow** | `#a1a099` | every line and arrowhead. A warm grey, never black |
+| **night** | `#5d579d` filled, white text | the one solid block in the set — see below |
 | **text** | `#2b2b29` | edge labels and anything not inside a shape |
 | **page** | `#ffffff` | the background, always, on every figure |
 
@@ -30,6 +31,10 @@ tinted paper with ink on it, never as a block of colour.
 guess what a green box is in the third. Never introduce a fourth hue to distinguish two things that
 the existing three already separate; if two things need separating and share a family, separate them
 by shape or position instead.
+
+**One filled block exists, and only one.** The day/night figure fills its night band, because there
+the contrast *is* the subject — it does work no caption can, and it replaced two. Nothing else may
+fill. A block of colour anywhere else is decoration.
 
 **Arrows are grey, not black.** This is the single easiest rule to break and the one that costs the
 most. Black lines pull ahead of the shapes and the figure starts to read as a diagram of arrows.
@@ -43,8 +48,8 @@ Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif
 
 | role | size | weight |
 |---|---|---|
-| node label, inside a shape | 25 | 600 |
-| edge label, on or beside a line | 22 | 400 |
+| node label, inside a shape | 28 | 600 |
+| edge label, on or beside a line | 24 | 400 |
 | flywheel station | 35 | 700 |
 | flywheel feeder station | 21 | 700 |
 
@@ -60,6 +65,13 @@ room for it. A node whose text has to wrap is a node that is doing two jobs.
 | **stadium**, fully rounded ends | a terminal — what enters the system or leaves it |
 | **band**, a box stretched along an axis | a span of time; its width means hours |
 | **bare text**, no shape at all | a station on a flywheel |
+| **deck**, a box with copies offset behind it | several of the same thing, count unstated |
+| **panel**, a wide container holding boxes | one thing with two halves — the only container in the set |
+
+A deck says *several* without saying how many. Drawing N labelled copies asserts a number, and the
+number is usually a knob rather than a fact — what matters is that there is more than one and they
+are peers. A panel earns being the one container because the grid is a single address: serving and
+training are jobs it does, and three peer boxes would say there are three things.
 
 Every box, stadium and band is **66px tall** with a **2px** border. One height for everything is
 what makes a row of unlike things read as one row.

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 488" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 454" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -31,26 +31,23 @@
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="1600" height="488" fill="#fff"/>
-  <rect x="100" y="107" width="461" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="330" y="149" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Serving</text>
-  <rect x="573" y="107" width="927" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1036" y="149" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">Training</text>
-  <text x="333" y="84" text-anchor="middle" fill="#2b2b29" font-size="22">day shift</text>
-  <text x="1033" y="84" text-anchor="middle" fill="#2b2b29" font-size="22">night shift</text>
-  <text x="333" y="214" text-anchor="middle" fill="#2b2b29" font-size="22">people work, every answer kept</text>
-  <text x="1033" y="214" text-anchor="middle" fill="#2b2b29" font-size="22">idle machines, the model gets better</text>
-  <text x="333" y="246" text-anchor="middle" fill="#2b2b29" font-size="22">8 hours</text>
-  <text x="1033" y="246" text-anchor="middle" fill="#2b2b29" font-size="22">16 hours</text>
-  <path d="M100 300 H1500" fill="none" stroke="#a1a099" stroke-width="1.6"/>
-  <path d="M100 294 V307" stroke="#a1a099" stroke-width="1.6"/>
-  <text x="100" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">09:00</text>
-  <path d="M567 294 V307" stroke="#a1a099" stroke-width="1.6"/>
-  <text x="567" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">17:00</text>
-  <path d="M975 294 V307" stroke="#a1a099" stroke-width="1.6"/>
-  <text x="975" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">00:00</text>
-  <path d="M1500 294 V307" stroke="#a1a099" stroke-width="1.6"/>
-  <text x="1500" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">09:00</text>
-  <path d="M1500 390 L100 390" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <text x="800" y="428" text-anchor="middle" fill="#2b2b29" font-size="22">and again tomorrow, on a better model</text>
+  <rect width="1600" height="454" fill="#fff"/>
+  <rect x="100" y="99" width="461" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="330" y="141" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Inference</text>
+  <rect x="573" y="99" width="927" height="66" fill="#5d579d" stroke="#5d579d" stroke-width="2"/>
+  <text x="1036" y="141" text-anchor="middle" fill="#ffffff" font-size="28" font-weight="600">Training</text>
+  <text x="800" y="72" text-anchor="middle" fill="#2b2b29" font-size="24">the same machines, two shifts</text>
+  <text x="333" y="208" text-anchor="middle" fill="#2b2b29" font-size="24">8 hours · people work, every answer kept</text>
+  <text x="1033" y="208" text-anchor="middle" fill="#2b2b29" font-size="24">16 hours · idle machines, the model gets better</text>
+  <path d="M100 268 H1500" fill="none" stroke="#a1a099" stroke-width="1.6"/>
+  <path d="M100 262 V275" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="100" y="302" text-anchor="middle" fill="#2b2b29" font-size="24">09:00</text>
+  <path d="M567 262 V275" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="567" y="302" text-anchor="middle" fill="#2b2b29" font-size="24">17:00</text>
+  <path d="M975 262 V275" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="975" y="302" text-anchor="middle" fill="#2b2b29" font-size="24">00:00</text>
+  <path d="M1500 262 V275" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="1500" y="302" text-anchor="middle" fill="#2b2b29" font-size="24">09:00</text>
+  <path d="M1500 356 L100 356" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="800" y="394" text-anchor="middle" fill="#2b2b29" font-size="24">and again tomorrow, on a better model</text>
 </svg>

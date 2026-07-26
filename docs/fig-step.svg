@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1742 400" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1828 400" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -31,28 +31,28 @@
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="1742" height="400" fill="#fff"/>
-  <rect x="100" y="157" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="172" y="199" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">One task</text>
-  <rect x="383" y="139" width="256" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <rect x="374" y="148" width="256" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <rect x="365" y="157" width="256" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="493" y="199" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Several attempts</text>
-  <rect x="852" y="157" width="216" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="960" y="199" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">Their average</text>
-  <path d="M257 190 L351 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M653 190 L838 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="736" y="166" text-anchor="middle" fill="#2b2b29" font-size="22">scored against</text>
-  <rect x="1188" y="57" width="190" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1283" y="99" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Likelier</text>
-  <rect x="1188" y="257" width="190" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1283" y="299" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Less likely</text>
-  <path d="M1080 176 C1150 176, 1104 90, 1174 90" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M1080 204 C1150 204, 1104 290, 1174 290" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="1120" y="64" text-anchor="middle" fill="#2b2b29" font-size="22">above it</text>
-  <text x="1120" y="330" text-anchor="middle" fill="#2b2b29" font-size="22">below it</text>
-  <rect x="1498" y="157" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1570" y="199" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">One step</text>
-  <path d="M1390 90 C1460 90, 1414 176, 1484 176" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M1390 290 C1460 290, 1414 204, 1484 204" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect width="1828" height="400" fill="#fff"/>
+  <rect x="100" y="157" width="158" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="179" y="199" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">One task</text>
+  <rect x="396" y="139" width="281" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="387" y="148" width="281" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="378" y="157" width="281" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="518" y="199" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Several attempts</text>
+  <rect x="905" y="157" width="236" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1023" y="199" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">Their average</text>
+  <path d="M270 190 L364 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M691 190 L891 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="782" y="166" text-anchor="middle" fill="#2b2b29" font-size="24">scored against</text>
+  <rect x="1261" y="57" width="190" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1356" y="99" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Likelier</text>
+  <rect x="1261" y="257" width="190" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1356" y="299" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Less likely</text>
+  <path d="M1153 176 C1223 176, 1177 90, 1247 90" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1153 204 C1223 204, 1177 290, 1247 290" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1193" y="64" text-anchor="middle" fill="#2b2b29" font-size="24">above it</text>
+  <text x="1193" y="330" text-anchor="middle" fill="#2b2b29" font-size="24">below it</text>
+  <rect x="1571" y="157" width="158" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1650" y="199" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">One step</text>
+  <path d="M1463 90 C1533 90, 1487 176, 1557 176" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1463 290 C1533 290, 1487 204, 1557 204" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
 </svg>
