@@ -75,6 +75,32 @@ class Fig:
         self._saw(cx + w / 2, cy + H / 2)
         return w
 
+    def band(self, x1, x2, cy, label, kind="green"):
+        """A stretch of time. Same tokens as a node; the width carries the hours."""
+        fill, line, text = {
+            "green": (GREEN_FILL, GREEN_LINE, GREEN_TEXT),
+            "purple": (PURPLE_FILL, PURPLE_LINE, PURPLE_TEXT),
+        }[kind]
+        self.parts.append(
+            f'<rect x="{x1:.0f}" y="{cy - H / 2:.0f}" width="{x2 - x1:.0f}" height="{H}" '
+            f'fill="{fill}" stroke="{line}" stroke-width="{BORDER}"/>')
+        self.parts.append(
+            f'<text x="{(x1 + x2) / 2:.0f}" y="{cy + 9:.0f}" text-anchor="middle" fill="{text}" '
+            f'font-size="{NODE_FS}" font-weight="600">{label}</text>')
+        self._saw(x2, cy + H / 2)
+
+    def axis(self, x1, x2, y, ticks):
+        """A time line with labelled ticks — hours, so the width means something."""
+        self.parts.append(
+            f'<path d="M{x1:.0f} {y} H{x2:.0f}" fill="none" stroke="{ARROW}" stroke-width="1.6"/>')
+        for tx, tl in ticks:
+            self.parts.append(
+                f'<path d="M{tx:.0f} {y - 6} V{y + 7}" stroke="{ARROW}" stroke-width="1.6"/>')
+            self.parts.append(
+                f'<text x="{tx:.0f}" y="{y + 34}" text-anchor="middle" fill="{LABEL_TEXT}" '
+                f'font-size="{LABEL_FS}">{tl}</text>')
+        self._saw(x2, y + 34)
+
     # ---- edges --------------------------------------------------------
     def arrow(self, x1, y1, x2, y2, dashed=False, curve=0):
         d = (f"M{x1:.0f} {y1:.0f} C{x1 + curve:.0f} {y1:.0f}, {x2 - curve:.0f} {y2:.0f}, "
@@ -93,6 +119,46 @@ class Fig:
             f'marker-end="url(#h)"/>')
         for x, y in pts:
             self._saw(x, y)
+
+    def ring(self, cx, cy, r, stations):
+        """A flywheel: nodes on a circle, arcs between them, clockwise from the top.
+
+        Each arc starts and ends clear of the box it touches, worked out from that
+        box's own width, so a wide station never has an arrow running under it.
+        """
+        import math
+        n = len(stations)
+        placed = []
+        for k, (label, kind, *rest) in enumerate(stations):
+            w = rest[0] if rest else box_w(label)
+            th = math.radians(-90 + k * (360 / n))
+            x, y = cx + r * math.cos(th), cy + r * math.sin(th)
+            (self.box if kind in ("green", "purple") else self.term)(
+                x, y, label, **({"kind": kind} if kind in ("green", "purple") else {}), w=w)
+            placed.append((x, y, w, -90 + k * (360 / n)))
+        # Arcs ride the same circle the boxes sit on and run between them, which is
+        # how the reference flywheels read as wheels. That only works if the circle
+        # is wide relative to the boxes — keep labels to two or three words.
+        for k in range(n):
+            _, _, w1, a1 = placed[k]
+            _, _, w2, a2 = placed[(k + 1) % n]
+            g1 = math.degrees(math.atan((w1 / 2 + 30) / r))
+            g2 = math.degrees(math.atan((w2 / 2 + 40) / r))
+            ra = r
+            s1, s2 = math.radians(a1 + g1), math.radians(a2 - g2)
+            p1 = (cx + ra * math.cos(s1), cy + ra * math.sin(s1))
+            p2 = (cx + ra * math.cos(s2), cy + ra * math.sin(s2))
+            self.parts.append(
+                f'<path d="M{p1[0]:.0f} {p1[1]:.0f} A{ra:.0f} {ra:.0f} 0 0 1 {p2[0]:.0f} {p2[1]:.0f}" '
+                f'fill="none" stroke="{ARROW}" stroke-width="{STROKE}" marker-end="url(#h)"/>')
+            self._saw(cx + ra, cy + ra)
+        return placed
+
+    def hub(self, cx, cy, *lines):
+        for i, ln in enumerate(lines):
+            self.parts.append(
+                f'<text x="{cx:.0f}" y="{cy + i * 34:.0f}" text-anchor="middle" '
+                f'fill="{LABEL_TEXT}" font-size="24">{ln}</text>')
 
     def label(self, cx, cy, *lines, anchor="middle"):
         for i, ln in enumerate(lines):

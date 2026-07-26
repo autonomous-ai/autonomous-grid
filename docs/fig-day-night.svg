@@ -1,32 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1884 474" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 488" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="1884" height="474" fill="#fff"/>
-  <rect x="100" y="167" width="200" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="200" y="209" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">The workday</text>
-  <rect x="420" y="167" width="278" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="559" y="209" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Every answer kept</text>
-  <rect x="1025" y="167" width="170" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1110" y="209" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">The climb</text>
-  <rect x="1329" y="167" width="153" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1406" y="209" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The gate</text>
-  <path d="M312 200 L406 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <path d="M710 200 L1011 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <text x="861" y="148" text-anchor="middle" fill="#2b2b29" font-size="22">what happened,</text>
-  <text x="861" y="176" text-anchor="middle" fill="#2b2b29" font-size="22">attached in the evening</text>
-  <path d="M1207 200 L1315 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <text x="1262" y="176" text-anchor="middle" fill="#2b2b29" font-size="22">23:00</text>
-  <rect x="1602" y="67" width="122" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1663" y="109" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Served</text>
-  <rect x="1602" y="267" width="122" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1663" y="309" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Binned</text>
-  <path d="M1494 186 C1554 186, 1528 100, 1588 100" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <path d="M1494 214 C1554 214, 1528 300, 1588 300" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <text x="1548" y="82" text-anchor="middle" fill="#2b2b29" font-size="22">better</text>
-  <text x="1556" y="352" text-anchor="middle" fill="#2b2b29" font-size="22">not better</text>
-  <path d="M1732 100 L1784 100 L1784 380 L200 380 L200 247" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <text x="760" y="414" text-anchor="middle" fill="#2b2b29" font-size="22">tomorrow, on a better model</text>
+  <rect width="1600" height="488" fill="#fff"/>
+  <rect x="100" y="107" width="461" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="330" y="149" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Serving</text>
+  <rect x="573" y="107" width="927" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1036" y="149" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">Training</text>
+  <text x="333" y="84" text-anchor="middle" fill="#2b2b29" font-size="22">day shift</text>
+  <text x="1033" y="84" text-anchor="middle" fill="#2b2b29" font-size="22">night shift</text>
+  <text x="333" y="214" text-anchor="middle" fill="#2b2b29" font-size="22">people work, every answer kept</text>
+  <text x="1033" y="214" text-anchor="middle" fill="#2b2b29" font-size="22">idle machines, the model gets better</text>
+  <text x="333" y="246" text-anchor="middle" fill="#2b2b29" font-size="22">8 hours</text>
+  <text x="1033" y="246" text-anchor="middle" fill="#2b2b29" font-size="22">16 hours</text>
+  <path d="M100 300 H1500" fill="none" stroke="#a1a099" stroke-width="1.6"/>
+  <path d="M100 294 V307" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="100" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">09:00</text>
+  <path d="M567 294 V307" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="567" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">17:00</text>
+  <path d="M975 294 V307" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="975" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">00:00</text>
+  <path d="M1500 294 V307" stroke="#a1a099" stroke-width="1.6"/>
+  <text x="1500" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">09:00</text>
+  <path d="M1500 390 L100 390" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
+  <text x="800" y="428" text-anchor="middle" fill="#2b2b29" font-size="22">and again tomorrow, on a better model</text>
 </svg>

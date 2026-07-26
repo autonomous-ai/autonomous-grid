@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1460 1260" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1460" height="1260" fill="#fff"/>
+  <rect x="630" y="97" width="200" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="139" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">More people</text>
+  <rect x="1043" y="347" width="240" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1163" y="389" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">More machines</text>
+  <rect x="1073" y="847" width="180" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1163" y="889" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Idle hours</text>
+  <rect x="625" y="1097" width="210" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="1139" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">More training</text>
+  <rect x="185" y="847" width="224" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="297" y="889" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">A better model</text>
+  <rect x="189" y="347" width="215" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="297" y="389" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Answers kept</text>
+  <path d="M856 146 A500 500 0 0 1 1066 260" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M1217 515 A500 500 0 0 1 1212 763" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M1093 974 A500 500 0 0 1 869 1110" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M600 1113 A500 500 0 0 1 388 995" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M245 752 A500 500 0 0 1 244 513" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M379 274 A500 500 0 0 1 595 149" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <text x="730" y="584" text-anchor="middle" fill="#2b2b29" font-size="24">the models you own,</text>
+  <text x="730" y="618" text-anchor="middle" fill="#2b2b29" font-size="24">better every night</text>
+  <path d="M340 408 L660 1100" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
+  <text x="548" y="806" text-anchor="start" fill="#2b2b29" font-size="22">judged work,</text>
+  <text x="548" y="834" text-anchor="start" fill="#2b2b29" font-size="22">no new hardware</text>
+  <rect x="50" y="33" width="356" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="228" y="75" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">More systems connected</text>
+  <path d="M418 86 C488 86, 544 116, 614 116" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+</svg>

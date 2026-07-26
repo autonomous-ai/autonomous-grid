@@ -106,24 +106,24 @@ f.label((grid + tcx) / 2, 444, "back to the machines, every two steps")
 f.write(f"{OUT}/fig-fleet.svg")
 
 # ----------------------------------------------------------- fig-day-night
-f = Fig(1700, 440)
-y = 200
-(day, dw), (kept, kw), (climb, cw), (gate, gw) = chain(
-    f, y, [("term", "The workday"), ("green", "Every answer kept"),
-           ("green", "The climb"), ("purple", "The gate")],
-    edges=[None, ("what happened,", "attached in the evening"), "23:00"])
-ow = box_w("Served") - 8
-ocx = gate + gw / 2 + GAP + ow / 2
-f.term(ocx, y - 100, "Served", w=ow)
-f.term(ocx, y + 100, "Binned", w=ow)
-f.arrow(gate + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 100, curve=60)
-f.arrow(gate + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 100, dashed=True, curve=60)
-f.label(gate + gw / 2 + 66, y - 118, "better")
-f.label(gate + gw / 2 + 74, y + 152, "not better")
-turn = ocx + ow / 2 + 60          # clear of the pill, or the line runs through it
-f.elbow([(ocx + ow / 2 + 8, y - 100), (turn, y - 100), (turn, 380), (day, 380),
-         (day, y + H / 2 + 14)], dashed=True)
-f.label(760, 414, "tomorrow, on a better model")
+# One job only: show that the same machines run two shifts. The gate, the climb
+# and what gets served are explained by the other figures — not again here.
+f = Fig(1600, 400)
+X0, X1 = 100, 1500
+PER_HOUR = (X1 - X0) / 24
+at = lambda hour: X0 + ((hour - 9) % 24) * PER_HOUR   # the day starts at 09:00
+band_y = 140
+f.band(X0, at(17) - 6, band_y, "Serving")
+f.band(at(17) + 6, X1, band_y, "Training", kind="purple")
+f.label((X0 + at(17)) / 2, band_y - 56, "day shift")
+f.label((at(17) + X1) / 2, band_y - 56, "night shift")
+f.label((X0 + at(17)) / 2, band_y + 74, "people work, every answer kept")
+f.label((at(17) + X1) / 2, band_y + 74, "idle machines, the model gets better")
+f.label((X0 + at(17)) / 2, band_y + 106, "8 hours")
+f.label((at(17) + X1) / 2, band_y + 106, "16 hours")
+f.axis(X0, X1, 300, [(X0, "09:00"), (at(17), "17:00"), (at(0), "00:00"), (X1, "09:00")])
+f.arrow(X1, 390, X0, 390, dashed=True)
+f.label((X0 + X1) / 2, 428, "and again tomorrow, on a better model")
 f.write(f"{OUT}/fig-day-night.svg")
 
 # --------------------------------------------------------------- fig-earns
@@ -170,4 +170,34 @@ f.elbow([(train, y + H / 2 + 12), (train, 350), (mach, 350), (mach, y + H / 2 + 
 f.label((mach + train) / 2, 390, "the new adapter, every two steps")
 f.write(f"{OUT}/train-architecture.svg")
 
-print("wrote six figures")
+# -------------------------------------------------------------- fig-flywheel
+# Two loops, not one. The ring is the loop nobody else has: everyone who uses it
+# brings a machine, so headcount is capacity. The chord across the middle is the
+# faster loop — judged work needs no new hardware at all.
+f = Fig(1460, 1260)
+CX, CY, R = 730, 630, 500
+f.ring(CX, CY, R, [
+    ("More people", "green", 200),
+    ("More machines", "green", 240),
+    ("Idle hours", "green", 180),
+    ("More training", "green", 210),
+    ("A better model", "purple", 224),
+    ("Answers kept", "green", 215),
+])
+f.hub(CX, CY - 46, "the models you own,")
+f.hub(CX, CY - 12, "better every night")
+
+# the data loop: judged work goes straight back to training, skipping the whole
+# hardware arc
+f.arrow(340, 408, 660, 1100, dashed=True)
+f.label(548, 806, "judged work,", anchor="start")
+f.label(548, 834, "no new hardware", anchor="start")
+
+# connectors reach more of the real work, which is what brings the next team in
+cw = box_w("More systems connected") - 8
+f.term(50 + cw / 2, 66, "More systems connected", w=cw)
+f.arrow(50 + cw + 12, 86, CX - 100 - 16, 116, curve=70)
+
+f.write(f"{OUT}/fig-flywheel.svg")
+
+print("wrote seven figures")

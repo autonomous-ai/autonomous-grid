@@ -39,9 +39,9 @@ The full standard is `autonomous-org/knowledge/diagram-style.md`. The short vers
 
 ## The exception
 
-`fig-sutton.svg` is deliberately **not** in this style. It reproduces Figure 3.1 of Sutton &
-Barto, so it keeps the book's own register and carries an attribution line. Our version of the
-same loop sits directly beneath it in house style — the contrast is the point.
+`fig-sutton.png` is deliberately **not** in this style, and is not ours to restyle: it is
+Figure 3.1 of Sutton & Barto, used as published with an attribution line. Our version of the same
+loop sits directly beneath it in house style — the contrast is the point. There is no SVG for it.
 
 `home-grid.svg` predates the standard and still uses the older panel style with product logos
 baked in (see `build_diagram.py`, which inlines them). Not yet converted.

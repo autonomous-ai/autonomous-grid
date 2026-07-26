@@ -22,7 +22,7 @@ with a new *state* and a *reward*, and the agent adjusts. A control loop with a 
 <p align="center">
 <img src="../docs/fig-sutton.png" width="620" alt="The agent takes an action A-t; the environment returns a reward R-t-plus-1 and a state S-t-plus-1 across a dashed time-step boundary, which reach the agent as its reward R-t and state S-t.">
 <br>
-<sub>Figure 3.1 of Sutton &amp; Barto, <i>Reinforcement Learning: An Introduction</i> (2nd ed.), redrawn.</sub>
+<sub>Figure 3.1 of Sutton &amp; Barto, <i>Reinforcement Learning: An Introduction</i> (2nd ed.).</sub>
 </p>
 
 Is it still the right picture for language models? **Yes — the loop is unchanged.** Three things
@@ -86,7 +86,7 @@ The two halves want the same machines at different hours. People need inference 
 training wants sustained capacity and nobody's lap getting hot. A scheduling gift, not a conflict.
 
 <p align="center">
-<img src="../docs/fig-day-night.png" width="940" alt="Through the workday every answer is kept; what happened is attached in the evening; the climb runs at 23:00; the gate serves the result or bins it, and tomorrow starts on a better model.">
+<img src="../docs/fig-day-night.png" width="940" alt="A 24-hour timeline: from 09:00 to 17:00 the machines serve, eight hours; from 17:00 back round to 09:00 they train, sixteen hours; and the next day starts on a better model.">
 </p>
 
 **Cadence is set by the slowest arrow, and that is *attach truth*:** whether a support reply worked
@@ -264,6 +264,25 @@ answer:
 ```bash
 curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"what we really sent"}'
 ```
+
+## Why it compounds
+
+Two loops turn here, and they are driven by different things.
+
+The wheel is the one a cloud product cannot copy. Every person who uses this brings a machine with
+them, so the fleet grows with headcount instead of with your bill — and those machines are idle
+exactly when training wants them. More people means more capacity means more training a night.
+
+The line across the middle is the faster loop. Work that someone edited, sent or binned is training
+data the moment it is judged, and that costs no hardware at all. A team that never adds a machine
+still gets a better model every morning.
+
+<p align="center">
+<img src="../docs/fig-flywheel.png" width="740" alt="A flywheel: more people brings more machines, which brings more idle hours, which brings more training a night, which produces a better model, whose answers people keep, which brings more people. Across the middle, judged work goes straight back to training with no new hardware. Connecting more systems feeds the wheel.">
+</p>
+
+Connecting a system feeds both: the model reaches more of the real work, so more of the work comes
+back judged.
 
 ## The code
 
