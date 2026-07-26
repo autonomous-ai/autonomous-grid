@@ -39,6 +39,12 @@ train = [
     "datasets>=3.0",
     "torch>=2.6",
     "verifiers>=0.2",
+    # Apple Silicon only, by marker. `grid train serve` turns a Mac into a rollout node and
+    # `grid train sft --backend mlx` trains on one, and both import mlx_lm — but nothing declared
+    # it, so `pip install 'grid[train]'` (what `grid train doctor` tells you to run) produced an
+    # install where serve fails at import with "needs an Apple Silicon Mac". The marker keeps it
+    # off Linux and CUDA boxes, where it neither installs nor is wanted.
+    "mlx-lm>=0.28; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
