@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1194 1030" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2147 1276" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -7,24 +7,50 @@
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="1194" height="1030" fill="#fff"/>
-  <text x="620" y="172" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="700">More people</text>
-  <text x="997" y="446" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="700">More machines</text>
-  <text x="853" y="889" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="700">Idle hours</text>
-  <text x="387" y="889" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="700">More training</text>
-  <text x="243" y="446" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="700">Answers kept</text>
-  <path d="M728 179 A396 396 0 0 1 933 318" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
-  <path d="M1016 563 A396 396 0 0 1 930 806" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
-  <path d="M767 928 A396 396 0 0 1 496 936" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
-  <path d="M306 802 A396 396 0 0 1 224 561" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
-  <path d="M295 334 A396 396 0 0 1 503 182" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
-  <circle cx="620" cy="560" r="176" fill="#5d579d"/>
-  <text x="620" y="550" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">A BETTER</text>
-  <text x="620" y="592" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">MODEL</text>
-  <path d="M407 491 A224 224 0 0 0 488 741" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="8 8" marker-end="url(#h)"/>
-  <text x="566" y="800" text-anchor="middle" fill="#2b2b29" font-size="22">judged work,</text>
-  <text x="566" y="828" text-anchor="middle" fill="#2b2b29" font-size="22">no new hardware</text>
-  <rect x="76" y="55" width="356" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="254" y="97" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">More systems connected</text>
-  <path d="M446 112 L494 172" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <rect width="2147" height="1276" fill="#fff"/>
+  <text x="1010" y="222" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More work on the grid</text>
+  <text x="1400" y="612" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More judged examples</text>
+  <text x="1010" y="1002" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Better private models</text>
+  <text x="620" y="612" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Lower cost per task</text>
+  <path d="M1206 263 A390 390 0 0 1 1340 392" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
+  <path d="M1343 802 A390 390 0 0 1 1208 936" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
+  <path d="M818 939 A390 390 0 0 1 670 791" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
+  <path d="M666 416 A390 390 0 0 1 808 267" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#H)"/>
+  <circle cx="1010" cy="600" r="142" fill="#5d579d"/>
+  <text x="1010" y="590" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">MORE DONE,</text>
+  <text x="1010" y="632" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">FOR LESS</text>
+  <text x="392" y="148" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">More people, each</text>
+  <text x="392" y="178" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">arriving with a machine</text>
+  <path d="M590 188 Q677 156 766 184" fill="none" stroke="#5a912f" stroke-width="2" marker-end="url(#h)"/>
+  <text x="200" y="442" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">Machines already idle at</text>
+  <text x="200" y="472" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">the hours training wants</text>
+  <path d="M356 200 Q276 279 268 392" fill="none" stroke="#5a912f" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M372 486 Q363 534 392 572" fill="none" stroke="#5a912f" stroke-width="2" marker-end="url(#h)"/>
+  <text x="226" y="777" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">Capacity grows with</text>
+  <text x="226" y="807" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">headcount, not with</text>
+  <text x="226" y="837" text-anchor="middle" fill="#5a912f" font-size="21" font-weight="700">your bill</text>
+  <path d="M388 632 Q367 681 386 730" fill="none" stroke="#5a912f" stroke-width="2" marker-end="url(#h)"/>
+  <text x="1652" y="148" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">More systems</text>
+  <text x="1652" y="178" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">connected</text>
+  <path d="M1512 188 Q1384 156 1256 184" fill="none" stroke="#5d579d" stroke-width="2" marker-end="url(#h)"/>
+  <text x="1848" y="427" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">Outcomes come back:</text>
+  <text x="1848" y="457" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">the ticket stayed solved,</text>
+  <text x="1848" y="487" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">the deal closed</text>
+  <path d="M1694 200 Q1774 275 1790 384" fill="none" stroke="#5d579d" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M1682 522 Q1672 561 1634 572" fill="none" stroke="#5d579d" stroke-width="2" marker-end="url(#h)"/>
+  <text x="1806" y="792" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">A human edit outranks</text>
+  <text x="1806" y="822" text-anchor="middle" fill="#5d579d" font-size="21" font-weight="700">a model's own guess</text>
+  <path d="M1650 764 Q1619 701 1628 632" fill="none" stroke="#5d579d" stroke-width="2" marker-end="url(#h)"/>
+  <text x="536" y="1168" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">One model per job,</text>
+  <text x="536" y="1198" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">not one model for everything</text>
+  <path d="M772 1016 Q722 1065 716 1134" fill="none" stroke="#ad5130" stroke-width="2" marker-end="url(#h)"/>
+  <text x="1462" y="1168" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">Weights you own, on data</text>
+  <text x="1462" y="1198" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">that never left the network</text>
+  <path d="M1248 1016 Q1284 1070 1272 1134" fill="none" stroke="#ad5130" stroke-width="2" marker-end="url(#h)"/>
+  <rect x="1706" y="1007" width="24" height="24" rx="5" fill="#5a912f"/>
+  <text x="1746" y="1027" fill="#2b2b29" font-size="21">Hardware you already own</text>
+  <rect x="1706" y="1049" width="24" height="24" rx="5" fill="#5d579d"/>
+  <text x="1746" y="1069" fill="#2b2b29" font-size="21">Work you already do</text>
+  <rect x="1706" y="1091" width="24" height="24" rx="5" fill="#ad5130"/>
+  <text x="1746" y="1111" fill="#2b2b29" font-size="21">Nothing leaves your network</text>
 </svg>

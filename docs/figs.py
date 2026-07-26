@@ -18,6 +18,8 @@ H = 66            # every node is this tall
 BORDER = 2
 STROKE = 2
 RIM = 4           # the flywheel rim — heavy enough to read as one wheel, not six links
+CORE_FS = 35      # a station on the driving loop — the only text at this size
+SAT_FS = 21       # a station on a feeder loop, subordinate to the core by size and colour
 NODE_FS = 25      # node label
 LABEL_FS = 22     # edge label
 PAD = 22          # horizontal padding inside a box
@@ -155,7 +157,7 @@ class Fig:
             self._saw(cx + ra, cy + ra)
         return placed
 
-    def wheel(self, cx, cy, r, stations, hub_r=0, hub_lines=(), hub_fill=None):
+    def wheel(self, cx, cy, r, stations, hub_r=0, hub_lines=(), hub_fill=None, fs=None):
         """A flywheel drawn the way the ones people remember are drawn.
 
         The reference (Amazon's) works because of three things this deliberately
@@ -171,6 +173,7 @@ class Fig:
         label never has the rim running through it.
         """
         import math
+        fs = fs or NODE_FS
         n = len(stations)
         placed = []
         for k, st in enumerate(stations):
@@ -179,10 +182,10 @@ class Fig:
             th = math.radians(deg)
             x, y = cx + r * math.cos(th), cy + r * math.sin(th)
             self.parts.append(
-                f'<text x="{x:.0f}" y="{y + NODE_FS / 3:.0f}" text-anchor="middle" '
-                f'fill="{colour}" font-size="{NODE_FS}" font-weight="700">{label}</text>')
-            self._saw(x + text_w(label) / 2, y + H / 2)
-            placed.append((x, y, text_w(label), deg))
+                f'<text x="{x:.0f}" y="{y + fs / 3:.0f}" text-anchor="middle" '
+                f'fill="{colour}" font-size="{fs}" font-weight="700">{label}</text>')
+            self._saw(x + text_w(label, fs) / 2, y + H / 2)
+            placed.append((x, y, text_w(label, fs), deg))
 
         for k in range(n):
             _, _, w1, a1 = placed[k]
@@ -209,6 +212,61 @@ class Fig:
                     f'fill="#fff" font-size="34" font-weight="700" '
                     f'letter-spacing="0.5">{ln}</text>')
         return placed
+
+    def block(self, cx, cy, lines, colour=None, fs=None, weight=700, lead=None):
+        """A short stack of centred text with no box around it.
+
+        Every station on a multi-loop flywheel is drawn this way. Boxes would put
+        forty borders on the page and the loops would disappear behind them; size
+        and colour carry the hierarchy instead — core stations large and dark,
+        feeder stations smaller and in their loop's colour.
+        """
+        fs = fs or CORE_FS
+        lead = lead or fs + 9
+        top = cy - (len(lines) - 1) * lead / 2
+        for i, ln in enumerate(lines):
+            self.parts.append(
+                f'<text x="{cx:.0f}" y="{top + i * lead + fs / 3:.0f}" text-anchor="middle" '
+                f'fill="{colour or LABEL_TEXT}" font-size="{fs}" '
+                f'font-weight="{weight}">{ln}</text>')
+            self._saw(cx + text_w(ln, fs) / 2, top + i * lead + fs)
+        return max(text_w(ln, fs) for ln in lines)
+
+    def bow(self, x1, y1, x2, y2, lift=60, width=None, colour=None, dashed=False):
+        """One curved arrow between two free-floating points.
+
+        `lift` bends it perpendicular to the straight line between them — positive
+        one way, negative the other — which is the whole vocabulary needed to keep
+        thirty arrows from crossing each other on a dense diagram.
+        """
+        import math
+        dx, dy = x2 - x1, y2 - y1
+        L = math.hypot(dx, dy) or 1
+        px, py = -dy / L, dx / L
+        qx, qy = (x1 + x2) / 2 + px * lift, (y1 + y2) / 2 + py * lift
+        dash = ' stroke-dasharray="8 8"' if dashed else ""
+        self.parts.append(
+            f'<path d="M{x1:.0f} {y1:.0f} Q{qx:.0f} {qy:.0f} {x2:.0f} {y2:.0f}" fill="none" '
+            f'stroke="{colour or ARROW}" stroke-width="{width or STROKE}"{dash} '
+            f'marker-end="url(#{"H" if (width or STROKE) >= RIM else "h"})"/>')
+        self._saw(max(x1, x2), max(y1, y2))
+
+    def key(self, x, y, items, title=None):
+        """The legend. Each entry names one advantage and the colour that carries it."""
+        if title:
+            self.parts.append(
+                f'<text x="{x:.0f}" y="{y:.0f}" fill="{LABEL_TEXT}" font-size="{SAT_FS}" '
+                f'font-weight="700">{title}</text>')
+            y += 40
+        for i, (colour, label) in enumerate(items):
+            ry = y + i * 42
+            self.parts.append(
+                f'<rect x="{x:.0f}" y="{ry - 17:.0f}" width="24" height="24" rx="5" '
+                f'fill="{colour}"/>')
+            self.parts.append(
+                f'<text x="{x + 40:.0f}" y="{ry + 3:.0f}" fill="{LABEL_TEXT}" '
+                f'font-size="{SAT_FS}">{label}</text>')
+            self._saw(x + 40 + text_w(label, SAT_FS), ry + 20)
 
     def inner_arc(self, cx, cy, r, a1, a2, label=()):
         """A shortcut that stays inside the rim instead of cutting across it.

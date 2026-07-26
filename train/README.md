@@ -267,24 +267,29 @@ answer:
 curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"what we really sent"}'
 ```
 
-## Two loops turn, and one of them needs no hardware
+## Three loops turn the same wheel, and each is driven by something different
 
-Two loops turn here, driven by different things.
-
-The wheel is the one a cloud product cannot copy. Everyone who uses this brings a machine with them,
-so the fleet grows with headcount rather than with your bill — and those machines sit idle at
-exactly the hours training wants them. More people, more capacity, more training a night.
-
-The shorter arc inside the rim is faster. Work that someone edited, sent or binned becomes training
-data the moment it is judged, and judging it costs no hardware at all. A team that never adds a
-machine still wakes up to a better model.
+Four stations carry the whole argument — more work on the grid, more of it judged, better private
+models, lower cost per task — and three separate mechanisms push them round. That is the part worth
+sitting with: they are not three diagrams, they are three reasons the same wheel keeps turning.
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="740" alt="A flywheel turning around a better model. On the rim, clockwise: more people brings more machines, which brings more idle hours, which brings more training a night, whose answers people keep, which brings more people. Inside the rim a shorter arc runs the other way, from answers kept straight back to training: judged work needs no new hardware. Connecting more systems feeds the wheel from outside.">
+<img src="../docs/fig-flywheel.png" width="900" alt="A flywheel of four stations, clockwise: more work on the grid, more judged examples, better private models, lower cost per task, and back again; at the hub, more done for less. Three coloured feeder loops hang off it. In green, hardware you already own: more people each arriving with a machine, machines already idle at the hours training wants, and capacity that grows with headcount rather than with your bill. In purple, work you already do: more systems connected, outcomes coming back when a ticket stays solved or a deal closes, and a human edit outranking a model's own guess. In red, nothing leaves your network: one model per job rather than one for everything, and weights you own on data that never left.">
 </p>
 
-Connecting a system feeds both: the model reaches more of the real work, so more of the work comes
-back judged.
+**Capacity turns with headcount.** Everyone who uses this brings a machine with them, so the fleet
+grows with your team rather than with your bill — and those machines sit idle at exactly the hours
+training wants them. This is the loop a cloud product cannot copy, because its capacity is
+something you rent and this one walks in the door.
+
+**Data turns with usage, and needs no new hardware at all.** Work that someone edited, sent or
+binned becomes training data the moment it is judged. A team that never adds a single machine still
+wakes up to a better model, which is why this loop runs faster than the first one.
+
+**Economics turns with model quality.** Every improvement keeps more work on hardware you already
+own instead of sending it to a vendor, and the cheaper a task gets the more work is worth moving
+here — which feeds the other two. Connecting a system feeds all three at once: the model reaches
+more of the real work, so more of the work comes back judged.
 
 ## The code
 

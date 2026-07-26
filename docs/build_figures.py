@@ -1,7 +1,17 @@
 """Generate the six training figures. One system, six drawings."""
 import os
 
-from figs import GREEN_TEXT, Fig, H, box_w
+from figs import (
+    CORAL_TEXT,
+    CORE_FS,
+    GREEN_TEXT,
+    LABEL_TEXT,
+    PURPLE_TEXT,
+    SAT_FS,
+    Fig,
+    H,
+    box_w,
+)
 
 OUT = os.path.dirname(os.path.abspath(__file__))
 M = 100          # page margin
@@ -171,41 +181,64 @@ f.label((mach + train) / 2, 390, "the new adapter, every two steps")
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
-# Two loops, not one. The ring is the loop nobody else has: everyone who uses it
-# brings a machine, so headcount is capacity. The chord across the middle is the
-# faster loop — judged work needs no new hardware at all.
-f = Fig(1180, 1030)
-CX, CY, R = 620, 560, 396
-# A better model is not a station on this wheel — it is what the wheel is *for*,
-# so it sits in the middle the way growth does on the flywheel everyone knows.
-# What is left on the rim is the mechanism, and every station on it is the same
-# kind of thing, so they are all one colour.
+# THREE loops, sharing their stations. One wheel with five words on it was true
+# and far too small a claim: the interesting thing here is that three different
+# mechanisms drive the same four stations, and each turns at its own speed.
+#
+#   capacity  — people bring machines, machines are idle at night, training is free
+#   data      — work flows through, gets judged, becomes tomorrow's training set
+#   economics — better models keep work local, which makes the next unit cheaper
+#
+# Drawn the way DoorDash draws theirs: one heavy core loop that carries the whole
+# argument, and the feeder loops hung off it in the colour of the advantage they
+# come from. Boxes are gone entirely — forty borders would bury the arrows.
+f = Fig(2080, 1276)
+CX, CY, R = 1010, 600, 390
+
+# The hub is what all three loops are for, and it is not one of the stations:
+# every turn leaves the same work costing less than it did the turn before.
 f.wheel(CX, CY, R, [
-    ("More people", GREEN_TEXT),
-    ("More machines", GREEN_TEXT),
-    ("Idle hours", GREEN_TEXT),
-    ("More training", GREEN_TEXT),
-    ("Answers kept", GREEN_TEXT),
-], hub_r=176, hub_lines=("A BETTER", "MODEL"))
+    ("More work on the grid", LABEL_TEXT),
+    ("More judged examples", LABEL_TEXT),
+    ("Better private models", LABEL_TEXT),
+    ("Lower cost per task", LABEL_TEXT),
+], hub_r=142, hub_lines=("MORE DONE,", "FOR LESS"), fs=CORE_FS)
 
-# The faster loop, and the only one that runs against the rim: judged work goes
-# straight back to training without waiting for anyone to bring a machine. Drawn
-# inside the rim — a chord across the middle reads as the wheel cut in half — and
-# it is deliberately the short way between the only two stations it needs.
-# Hugging the hub, not the rim: at a rim-like radius the two arcs run parallel and
-# the shortcut reads as a second rim rather than a way across.
-f.inner_arc(CX, CY, 224, 198, 126)
-# The caption sits under the hub rather than beside the arc it describes: the left
-# wedge already carries the rim, the shortcut and two station names, and anything
-# placed there lands on one of them.
-f.label(CX - 54, CY + 240, "judged work,", "no new hardware")
+TOP, RIGHT, BOTTOM, LEFT = (CX, CY - R), (CX + R, CY), (CX, CY + R), (CX - R, CY)
 
-# Connectors reach more of the real work, which is what brings the next team in.
-# It feeds the wheel from outside, like the cost/price loop on the reference. One
-# straight run, because a curve here has to bend twice and reads as a squiggle.
-cw = box_w("More systems connected") - 8
-f.term(CX - 366, 88, "More systems connected", w=cw)
-f.arrow(CX - 366 + cw / 2 + 14, 112, CX - 126, 172)
+# ---- capacity: the loop a cloud product cannot copy (green, left) ----
+# It is drawn as a chain, not as three separate feeds, because the chain IS the
+# loop: people arrive with machines, the machines are idle at night, and that is
+# where the training capacity comes from.
+f.block(392, 156, ("More people, each", "arriving with a machine"), GREEN_TEXT, SAT_FS)
+f.bow(590, 188, TOP[0] - 244, TOP[1] - 26, lift=-30, colour=GREEN_TEXT)
+f.block(200, 450, ("Machines already idle at", "the hours training wants"), GREEN_TEXT, SAT_FS)
+f.bow(356, 200, 268, 392, lift=40, colour=GREEN_TEXT)
+f.bow(372, 486, LEFT[0] - 228, LEFT[1] - 28, lift=20, colour=GREEN_TEXT)
+f.block(226, 800, ("Capacity grows with", "headcount, not with", "your bill"), GREEN_TEXT, SAT_FS)
+f.bow(LEFT[0] - 232, LEFT[1] + 32, 386, 730, lift=20, colour=GREEN_TEXT)
+
+# ---- data: the loop that needs no new hardware at all (purple, right) ----
+f.block(1652, 156, ("More systems", "connected"), PURPLE_TEXT, SAT_FS)
+f.bow(1512, 188, TOP[0] + 246, TOP[1] - 26, lift=30, colour=PURPLE_TEXT)
+f.block(1848, 450, ("Outcomes come back:", "the ticket stayed solved,", "the deal closed"),
+        PURPLE_TEXT, SAT_FS)
+f.bow(1694, 200, 1790, 384, lift=-36, colour=PURPLE_TEXT)
+f.bow(1682, 522, RIGHT[0] + 234, RIGHT[1] - 28, lift=-20, colour=PURPLE_TEXT)
+f.block(1806, 800, ("A human edit outranks", "a model's own guess"), PURPLE_TEXT, SAT_FS)
+f.bow(1650, 764, RIGHT[0] + 228, RIGHT[1] + 32, lift=-20, colour=PURPLE_TEXT)
+
+# ---- what you are left holding (coral, bottom) ----
+f.block(536, 1176, ("One model per job,", "not one model for everything"), CORAL_TEXT, SAT_FS)
+f.bow(BOTTOM[0] - 238, BOTTOM[1] + 26, 716, 1134, lift=24, colour=CORAL_TEXT)
+f.block(1462, 1176, ("Weights you own, on data", "that never left the network"), CORAL_TEXT, SAT_FS)
+f.bow(BOTTOM[0] + 238, BOTTOM[1] + 26, 1272, 1134, lift=-24, colour=CORAL_TEXT)
+
+f.key(1706, 1024, [
+    (GREEN_TEXT, "Hardware you already own"),
+    (PURPLE_TEXT, "Work you already do"),
+    (CORAL_TEXT, "Nothing leaves your network"),
+])
 
 f.write(f"{OUT}/fig-flywheel.svg")
 
