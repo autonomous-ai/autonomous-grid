@@ -1,13 +1,13 @@
 # autonomous-support-tickets
 
-150 support tickets with the reply that resolves them, for training a reply-drafting model.
+1,070 support tickets with the reply that resolves them, for training a reply-drafting model.
 
 | | |
 |---|---|
-| rows | 150 (135 train / 15 held out by `grid train sft`) |
-| distinct replies | 145 |
-| reply length | 84–133 words, mean 112 |
-| shape | `{subject, body, reply, resolved}` |
+| rows | 1,070 (963 train / 107 held out by `grid train sft`) |
+| distinct replies | 1,012 · distinct bodies 1,066 |
+| reply length | 67–107 words, mean 88 |
+| shape | `{subject, body, reply, resolved}`, plus `facts.jsonl` answer key |
 | regenerate | `python make_tickets.py` — seeded, so it reproduces exactly |
 
 ## Where it comes from
@@ -50,6 +50,31 @@ from the published technical truth instead: the tickets are invented, the resolu
   resolved tickets, and this corpus stops being training data and becomes a smoke test.
 
 ## Used by
+
+**`sft-mlx-qwen2.5-7b-instruct-4bit-20260726-093515`** — 1,070 rows, Qwen2.5-7B, 600 iters,
+loss 4.398 → 0.171, 29.8 min on an M2 Max. Graded by `eval_facts.py` on 50 held-out tickets,
+against the same base model with no adapter as the control:
+
+| | base 7B | trained |
+|---|---|---|
+| correct fix stated | 10% | **96%** |
+| cites the order id | 66% | **96%** |
+| speaks as the agent | 100% | 100% |
+| no invented history | 100% | 100% |
+| **all four** | **6%** | **94%** |
+
+**What that does and does not prove.** The fix and order-citation gains are attributable to the
+adapter: same base, same tickets, the adapter is the only variable, and 10% → 96% is not noise.
+The other two rows prove nothing here — the base 7B already scored 100% on both, so this run
+cannot say whether the corpus fixes for role-bleed and invented history work. Those were 1.5B
+failures, and the model changed at the same time as the corpus. If that matters, the test is a
+1.5B rerun on the current corpus.
+
+The three remaining failures are not random. Two are E03 borrowing another code's procedure — one
+recites the E01 unplug sequence — and E03 is the only issue whose documented fix is physical
+("clear the obstruction") rather than a numbered procedure, so it has the least distinctive
+vocabulary to key on. It is the hardest row in the set. The third dropped the order id from an
+otherwise correct wobble reply.
 
 **`sft-mlx-qwen2.5-1.5b-instruct-4bit-20260726-083026`** — loss 3.88 → 0.587, val 0.672, 21.7 min
 on an M2 Max. **The loss curve is clean and the model is not usable.** Recorded here because a
