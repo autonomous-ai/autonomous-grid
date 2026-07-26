@@ -217,61 +217,42 @@ f.label((mcx + tcx) / 2, 470, "the new adapter, to every machine, every two step
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
-# Three loops, and inference is what they all turn on — which is why it is the
-# hub rather than a station. Grid is an inference layer first; the training plane
-# is built on top of it, so the drawing should say that before it says anything
-# else.
+# Amazon's flywheel, station for station, because the mapping is exact and the
+# thing that makes theirs work is that it is SMALL: one ring, one arc that leaves
+# the hub and rejoins the ring, one filled centre, and nothing else. No legend,
+# no colour coding — the structure carries the argument, so anything added to
+# help the reader is a thing the reader has to read.
 #
-#   compute        (green)  people arrive with machines, so capacity grows with
-#                           headcount rather than with the bill
-#   training       (purple) inference produces the work that gets judged, trained
-#                           on, and served back cheaper — needs no new hardware
-#   specialisation (coral)  data for one job earns a model for that job, which
-#                           pulls more of that job in; it compounds PER JOB TYPE
-#
-# Amazon's grammar rather than Doordash's: a tight core ring turning around the
-# hub, with a larger loop departing and rejoining it. Two rings, so the inner one
-# is rotated — two rings both starting at the top put a station directly above a
-# station and the joining arrow then runs through both labels.
-f = Fig(2200, 1370)
-CX, CY = 1000, 760
-R1, R2 = 340, 600
+#   sellers -> more computers      selection -> more models
+#   traffic -> more employees      customer experience -> the end goal
+#   growth  -> intelligence
+#   lower cost structure -> more connectors   lower prices -> more context
+f = Fig(1560, 1300)
+CX, CY, R = 790, 640, 366
 
-# --- the core: compute. Turns with headcount, and a cloud product cannot copy it
-f.wheel(CX, CY, R1, [
-    ("More people", GREEN_TEXT),
-    ("More compute", GREEN_TEXT),
-    ("More intelligence", GREEN_TEXT),
-], hub_r=142, hub_lines=("MORE", "INFERENCE"), fs=32, start=0, arc=GREEN_TEXT)
+f.wheel(CX, CY, R, [
+    ("More models", LABEL_TEXT),
+    ("Superhuman work", LABEL_TEXT),
+    ("More employees", LABEL_TEXT),
+    ("More computers", LABEL_TEXT),
+], hub_r=168, hub_lines=("INTELLIGENCE",), fs=CORE_FS)
 
-# --- the second loop: training. Departs the hub and rejoins it, needing nothing
-#     new once work is already flowing
-f.wheel(CX, CY, R2, [
-    ("More connectors", PURPLE_TEXT),
-    ("More data", PURPLE_TEXT),
-    ("More training", PURPLE_TEXT),
-    ("Better models", PURPLE_TEXT),
-    ("Lower cost per task", PURPLE_TEXT),
-], fs=32, arc=PURPLE_TEXT)
+# The second loop leaves the hub, runs over the top, and comes back down into the
+# station it improves — the same path Amazon's cost/price loop takes.
+f.block(1150, 174, ("More context",), LABEL_TEXT, CORE_FS)
+f.block(372, 200, ("More connectors",), LABEL_TEXT, CORE_FS)
+f.bow(668, 522, 430, 258, lift=-54)
+f.bow(536, 172, 986, 154, lift=-46)
+f.bow(1216, 218, 1186, 592, lift=-48)
 
-# The two joins that make it one wheel rather than two drawings: inference is
-# what gets connected to, and cheaper tasks are what come back as more inference.
-f.bow(CX, CY - 156, CX, 214, lift=0, colour=PURPLE_TEXT, width=RIM)
-f.bow(556, 616, CX - 150, CY - 48, lift=0, colour=PURPLE_TEXT, width=RIM)
-
-# --- the third loop: specialisation. Hung off More data, because that is where a
-#     job's own examples accumulate.
-f.block(1930, 388, ("One model", "per job"), CORAL_TEXT, SAT_FS)
-f.block(1946, 726, ("More of that job", "routed to it"), CORAL_TEXT, SAT_FS)
-f.bow(1660, 540, 1852, 412, lift=26, colour=CORAL_TEXT)
-f.bow(1938, 452, 1944, 668, lift=-40, colour=CORAL_TEXT)
-f.bow(1852, 760, 1664, 620, lift=26, colour=CORAL_TEXT)
-
-f.key(120, 1146, [
-    (GREEN_TEXT, "Compute — turns with headcount"),
-    (PURPLE_TEXT, "Training — turns with usage"),
-    (CORAL_TEXT, "Specialisation — turns per job"),
-])
+# The third loop is the same shape underneath: training makes the models sharper
+# at the jobs you actually run, and that lands in the same place. Both arcs come
+# home to the work, because that is what the whole thing is for.
+f.block(384, 1082, ("More training",), LABEL_TEXT, CORE_FS)
+f.block(1176, 1108, ("Sharper models",), LABEL_TEXT, CORE_FS)
+f.bow(668, 758, 436, 1030, lift=54)
+f.bow(548, 1122, 1010, 1140, lift=46)
+f.bow(1236, 1070, 1190, 692, lift=48)
 
 f.write(f"{OUT}/fig-flywheel.svg")
 

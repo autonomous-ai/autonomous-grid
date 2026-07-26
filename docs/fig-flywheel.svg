@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2200 1420" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1560 1300" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -25,39 +25,25 @@
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="2200" height="1420" fill="#fff"/>
-  <text x="1340" y="771" text-anchor="middle" fill="#5a912f" font-size="32" font-weight="700">More people</text>
-  <text x="830" y="1065" text-anchor="middle" fill="#5a912f" font-size="32" font-weight="700">More compute</text>
-  <text x="830" y="476" text-anchor="middle" fill="#5a912f" font-size="32" font-weight="700">More intelligence</text>
-  <path d="M1316 885 A340 340 0 0 1 971 1099" fill="none" stroke="#5a912f" stroke-width="4" marker-end="url(#Hg)"/>
-  <path d="M726 961 A340 340 0 0 1 710 582" fill="none" stroke="#5a912f" stroke-width="4" marker-end="url(#Hg)"/>
-  <path d="M983 420 A340 340 0 0 1 1313 627" fill="none" stroke="#5a912f" stroke-width="4" marker-end="url(#Hg)"/>
-  <circle cx="1000" cy="760" r="142" fill="#5d579d"/>
-  <text x="1000" y="750" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">MORE</text>
-  <text x="1000" y="792" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">INFERENCE</text>
-  <text x="1000" y="171" text-anchor="middle" fill="#5d579d" font-size="32" font-weight="700">More connectors</text>
-  <text x="1571" y="585" text-anchor="middle" fill="#5d579d" font-size="32" font-weight="700">More data</text>
-  <text x="1353" y="1256" text-anchor="middle" fill="#5d579d" font-size="32" font-weight="700">More training</text>
-  <text x="647" y="1256" text-anchor="middle" fill="#5d579d" font-size="32" font-weight="700">Better models</text>
-  <text x="429" y="585" text-anchor="middle" fill="#5d579d" font-size="32" font-weight="700">Lower cost per task</text>
-  <path d="M1163 182 A600 600 0 0 1 1521 463" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <path d="M1595 685 A600 600 0 0 1 1460 1146" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <path d="M1233 1313 A600 600 0 0 1 779 1318" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <path d="M544 1149 A600 600 0 0 1 400 768" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <path d="M514 408 A600 600 0 0 1 828 185" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <path d="M1000 604 Q1000 409 1000 214" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <path d="M556 616 Q703 664 850 712" fill="none" stroke="#5d579d" stroke-width="4" marker-end="url(#Hp)"/>
-  <text x="1930" y="380" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">One model</text>
-  <text x="1930" y="410" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">per job</text>
-  <text x="1946" y="718" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">More of that job</text>
-  <text x="1946" y="748" text-anchor="middle" fill="#ad5130" font-size="21" font-weight="700">routed to it</text>
-  <path d="M1660 540 Q1770 498 1852 412" fill="none" stroke="#ad5130" stroke-width="2" marker-end="url(#hc)"/>
-  <path d="M1938 452 Q1981 559 1944 668" fill="none" stroke="#ad5130" stroke-width="2" marker-end="url(#hc)"/>
-  <path d="M1852 760 Q1774 669 1664 620" fill="none" stroke="#ad5130" stroke-width="2" marker-end="url(#hc)"/>
-  <rect x="120" y="1129" width="24" height="24" rx="5" fill="#5a912f"/>
-  <text x="160" y="1149" fill="#2b2b29" font-size="21">Compute — turns with headcount</text>
-  <rect x="120" y="1171" width="24" height="24" rx="5" fill="#5d579d"/>
-  <text x="160" y="1191" fill="#2b2b29" font-size="21">Training — turns with usage</text>
-  <rect x="120" y="1213" width="24" height="24" rx="5" fill="#ad5130"/>
-  <text x="160" y="1233" fill="#2b2b29" font-size="21">Specialisation — turns per job</text>
+  <rect width="1560" height="1300" fill="#fff"/>
+  <text x="790" y="286" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More models</text>
+  <text x="1156" y="652" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Superhuman work</text>
+  <text x="790" y="1018" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More employees</text>
+  <text x="424" y="652" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More computers</text>
+  <path d="M928 301 A366 366 0 0 1 1110 463" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#Ha)"/>
+  <path d="M1114 811 A366 366 0 0 1 960 964" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#Ha)"/>
+  <path d="M627 968 A366 366 0 0 1 464 806" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#Ha)"/>
+  <path d="M460 481 A366 366 0 0 1 644 304" fill="none" stroke="#a1a099" stroke-width="4" marker-end="url(#Ha)"/>
+  <circle cx="790" cy="640" r="168" fill="#5d579d"/>
+  <text x="790" y="651" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">INTELLIGENCE</text>
+  <text x="1150" y="186" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More context</text>
+  <text x="372" y="212" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More connectors</text>
+  <path d="M668 522 Q509 426 430 258" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M536 172 Q759 117 986 154" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1216 218 Q1249 409 1186 592" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="384" y="1094" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More training</text>
+  <text x="1176" y="1120" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Sharper models</text>
+  <path d="M668 758 Q511 859 436 1030" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M548 1122 Q777 1177 1010 1140" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1236 1070 Q1261 875 1190 692" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
 </svg>

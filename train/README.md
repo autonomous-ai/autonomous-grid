@@ -267,31 +267,28 @@ answer:
 curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"what we really sent"}'
 ```
 
-## Three loops, and inference is what they all turn on
-
-Everything here turns on one quantity, which is why it sits in the middle rather than on the rim:
-**inference**. Grid is an inference layer first, and the training plane is built on top of it. Three
-separate mechanisms drive that quantity up, they run at different speeds, and none of them is the
-one a competitor can buy.
+## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="900" alt="Two concentric flywheels around a hub reading MORE INFERENCE. The inner green ring turns clockwise through more people, more compute and more intelligence. The outer purple ring turns through more connectors, more data, more training, better models and lower cost per task, joined to the hub by two arrows: inference out to connectors, and lower cost per task back in. A third loop in red hangs off more data: one model per job, then more of that job routed to it, then back to more data. A legend names the three: compute turns with headcount, training turns with usage, specialisation turns per job.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise: more computers, more models, superhuman work, more employees, and back to more computers. Two further arcs leave the hub and rejoin the ring at superhuman work — over the top, more connectors then more context; underneath, more training then sharper models.">
 </p>
 
-**Compute turns with headcount.** Everyone who uses this arrives with a machine, so capacity grows
-with the team rather than with the bill. That is the loop a cloud product structurally cannot copy:
-its capacity is something you rent, and this one walks in the door.
+**The ring is the whole business in four words.** More employees arrive, and each arrives with a
+computer. More computers run more models. More models make the work superhuman. Work that feels
+superhuman brings more employees. Capacity grows with the team rather than with the bill, and that
+is the part a cloud product structurally cannot copy — its capacity is rented, and this walks in
+the door.
 
-**Training turns with usage, and needs nothing new.** Once work is flowing, more of your real
-systems become worth connecting, connected systems produce data, data buys training, and training
-makes the models better and each task cheaper — which brings more work back through inference. A
-team that never adds a single machine still wakes up to a better model, which is why this loop
-outruns the first one.
+**Over the top: context.** Connecting a system is the cheapest thing on this page and it is what
+turns a general model into one that knows your work — your tickets, your repos, your deals. More
+connectors, more context, better work. Nothing new has to be bought for this loop to turn.
 
-**Specialisation turns per job.** The examples that accumulate are not one undifferentiated pile;
-they arrive sorted by the job that produced them. Enough of them for one job earns a model for that
-job, a model that is better at it pulls more of that job in, and that produces more examples for it.
-This is the only one of the three that gets stronger the more *different kinds* of work you run.
+**Underneath: depth.** Context makes a model that knows *about* your work. Training makes one that
+is *good at* it. The same traffic that flows through the ring is the training set, so the models get
+sharper at the jobs you actually run, not at a benchmark.
+
+Both outer arcs come home to the same station, which is the point of the drawing: breadth and depth
+are different mechanisms, and neither is the goal. The goal is the work.
 
 ## The code
 
