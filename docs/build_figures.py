@@ -293,10 +293,12 @@ f.bow(1470, 292, 1256, 610, lift=-46, colour=INK, width=RIM)
 
 # The one place a verb earns its keep: Computers is the only station that does two
 # different jobs, and without this second arrow the drawing shows only the first.
-# The same machines serve by day and train at night — section 4.
-f.bow(910, 302, 1236, 262, lift=-22, colour=INK, width=RIM)
-f.label(1058, 348, "train")
-f.label(1064, 486, "serve")
+# The same machines serve by day and train at night — section 4. The two arrows
+# leave Computers well apart: the rim departs at about 288 degrees, so this one
+# starts clear above it rather than from the same few pixels.
+f.bow(922, 236, 1240, 258, lift=-20, colour=INK, width=RIM)
+f.label(1074, 292, "train")
+f.label(1042, 442, "serve")
 
 f.write(f"{OUT}/fig-flywheel.svg")
 

@@ -52,7 +52,7 @@
   <path d="M400 168 Q531 126 668 132" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <path d="M936 132 Q1099 133 1252 190" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <path d="M1470 292 Q1401 477 1256 610" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
-  <path d="M910 302 Q1070 260 1236 262" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
-  <text x="1058" y="348" text-anchor="middle" fill="#2b2b29" font-size="22">train</text>
-  <text x="1064" y="486" text-anchor="middle" fill="#2b2b29" font-size="22">serve</text>
+  <path d="M922 236 Q1082 227 1240 258" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
+  <text x="1074" y="292" text-anchor="middle" fill="#2b2b29" font-size="22">train</text>
+  <text x="1042" y="442" text-anchor="middle" fill="#2b2b29" font-size="22">serve</text>
 </svg>
