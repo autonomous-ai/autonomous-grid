@@ -111,6 +111,12 @@ alone separates them, and no two lines in one figure should cross if a bend woul
 - **Nothing is added to help the reader.** No legend, no key, no colour scale, no title inside the
   frame. The README's prose is the caption. A legend is a sign that the drawing has not done its job.
 
+**One fleet, spelled once.** The machines are a `FLEET` constant in `build_figures.py`, and every
+figure that draws them takes its names and their order from it — at one box width, so two fleet rows
+in different figures stack when a reader scrolls between them. Three figures once drew this row and
+all three disagreed; two spellings of one fleet reads as two different fleets. A figure that needs
+fewer machines slices `FLEET` rather than retyping it, so a subset is visibly a subset.
+
 **Names, not logos.** When a station needs examples — what "your systems" actually means — set them
 as a smaller line beneath it (`Gmail · Slack · Notion`). A real logo would be the only thing in the
 whole set not drawn by `figs.py`: an external asset to license, keep current and re-export, in a

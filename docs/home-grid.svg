@@ -50,20 +50,20 @@
   <path d="M688 244 L688 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M972 244 L972 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M1258 244 L1258 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="200" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="314" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac Studio</text>
-  <path d="M314 579 L314 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="458" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="572" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
-  <path d="M572 579 L572 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="716" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="830" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
+  <rect x="103" y="591" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="238" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>
+  <rect x="399" y="591" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="534" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac Studio</text>
+  <rect x="695" y="591" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="830" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
+  <rect x="991" y="591" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1126" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
+  <rect x="1287" y="591" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1422" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 5090</text>
+  <path d="M238 579 L238 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M534 579 L534 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M830 579 L830 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="974" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1088" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>
-  <path d="M1088 579 L1088 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="1232" y="591" width="228" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1346" y="633" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 5090</text>
-  <path d="M1346 579 L1346 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1126 579 L1126 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1422 579 L1422 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <text x="830" y="702" text-anchor="middle" fill="#2b2b29" font-size="24">MLX · Ollama · vLLM · LM Studio · ComfyUI — the engines you already run</text>
 </svg>

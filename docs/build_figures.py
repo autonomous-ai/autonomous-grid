@@ -18,6 +18,25 @@ from figs import (
 OUT = os.path.dirname(os.path.abspath(__file__))
 M = 100          # page margin
 GAP = 120        # the gap an arrow crosses
+MW = 270         # a machine box; one width, so any two fleet rows line up
+FGAP = 26        # between machines: close enough that the row reads as one strip
+
+# One fleet, named and ordered once. Three figures drew this row and all three
+# disagreed — two called the same box "RTX box" where a third said "RTX 6000",
+# and home-grid ordered it differently again. A reader who meets these machines
+# on the front page should recognise the same five, in the same order, in every
+# later figure; three spellings of one fleet reads as three different fleets.
+FLEET = ("MacBook Pro", "Mac Studio", "Mac mini", "RTX 6000", "RTX 5090")
+
+
+def fleet_row(f, page_w, y):
+    """Draw the fleet centred on the page. Returns each box's centre x."""
+    span = len(FLEET) * MW + (len(FLEET) - 1) * FGAP
+    x0 = (page_w - span) / 2
+    xs = [x0 + MW / 2 + i * (MW + FGAP) for i in range(len(FLEET))]
+    for cx, name in zip(xs, FLEET):
+        f.box(cx, y, name, w=MW)
+    return xs
 
 
 def chain(f, y, items, edges=None):
@@ -109,10 +128,12 @@ f.box(gcx, y, "The orchestrator", kind="purple", w=gw)
 f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
 f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 26, "one task, several attempts")
 
-MW = 220
 mcx = gcx + gw / 2 + GAP + MW / 2
+# Three of the five, not all five: this figure is about one task landing on a
+# free machine, and five rows would make the fleet the subject instead. Names
+# come from FLEET so it is visibly a subset, never a different set.
 rows = [y - 120, y, y + 120]
-for ry, name in zip(rows, ["MacBook Pro", "Mac Studio", "RTX box"]):
+for ry, name in zip(rows, [FLEET[0], FLEET[1], FLEET[3]]):
     f.box(mcx, ry, name, w=MW)
     curve = 0 if ry == y else 64
     off = 14 if ry > y else -14 if ry < y else 0
@@ -213,18 +234,10 @@ f.label(gcx + gw / 2 + 70, y + 162, "not better")
 ocw = box_w("The orchestrator")
 oy = 470
 f.box(tcx, oy, "The orchestrator", kind="purple", w=ocw)
-MW = 270
 my = 720
-# Set close enough to touch: three boxes in a contiguous strip read as one fleet,
-# so one pair of arrows can address the group. Fanning to each of them meant six
-# lines that crossed, to say a thing the row already says.
 # Five, spread the full width: the fleet is the point of the page and a huddle of
 # three under the trainer left half the frame empty saying nothing.
-FLEET = ("MacBook Pro", "Mac Studio", "Mac mini", "RTX 6000", "RTX 5090")
-fspan = len(FLEET) * MW + (len(FLEET) - 1) * 26
-fx0 = (1700 - fspan) / 2
-for i, name in enumerate(FLEET):
-    f.box(fx0 + MW / 2 + i * (MW + 26), my, name, w=MW)
+fleet_x = fleet_row(f, 1700, my)
 
 # Both directions live in the gap between the trainer and the orchestrator,
 # stacked directly above one another. The trainer never speaks to a machine: it
@@ -237,8 +250,7 @@ f.label(tcx + 96, 340, "the attempts, and", "the token ids they sampled", anchor
 # Each arrow leaves its own point along the orchestrator's edge. Five lines from
 # one pixel is a knot; five from a spread edge is a distribution, which is what
 # this actually is.
-for i in range(len(FLEET)):
-    bx = fx0 + MW / 2 + i * (MW + 26)
+for i, bx in enumerate(fleet_x):
     f.arrow(tcx - 120 + i * 60, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True)
 f.label(1700 - M, my + H / 2 + 56, "placed on whichever machine is free", anchor="end")
 f.write(f"{OUT}/train-architecture.svg")
@@ -327,25 +339,32 @@ f.write(f"{OUT}/fig-flywheel.svg")
 # as one system: one line across the top, the fleet underneath the thing that
 # places work on it. Simpler than training because there is no gate and no
 # adapter — a request goes out, an answer comes back.
-f = Fig(1350, 470)
+f = Fig(1700, 500)
 y = 152
 aw3 = box_w("Your apps") - 8
 acx = M + aw3 / 2
 f.term(acx, y, "Your apps", w=aw3)
 f.label(acx, y + 66, "OpenClaw · Hermes", "your own code")
 
+# Parked over the fourth machine, not the middle one. Centring it left the whole
+# top-right of the page empty, and the machine that answers is whichever one was
+# free — an off-centre pick says that better than a symmetric one.
 ocw2 = box_w("The orchestrator")
-occx = acx + aw3 / 2 + 460 + ocw2 / 2
+occx = (1700 - (len(FLEET) * MW + (len(FLEET) - 1) * FGAP)) / 2 + MW / 2 + 3 * (MW + FGAP)
 f.box(occx, y, "The orchestrator", kind="purple", w=ocw2)
 f.arrow(acx + aw3 / 2 + 12, y - 18, occx - ocw2 / 2 - 14, y - 18)
 f.label((acx + aw3 / 2 + occx - ocw2 / 2) / 2, y - 40, "one OpenAI-compatible endpoint")
 f.arrow(occx - ocw2 / 2 - 14, y + 18, acx + aw3 / 2 + 12, y + 18)
 f.label((acx + aw3 / 2 + occx - ocw2 / 2) / 2, y + 58, "the answer")
 
-MW2 = 236
-my2 = 372
-for bx, name in zip((occx - 250, occx, occx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
-    f.box(bx, my2, name, w=MW2)
+# The same five machines as the training figure, at the same width and spacing,
+# so the two rows stack when a reader scrolls from one section to the next.
+# ONE pair of arrows, into the middle box: serving a request lights up a single
+# machine, and four boxes sitting quietly either side is what says so. Training
+# fans to all five because training uses all five — that contrast is the whole
+# difference between the two halves, and it only reads if the rows are identical.
+my2 = 402
+fleet_row(f, 1700, my2)
 f.arrow(occx - 64, y + H / 2 + 12, occx - 64, my2 - H / 2 - 14)
 f.arrow(occx + 64, my2 - H / 2 - 14, occx + 64, y + H / 2 + 12)
 f.label(occx - 96, 262, "whichever computer", "serves that model", anchor="end")
@@ -372,14 +391,8 @@ f.panel(M, 1660 - M, gy, "Your grid", ["Inference", "Training"])
 for cx in app_x:
     f.arrow(cx, gy - 176 / 2 - 12, cx, app_y + H / 2 + 14)
 
-MACH = ["Mac Studio", "Mac mini", "RTX 6000", "MacBook Pro", "RTX 5090"]
-mw = max(box_w(m) for m in MACH)
-mspan = len(MACH) * mw + (len(MACH) - 1) * 30
-mx0 = (1660 - mspan) / 2
 mach_y = 624
-for i, m in enumerate(MACH):
-    cx = mx0 + mw / 2 + i * (mw + 30)
-    f.box(cx, mach_y, m, w=mw)
+for cx in fleet_row(f, 1660, mach_y):
     f.arrow(cx, mach_y - H / 2 - 12, cx, gy + 176 / 2 + 14)
 f.label(1660 / 2, mach_y + 78, "MLX · Ollama · vLLM · LM Studio · ComfyUI — the engines you already run")
 f.write(f"{OUT}/home-grid.svg")

@@ -29,7 +29,7 @@ inference is what a grid already does. So the expensive part of training is work
 already good at, and the only new thing is one machine that adjusts weights.
 
 <p align="center">
-<img src="../docs/train-architecture.png" width="900" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator places each task on whichever of a MacBook Pro, Mac Studio or RTX box is free, and the attempts come back to the trainer with the token ids they sampled.">
+<img src="../docs/train-architecture.png" width="900" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator fans each task out across all five of your machines — a MacBook Pro, a Mac Studio, a Mac mini, an RTX 6000 and an RTX 5090 — placing it wherever there is room, and the attempts come back to the trainer with the token ids they sampled.">
 </p>
 
 ---
@@ -100,7 +100,7 @@ you rent, and renting compute by the hour is the expensive way to do the one job
 hardware suits perfectly.
 
 <p align="center">
-<img src="../docs/fig-fleet.png" width="880" alt="The trainer sends one task and asks for several attempts; the orchestrator places that work on whichever of a MacBook Pro, Mac Studio or RTX box is free; the completions and the token ids they sampled come back to the trainer, which pushes each new adapter straight to every machine, every two steps.">
+<img src="../docs/fig-fleet.png" width="880" alt="The trainer sends one task and asks for several attempts; the orchestrator places that work on whichever of a MacBook Pro, Mac Studio or RTX 6000 is free; the completions and the token ids they sampled come back to the trainer, which pushes each new adapter straight to every machine, every two steps.">
 </p>
 
 Note who is driving. The trainer holds the tasks and the weights and opens every request; the
