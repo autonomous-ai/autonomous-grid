@@ -150,6 +150,8 @@ client.chat.completions.create(
 
 **That's it.** Every model on every computer answers at one endpoint.
 
+---
+
 ## Working from anywhere
 
 The four steps above run on your own network and need nothing from us. To reach the same computers
