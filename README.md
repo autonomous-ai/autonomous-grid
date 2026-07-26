@@ -15,7 +15,7 @@
 
 </div>
 
-An inference server runs a model on one machine. Grid makes every machine you have — your Mac,
+An inference server serves whatever fits on one machine. Grid makes every machine you have — your Mac,
 your NVIDIA desktop, the workstation in the corner — answer as one, behind **one OpenAI-compatible
 endpoint**, and does two things with them.
 
