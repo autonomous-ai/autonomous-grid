@@ -181,7 +181,7 @@ f.write(f"{OUT}/fig-earns.svg")
 # is the story — tasks in, adapter out, gate decides. The fleet sits underneath
 # the trainer because it is not a stage in that line, it is what the trainer
 # reaches for and gets answers back from.
-f = Fig(1700, 900)
+f = Fig(1700, 830)
 y = 250
 ww = box_w("Your tasks") - 8
 wcx = M + ww / 2
@@ -212,7 +212,7 @@ f.label(gcx + gw / 2 + 70, y + 162, "not better")
 # work. The fleet figure says the same thing; these two must not disagree.
 ocw = box_w("The orchestrator")
 oy = 470
-f.box(tcx - 118, oy, "The orchestrator", kind="purple", w=ocw)
+f.box(tcx, oy, "The orchestrator", kind="purple", w=ocw)
 MW = 236
 my = 700
 # Set close enough to touch: three boxes in a contiguous strip read as one fleet,
@@ -221,16 +221,18 @@ my = 700
 for bx, name in zip((tcx - 250, tcx, tcx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
     f.box(bx, my, name, w=MW)
 
-f.arrow(tcx - 118, y + H / 2 + 12, tcx - 118, oy - H / 2 - 14)
-f.label(tcx - 156, 384, "a task,", "several attempts", anchor="end")
-for bx in (tcx - 250, tcx, tcx + 250):
-    f.arrow(tcx - 118, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True,
-            curve=0 if bx == tcx - 250 else 70)
-f.label(tcx + 250, oy + 74, "placed on whichever machine is free", anchor="start")
+# Both directions live in the gap between the trainer and the orchestrator,
+# stacked directly above one another. The trainer never speaks to a machine: it
+# asks the grid and the grid answers, so the round trip belongs on that one hop.
+f.arrow(tcx - 64, y + H / 2 + 12, tcx - 64, oy - H / 2 - 14)
+f.label(tcx - 96, 352, "a task,", "several attempts", anchor="end")
+f.arrow(tcx + 64, oy - H / 2 - 14, tcx + 64, y + H / 2 + 12)
+f.label(tcx + 96, 340, "the attempts, and", "the token ids they sampled", anchor="start")
 
-# The completions come back to the trainer, clear of the orchestrator box.
-f.arrow(tcx + 70, my - H / 2 - 14, tcx + 70, y + H / 2 + 12)
-f.label(tcx + 96, 386, "the attempts, and", "the token ids they sampled", anchor="start")
+for bx in (tcx - 250, tcx, tcx + 250):
+    f.arrow(tcx, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True,
+            curve=0 if bx == tcx else 74)
+f.label(tcx + 330, my - 84, "placed on whichever", "machine is free", anchor="start")
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
