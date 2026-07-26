@@ -49,8 +49,8 @@ You get `grid` (and the `agrid` alias) on your PATH — a self-contained binary 
 [uv](https://docs.astral.sh/uv/)-managed install on macOS. Pin a release with `GRID_VERSION=0.1.0`.
 Contributors can instead clone and `uv tool install -e . --force`.
 
-The four steps below are the **local** path — your own network, no account, nothing to sign into.
-[Working from anywhere](#working-from-anywhere) is the same four steps with three commands changed.
+The four steps below are the **local** path. Remote mode is the same four steps with
+[three commands changed](#working-from-anywhere).
 
 ### 1 · Start a grid
 
