@@ -270,7 +270,7 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise: more computers, more models, superhuman work, more employees, and back to more computers. Two further arcs fork off the rim at marked points and rejoin the ring at superhuman work — over the top, more connectors then more context; underneath, more training then sharper models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise: more computers, more models, superhuman work, more employees, and back to more computers. A second loop forks off the rim at a marked point and runs over the top — more connectors, then more domain-specific data, then more domain-specific models — before rejoining the ring at superhuman work.">
 </p>
 
 **The ring is the whole business in four words.** More employees arrive, and each arrives with a
@@ -279,16 +279,12 @@ superhuman brings more employees. Capacity grows with the team rather than with 
 is the part a cloud product structurally cannot copy — its capacity is rented, and this walks in
 the door.
 
-**Over the top: context.** Connecting a system is the cheapest thing on this page and it is what
-turns a general model into one that knows your work — your tickets, your repos, your deals. More
-connectors, more context, better work. Nothing new has to be bought for this loop to turn.
-
-**Underneath: depth.** Context makes a model that knows *about* your work. Training makes one that
-is *good at* it. The same traffic that flows through the ring is the training set, so the models get
-sharper at the jobs you actually run, not at a benchmark.
-
-Both outer arcs come home to the same station, which is the point of the drawing: breadth and depth
-are different mechanisms, and neither is the goal. The goal is the work.
+**The second loop is where the work gets specific.** Connecting a system is the cheapest thing on
+this page, and it is what turns a general model into one that knows your tickets, your repos, your
+deals. That data is not one undifferentiated pile — it arrives sorted by the job that produced it,
+which is what makes a model *for that job* possible rather than one model asked to be good at
+everything. It comes home to the same station the ring does, because a sharper model is not the
+goal. The work is the goal.
 
 ## The code
 

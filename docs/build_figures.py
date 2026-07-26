@@ -217,24 +217,26 @@ f.label((mcx + tcx) / 2, 470, "the new adapter, to every machine, every two step
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
-# Amazon's flywheel, station for station. Four things make theirs read the way it
-# does, and all four are structural rather than decorative:
+# Amazon's flywheel, station for station. Two loops, because theirs is two, and
+# the reason theirs is memorable is that it is small enough to hold in one look.
 #
+# Four things make the lines read the way the reference's do, and all four are
+# structural rather than decorative:
 #   1. the second loop FORKS off the wheel at a marked point — it does not cross
 #      it. Two lines leaving one dot read as a branch; two lines meeting in open
-#      space read as a mistake, which is what the first attempt looked like.
-#   2. the centre is large against the ring — a little over half its diameter —
-#      so the wheel reads as a disc with words round it, not a hoop.
-#   3. the lines are near-black and heavy. Thin grey says "annotation"; this is
-#      the argument.
-#   4. nothing else is on the page. No legend, no colour coding.
+#      space read as a mistake.
+#   2. the centre is large against the ring, a little over half its diameter, so
+#      the wheel reads as a disc with words round it rather than a hoop.
+#   3. the lines are near-black and heavy. Thin grey is what this system uses for
+#      annotation; this figure is the argument.
+#   4. nothing else is on the page — no legend, no colour coding.
 #
 #   growth -> intelligence            sellers -> more computers
 #   selection -> more models          traffic -> more employees
 #   customer experience -> superhuman work
-#   lower cost structure -> more connectors    lower prices -> more context
-f = Fig(1620, 1330)
-CX, CY, R = 800, 650, 430
+#   the second loop: connectors -> domain-specific data -> domain-specific models
+f = Fig(1700, 1190)
+CX, CY, R = 800, 660, 430
 INK = LABEL_TEXT
 
 f.wheel(CX, CY, R, [
@@ -244,21 +246,18 @@ f.wheel(CX, CY, R, [
     ("More computers", LABEL_TEXT),
 ], hub_r=250, hub_lines=("INTELLIGENCE",), fs=CORE_FS, arc=INK)
 
-# Both second loops fork off the rim rather than leaving the hub, so neither one
-# crosses the wheel. Each lands back on the station it improves.
-f.dot(448, 403)
-f.block(330, 176, ("More connectors",), LABEL_TEXT, CORE_FS)
-f.bow(448, 403, 392, 232, lift=-30, colour=INK, width=RIM)
-f.bow(492, 168, 1082, 152, lift=-58, colour=INK, width=RIM)
-f.bow(1310, 208, 1258, 596, lift=-56, colour=INK, width=RIM)
-f.block(1238, 160, ("More context",), LABEL_TEXT, CORE_FS)
+# The second loop forks off the rim rather than leaving the hub, so it crosses
+# nothing, and it lands back on the station it exists to improve. Connecting a
+# system is what turns a general model into one that knows your work.
+f.dot(448, 413)
+f.block(258, 244, ("More connectors",), LABEL_TEXT, CORE_FS)
+f.block(806, 96, ("More domain-", "specific data"), LABEL_TEXT, CORE_FS)
+f.block(1338, 252, ("More domain-", "specific models"), LABEL_TEXT, CORE_FS)
 
-f.dot(448, 897)
-f.block(342, 1134, ("More training",), LABEL_TEXT, CORE_FS)
-f.bow(448, 897, 396, 1078, lift=30, colour=INK, width=RIM)
-f.bow(500, 1146, 1096, 1160, lift=58, colour=INK, width=RIM)
-f.bow(1330, 1108, 1262, 706, lift=56, colour=INK, width=RIM)
-f.block(1256, 1152, ("Sharper models",), LABEL_TEXT, CORE_FS)
+f.bow(448, 413, 336, 290, lift=-26, colour=INK, width=RIM)
+f.bow(432, 214, 616, 126, lift=-30, colour=INK, width=RIM)
+f.bow(1000, 118, 1136, 196, lift=-26, colour=INK, width=RIM)
+f.bow(1428, 336, 1280, 602, lift=-44, colour=INK, width=RIM)
 
 f.write(f"{OUT}/fig-flywheel.svg")
 

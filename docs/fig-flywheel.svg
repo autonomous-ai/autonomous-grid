@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1620 1330" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 1190" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -31,27 +31,25 @@
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="1620" height="1330" fill="#fff"/>
-  <text x="800" y="232" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More models</text>
-  <text x="1230" y="662" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Superhuman work</text>
-  <text x="800" y="1092" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More employees</text>
-  <text x="370" y="662" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More computers</text>
-  <path d="M941 244 A430 430 0 0 1 1189 467" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M1192 826 A430 430 0 0 1 975 1043" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M632 1046 A430 430 0 0 1 406 821" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M402 486 A430 430 0 0 1 650 247" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <circle cx="800" cy="650" r="250" fill="#5d579d"/>
-  <text x="800" y="661" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">INTELLIGENCE</text>
-  <circle cx="448" cy="403" r="9" fill="#2b2b29"/>
-  <text x="330" y="188" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More connectors</text>
-  <path d="M448 403 Q391 327 392 232" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M492 168 Q785 102 1082 152" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M1310 208 Q1340 409 1258 596" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <text x="1238" y="172" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More context</text>
-  <circle cx="448" cy="897" r="9" fill="#2b2b29"/>
-  <text x="342" y="1146" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More training</text>
-  <path d="M448 897 Q393 979 396 1078" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M500 1146 Q797 1211 1096 1160" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <path d="M1330 1108 Q1351 898 1262 706" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
-  <text x="1256" y="1164" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Sharper models</text>
+  <rect width="1700" height="1190" fill="#fff"/>
+  <text x="800" y="242" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More models</text>
+  <text x="1230" y="672" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">Superhuman work</text>
+  <text x="800" y="1102" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More employees</text>
+  <text x="370" y="672" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More computers</text>
+  <path d="M941 254 A430 430 0 0 1 1189 477" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M1192 836 A430 430 0 0 1 975 1053" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M632 1056 A430 430 0 0 1 406 831" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M402 496 A430 430 0 0 1 650 257" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <circle cx="800" cy="660" r="250" fill="#5d579d"/>
+  <text x="800" y="671" text-anchor="middle" fill="#fff" font-size="34" font-weight="700" letter-spacing="0.5">INTELLIGENCE</text>
+  <circle cx="448" cy="413" r="9" fill="#2b2b29"/>
+  <text x="258" y="256" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More connectors</text>
+  <text x="806" y="86" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More domain-</text>
+  <text x="806" y="130" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">specific data</text>
+  <text x="1338" y="242" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">More domain-</text>
+  <text x="1338" y="286" text-anchor="middle" fill="#2b2b29" font-size="35" font-weight="700">specific models</text>
+  <path d="M448 413 Q373 369 336 290" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M432 214 Q511 143 616 126" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M1000 118 Q1081 134 1136 196" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
+  <path d="M1428 336 Q1392 490 1280 602" fill="none" stroke="#2b2b29" stroke-width="4" marker-end="url(#Hk)"/>
 </svg>
