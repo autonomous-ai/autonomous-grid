@@ -128,13 +128,62 @@ Three things follow. **Splitting the work costs nothing** — the two-machine ru
 five-step cadence. **And the last row is the lesson:** with no push at all the line is perfectly
 flat, which is what a broken training loop looks like from outside.
 
+### Apple Silicon — run at last, and the four defects it was hiding
+
+Every number in the table above came from torch on an Intel iMac. The MLX path had never been
+run by anyone, which `docs/start-on-a-mac.md` said in as many words. It has now been run, on an
+**M2 Max (64 GB), mlx-lm 0.31.3, Python 3.12** — and the first attempt did something worse than
+fail flat: it **inverted the model**, 0.705 → 0.017, with every test in the repo still green.
+
+The runs below are from that M2 Max, at the defaults each file now ships, so a bare
+`python -m train.mlx.grpo_hello` reproduces them. Both rows are the same machine — the torch
+row is its CPU, and is a *different machine* from the Intel iMac in the table above, so the two
+torch numbers are not a before/after of anything.
+
+| Backend | Steps | Held-out score (seeds 17 · 5 · 99) | Time | Verdict |
+|---|---|---|---|---|
+| torch · M2 Max CPU | 60 | 0.220 → 0.736 | 3.5 min | passed |
+| **MLX · M2 Max GPU** | 60 | 0.225 → **0.527** · 0.222 → 0.687 · 0.255 → 0.764 | **~1 min** | **passed** |
+
+Four defects, none of which crashed anything:
+
+* **The LoRA scale was 10× the torch twin's.** mlx-lm multiplies the adapter branch by `scale`
+  directly; peft multiplies by `lora_alpha / r`. The torch side sets `lora_alpha = 2 * rank` —
+  an effective 2.0 — and the MLX side hardcoded **20.0**, which is mlx-lm's own example value.
+  `adapters.py` had the relationship written down correctly the whole time; the trainer just
+  didn't use it. Changing that one flag and nothing else, same seed and model: **0.225 → 0.527
+  at scale 2.0, and 0.225 → 0.000 at 20.0.** Lowering the learning rate ten-fold also removes
+  the collapse — the two knobs largely trade off — but only one of them is a *correctness*
+  requirement: an adapter has to mean the same thing on both backends, or a mixed fleet serves
+  a different model than it trained.
+* **The saved adapter disagreed with the run that produced it.** `adapter_config.json` is what
+  mlx-lm rebuilds the LoRA layers from when serving, and it was written with a hardcoded
+  `scale: 20.0` regardless of training. Loading a *correctly* trained adapter through that
+  config scored **0.007 — below the untrained model.** Fixing the trainer alone would have
+  moved the same 10× fault out of the loop and into the artifact, where `grid train serve`,
+  `deploy.py` and `sync.py` all consume it. The config now records what training actually used,
+  and a saved adapter reloads to its exact trained score.
+* **The two "twins" measured different tasks.** torch reverses 3–4 words; MLX took the module
+  default of 3–**6**, a materially harder job, and the two sets of numbers were read as though
+  they were comparable. Step count, sampling cap and eval-set size disagreed too.
+* **The starting model had no room to climb.** Qwen2.5-0.5B-Instruct-4bit scores ~0.84 untrained
+  on the 3–4 word task (0.705 on the harder 3–6 word one it was actually being run against). A
+  smoke test that starts near the ceiling cannot show a climb however well the loop works — so
+  the default is now the same weak SmolLM2-135M the torch twin uses, where the gap between
+  working and broken is impossible to miss.
+
+The honest lesson is the one this section already draws about the flat line: **a training run
+fails quietly.** All four left the suite green, and the single number that would have exposed
+them on sight — the step-0 baseline — was printed to the terminal and never written to
+`log.jsonl`. Both twins write it there now, as the file's first line.
+
 ## Try it
 
 Nothing here needs a GPU, a key, or an account. The first command is a complete training run.
 
 ```bash
 python -m train.torch_grpo_hello     # any machine — CPU is fine, ~6 minutes
-python -m train.mlx.grpo_hello       # the same, natively on Apple Silicon (pip install mlx-lm)
+python -m train.mlx.grpo_hello       # the same task and model, on Apple Silicon in ~1 minute
 
 grid train where                     # which grids training can use (LAN and hosted)
 grid train ui                        # watch the curves → http://127.0.0.1:8321

@@ -1,6 +1,6 @@
 """RL hello world on Apple Silicon: GRPO word-reversal climb, one Mac, no CUDA.
 
-    python -m train.mlx.grpo_hello                  # ~5-10 min on an M-series Mac
+    python -m train.mlx.grpo_hello                  # ~1 min on an M-series Mac
     python -m train.mlx.grpo_hello --steps 40       # shorter proof
 
 Each step: sample a group of completions for one task from the current policy (recording the
@@ -19,8 +19,24 @@ Correctness notes, deliberate and load-bearing:
   and the clip is inert — kept anyway so the semantics survive a future multi-epoch setting.
 - Sampling is temperature-1 categorical over the same distribution the loss differentiates,
   so behavior and trainable logprobs are exactly comparable.
+- The LoRA `scale` is the peft `lora_alpha / r`, in the same units (adapters.py:135) — the torch
+  twin's `lora_alpha = 2 * rank` is this file's `--lora-scale 2.0`. mlx-lm's own examples use
+  20.0, and taking that number here put the MLX adapter ten times louder than the peft one for
+  the same nominal rank. That is a correctness problem before it is a stability one: an adapter
+  converted between the two backends must mean the same thing on both, or a mixed fleet serves
+  a different model than it trained. It was also unstable at the shipped learning rate — a
+  0.705 baseline fell to 0.017, with the whole suite still green.
+- The same `scale` is written into adapter_config.json, because mlx-lm rebuilds the LoRA layers
+  from that file when serving. A config that disagrees with the run is the identical 10x fault,
+  moved from the training loop into the artifact.
+- The defaults mirror the torch twin's — same model, same 3-4 word task, same steps, tokens,
+  rank, eval size and effective LoRA scale — so the two backends' numbers can be read side by
+  side. Two differences remain and are deliberate: the optimiser (mlx `Adam` vs torch `AdamW`,
+  which applies 0.01 weight decay), and how "all linear layers" is reached — `all-linear` in
+  peft against every transformer block here.
 
-Requires Apple Silicon (`pip install mlx-lm`). Verified against mlx-lm 0.31.3 APIs.
+Requires Apple Silicon (`pip install mlx-lm`). Verified against mlx-lm 0.31.3 APIs, and run on
+an M2 Max: 0.216 -> 0.845 held-out in 62s over 60 steps.
 """
 from __future__ import annotations
 
@@ -38,7 +54,10 @@ from ..hello_task import (
     reward,
 )
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+# The same model the torch twin starts from, so the two hello worlds report comparable numbers.
+# It is deliberately weak: Qwen2.5-0.5B already scores ~0.84 on this task untrained, and a smoke
+# test whose baseline is near the ceiling cannot show a climb no matter how well the loop works.
+DEFAULT_MODEL = "mlx-community/SmolLM2-135M-Instruct"
 
 
 def _import_mlx():
@@ -60,15 +79,28 @@ def _import_mlx():
 def main() -> int:
     parser = argparse.ArgumentParser(description="GRPO hello world on Apple Silicon (MLX)")
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--steps", type=int, default=80)
+    parser.add_argument("--steps", type=int, default=60)
     parser.add_argument("--group-size", type=int, default=8)
-    parser.add_argument("--max-tokens", type=int, default=48)
+    parser.add_argument("--max-tokens", type=int, default=40)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--lora-rank", type=int, default=16)
-    parser.add_argument("--lora-layers", type=int, default=8)
+    # -1 = every transformer block, the closest MLX equivalent of the torch twin's
+    # `target_modules="all-linear"`. Adapting only the last 8 blocks trains far fewer parameters
+    # and roughly halves the climb over the same 60 steps.
+    parser.add_argument("--lora-layers", type=int, default=-1)
+    # mlx-lm multiplies the LoRA branch by `scale` directly; peft multiplies by lora_alpha/r
+    # (adapters.py:135). The torch twin uses lora_alpha = 2 * rank, so its effective scale is
+    # 2.0 — this is the same knob, in the same units, and the two must agree or a converted
+    # adapter means something different on either side of the fleet.
+    parser.add_argument("--lora-scale", type=float, default=2.0)
     parser.add_argument("--clip-eps", type=float, default=0.2)
     parser.add_argument("--eval-every", type=int, default=10)
-    parser.add_argument("--eval-tasks", type=int, default=24)
+    parser.add_argument("--eval-tasks", type=int, default=16)
+    # Task size, matching the torch twin. Reversing six words is a materially harder job than
+    # reversing four, so leaving these unexposed made the two hello worlds measure different
+    # tasks and report the numbers as if they were comparable.
+    parser.add_argument("--min-words", type=int, default=3)
+    parser.add_argument("--max-words", type=int, default=4)
     parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
 
@@ -79,10 +111,11 @@ def main() -> int:
     print(f"Loading {args.model} …")
     model, tokenizer = load(args.model)
     model.freeze()
+    lora_layers = len(model.layers) if args.lora_layers < 0 else args.lora_layers
     linear_to_lora_layers(
         model,
-        args.lora_layers,
-        {"rank": args.lora_rank, "scale": 20.0, "dropout": 0.0},
+        lora_layers,
+        {"rank": args.lora_rank, "scale": args.lora_scale, "dropout": 0.0},
     )
     optimizer = optim.Adam(learning_rate=args.learning_rate)
     eos_ids = set(tokenizer.eos_token_ids)
@@ -168,7 +201,12 @@ def main() -> int:
         mx.eval(model.parameters(), optimizer.state, loss)
         return loss.item()
 
-    eval_set = make_eval_set(seed=args.seed + 1000, n=args.eval_tasks)
+    eval_set = make_eval_set(
+        seed=args.seed + 1000,
+        n=args.eval_tasks,
+        min_words=args.min_words,
+        max_words=args.max_words,
+    )
     started = time.time()  # before the baseline eval: reported minutes = what the user waited
 
     def evaluate() -> float:
@@ -180,10 +218,15 @@ def main() -> int:
 
     baseline = evaluate()
     print(f"step 0  eval {baseline:.3f}  (baseline before any training)")
-    history = [{"step": 0, "eval": baseline}]
+    # The baseline goes to the log *file*, not just the in-memory history: it is the number that
+    # decides whether a run helped or hurt, and a reader holding only log.jsonl cannot tell a
+    # climb from a collapse without it.
+    history = [{"step": 0, "eval": round(baseline, 4)}]
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(history[0]) + "\n")
 
     for step in range(1, args.steps + 1):
-        user_text, target = make_task(rng)
+        user_text, target = make_task(rng, args.min_words, args.max_words)
         prompt_ids = encode_prompt(user_text)
         completions, rewards = [], []
         for _ in range(args.group_size):
@@ -240,13 +283,21 @@ def _save_adapters(mx, model, run_dir: Path, args: argparse.Namespace) -> None:
         str(adapter_dir / "adapters.safetensors"),
         dict(tree_flatten(model.trainable_parameters())),
     )
-    # The config mlx_lm expects next to the weights so `--adapter-path` just works.
+    # The config mlx_lm expects next to the weights so `--adapter-path` just works. Both values
+    # must be what training actually used, not what the flags said: `load_adapters` rebuilds the
+    # LoRA layers from this file, so a `scale` that disagrees with the run applies the trained
+    # delta at the wrong magnitude on every serving node, and `num_layers` is written resolved
+    # rather than as the -1 sentinel so it does not depend on mlx-lm clamping a negative index.
     (adapter_dir / "adapter_config.json").write_text(
         json.dumps(
             {
                 "fine_tune_type": "lora",
-                "num_layers": args.lora_layers,
-                "lora_parameters": {"rank": args.lora_rank, "scale": 20.0, "dropout": 0.0},
+                "num_layers": len(model.layers) if args.lora_layers < 0 else args.lora_layers,
+                "lora_parameters": {
+                    "rank": args.lora_rank,
+                    "scale": args.lora_scale,
+                    "dropout": 0.0,
+                },
             },
             indent=2,
         )

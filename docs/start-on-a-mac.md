@@ -4,10 +4,11 @@ The shortest real path from nothing to a model your team can use, on one Apple-S
 NVIDIA card, no vLLM, no cloud account, and nothing leaves the machine.
 
 Everything here has been exercised end to end over HTTP in `tests/e2e_train.py`, and the imitation
-rung has been run for real on an Intel Mac (140 tickets, 48 seconds on CPU). **What no one has run
-yet is the MLX path on Apple Silicon** — the code is verified against mlx-lm's source and its wire
-contract is tested, but the first person to do this is doing it first. If something here is wrong,
-it will be wrong in this file.
+rung has been run for real on an Intel Mac (140 tickets, 48 seconds on CPU). **The MLX path has now
+been run on Apple Silicon** — an M2 Max on mlx-lm 0.31.3 — which it had not been when this file was
+first written. Doing so found three defects that left every test green and the model *worse* than
+untrained; they are fixed, and the story is in `train/README.md` §5. Step 1 below is the run that
+found them, so do not skip it.
 
 ## 0. Install (2 minutes)
 
@@ -21,7 +22,11 @@ grid train doctor                  # what this computer can do right now
 `doctor` answers for two rungs separately. Expect the first to be ready and the second to say it
 needs an engine — that is correct on a fresh machine, and stage one is what you want first.
 
-## 1. The five-minute proof (optional, but do it once)
+Those two installs disagree about `transformers` — mlx-lm wants the 5.x line, and the torch
+trainer was written against 4.x. Both are exercised on one Mac now (4.57 and 5.14), so the order
+you install them in doesn't matter.
+
+## 1. The one-minute proof (optional, but do it once)
 
 Before any of your own data, watch a model actually learn:
 
@@ -30,9 +35,14 @@ python -m train.mlx.grpo_hello
 ```
 
 A small model is asked to reverse the words in a sentence, scored on how close it gets, and
-updated. On an Intel iMac's CPU the same task climbed **0.220 → 0.674 in 5.6 minutes**. You should
-see the score rise and a verdict at the end. If it doesn't rise, stop here and say so — everything
-downstream assumes this works.
+updated. On an **M2 Max this climbs from about 0.22 to between 0.53 and 0.76 in roughly a minute**
+— it varies by seed — and prints `CLIMB CONFIRMED`. The torch twin does the same job on that
+machine's CPU in 3.5 minutes. You should see the score rise and a verdict at the end. If it
+doesn't rise, stop here and say so — everything downstream assumes this works.
+
+The number to watch is the **step-0 baseline**, printed before training starts and written as the
+first line of `log.jsonl`. A run that ends below where it began has not merely failed to learn; it
+has made the model worse, and without that first number the curve alone won't tell you.
 
 ## 2. Your own data (5 minutes)
 

@@ -119,13 +119,20 @@ def main() -> int:
     log_path = run_dir / "log.jsonl"
 
     def encode_prompt(user_text: str) -> list[int]:
-        return tokenizer.apply_chat_template(
+        # Render to text first, then encode. `apply_chat_template(tokenize=True)` returns a plain
+        # list of ids on transformers 4.x but a BatchEncoding on 5.x, and the 5.x object goes
+        # into `torch.tensor(...)` as an un-inferable dtype — the whole trainer dies at the
+        # baseline eval, before step 1. The template already emits its own special tokens, so
+        # `add_special_tokens=False` keeps the ids identical to the 4.x path on both versions.
+        text = tokenizer.apply_chat_template(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text},
             ],
             add_generation_prompt=True,
+            tokenize=False,
         )
+        return tokenizer.encode(text, add_special_tokens=False)
 
     rollout_nodes = list(args.rollout_url or ())
     remotes = []
@@ -249,6 +256,10 @@ def main() -> int:
 
     baseline = evaluate()
     print(f"step 0  eval {baseline:.3f}  (baseline before any training)")
+    # Persist the baseline, not just print it: it is the number that separates a climb from a
+    # collapse, and a reader holding only log.jsonl cannot tell the two apart without it.
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"step": 0, "eval": round(baseline, 4)}) + "\n")
 
     final = baseline
     for step in range(1, args.steps + 1):
