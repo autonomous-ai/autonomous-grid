@@ -260,9 +260,10 @@ leave your network.
 
 Why bother, when the models you can rent are so good? Because they know nothing about you, and
 waiting for a bigger general model does not fix that: the information was never on the internet to
-begin with. It is sitting in your systems. What you get on the other side of that gap is worse than
-the frontier at everything and better than the frontier at your thing — which is the trade you want,
-because most of what your team does all day is your thing.
+begin with. It is sitting in your systems. What you get on the other side of that gap is an **expert
+in your work rather than a generalist** — worse than the frontier at everything, better than the
+frontier at your thing. That is the trade you want, because most of what your team does all day is
+your thing.
 
 ```bash
 grid train packs                        # ready-made setups for real business data

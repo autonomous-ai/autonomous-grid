@@ -13,14 +13,14 @@ actually writes a reply. Waiting for a bigger general model does not close that 
 information was never on the internet to begin with. It is sitting in your systems.
 
 Domain-specific intelligence is what is on the other side of that gap: a small model that has seen
-how your work actually goes. It is worse than the frontier at everything and better than the
-frontier at your thing, which is the trade you want, because most of what your team does all day is
-your thing. The weights are yours, so nobody deprecates them, reprices them or swaps them out from
+how your work actually goes — **an expert in your work rather than a generalist**. It is worse than
+the frontier at everything and better than the frontier at your thing, which is the trade you want,
+because most of what your team does all day is your thing. The weights are yours, so nobody deprecates them, reprices them or swaps them out from
 under you. And the data they learned from never left the building.
 
-That is the *why*. The rest of this page is the *how* — and the reason it is drawn as a flywheel
-rather than a pipeline is that domain-specific intelligence, unlike a model you rent, **compounds**:
-every night's work is the next night's training set.
+That is the *why*. The rest of this page is the *how*, and it is drawn as a flywheel rather than a
+pipeline because an expert you own, unlike a model you rent, **compounds** — every night's work is
+the next night's training set.
 
 ## How the training plane works
 
@@ -304,7 +304,7 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then domain-specific models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then expert models — before rejoining the wheel at models.">
 </p>
 
 The hub says *compounding* rather than *domain-specific* for a reason worth stating: a wheel
@@ -321,8 +321,9 @@ because they are the ones who connect a system — the cheapest thing on this pa
 general model into one that knows your tickets, your repos, your deals. That data is not one undifferentiated pile — it arrives sorted by the job
 that produced it, which is what makes a model *for that job* possible rather than one model asked
 to be good at everything. Those are models too — which is why the loop rejoins the wheel at
-models, and why the drawing spells out *domain-specific* there against the plain **Models** on the
-rim. What it skips is the one station that needs somebody to buy something.
+models, and why that station reads **Expert models** against the plain **Models** on the rim: not a
+different kind of thing, a narrower and better one. What it skips is the single station that needs
+somebody to buy something.
 
 ## The code
 

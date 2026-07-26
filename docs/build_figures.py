@@ -289,24 +289,23 @@ f.block(258, 200, ("Your systems",), GREEN_TEXT, CORE_FS)
 f.block(258, 252, ("Gmail · Slack · Notion", "Drive · Salesforce"),
         LABEL_TEXT, SAT_FS, weight=400)
 f.block(800, 118, ("Your data",), GREEN_TEXT, CORE_FS)
-# Spelled out rather than "Your DSI": the hub is the asset that accumulates, this
-# is the artifact that gets made, and naming both the same thing would collapse a
-# distinction the second loop exists to draw. It also puts the contrast on the
-# page — the ring's general Models, and the domain-specific ones joining them.
-f.block(1436, 212, ("Domain-specific", "models"), PURPLE_TEXT, CORE_FS)
+# "Expert models", not "domain-specific models": every other station on this wheel
+# is a word a reader already owns, and that was the last piece of jargon. It also
+# draws the contrast harder — experts joining the plain Models on the rim.
+f.block(1424, 226, ("Expert models",), PURPLE_TEXT, CORE_FS)
 
 f.bow(336, 604, 274, 322, lift=-18, colour=INK, width=RIM)
 f.label(356, 470, "connect")
 f.bow(400, 168, 668, 132, lift=-24, colour=INK, width=RIM)
-f.bow(936, 132, 1242, 184, lift=-28, colour=INK, width=RIM)
-f.bow(1502, 300, 1256, 610, lift=-52, colour=INK, width=RIM)
+f.bow(936, 132, 1256, 192, lift=-28, colour=INK, width=RIM)
+f.bow(1508, 288, 1256, 610, lift=-54, colour=INK, width=RIM)
 
 # The one place a verb earns its keep: Computers is the only station that does two
 # different jobs, and without this second arrow the drawing shows only the first.
 # The same machines serve by day and train at night — section 4. The two arrows
 # leave Computers well apart: the rim departs at about 288 degrees, so this one
 # starts clear above it rather than from the same few pixels.
-f.bow(922, 236, 1234, 256, lift=-20, colour=INK, width=RIM)
+f.bow(922, 236, 1250, 258, lift=-20, colour=INK, width=RIM)
 f.label(1074, 292, "train")
 f.label(1042, 442, "serve")
 
