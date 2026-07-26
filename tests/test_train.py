@@ -318,3 +318,79 @@ def test_push_adapter_falls_back_to_vllm_endpoint(tmp_path):
     )
     assert results[0]["ok"] is True
     assert paths == ["/reload_adapter", "/v1/load_lora_adapter"]
+
+
+# --- spreading one group over the fleet -----------------------------------------------------
+
+def test_a_group_is_split_only_when_the_fleet_would_otherwise_idle():
+    """TRL's generation batch at our defaults is ONE prompt, so a whole group on one engine
+    leaves every other machine asleep. With many prompts in flight, keeping the group whole is
+    right again — the engine reuses the prompt prefix and the fleet is busy anyway."""
+    from train.config import RolloutConfig
+    from train.rollout import split_for
+
+    four = RolloutConfig(base_url="http://grid/v1",
+                         sync_nodes=("http://a/v1", "http://b/v1", "http://c/v1", "http://d/v1"))
+    assert split_for(four, prompts_in_flight=1) == 4      # one prompt, four machines: split it
+    assert split_for(four, prompts_in_flight=2) == 2
+    assert split_for(four, prompts_in_flight=8) == 1      # fleet already busy: keep it whole
+
+    alone = RolloutConfig(base_url="http://grid/v1")
+    assert split_for(alone, prompts_in_flight=1) == 1     # nothing to spread across
+
+    pinned = RolloutConfig(base_url="http://grid/v1", sync_nodes=("http://a/v1",), split_group=3)
+    assert split_for(pinned, prompts_in_flight=99) == 3   # an explicit setting always wins
+
+
+def test_a_split_group_comes_back_whole_and_in_order():
+    import httpx
+
+    from train.config import RolloutConfig
+    from train.rollout import GridRolloutClient
+
+    seen: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        body = _json.loads(request.content)
+        n = body["n"]
+        seen.append(n)
+        # each chunk numbers its own choices from 0, as an OpenAI-compatible engine does
+        return httpx.Response(200, json={"choices": [
+            {"text": f"n{n}-{i}", "logprobs": {"tokens": [f"token_id:{i}"],
+                                               "token_logprobs": [-0.5]}}
+            for i in range(n)]})
+
+    cfg = RolloutConfig(base_url="http://grid/v1")
+    client = GridRolloutClient(cfg, "m", transport=httpx.MockTransport(handle))
+    rollouts = client.generate_group("a task", 8, split=4)
+    client.close()
+
+    assert sorted(seen) == [2, 2, 2, 2]        # four concurrent requests, evenly divided
+    assert len(rollouts) == 8                  # and the group comes back whole
+    # every completion still carries its own logprobs — the only pairing the trainer relies on
+    assert all(len(r.token_ids) == len(r.logprobs) for r in rollouts)
+
+
+def test_a_failed_chunk_fails_the_group():
+    """A short group would silently change the baseline every other attempt is measured against."""
+    import httpx
+    import pytest
+
+    from train.config import RolloutConfig
+    from train.rollout import GridRolloutClient, RolloutError
+
+    calls = {"n": 0}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return httpx.Response(500, json={"error": "engine fell over"})
+        return httpx.Response(200, json={"choices": [
+            {"text": "x", "logprobs": {"tokens": ["token_id:1"], "token_logprobs": [-0.5]}}]})
+
+    client = GridRolloutClient(RolloutConfig(base_url="http://grid/v1"), "m",
+                               transport=httpx.MockTransport(handle))
+    with pytest.raises(RolloutError):
+        client.generate_group("a task", 4, split=4)
+    client.close()

@@ -77,6 +77,13 @@ class GridRolloutClient:
     prefix across the whole GRPO group, and it keeps the group on one engine — the same
     prefix-locality reasoning as prime-rl's group pinning, but enforced by request shape
     instead of a scheduler.
+
+    That reasoning holds only while there are enough prompts in flight to keep every machine
+    busy, and at our defaults there are not: a generation batch is one prompt, so the whole
+    fleet waits on one engine. `split_group` spreads a single group over several concurrent
+    requests to the same endpoint — the grid places them, so they land on different machines —
+    turning the wall clock for a group from the sum of eight completions into the slowest chunk.
+    The cost is one prompt prefill per request, since no KV cache is shared across machines.
     """
 
     def __init__(self, cfg: RolloutConfig, model: str, *, transport: httpx.BaseTransport | None = None) -> None:
@@ -114,11 +121,35 @@ class GridRolloutClient:
         return response.json()
 
     def generate_group(
-        self, prompt: str | list[int], n: int, temperature: float | None = None
+        self, prompt: str | list[int], n: int, temperature: float | None = None,
+        *, split: int = 1
     ) -> list[Rollout]:
         """`prompt` may be token ids — preferred for training, since the engine then conditions
         on exactly the prefix the trainer trains on (text round-trips are not identity for
-        every tokenizer). vLLM and Grid's MLX rollout server both accept either form."""
+        every tokenizer). vLLM and Grid's MLX rollout server both accept either form.
+
+        `split` > 1 asks for the same group over several concurrent requests. The completions are
+        returned in chunk order, which keeps each completion paired with its own logprobs — the
+        only ordering the trainer relies on. A chunk that fails fails the group: a short group
+        would change the baseline every other attempt is measured against.
+        """
+        if split > 1 and n > 1:
+            return self._generate_split(prompt, n, temperature, split)
+        return self._generate_one(prompt, n, temperature)
+
+    def _generate_split(self, prompt, n, temperature, split) -> list[Rollout]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        parts = _even_split(n, split)
+        with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+            futures = [pool.submit(self._generate_one, prompt, size, temperature)
+                       for size in parts]
+            chunks = [f.result() for f in futures]      # raises on the first failed chunk
+        return [rollout for chunk in chunks for rollout in chunk]
+
+    def _generate_one(
+        self, prompt: str | list[int], n: int, temperature: float | None = None
+    ) -> list[Rollout]:
         body = {
             "model": self._model,
             "prompt": prompt,
@@ -137,6 +168,33 @@ class GridRolloutClient:
         # OpenAI choices carry an `index`; keep group order deterministic regardless of arrival.
         ordered = sorted(choices, key=lambda c: c.get("index", 0))
         return [parse_completion_choice(c) for c in ordered]
+
+
+def split_for(cfg: RolloutConfig, *, prompts_in_flight: int) -> int:
+    """How many requests to spread one group over, for this step.
+
+    Explicit wins. `split_group = 0` means decide per step, and the decision is the whole point:
+    keeping a group whole is right when the prompts in flight already outnumber the machines, and
+    wrong when a generation batch is one prompt and the rest of the fleet is asleep. The machines
+    we push weights to are the machines that sample, so `sync_nodes` is the fleet size we know.
+    """
+    if cfg.split_group > 0:
+        return cfg.split_group
+    nodes = len(cfg.sync_nodes)
+    if nodes < 2 or prompts_in_flight < 1:
+        return 1
+    return max(1, nodes // prompts_in_flight)
+
+
+def _even_split(n: int, parts: int) -> list[int]:
+    """Divide n completions over `parts` requests as evenly as possible, largest chunks first.
+
+    Never returns a zero — a request for no completions is an error on both engines — and never
+    more parts than completions.
+    """
+    parts = max(1, min(parts, n))
+    base, extra = divmod(n, parts)
+    return [base + 1] * extra + [base] * (parts - extra)
 
 
 def probe_endpoint(cfg: RolloutConfig, model: str, *, transport: httpx.BaseTransport | None = None) -> dict:
@@ -190,9 +248,10 @@ def build_rollout_func(cfg: RolloutConfig, model: str, tokenizer):
         completion_ids: list[list[int]] = []
         logprobs: list[list[float]] = []
         completions_text: list[str] = []
+        split = split_for(cfg, prompts_in_flight=len(groups))
         for prompt, count in groups:
             ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            for rollout in client.generate_group(prompt, count):
+            for rollout in client.generate_group(prompt, count, split=split):
                 prompt_ids.append(list(ids))
                 completion_ids.append(list(rollout.token_ids))
                 logprobs.append(list(rollout.logprobs))

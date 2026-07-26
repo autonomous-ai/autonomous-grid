@@ -88,6 +88,14 @@ class RolloutConfig:
     # on the same task). `sync_nodes` defaults to [base_url] — the endpoint already in hand.
     sync_every: int = 2
     sync_nodes: tuple[str, ...] = ()
+    # How many concurrent requests one GRPO group is spread over. 1 keeps the group whole on one
+    # engine, which is right when many prompts are in flight: the engine reuses the prompt prefix
+    # across the group and the fleet is busy anyway. But TRL's generation batch at our defaults
+    # (per_device_batch 2 x gradient_accumulation 4 = 8 completions, num_generations 8) is ONE
+    # prompt — so with the group whole, one machine works and every other machine idles. Splitting
+    # trades a prompt prefill per request for the latency of the slowest chunk instead of the sum.
+    # 0 = decide per step: split only when there are fewer prompts in flight than machines.
+    split_group: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
