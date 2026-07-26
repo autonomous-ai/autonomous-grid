@@ -235,29 +235,33 @@ f.write(f"{OUT}/train-architecture.svg")
 #   selection -> more models          traffic -> more employees
 #   customer experience -> superhuman work
 #   the second loop: connectors -> domain-specific data -> domain-specific models
-f = Fig(1700, 1190)
-CX, CY, R = 800, 660, 430
+f = Fig(1660, 1180)
+CX, CY, R = 800, 640, 430
 INK = LABEL_TEXT
 
+# Nouns, not quantities. The reference says Sellers, Selection, Traffic — never
+# "more sellers" — because a flywheel already means "more of this drives more of
+# that", and repeating it in every label is the diagram explaining its own form.
 f.wheel(CX, CY, R, [
-    ("More models", LABEL_TEXT),
+    ("Models", LABEL_TEXT),
     ("Superhuman work", LABEL_TEXT),
-    ("More employees", LABEL_TEXT),
-    ("More computers", LABEL_TEXT),
-], hub_r=250, hub_lines=("INTELLIGENCE",), fs=CORE_FS, arc=INK)
+    ("Employees", LABEL_TEXT),
+    ("Computers", LABEL_TEXT),
+], hub_r=250, hub_lines=("INTELLIGENCE",), fs=CORE_FS, start=0, arc=INK)
 
-# The second loop forks off the rim rather than leaving the hub, so it crosses
-# nothing, and it lands back on the station it exists to improve. Connecting a
-# system is what turns a general model into one that knows your work.
-f.dot(448, 413)
-f.block(258, 244, ("More connectors",), LABEL_TEXT, CORE_FS)
-f.block(806, 96, ("More domain-", "specific data"), LABEL_TEXT, CORE_FS)
-f.block(1338, 252, ("More domain-", "specific models"), LABEL_TEXT, CORE_FS)
+# The second loop forks off the rim, runs over the top, and rejoins the wheel at
+# Models — domain-specific models ARE models, so that is the station they feed.
+# What it bypasses is Computers: this is the way to more models that does not
+# need anyone to buy hardware.
+f.dot(448, 393)
+f.block(286, 244, ("Connectors",), LABEL_TEXT, CORE_FS)
+f.block(800, 90, ("Domain-specific", "data"), LABEL_TEXT, CORE_FS)
+f.block(1376, 248, ("Domain-specific", "models"), LABEL_TEXT, CORE_FS)
 
-f.bow(448, 413, 336, 290, lift=-26, colour=INK, width=RIM)
-f.bow(432, 214, 616, 126, lift=-30, colour=INK, width=RIM)
-f.bow(1000, 118, 1136, 196, lift=-26, colour=INK, width=RIM)
-f.bow(1428, 336, 1280, 602, lift=-44, colour=INK, width=RIM)
+f.bow(448, 393, 350, 292, lift=-26, colour=INK, width=RIM)
+f.bow(400, 214, 624, 112, lift=-30, colour=INK, width=RIM)
+f.bow(980, 106, 1196, 186, lift=-26, colour=INK, width=RIM)
+f.bow(1466, 336, 1300, 576, lift=-44, colour=INK, width=RIM)
 
 f.write(f"{OUT}/fig-flywheel.svg")
 

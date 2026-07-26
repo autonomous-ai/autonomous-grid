@@ -270,21 +270,20 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise: more computers, more models, superhuman work, more employees, and back to more computers. A second loop forks off the rim at a marked point and runs over the top — more connectors, then more domain-specific data, then more domain-specific models — before rejoining the ring at superhuman work.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. A second loop forks off the rim at a marked point and runs over the top — connectors, then domain-specific data, then domain-specific models — before rejoining the wheel at models.">
 </p>
 
-**The ring is the whole business in four words.** More employees arrive, and each arrives with a
-computer. More computers run more models. More models make the work superhuman. Work that feels
-superhuman brings more employees. Capacity grows with the team rather than with the bill, and that
-is the part a cloud product structurally cannot copy — its capacity is rented, and this walks in
-the door.
+**The ring is the whole business in four words.** Computers run models. Models make the work
+superhuman. Superhuman work brings employees. Employees arrive carrying the next computers.
+Capacity grows with the team rather than with the bill, and that is the part a cloud product
+structurally cannot copy — its capacity is rented, and this walks in the door.
 
-**The second loop is where the work gets specific.** Connecting a system is the cheapest thing on
-this page, and it is what turns a general model into one that knows your tickets, your repos, your
-deals. That data is not one undifferentiated pile — it arrives sorted by the job that produced it,
-which is what makes a model *for that job* possible rather than one model asked to be good at
-everything. It comes home to the same station the ring does, because a sharper model is not the
-goal. The work is the goal.
+**The second loop is the way to more models that buys no hardware.** Connecting a system is the
+cheapest thing on this page, and it is what turns a general model into one that knows your tickets,
+your repos, your deals. That data is not one undifferentiated pile — it arrives sorted by the job
+that produced it, which is what makes a model *for that job* possible rather than one model asked
+to be good at everything. Those are models too, so the loop rejoins the wheel where models do. What
+it skips is the station that needs someone to buy something.
 
 ## The code
 
