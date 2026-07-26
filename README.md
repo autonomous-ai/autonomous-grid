@@ -28,8 +28,8 @@ weights never leave your network. This belongs here rather than in a separate to
 RL fine-tuning is roughly 75% sampling, sampling is inference, and inference is what a grid already
 does. The expensive part of training is work your fleet is already good at.
 
-**Intranet** is the old word for exactly this: a network that is yours, inside your building, not
-the public one. That is what this is, for AI.
+**Intranet** — the old word for a network that is yours, not the public one. An AI intranet is
+every computer you own, answering as one, on your own network.
 
 **Local by default — no account, no relay, nothing to sign into.** Your apps point at a machine on
 your own network, and it keeps working if we disappear. If you want to reach the same computers from
