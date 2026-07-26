@@ -121,11 +121,20 @@ def _rank_from(tensors: dict) -> int:
     raise AdapterError("cannot infer LoRA rank")
 
 
+# peft's effective scaling is lora_alpha / r; mlx-lm multiplies the adapter branch by `scale`
+# directly. Our own configs are alpha = 2 x rank, so an adapter whose config we cannot read is
+# assumed to mean this in BOTH directions. It used to be mlx-lm's example value of 20.0 going one
+# way and 2.0 coming back, so a config-less round trip moved the adapter's effective scale by 10x
+# — the same defect that made the M2 trainer invert its model (5790516) and the SFT lane train a
+# different LoRA than the config asked for (19e072c).
+DEFAULT_SCALE = 2.0
+
+
 def _write_mlx_config(source_dir: Path, dest_dir: Path, tensors: dict) -> None:
     import json
 
     rank = _rank_from(tensors)
-    scale = 20.0
+    scale = DEFAULT_SCALE
     peft_config = source_dir / "adapter_config.json"
     if peft_config.is_file():
         raw = json.loads(peft_config.read_text(encoding="utf-8"))
@@ -153,13 +162,13 @@ def _write_peft_config(source_dir: Path, dest_dir: Path, tensors: dict) -> None:
     import json
 
     rank = _rank_from(tensors)
-    alpha = 2 * rank
+    alpha = DEFAULT_SCALE * rank
     mlx_config = source_dir / "adapter_config.json"
     if mlx_config.is_file():
         raw = json.loads(mlx_config.read_text(encoding="utf-8"))
         params = raw.get("lora_parameters") or {}
         rank = int(params.get("rank", rank))
-        alpha = float(params.get("scale", 2.0)) * rank
+        alpha = float(params.get("scale", DEFAULT_SCALE)) * rank
     (dest_dir / "adapter_config.json").write_text(
         json.dumps(
             {

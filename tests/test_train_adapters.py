@@ -129,3 +129,24 @@ def test_conversion_ignores_non_lora_tensors():
         "model.layers.0.self_attn.q_proj.lora_a",
         "model.layers.0.self_attn.q_proj.lora_b",
     }
+
+
+def test_a_config_less_round_trip_does_not_move_the_scale(tmp_path):
+    """peft -> mlx fell back to mlx-lm's example 20.0 while mlx -> peft fell back to 2.0, so an
+    adapter converted twice came back meaning something ten times different. Same defect that
+    inverted the M2 trainer (5790516) and made the SFT lane train a rank nobody asked for."""
+    from train.adapters import DEFAULT_SCALE
+
+    source, _ = _peft_adapter(tmp_path)
+    (source / "adapter_config.json").unlink()          # an adapter whose config we cannot read
+
+    mlx = tmp_path / "out-mlx"
+    convert(source, mlx, to="mlx")
+    scale = json.loads((mlx / "adapter_config.json").read_text())["lora_parameters"]["scale"]
+    assert scale == DEFAULT_SCALE
+
+    (mlx / "adapter_config.json").unlink()
+    back = tmp_path / "out-peft"
+    convert(mlx, back, to="peft")
+    cfg = json.loads((back / "adapter_config.json").read_text())
+    assert cfg["lora_alpha"] / cfg["r"] == DEFAULT_SCALE       # the same adapter, still

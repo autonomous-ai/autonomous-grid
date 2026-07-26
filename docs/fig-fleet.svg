@@ -1,58 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 300" shape-rendering="geometricPrecision"
-     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 380" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
   <style>
-    .n   { stroke:#000; stroke-width:2; fill:#fff }
-    .dot { fill:#000 }
-    .e   { stroke:#000; stroke-width:2; fill:none }
-    .hd  { font-size:20px; fill:#000 }
-    .sy  { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:24px; fill:#000 }
+    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
+    .p  { fill:#f0eefb; stroke:#7a6fd1; stroke-width:1.7 }
+    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
+    .tg { fill:#4a8b2c; font-size:19px; font-weight:700 }
+    .tp { fill:#5b4fc0; font-size:19px; font-weight:700 }
+    .tc { fill:#c2593a; font-size:19px; font-weight:700 }
+    .l  { fill:#3a3a3a; font-size:15.5px }
+    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
+    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
   </style>
-  <rect width="720" height="300" fill="#fff"/>
+  <rect width="1120" height="380" fill="#fff"/>
 
-  <g class="hd" text-anchor="middle">
-    <text x="120" y="40">MacBook Pro</text>
-    <text x="360" y="40">Mac Studio</text>
-    <text x="600" y="40">RTX box</text>
-  </g>
+  <ellipse cx="82" cy="190" rx="58" ry="40" class="c"/>
+  <text x="82" y="184" text-anchor="middle" class="tc">Tasks</text>
+  <text x="82" y="206" text-anchor="middle" class="tc">tonight</text>
 
-  <!-- each machine takes one task and writes its own group -->
-  <g>
-    <circle cx="120" cy="88" r="15" class="n"/>
-    <circle cx="360" cy="88" r="15" class="n"/>
-    <circle cx="600" cy="88" r="15" class="n"/>
-    <text x="120" y="70" text-anchor="middle" class="sy">s</text>
-    <text x="360" y="70" text-anchor="middle" class="sy">s</text>
-    <text x="600" y="70" text-anchor="middle" class="sy">s</text>
-  </g>
+  <rect x="216" y="150" width="180" height="80" rx="3" class="p"/>
+  <text x="306" y="197" text-anchor="middle" class="tp">The grid</text>
 
-  <g class="e">
-    <path d="M120 103 L36 190"/><path d="M120 103 L60 190"/><path d="M120 103 L84 190"/>
-    <path d="M120 103 L108 190"/><path d="M120 103 L132 190"/><path d="M120 103 L156 190"/>
-    <path d="M120 103 L180 190"/><path d="M120 103 L204 190"/>
-    <path d="M360 103 L276 190"/><path d="M360 103 L300 190"/><path d="M360 103 L324 190"/>
-    <path d="M360 103 L348 190"/><path d="M360 103 L372 190"/><path d="M360 103 L396 190"/>
-    <path d="M360 103 L420 190"/><path d="M360 103 L444 190"/>
-    <path d="M600 103 L516 190"/><path d="M600 103 L540 190"/><path d="M600 103 L564 190"/>
-    <path d="M600 103 L588 190"/><path d="M600 103 L612 190"/><path d="M600 103 L636 190"/>
-    <path d="M600 103 L660 190"/><path d="M600 103 L684 190"/>
-  </g>
-  <g class="dot">
-    <circle cx="36" cy="198" r="7.5"/><circle cx="60" cy="198" r="7.5"/><circle cx="84" cy="198" r="7.5"/>
-    <circle cx="108" cy="198" r="7.5"/><circle cx="132" cy="198" r="7.5"/><circle cx="156" cy="198" r="7.5"/>
-    <circle cx="180" cy="198" r="7.5"/><circle cx="204" cy="198" r="7.5"/>
-    <circle cx="276" cy="198" r="7.5"/><circle cx="300" cy="198" r="7.5"/><circle cx="324" cy="198" r="7.5"/>
-    <circle cx="348" cy="198" r="7.5"/><circle cx="372" cy="198" r="7.5"/><circle cx="396" cy="198" r="7.5"/>
-    <circle cx="420" cy="198" r="7.5"/><circle cx="444" cy="198" r="7.5"/>
-    <circle cx="516" cy="198" r="7.5"/><circle cx="540" cy="198" r="7.5"/><circle cx="564" cy="198" r="7.5"/>
-    <circle cx="588" cy="198" r="7.5"/><circle cx="612" cy="198" r="7.5"/><circle cx="636" cy="198" r="7.5"/>
-    <circle cx="660" cy="198" r="7.5"/><circle cx="684" cy="198" r="7.5"/>
-  </g>
+  <rect x="492" y="40" width="248" height="76" rx="3" class="g"/>
+  <text x="616" y="72" text-anchor="middle" class="tg">MacBook Pro</text>
+  <text x="616" y="97" text-anchor="middle" class="l">one task, eight attempts</text>
 
-  <g class="e">
-    <path d="M120 214 L336 258"/><path d="M360 214 V258"/><path d="M600 214 L384 258"/>
-  </g>
-  <g fill="#000" stroke="#000" stroke-width="2">
-    <path d="M340 259 l-3 -14 l13 9 Z"/><path d="M360 264 l-5 -13.5 h10 Z"/><path d="M380 259 l3 -14 l-13 9 Z"/>
-  </g>
-  <text x="360" y="290" text-anchor="middle" class="hd">trainer</text>
+  <rect x="492" y="152" width="248" height="76" rx="3" class="g"/>
+  <text x="616" y="184" text-anchor="middle" class="tg">Mac Studio</text>
+  <text x="616" y="209" text-anchor="middle" class="l">one task, eight attempts</text>
+
+  <rect x="492" y="264" width="248" height="76" rx="3" class="g"/>
+  <text x="616" y="296" text-anchor="middle" class="tg">RTX box</text>
+  <text x="616" y="321" text-anchor="middle" class="l">one task, eight attempts</text>
+
+  <rect x="856" y="152" width="200" height="76" rx="3" class="p"/>
+  <text x="956" y="198" text-anchor="middle" class="tp">The trainer</text>
+
+  <path d="M146 190 H206" class="ln" marker-end="url(#a)"/>
+  <path d="M400 178 C446 178, 446 78, 482 78" class="ln" marker-end="url(#a)"/>
+  <path d="M400 190 H482" class="ln" marker-end="url(#a)"/>
+  <path d="M400 202 C446 202, 446 302, 482 302" class="ln" marker-end="url(#a)"/>
+
+  <path d="M744 78 C800 78, 800 178, 846 178" class="ln" marker-end="url(#a)"/>
+  <path d="M744 190 H846" class="ln" marker-end="url(#a)"/>
+  <path d="M744 302 C800 302, 800 202, 846 202" class="ln" marker-end="url(#a)"/>
+
+  <path d="M956 228 V352 H306 V240" class="dn" marker-end="url(#a)"/>
+  <text x="640" y="374" text-anchor="middle" class="l">The new adapter, every two steps</text>
 </svg>

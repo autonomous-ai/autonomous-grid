@@ -1,46 +1,49 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 330" shape-rendering="geometricPrecision"
-     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 330" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
   <style>
-    .n    { stroke:#000; stroke-width:2; fill:#fff }
-    .dot  { fill:#000 }
-    .e    { stroke:#000; stroke-width:2; fill:none }
-    .arc  { stroke:#000; stroke-width:2; fill:none }
-    .base { stroke:#000; stroke-width:1.5; fill:none; stroke-dasharray:4 4 }
-    .wd   { font-size:22px; fill:#000 }
-    .sy   { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:30px; fill:#000 }
-    .num  { font-family:Georgia,'Times New Roman',serif; font-size:19px; fill:#000 }
+    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
+    .p  { fill:#f0eefb; stroke:#7a6fd1; stroke-width:1.7 }
+    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
+    .tg { fill:#4a8b2c; font-size:19px; font-weight:700 }
+    .tp { fill:#5b4fc0; font-size:19px; font-weight:700 }
+    .tc { fill:#c2593a; font-size:19px; font-weight:700 }
+    .l  { fill:#3a3a3a; font-size:15.5px }
+    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
+    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
   </style>
-  <rect width="720" height="330" fill="#fff"/>
+  <rect width="1120" height="330" fill="#fff"/>
 
-  <!-- the task -->
-  <circle cx="360" cy="46" r="15" class="n"/>
-  <text x="360" y="22" text-anchor="middle" class="sy">s</text>
+  <ellipse cx="80" cy="160" rx="52" ry="38" class="c"/>
+  <text x="80" y="167" text-anchor="middle" class="tc">A task</text>
 
-  <!-- eight attempts, one fan, dot height = its reward -->
-  <g class="e">
-    <path d="M360 61 L84 150"/>  <path d="M360 61 L176 176"/> <path d="M360 61 L268 188"/>
-    <path d="M360 61 L360 202"/> <path d="M360 61 L452 214"/> <path d="M360 61 L544 232"/>
-    <path d="M360 61 L636 244"/> <path d="M360 61 L636 150"/>
-  </g>
-  <g class="dot">
-    <circle cx="84"  cy="150" r="7.5"/> <circle cx="176" cy="176" r="7.5"/>
-    <circle cx="268" cy="188" r="7.5"/> <circle cx="360" cy="202" r="7.5"/>
-    <circle cx="452" cy="214" r="7.5"/> <circle cx="544" cy="232" r="7.5"/>
-    <circle cx="636" cy="244" r="7.5"/> <circle cx="636" cy="150" r="7.5"/>
-  </g>
+  <rect x="188" y="122" width="200" height="76" rx="3" class="g"/>
+  <text x="288" y="153" text-anchor="middle" class="tg">Eight</text>
+  <text x="288" y="177" text-anchor="middle" class="tg">attempts</text>
 
-  <!-- their own mean, the only bar there is -->
-  <path d="M60 196 H660" class="base"/>
-  <text x="668" y="202" class="sy">r̄</text>
-  <path d="M291.5 83.2 A72 72 0 0 0 428.5 83.2" class="arc"/>
-  <text x="278" y="106" text-anchor="end" class="wd">mean</text>
+  <rect x="472" y="122" width="212" height="76" rx="3" class="p"/>
+  <text x="578" y="153" text-anchor="middle" class="tp">Their own</text>
+  <text x="578" y="177" text-anchor="middle" class="tp">average</text>
 
-  <!-- above it and below it -->
-  <text x="60" y="176" class="wd">above</text>
-  <text x="60" y="266" class="wd">below</text>
+  <rect x="784" y="46" width="200" height="66" rx="3" class="g"/>
+  <text x="884" y="86" text-anchor="middle" class="tg">Reinforce</text>
 
-  <!-- one step -->
-  <path d="M360 214 V292" class="e"/>
-  <path d="M360 292 l-5 -13.5 h10 Z" fill="#000" stroke="#000" stroke-width="2" transform="translate(0,13.5)"/>
-  <text x="374" y="300" class="wd">step</text>
+  <rect x="784" y="208" width="200" height="66" rx="3" class="c"/>
+  <text x="884" y="248" text-anchor="middle" class="tc">Discourage</text>
+
+  <path d="M136 160 H178" class="ln" marker-end="url(#a)"/>
+  <path d="M392 160 H462" class="ln" marker-end="url(#a)"/>
+  <text x="427" y="148" text-anchor="middle" class="l">Score</text>
+
+  <path d="M688 142 C736 142, 736 79, 774 79" class="ln" marker-end="url(#a)"/>
+  <text x="726" y="112" text-anchor="middle" class="l">Above</text>
+  <path d="M688 178 C736 178, 736 241, 774 241" class="dn" marker-end="url(#a)"/>
+  <text x="726" y="212" text-anchor="middle" class="l">Below</text>
+
+  <path d="M884 112 V160 H288 V208" class="ln" marker-end="url(#a)"/>
+  <text x="586" y="300" text-anchor="middle" class="l">One step on the adapter, then the next task</text>
 </svg>
