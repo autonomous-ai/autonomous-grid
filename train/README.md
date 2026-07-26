@@ -9,7 +9,7 @@ inference, and inference is what a grid already does.** The expensive part of tr
 your fleet is already good at; the only new thing is one machine that adjusts weights.
 
 <p align="center">
-<img src="../docs/train-architecture.png" width="900" alt="Your work goes to the machines you own, which write eight attempts a task; one trainer — a Mac or an NVIDIA box — turns those attempts into an adapter and sends it back every two steps; the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
+<img src="../docs/train-architecture.png" width="900" alt="Your work goes to the machines you own, which write eight attempts a task; one trainer turns those attempts into an adapter and sends it back to the machines every two steps; the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
 </p>
 
 ---
@@ -23,7 +23,7 @@ Is it still the right picture for language models? **Yes — the loop is unchang
 collapse, and knowing which three is most of the intuition.
 
 <p align="center">
-<img src="../docs/fig-loop.png" width="720" alt="The reinforcement-learning loop on a model you own: your model writes an attempt, your work plus a check scores it between 0 and 1, and the model adjusts.">
+<img src="../docs/fig-loop.png" width="640" alt="A task goes to your model, which writes an attempt; a check scores the attempt, and a reward between 0 and 1 goes back to the model.">
 </p>
 
 **1 — The episode is short.** Classic RL imagines a long trajectory: move, observe, move again. For
@@ -43,7 +43,7 @@ consumer hardware.
 ## 2. One training step, exactly
 
 <p align="center">
-<img src="../docs/fig-step.png" width="800" alt="One training step: a task, eight sampled attempts, their own average as the bar, the ones above it made likelier and the ones below less likely, and one optimizer step on a small add-on layer.">
+<img src="../docs/fig-step.png" width="880" alt="One task, eight attempts, each scored against their own average: the ones above it are made likelier, the ones below it less likely, and that is one step.">
 </p>
 
 Note what is absent: **no labelled right answer is needed, only a way to score an attempt.** That
@@ -63,7 +63,7 @@ an improvement to a model you rent, and renting compute by the hour is the expen
 one job idle office hardware suits perfectly.
 
 <p align="center">
-<img src="../docs/fig-fleet.png" width="900" alt="Tonight's tasks go to the grid, which gives one task to each machine — a MacBook Pro, a Mac Studio, an RTX box — and each writes eight attempts and returns them to the trainer. The new adapter goes back to the grid every two steps.">
+<img src="../docs/fig-fleet.png" width="880" alt="Tasks go to the grid, which gives one task each to a MacBook Pro, a Mac Studio and an RTX box; each writes eight attempts and returns them to the trainer, which produces one adapter and sends it back to the machines every two steps.">
 </p>
 
 Two facts make this work on ordinary hardware: attempts are **independent**, so they fan out
@@ -80,7 +80,7 @@ The two halves want the same machines at different hours. People need inference 
 training wants sustained capacity and nobody's lap getting hot. A scheduling gift, not a conflict.
 
 <p align="center">
-<img src="../docs/fig-day-night.png" width="940" alt="The day and night cycle: people work and every answer is kept, what happened is attached in the evening, the climb runs at 23:00 on idle machines, and at 07:00 the gate serves it or bins it.">
+<img src="../docs/fig-day-night.png" width="940" alt="Through the workday every answer is kept; what happened is attached in the evening; the climb runs at 23:00; the gate serves the result or bins it, and tomorrow starts on a better model.">
 </p>
 
 **Cadence is set by the slowest arrow, and that is *attach truth*:** whether a support reply worked
@@ -230,7 +230,7 @@ Everything above assumes someone exports a file and starts a run. The end state 
 has to: a business runs its grid, and its models get better on their own.
 
 <p align="center">
-<img src="../docs/fig-earns.png" width="760" alt="What earns a place in the training set: a person's rewrite is truth at weight 1.0, a stronger model's answer 0.8, an answer sent as-is 0.6, and a binned or unjudged answer is kept for the record but never imitated.">
+<img src="../docs/fig-earns.png" width="620" alt="One answer it served: the version you rewrote counts 1.0, a stronger model's answer 0.8, one you sent as it was 0.6, and one you binned is kept as a record but never imitated.">
 </p>
 
 The rule that keeps this honest is the last row: **a model's own unjudged output is stored

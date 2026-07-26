@@ -1,36 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 947 348" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
-            stroke-linecap="round" stroke-linejoin="round"/>
+    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <style>
-    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
-    .p  { fill:#f0eefb; stroke:#7a6fd1; stroke-width:1.7 }
-    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
-    .tg { fill:#4a8b2c; font-size:19px; font-weight:700 }
-    .tp { fill:#5b4fc0; font-size:19px; font-weight:700 }
-    .tc { fill:#c2593a; font-size:19px; font-weight:700 }
-    .l  { fill:#3a3a3a; font-size:15.5px }
-    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
-    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
-  </style>
-  <rect width="1000" height="300" fill="#fff"/>
-
-  <ellipse cx="96" cy="120" rx="52" ry="38" class="c"/>
-  <text x="96" y="127" text-anchor="middle" class="tc">A task</text>
-
-  <rect x="272" y="82" width="216" height="76" rx="3" class="g"/>
-  <text x="380" y="128" text-anchor="middle" class="tg">Your model</text>
-
-  <rect x="640" y="82" width="216" height="76" rx="3" class="p"/>
-  <text x="748" y="128" text-anchor="middle" class="tp">A check</text>
-
-  <path d="M152 120 H262" class="ln" marker-end="url(#a)"/>
-  <path d="M488 120 H630" class="ln" marker-end="url(#a)"/>
-  <text x="559" y="108" text-anchor="middle" class="l">Attempt</text>
-
-  <path d="M748 158 V228 H380 V168" class="ln" marker-end="url(#a)"/>
-  <text x="564" y="252" text-anchor="middle" class="l">Reward &#8212; between 0 and 1</text>
+  <rect width="947" height="348" fill="#fff"/>
+  <rect x="100" y="97" width="114" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="157" y="139" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">A task</text>
+  <rect x="334" y="97" width="185" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="426" y="139" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Your model</text>
+  <rect x="702" y="97" width="145" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="775" y="139" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">A check</text>
+  <path d="M226 130 L320 130" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M531 130 L688 130" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <text x="611" y="106" text-anchor="middle" fill="#2b2b29" font-size="22">an attempt</text>
+  <path d="M775 175 L775 246 L426 246 L426 177" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
+  <text x="601" y="288" text-anchor="middle" fill="#2b2b29" font-size="22">a reward between 0 and 1</text>
 </svg>

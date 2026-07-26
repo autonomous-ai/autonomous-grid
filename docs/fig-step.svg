@@ -1,49 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 330" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1710 400" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
-            stroke-linecap="round" stroke-linejoin="round"/>
+    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <style>
-    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
-    .p  { fill:#f0eefb; stroke:#7a6fd1; stroke-width:1.7 }
-    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
-    .tg { fill:#4a8b2c; font-size:19px; font-weight:700 }
-    .tp { fill:#5b4fc0; font-size:19px; font-weight:700 }
-    .tc { fill:#c2593a; font-size:19px; font-weight:700 }
-    .l  { fill:#3a3a3a; font-size:15.5px }
-    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
-    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
-  </style>
-  <rect width="1120" height="330" fill="#fff"/>
-
-  <ellipse cx="80" cy="160" rx="52" ry="38" class="c"/>
-  <text x="80" y="167" text-anchor="middle" class="tc">A task</text>
-
-  <rect x="188" y="122" width="200" height="76" rx="3" class="g"/>
-  <text x="288" y="153" text-anchor="middle" class="tg">Eight</text>
-  <text x="288" y="177" text-anchor="middle" class="tg">attempts</text>
-
-  <rect x="472" y="122" width="212" height="76" rx="3" class="p"/>
-  <text x="578" y="153" text-anchor="middle" class="tp">Their own</text>
-  <text x="578" y="177" text-anchor="middle" class="tp">average</text>
-
-  <rect x="784" y="46" width="200" height="66" rx="3" class="g"/>
-  <text x="884" y="86" text-anchor="middle" class="tg">Reinforce</text>
-
-  <rect x="784" y="208" width="200" height="66" rx="3" class="c"/>
-  <text x="884" y="248" text-anchor="middle" class="tc">Discourage</text>
-
-  <path d="M136 160 H178" class="ln" marker-end="url(#a)"/>
-  <path d="M392 160 H462" class="ln" marker-end="url(#a)"/>
-  <text x="427" y="148" text-anchor="middle" class="l">Score</text>
-
-  <path d="M688 142 C736 142, 736 79, 774 79" class="ln" marker-end="url(#a)"/>
-  <text x="726" y="112" text-anchor="middle" class="l">Above</text>
-  <path d="M688 178 C736 178, 736 241, 774 241" class="dn" marker-end="url(#a)"/>
-  <text x="726" y="212" text-anchor="middle" class="l">Below</text>
-
-  <path d="M884 112 V160 H288 V208" class="ln" marker-end="url(#a)"/>
-  <text x="586" y="300" text-anchor="middle" class="l">One step on the adapter, then the next task</text>
+  <rect width="1710" height="400" fill="#fff"/>
+  <rect x="100" y="157" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="172" y="199" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">One task</text>
+  <rect x="365" y="157" width="224" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="477" y="199" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Eight attempts</text>
+  <rect x="820" y="157" width="216" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="928" y="199" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">Their average</text>
+  <path d="M257 190 L351 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M601 190 L806 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <text x="704" y="166" text-anchor="middle" fill="#2b2b29" font-size="22">scored against</text>
+  <rect x="1156" y="57" width="190" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1251" y="99" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Likelier</text>
+  <rect x="1156" y="257" width="190" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1251" y="299" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Less likely</text>
+  <path d="M1048 176 C1118 176, 1072 90, 1142 90" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M1048 204 C1118 204, 1072 290, 1142 290" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <text x="1088" y="64" text-anchor="middle" fill="#2b2b29" font-size="22">above it</text>
+  <text x="1088" y="330" text-anchor="middle" fill="#2b2b29" font-size="22">below it</text>
+  <rect x="1466" y="157" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1538" y="199" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">One step</text>
+  <path d="M1358 90 C1428 90, 1382 176, 1452 176" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M1358 290 C1428 290, 1382 204, 1452 204" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
 </svg>
