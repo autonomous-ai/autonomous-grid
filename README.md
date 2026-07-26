@@ -2,7 +2,7 @@
 
 # ⚡ Grid
 
-### Your AI intranet — network the computers you already own, for inference and training.
+### Your AI intranet: network the computers you already own for inference and training.
 
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
