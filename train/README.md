@@ -53,9 +53,11 @@ three is most of the intuition. Here is the same loop with our names on it:
 </p>
 
 **1 — The episode is short.** Classic RL imagines a long trajectory: move, observe, move again. For
-most business tasks there is one state (the prompt) and one action (the whole answer), and reward
-arrives once. Long trajectories return the moment agents use tools, which is why the design leaves
-room for them.
+most business tasks there is one prompt, one answer, and **one reward at the end** — no intermediate
+scoring to design, and nothing to shape. Be precise about what collapsed, though: the *scoring* did,
+not the decision. The model still chooses token by token and the gradient still lands per token —
+TRL gives every token in a completion that completion's own group-relative advantage. Long
+trajectories return the moment agents use tools, which is why the design leaves room for them.
 
 **2 — The environment is your data plus a check.** There is no simulator to build. The environment
 is a ticket from last month and how it actually resolved; a lead and whether it closed; a code
