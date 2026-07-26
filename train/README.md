@@ -275,9 +275,9 @@ The wheel is the one a cloud product cannot copy. Everyone who uses this brings 
 so the fleet grows with headcount rather than with your bill — and those machines sit idle at
 exactly the hours training wants them. More people, more capacity, more training a night.
 
-The line across the middle is faster. Work that someone edited, sent or binned becomes training data
-the moment it is judged, and judging it costs no hardware at all. A team that never adds a machine
-still wakes up to a better model.
+The shorter arc inside the rim is faster. Work that someone edited, sent or binned becomes training
+data the moment it is judged, and judging it costs no hardware at all. A team that never adds a
+machine still wakes up to a better model.
 
 <p align="center">
 <img src="../docs/fig-flywheel.png" width="740" alt="A flywheel turning around a better model. On the rim, clockwise: more people brings more machines, which brings more idle hours, which brings more training a night, whose answers people keep, which brings more people. Inside the rim a shorter arc runs the other way, from answers kept straight back to training: judged work needs no new hardware. Connecting more systems feeds the wheel from outside.">
