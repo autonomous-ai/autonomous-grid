@@ -421,7 +421,8 @@ PH = 240
 STATS = [f"{len(FLEET)} nodes",
          f"{len({model for *_, model in FLEET})} models",
          f"{sum(gb for _, _, gb, _ in FLEET)} GB GPU memory"]
-f.panel(M, 1660 - M, gy, "Your local AI grid", STATS, ["Inference", "Training"], h=PH)
+f.panel(M, 1660 - M, gy, "Your grid", STATS,
+        ["Local AI Inference", "Local AI Training"], h=PH)
 for cx in app_x:
     f.arrow(cx, gy - PH / 2 - 12, cx, app_y + H / 2 + 14)
 
