@@ -1,62 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 360" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <defs>
-    <marker id="g" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#8a8a8a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="gd" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#b4b4b4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 330" shape-rendering="geometricPrecision"
+     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
   <style>
-    .green { fill:#f1f8ec; stroke:#7fb35f; stroke-width:1.8 }
-    .purple{ fill:#f2f1fb; stroke:#7a6fd1; stroke-width:1.8 }
-    .coral { fill:#fdf1ed; stroke:#e0785c; stroke-width:1.8 }
-    .tg { fill:#4e8b2c; font-size:17px; font-weight:750 }
-    .tp { fill:#5b4fc0; font-size:17px; font-weight:750 }
-    .tc { fill:#c2593a; font-size:17px; font-weight:750 }
-    .lbl{ fill:#3a3a3a; font-size:14.5px }
-    .sub{ fill:#6b6b6b; font-size:13.5px }
-    .ln { stroke:#8a8a8a; stroke-width:1.8; fill:none }
-    .lnd{ stroke:#b4b4b4; stroke-width:1.8; fill:none; stroke-dasharray:6 5 }
+    .n    { stroke:#000; stroke-width:2; fill:#fff }
+    .dot  { fill:#000 }
+    .e    { stroke:#000; stroke-width:2; fill:none }
+    .arc  { stroke:#000; stroke-width:2; fill:none }
+    .base { stroke:#000; stroke-width:1.5; fill:none; stroke-dasharray:4 4 }
+    .wd   { font-size:22px; fill:#000 }
+    .sy   { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:30px; fill:#000 }
+    .num  { font-family:Georgia,'Times New Roman',serif; font-size:19px; fill:#000 }
   </style>
-  <rect width="1120" height="360" fill="#ffffff"/>
+  <rect width="720" height="330" fill="#fff"/>
 
-  <rect x="40" y="112" width="120" height="62" rx="31" class="coral"/>
-  <text x="100" y="149" text-anchor="middle" class="tc">A task</text>
+  <!-- the task -->
+  <circle cx="360" cy="46" r="15" class="n"/>
+  <text x="360" y="22" text-anchor="middle" class="sy">s</text>
 
-  <path d="M166 143 L232 143" class="ln" marker-end="url(#g)"/>
+  <!-- eight attempts, one fan, dot height = its reward -->
+  <g class="e">
+    <path d="M360 61 L84 150"/>  <path d="M360 61 L176 176"/> <path d="M360 61 L268 188"/>
+    <path d="M360 61 L360 202"/> <path d="M360 61 L452 214"/> <path d="M360 61 L544 232"/>
+    <path d="M360 61 L636 244"/> <path d="M360 61 L636 150"/>
+  </g>
+  <g class="dot">
+    <circle cx="84"  cy="150" r="7.5"/> <circle cx="176" cy="176" r="7.5"/>
+    <circle cx="268" cy="188" r="7.5"/> <circle cx="360" cy="202" r="7.5"/>
+    <circle cx="452" cy="214" r="7.5"/> <circle cx="544" cy="232" r="7.5"/>
+    <circle cx="636" cy="244" r="7.5"/> <circle cx="636" cy="150" r="7.5"/>
+  </g>
 
-  <rect x="238" y="112" width="190" height="62" rx="6" class="green"/>
-  <text x="333" y="149" text-anchor="middle" class="tg">Eight attempts</text>
+  <!-- their own mean, the only bar there is -->
+  <path d="M60 196 H660" class="base"/>
+  <text x="668" y="202" class="sy">r̄</text>
+  <path d="M291.5 83.2 A72 72 0 0 0 428.5 83.2" class="arc"/>
+  <text x="278" y="106" text-anchor="end" class="wd">mean</text>
 
-  <path d="M434 143 L500 143" class="ln" marker-end="url(#g)"/>
-  <text x="467" y="130" text-anchor="middle" class="lbl">score</text>
+  <!-- above it and below it -->
+  <text x="60" y="176" class="wd">above</text>
+  <text x="60" y="266" class="wd">below</text>
 
-  <rect x="506" y="112" width="190" height="62" rx="6" class="purple"/>
-  <text x="601" y="142" text-anchor="middle" class="tp">Their average</text>
-  <text x="601" y="163" text-anchor="middle" class="sub">is the bar — no critic</text>
-
-  <path d="M702 128 C736 128, 736 82, 770 82" class="ln" marker-end="url(#g)"/>
-  <text x="736" y="70" text-anchor="middle" class="lbl">above</text>
-  <path d="M702 158 C736 158, 736 200, 770 200" class="lnd" marker-end="url(#gd)"/>
-  <text x="736" y="222" text-anchor="middle" class="lbl">below</text>
-
-  <rect x="776" y="54" width="170" height="56" rx="6" class="green"/>
-  <text x="861" y="89" text-anchor="middle" class="tg">Likelier</text>
-
-  <rect x="776" y="172" width="170" height="56" rx="6" class="coral"/>
-  <text x="861" y="207" text-anchor="middle" class="tc">Less likely</text>
-
-  <path d="M952 82 C980 82, 980 128, 1008 128" class="ln" marker-end="url(#g)"/>
-  <path d="M952 200 C980 200, 980 158, 1008 158" class="lnd" marker-end="url(#gd)"/>
-
-  <rect x="1014" y="114" width="66" height="58" rx="6" class="purple"/>
-  <text x="1047" y="139" text-anchor="middle" class="tp" font-size="15">One</text>
-  <text x="1047" y="159" text-anchor="middle" class="tp" font-size="15">step</text>
-
-  <path d="M1047 178 C1047 300, 333 300, 333 182" class="ln" marker-end="url(#g)"/>
-  <text x="690" y="292" text-anchor="middle" class="lbl">one optimizer step on a small add-on layer — LoRA, ~84 MB — then repeat a few hundred times</text>
-
-  <line x1="40" y1="322" x2="1080" y2="322" stroke="#e6e6e6" stroke-width="1.4"/>
-  <text x="40" y="346" class="sub">No labelled right answer is needed anywhere — only a way to score an attempt. That is why this reaches work nobody wrote the ideal output for.</text>
+  <!-- one step -->
+  <path d="M360 214 V292" class="e"/>
+  <path d="M360 292 l-5 -13.5 h10 Z" fill="#000" stroke="#000" stroke-width="2" transform="translate(0,13.5)"/>
+  <text x="374" y="300" class="wd">step</text>
 </svg>

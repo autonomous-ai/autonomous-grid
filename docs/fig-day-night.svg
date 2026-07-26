@@ -1,75 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1220 400" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <defs>
-    <marker id="g" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#8a8a8a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="gd" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#b4b4b4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 430" shape-rendering="geometricPrecision"
+     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
   <style>
-    .green { fill:#f1f8ec; stroke:#7fb35f; stroke-width:1.8 }
-    .purple{ fill:#f2f1fb; stroke:#7a6fd1; stroke-width:1.8 }
-    .coral { fill:#fdf1ed; stroke:#e0785c; stroke-width:1.8 }
-    .grey  { fill:#f7f7f7; stroke:#b4b4b4; stroke-width:1.8; stroke-dasharray:6 5 }
-    .tg { fill:#4e8b2c; font-size:16.5px; font-weight:750 }
-    .tp { fill:#5b4fc0; font-size:16.5px; font-weight:750 }
-    .tc { fill:#c2593a; font-size:16.5px; font-weight:750 }
-    .tk { fill:#7a7a7a; font-size:16.5px; font-weight:750 }
-    .hr { fill:#9a9a9a; font-size:12.5px; font-weight:700; letter-spacing:1.2 }
-    .sub{ fill:#6b6b6b; font-size:13.5px }
-    .lbl{ fill:#3a3a3a; font-size:14.5px }
-    .ln { stroke:#8a8a8a; stroke-width:1.8; fill:none }
-    .lnd{ stroke:#b4b4b4; stroke-width:1.8; fill:none; stroke-dasharray:6 5 }
+    .box  { fill:#fff; stroke:#000; stroke-width:3 }
+    .data { fill:#d0d1d3; stroke:#000; stroke-width:3 }
+    .term { fill:#a9a9a9; stroke:#000; stroke-width:3 }
+    .pri  { fill:none; stroke:#000; stroke-width:4.5 }
+    .sec  { fill:none; stroke:#000; stroke-width:2.25 }
+    .spine{ fill:none; stroke:#9eb5ce; stroke-width:9 }
+    .nm   { font-size:30px; fill:#000 }
+    .sm   { font-size:22px; fill:#000 }
+    .wd   { font-size:20px; fill:#000 }
   </style>
-  <rect width="1220" height="400" fill="#ffffff"/>
+  <rect width="720" height="430" fill="#fff"/>
 
-  <text x="130" y="84" text-anchor="middle" class="hr">09:00</text>
-  <rect x="40" y="96" width="180" height="80" rx="6" class="coral"/>
-  <text x="130" y="128" text-anchor="middle" class="tc">The day</text>
-  <text x="130" y="150" text-anchor="middle" class="sub">people and agents work;</text>
-  <text x="130" y="168" text-anchor="middle" class="sub">every answer is kept</text>
+  <rect x="286" y="16" width="148" height="66" rx="13" ry="13" class="box"/>
+  <text x="360" y="58" text-anchor="middle" class="nm">Serving</text>
 
-  <path d="M226 136 L282 136" class="ln" marker-end="url(#g)"/>
+  <rect x="276" y="120" width="168" height="48" rx="24" ry="24" class="data"/>
+  <text x="360" y="152" text-anchor="middle" class="sm">answers</text>
 
-  <text x="378" y="84" text-anchor="middle" class="hr">18:00</text>
-  <rect x="288" y="96" width="180" height="80" rx="6" class="purple"/>
-  <text x="378" y="128" text-anchor="middle" class="tp">What happened</text>
-  <text x="378" y="150" text-anchor="middle" class="sub">edited · sent · binned ·</text>
-  <text x="378" y="168" text-anchor="middle" class="sub">the ticket stayed solved</text>
+  <rect x="276" y="206" width="168" height="48" rx="24" ry="24" class="data"/>
+  <text x="360" y="238" text-anchor="middle" class="sm">outcomes</text>
 
-  <path d="M474 136 L530 136" class="ln" marker-end="url(#g)"/>
+  <rect x="286" y="292" width="148" height="66" rx="13" ry="13" class="box"/>
+  <text x="360" y="334" text-anchor="middle" class="nm">Training</text>
 
-  <text x="626" y="84" text-anchor="middle" class="hr">23:00</text>
-  <rect x="536" y="96" width="180" height="80" rx="6" class="green"/>
-  <text x="626" y="128" text-anchor="middle" class="tg">The climb</text>
-  <text x="626" y="150" text-anchor="middle" class="sub">attempts on idle machines,</text>
-  <text x="626" y="168" text-anchor="middle" class="sub">learning on the trainer</text>
+  <g class="pri">
+    <path d="M360 82 V112"/><path d="M360 168 V198"/><path d="M360 254 V284"/>
+  </g>
+  <g fill="#000" stroke="#000" stroke-width="4.5">
+    <path d="M360 112 l-6 -15 h12 Z" transform="translate(0,15)"/>
+    <path d="M360 198 l-6 -15 h12 Z" transform="translate(0,15)"/>
+    <path d="M360 284 l-6 -15 h12 Z" transform="translate(0,15)"/>
+  </g>
 
-  <path d="M722 136 L778 136" class="ln" marker-end="url(#g)"/>
+  <path d="M434 325 H612 V49 H434" class="spine"/>
+  <path d="M446 49 l-14 -6 v12 Z" fill="#9eb5ce" stroke="#9eb5ce" stroke-width="9"/>
 
-  <text x="874" y="84" text-anchor="middle" class="hr">07:00</text>
-  <rect x="784" y="96" width="180" height="80" rx="6" class="purple"/>
-  <text x="874" y="128" text-anchor="middle" class="tp">Prove it</text>
-  <text x="874" y="150" text-anchor="middle" class="sub">better than what we</text>
-  <text x="874" y="168" text-anchor="middle" class="sub">serve, on unseen work?</text>
+  <path d="M286 325 H108 V392" class="sec"/>
+  <path d="M108 392 l-5 -14 h10 Z" fill="#000" stroke="#000" stroke-width="2.25" transform="translate(0,14)"/>
+  <rect x="94.4" y="392" width="27.3" height="27.3" class="term"/>
 
-  <path d="M970 118 C1000 118, 1000 74, 1030 74" class="ln" marker-end="url(#g)"/>
-  <text x="1000" y="62" text-anchor="middle" class="lbl">yes</text>
-  <path d="M970 154 C1000 154, 1000 214, 1030 214" class="lnd" marker-end="url(#gd)"/>
-  <text x="1002" y="236" text-anchor="middle" class="lbl">no</text>
-
-  <rect x="1036" y="46" width="84" height="56" rx="28" class="green"/>
-  <text x="1078" y="80" text-anchor="middle" class="tg">Serve</text>
-
-  <rect x="1036" y="186" width="84" height="56" rx="28" class="grey"/>
-  <text x="1078" y="220" text-anchor="middle" class="tk">Bin</text>
-
-  <path d="M1078 108 C1078 300, 130 300, 130 190" class="lnd" marker-end="url(#gd)"/>
-  <path d="M1078 248 C1078 300, 130 300, 130 190" class="lnd"/>
-  <text x="604" y="292" text-anchor="middle" class="lbl">tomorrow — either way, the day starts again</text>
-
-  <line x1="40" y1="336" x2="1180" y2="336" stroke="#e6e6e6" stroke-width="1.4"/>
-  <text x="40" y="362" class="sub"><tspan fill="#3a3a3a" font-weight="700">Cadence is set by the slowest arrow, and that is the second one:</tspan> whether a reply worked is known hours later, not minutes.</text>
-  <text x="40" y="384" class="sub">Nightly is therefore the honest ceiling — and by the standards of anyone else's fine-tuning, nightly is fast.</text>
+  <path d="M420 358 m-60 26 a72 72 0 0 0 -156 -18" class="sec"/>
+  <text x="152" y="360" text-anchor="end" class="wd">gate</text>
+  <text x="628" y="196" class="wd">better</text>
+  <text x="132" y="440" text-anchor="middle" class="wd"></text>
 </svg>

@@ -1,43 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 340" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <defs>
-    <marker id="g" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#8a8a8a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 264" shape-rendering="geometricPrecision"
+     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
   <style>
-    .green { fill:#f1f8ec; stroke:#7fb35f; stroke-width:1.8 }
-    .purple{ fill:#f2f1fb; stroke:#7a6fd1; stroke-width:1.8 }
-    .coral { fill:#fdf1ed; stroke:#e0785c; stroke-width:1.8 }
-    .tg { fill:#4e8b2c; font-size:19px; font-weight:750 }
-    .tp { fill:#5b4fc0; font-size:19px; font-weight:750 }
-    .tc { fill:#c2593a; font-size:19px; font-weight:750 }
-    .sub{ fill:#6b6b6b; font-size:14px }
-    .lbl{ fill:#3a3a3a; font-size:15.5px }
-    .ln { stroke:#8a8a8a; stroke-width:1.8; fill:none }
+    .box  { fill:#fff; stroke:#000; stroke-width:3 }
+    .pri  { fill:none; stroke:#000; stroke-width:4.5 }
+    .sec  { fill:none; stroke:#000; stroke-width:2.25 }
+    .rule { fill:none; stroke:#000; stroke-width:1.5; stroke-dasharray:3 3 }
+    .nm   { font-size:36px; fill:#000 }
+    .wd   { font-size:25px; fill:#000 }
+    .sy   { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:30px; fill:#000 }
+    .sub  { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:19px; fill:#000 }
   </style>
-  <rect width="1040" height="340" fill="#ffffff"/>
+  <rect width="720" height="264" fill="#fff"/>
 
-  <!-- the policy -->
-  <rect x="150" y="96" width="270" height="86" rx="6" class="green"/>
-  <text x="285" y="134" text-anchor="middle" class="tg">Your model</text>
-  <text x="285" y="160" text-anchor="middle" class="sub">writes one attempt, token by token</text>
+  <!-- the two actors; widths sized to their own labels, one shared centre -->
+  <rect x="306.6" y="6.6" width="126" height="77" rx="13" ry="13" class="box"/>
+  <text x="369.6" y="57" text-anchor="middle" class="nm">Model</text>
 
-  <!-- the environment -->
-  <rect x="620" y="96" width="270" height="86" rx="6" class="purple"/>
-  <text x="755" y="134" text-anchor="middle" class="tp">Your work + a check</text>
-  <text x="755" y="160" text-anchor="middle" class="sub">a real task, and a way to score it</text>
+  <rect x="245.7" y="169.7" width="248" height="84" rx="13" ry="13" class="box"/>
+  <text x="369.6" y="223" text-anchor="middle" class="nm">Work</text>
 
-  <!-- forward -->
-  <path d="M424 128 L612 128" class="ln" marker-end="url(#g)"/>
-  <text x="518" y="116" text-anchor="middle" class="lbl">the tokens it chose</text>
+  <!-- attempt: model -> work, down the right -->
+  <path d="M432.6 45.1 H641.3 V211.7 H493.7" class="pri"/>
+  <path d="M493.7 211.7 l13.5 -5 v10 Z" fill="#000" stroke="#000" stroke-width="4.5"/>
+  <rect x="556" y="88" width="112" height="66" fill="#fff"/>
+  <text x="564" y="112" class="wd">attempt</text>
+  <text x="564" y="146" class="sy">A<tspan class="sub" dy="7">t</tspan></text>
 
-  <!-- back -->
-  <path d="M616 160 L428 160" class="ln" marker-end="url(#g)"/>
-  <text x="518" y="184" text-anchor="middle" class="lbl">a reward between 0 and 1</text>
+  <!-- task: work -> model, outer return lane -->
+  <path d="M245.7 197.7 H66.3 V32 H306.6" class="pri"/>
+  <path d="M306.6 32 l-13.5 -5 v10 Z" fill="#000" stroke="#000" stroke-width="4.5" transform="translate(13.5,0)"/>
+  <rect x="0" y="86" width="60" height="68" fill="#fff"/>
+  <text x="56" y="110" text-anchor="end" class="wd">task</text>
+  <text x="56" y="146" text-anchor="end" class="sy">S<tspan class="sub" dy="7">t</tspan></text>
 
-  <!-- what collapses -->
-  <line x1="150" y1="234" x2="890" y2="234" stroke="#e6e6e6" stroke-width="1.4"/>
-  <text x="150" y="266" class="sub"><tspan fill="#3a3a3a" font-weight="700">One state, one action.</tspan> The prompt is the state; the whole answer is the move.</text>
-  <text x="150" y="292" class="sub"><tspan fill="#3a3a3a" font-weight="700">The environment is your data.</tspan> No simulator to build — a ticket, and how it actually resolved.</text>
-  <text x="150" y="318" class="sub"><tspan fill="#3a3a3a" font-weight="700">No critic.</tspan> The group of attempts grades itself, which is the reason this fits on the machines you own.</text>
+  <!-- reward: work -> model, inner lane, one clearance in -->
+  <path d="M245.7 225.7 H94.8 V60.5 H306.6" class="sec"/>
+  <path d="M306.6 60.5 l-11 -4 v8 Z" fill="#000" stroke="#000" stroke-width="2.25" transform="translate(11,0)"/>
+  <rect x="106" y="86" width="104" height="68" fill="#fff"/>
+  <text x="114" y="110" class="wd">reward</text>
+  <text x="114" y="146" class="sy">R<tspan class="sub" dy="7">t</tspan></text>
 </svg>
