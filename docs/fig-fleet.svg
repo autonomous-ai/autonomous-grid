@@ -1,10 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1560 504" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
-    <marker id="H" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
   <rect width="1560" height="504" fill="#fff"/>
@@ -12,7 +30,7 @@
   <text x="157" y="209" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Tasks</text>
   <rect x="334" y="167" width="146" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
   <text x="407" y="209" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The grid</text>
-  <path d="M226 200 L320 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
+  <path d="M226 200 L320 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="600" y="57" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="710" y="99" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">MacBook Pro</text>
   <rect x="600" y="167" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
@@ -21,16 +39,16 @@
   <text x="710" y="319" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">RTX box</text>
   <rect x="940" y="167" width="177" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
   <text x="1028" y="209" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The trainer</text>
-  <path d="M492 186 C552 186, 526 90, 586 90" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <path d="M832 90 C892 90, 866 186, 926 186" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <path d="M492 200 L586 200" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <path d="M832 200 L926 200" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <path d="M492 214 C552 214, 526 310, 586 310" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <path d="M832 310 C892 310, 866 214, 926 214" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
+  <path d="M492 186 C552 186, 526 90, 586 90" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M832 90 C892 90, 866 186, 926 186" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M492 200 L586 200" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M832 200 L926 200" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M492 214 C552 214, 526 310, 586 310" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M832 310 C892 310, 866 214, 926 214" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <text x="710" y="30" text-anchor="middle" fill="#2b2b29" font-size="22">one task each, eight attempts</text>
   <rect x="1237" y="167" width="184" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="1329" y="209" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">One adapter</text>
-  <path d="M1129 200 L1223 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <path d="M1028 245 L1028 404 L407 404 L407 247" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
+  <path d="M1129 200 L1223 200" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1028 245 L1028 404 L407 404 L407 247" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <text x="718" y="444" text-anchor="middle" fill="#2b2b29" font-size="22">back to the machines, every two steps</text>
 </svg>

@@ -26,6 +26,15 @@ PAD = 22          # horizontal padding inside a box
 
 FONT = "Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif"
 
+# An SVG marker carries its own colour, so a coloured arc drawn with the grey
+# arrowhead ends in a grey tip. One marker pair per colour the drawings use.
+MARKERS = {ARROW: "a", GREEN_TEXT: "g", PURPLE_TEXT: "p", CORAL_TEXT: "c"}
+
+
+def head(colour=None, heavy=False):
+    """The marker id for an arrow of this colour and weight."""
+    return ("H" if heavy else "h") + MARKERS.get(colour or ARROW, "a")
+
 NARROW = set("iljtfr1.,'! ")
 WIDE = set("mwMW")
 
@@ -111,7 +120,7 @@ class Fig:
         dash = ' stroke-dasharray="7 7"' if dashed else ""
         self.parts.append(
             f'<path d="{d}" fill="none" stroke="{ARROW}" stroke-width="{STROKE}"{dash} '
-            f'marker-end="url(#h)"/>')
+            f'marker-end="url(#{head()})"/>')
         self._saw(max(x1, x2), max(y1, y2))
 
     def elbow(self, pts, dashed=False):
@@ -119,7 +128,7 @@ class Fig:
         dash = ' stroke-dasharray="7 7"' if dashed else ""
         self.parts.append(
             f'<path d="{d}" fill="none" stroke="{ARROW}" stroke-width="{STROKE}"{dash} '
-            f'marker-end="url(#h)"/>')
+            f'marker-end="url(#{head()})"/>')
         for x, y in pts:
             self._saw(x, y)
 
@@ -153,11 +162,12 @@ class Fig:
             p2 = (cx + ra * math.cos(s2), cy + ra * math.sin(s2))
             self.parts.append(
                 f'<path d="M{p1[0]:.0f} {p1[1]:.0f} A{ra:.0f} {ra:.0f} 0 0 1 {p2[0]:.0f} {p2[1]:.0f}" '
-                f'fill="none" stroke="{ARROW}" stroke-width="{STROKE}" marker-end="url(#h)"/>')
+                f'fill="none" stroke="{ARROW}" stroke-width="{STROKE}" marker-end="url(#{head()})"/>')
             self._saw(cx + ra, cy + ra)
         return placed
 
-    def wheel(self, cx, cy, r, stations, hub_r=0, hub_lines=(), hub_fill=None, fs=None):
+    def wheel(self, cx, cy, r, stations, hub_r=0, hub_lines=(), hub_fill=None, fs=None,
+              start=-90, arc=None):
         """A flywheel drawn the way the ones people remember are drawn.
 
         The reference (Amazon's) works because of three things this deliberately
@@ -178,7 +188,10 @@ class Fig:
         placed = []
         for k, st in enumerate(stations):
             label, colour = (st + (GREEN_TEXT,))[:2] if len(st) < 2 else st[:2]
-            deg = -90 + k * (360 / n)
+            # `start` rotates the whole ring. Two concentric rings that both begin at
+            # the top put a station directly above a station, and the arrow joining
+            # them then runs along a radius through both labels.
+            deg = start + k * (360 / n)
             th = math.radians(deg)
             x, y = cx + r * math.cos(th), cy + r * math.sin(th)
             self.parts.append(
@@ -195,10 +208,13 @@ class Fig:
             s1, s2 = math.radians(a1 + g1), math.radians(a2 - g2)
             p1 = (cx + r * math.cos(s1), cy + r * math.sin(s1))
             p2 = (cx + r * math.cos(s2), cy + r * math.sin(s2))
+            # The rim carries the loop's own colour. With two rings on one drawing a
+            # grey rim says nothing about which loop an arc belongs to, and the
+            # colour on the labels alone is not enough to tell them apart.
             self.parts.append(
                 f'<path d="M{p1[0]:.0f} {p1[1]:.0f} A{r:.0f} {r:.0f} 0 0 1 '
-                f'{p2[0]:.0f} {p2[1]:.0f}" fill="none" stroke="{ARROW}" '
-                f'stroke-width="{RIM}" marker-end="url(#H)"/>')
+                f'{p2[0]:.0f} {p2[1]:.0f}" fill="none" stroke="{arc or ARROW}" '
+                f'stroke-width="{RIM}" marker-end="url(#{head(arc, heavy=True)})"/>')
             self._saw(cx + r, cy + r)
 
         if hub_r:
@@ -248,7 +264,7 @@ class Fig:
         self.parts.append(
             f'<path d="M{x1:.0f} {y1:.0f} Q{qx:.0f} {qy:.0f} {x2:.0f} {y2:.0f}" fill="none" '
             f'stroke="{colour or ARROW}" stroke-width="{width or STROKE}"{dash} '
-            f'marker-end="url(#{"H" if (width or STROKE) >= RIM else "h"})"/>')
+            f'marker-end="url(#{head(colour, heavy=(width or STROKE) >= RIM)})"/>')
         self._saw(max(x1, x2), max(y1, y2))
 
     def key(self, x, y, items, title=None):
@@ -281,7 +297,7 @@ class Fig:
         self.parts.append(
             f'<path d="M{p1[0]:.0f} {p1[1]:.0f} A{r:.0f} {r:.0f} 0 0 0 '
             f'{p2[0]:.0f} {p2[1]:.0f}" fill="none" stroke="{ARROW}" stroke-width="{STROKE}" '
-            f'stroke-dasharray="8 8" marker-end="url(#h)"/>')
+            f'stroke-dasharray="8 8" marker-end="url(#{head()})"/>')
         if label:
             mid = math.radians((a1 + a2) / 2)
             lx, ly = cx + (r - 34) * math.cos(mid), cy + (r - 34) * math.sin(mid)
@@ -302,23 +318,26 @@ class Fig:
 
     # ---- output -------------------------------------------------------
     def svg(self):
-        head = (
+        defs = []
+        for colour, sfx in MARKERS.items():
+            defs.append(
+                f'    <marker id="h{sfx}" markerWidth="14" markerHeight="14" refX="11" refY="5" '
+                f'orient="auto" markerUnits="userSpaceOnUse">\n'
+                f'      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="{colour}" '
+                f'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>\n'
+                f'    </marker>')
+            defs.append(
+                f'    <marker id="H{sfx}" markerWidth="19" markerHeight="19" refX="13" refY="6.5" '
+                f'orient="auto" markerUnits="userSpaceOnUse">\n'
+                f'      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="{colour}" '
+                f'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>\n'
+                f'    </marker>')
+        top = (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {self.w} {self.h}" '
             f'font-family="{FONT}">\n'
-            f'  <defs>\n'
-            f'    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" '
-            f'orient="auto" markerUnits="userSpaceOnUse">\n'
-            f'      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="{ARROW}" '
-            f'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>\n'
-            f'    </marker>\n'
-            f'    <marker id="H" markerWidth="19" markerHeight="19" refX="13" refY="6.5" '
-            f'orient="auto" markerUnits="userSpaceOnUse">\n'
-            f'      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="{ARROW}" '
-            f'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>\n'
-            f'    </marker>\n'
-            f'  </defs>\n'
+            f'  <defs>\n' + "\n".join(defs) + '\n  </defs>\n'
             f'  <rect width="{self.w}" height="{self.h}" fill="#fff"/>\n  ')
-        return head + "\n  ".join(self.parts) + "\n</svg>\n"
+        return top + "\n  ".join(self.parts) + "\n</svg>\n"
 
     def write(self, path):
         # the drawing decides the page, not the other way round

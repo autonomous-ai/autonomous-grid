@@ -267,29 +267,31 @@ answer:
 curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"what we really sent"}'
 ```
 
-## Three loops turn the same wheel, and each is driven by something different
+## Three loops, and inference is what they all turn on
 
-Four stations carry the whole argument — more work on the grid, more of it judged, better private
-models, lower cost per task — and three separate mechanisms push them round. That is the part worth
-sitting with: they are not three diagrams, they are three reasons the same wheel keeps turning.
+Everything here turns on one quantity, which is why it sits in the middle rather than on the rim:
+**inference**. Grid is an inference layer first, and the training plane is built on top of it. Three
+separate mechanisms drive that quantity up, they run at different speeds, and none of them is the
+one a competitor can buy.
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="900" alt="A flywheel of four stations, clockwise: more work on the grid, more judged examples, better private models, lower cost per task, and back again; at the hub, more done for less. Three coloured feeder loops hang off it. In green, hardware you already own: more people each arriving with a machine, machines already idle at the hours training wants, and capacity that grows with headcount rather than with your bill. In purple, work you already do: more systems connected, outcomes coming back when a ticket stays solved or a deal closes, and a human edit outranking a model's own guess. In red, nothing leaves your network: one model per job rather than one for everything, and weights you own on data that never left.">
+<img src="../docs/fig-flywheel.png" width="900" alt="Two concentric flywheels around a hub reading MORE INFERENCE. The inner green ring turns clockwise through more people, more compute and more intelligence. The outer purple ring turns through more connectors, more data, more training, better models and lower cost per task, joined to the hub by two arrows: inference out to connectors, and lower cost per task back in. A third loop in red hangs off more data: one model per job, then more of that job routed to it, then back to more data. A legend names the three: compute turns with headcount, training turns with usage, specialisation turns per job.">
 </p>
 
-**Capacity turns with headcount.** Everyone who uses this brings a machine with them, so the fleet
-grows with your team rather than with your bill — and those machines sit idle at exactly the hours
-training wants them. This is the loop a cloud product cannot copy, because its capacity is
-something you rent and this one walks in the door.
+**Compute turns with headcount.** Everyone who uses this arrives with a machine, so capacity grows
+with the team rather than with the bill. That is the loop a cloud product structurally cannot copy:
+its capacity is something you rent, and this one walks in the door.
 
-**Data turns with usage, and needs no new hardware at all.** Work that someone edited, sent or
-binned becomes training data the moment it is judged. A team that never adds a single machine still
-wakes up to a better model, which is why this loop runs faster than the first one.
+**Training turns with usage, and needs nothing new.** Once work is flowing, more of your real
+systems become worth connecting, connected systems produce data, data buys training, and training
+makes the models better and each task cheaper — which brings more work back through inference. A
+team that never adds a single machine still wakes up to a better model, which is why this loop
+outruns the first one.
 
-**Economics turns with model quality.** Every improvement keeps more work on hardware you already
-own instead of sending it to a vendor, and the cheaper a task gets the more work is worth moving
-here — which feeds the other two. Connecting a system feeds all three at once: the model reaches
-more of the real work, so more of the work comes back judged.
+**Specialisation turns per job.** The examples that accumulate are not one undifferentiated pile;
+they arrive sorted by the job that produced them. Enough of them for one job earns a model for that
+job, a model that is better at it pulls more of that job in, and that produces more examples for it.
+This is the only one of the three that gets stronger the more *different kinds* of work you run.
 
 ## The code
 

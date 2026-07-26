@@ -1,10 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 488" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
-    <marker id="H" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
   <rect width="1600" height="488" fill="#fff"/>
@@ -27,6 +45,6 @@
   <text x="975" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">00:00</text>
   <path d="M1500 294 V307" stroke="#a1a099" stroke-width="1.6"/>
   <text x="1500" y="334" text-anchor="middle" fill="#2b2b29" font-size="22">09:00</text>
-  <path d="M1500 390 L100 390" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
+  <path d="M1500 390 L100 390" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <text x="800" y="428" text-anchor="middle" fill="#2b2b29" font-size="22">and again tomorrow, on a better model</text>
 </svg>

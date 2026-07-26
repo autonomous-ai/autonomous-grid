@@ -1,12 +1,13 @@
 """Generate the six training figures. One system, six drawings."""
 import os
 
-from figs import (
+from figs import (  # noqa
     CORAL_TEXT,
     CORE_FS,
     GREEN_TEXT,
     LABEL_TEXT,
     PURPLE_TEXT,
+    RIM,
     SAT_FS,
     Fig,
     H,
@@ -161,83 +162,115 @@ for ry, label, weight, dashed in rows:
 f.write(f"{OUT}/fig-earns.svg")
 
 # ------------------------------------------------------- train-architecture
-f = Fig(1680, 430)
-y = 190
-(work, ww), (mach, mw), (train, tw2), (gate, gw) = chain(
-    f, y, [("term", "Your work"), ("green", "Machines you own"),
-           ("purple", "One trainer"), ("purple", "The gate")],
-    edges=[None, "eight attempts a task", "an adapter"])
+# The machines are drawn as a fan of three, not as one box saying "machines you
+# own". This is the first figure on the page and the claim it has to land is that
+# the work spreads across whatever you already have — a single box says "a
+# server", which is the opposite of the point, and the fan says it without a
+# caption. Named machines rather than generic ones, and the same three the fleet
+# figure uses later, so the second time a reader meets them they recognise them.
+f = Fig(1900, 520)
+y = 210
+ww = box_w("Your work") - 8
+wcx = M + ww / 2
+f.term(wcx, y, "Your work", w=ww)
+
+MW = 236
+mcx = wcx + ww / 2 + 150 + MW / 2
+rows = [y - 110, y, y + 110]
+for ry, name in zip(rows, ["MacBook Pro", "Mac Studio", "RTX box"]):
+    f.box(mcx, ry, name, w=MW)
+
+tw2 = box_w("One trainer")
+tcx = mcx + MW / 2 + 300 + tw2 / 2
+f.box(tcx, y, "One trainer", kind="purple", w=tw2)
+
+# Out of one point and into one point, the curve alone separating the three —
+# the same treatment the fleet figure uses, so the two read as one system.
+for ry in rows:
+    curve = 0 if ry == y else 62
+    off = 14 if ry > y else -14 if ry < y else 0
+    f.arrow(wcx + ww / 2 + 12, y + off, mcx - MW / 2 - 14, ry, curve=curve)
+    f.arrow(mcx + MW / 2 + 12, ry, tcx - tw2 / 2 - 14, y + off, curve=curve)
+# over the gap it describes — the fan-IN carries the attempts, not the fan-out
+f.label((mcx + MW / 2 + tcx - tw2 / 2) / 2, rows[0] - 62, "eight attempts a task")
+
+gw = box_w("The gate")
+gcx = tcx + tw2 / 2 + 210 + gw / 2
+f.box(gcx, y, "The gate", kind="purple", w=gw)
+f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
+f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 24, "an adapter")
+
 ow = box_w("Served") - 8
-ocx = gate + gw / 2 + GAP + ow / 2
-f.term(ocx, y - 100, "Served", w=ow)
-f.term(ocx, y + 100, "Binned", w=ow)
-f.arrow(gate + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 100, curve=60)
-f.arrow(gate + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 100, dashed=True, curve=60)
-f.label(gate + gw / 2 + 66, y - 118, "better")
-f.label(gate + gw / 2 + 74, y + 152, "not better")
-f.elbow([(train, y + H / 2 + 12), (train, 350), (mach, 350), (mach, y + H / 2 + 14)],
+ocx = gcx + gw / 2 + GAP + ow / 2
+f.term(ocx, y - 110, "Served", w=ow)
+f.term(ocx, y + 110, "Binned", w=ow)
+f.arrow(gcx + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 110, curve=60)
+f.arrow(gcx + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 110, dashed=True, curve=60)
+f.label(gcx + gw / 2 + 66, y - 128, "better")
+f.label(gcx + gw / 2 + 74, y + 162, "not better")
+
+# The adapter goes back to EVERY machine, and the single return line can only
+# touch one box, so the caption carries what the geometry cannot.
+f.elbow([(tcx, y + H / 2 + 12), (tcx, 430), (mcx, 430), (mcx, rows[2] + H / 2 + 14)],
         dashed=True)
-f.label((mach + train) / 2, 390, "the new adapter, every two steps")
+f.label((mcx + tcx) / 2, 470, "the new adapter, to every machine, every two steps")
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
-# THREE loops, sharing their stations. One wheel with five words on it was true
-# and far too small a claim: the interesting thing here is that three different
-# mechanisms drive the same four stations, and each turns at its own speed.
+# Three loops, and inference is what they all turn on — which is why it is the
+# hub rather than a station. Grid is an inference layer first; the training plane
+# is built on top of it, so the drawing should say that before it says anything
+# else.
 #
-#   capacity  — people bring machines, machines are idle at night, training is free
-#   data      — work flows through, gets judged, becomes tomorrow's training set
-#   economics — better models keep work local, which makes the next unit cheaper
+#   compute        (green)  people arrive with machines, so capacity grows with
+#                           headcount rather than with the bill
+#   training       (purple) inference produces the work that gets judged, trained
+#                           on, and served back cheaper — needs no new hardware
+#   specialisation (coral)  data for one job earns a model for that job, which
+#                           pulls more of that job in; it compounds PER JOB TYPE
 #
-# Drawn the way DoorDash draws theirs: one heavy core loop that carries the whole
-# argument, and the feeder loops hung off it in the colour of the advantage they
-# come from. Boxes are gone entirely — forty borders would bury the arrows.
-f = Fig(2080, 1276)
-CX, CY, R = 1010, 600, 390
+# Amazon's grammar rather than Doordash's: a tight core ring turning around the
+# hub, with a larger loop departing and rejoining it. Two rings, so the inner one
+# is rotated — two rings both starting at the top put a station directly above a
+# station and the joining arrow then runs through both labels.
+f = Fig(2200, 1370)
+CX, CY = 1000, 760
+R1, R2 = 340, 600
 
-# The hub is what all three loops are for, and it is not one of the stations:
-# every turn leaves the same work costing less than it did the turn before.
-f.wheel(CX, CY, R, [
-    ("More work on the grid", LABEL_TEXT),
-    ("More judged examples", LABEL_TEXT),
-    ("Better private models", LABEL_TEXT),
-    ("Lower cost per task", LABEL_TEXT),
-], hub_r=142, hub_lines=("MORE DONE,", "FOR LESS"), fs=CORE_FS)
+# --- the core: compute. Turns with headcount, and a cloud product cannot copy it
+f.wheel(CX, CY, R1, [
+    ("More people", GREEN_TEXT),
+    ("More compute", GREEN_TEXT),
+    ("More intelligence", GREEN_TEXT),
+], hub_r=142, hub_lines=("MORE", "INFERENCE"), fs=32, start=0, arc=GREEN_TEXT)
 
-TOP, RIGHT, BOTTOM, LEFT = (CX, CY - R), (CX + R, CY), (CX, CY + R), (CX - R, CY)
+# --- the second loop: training. Departs the hub and rejoins it, needing nothing
+#     new once work is already flowing
+f.wheel(CX, CY, R2, [
+    ("More connectors", PURPLE_TEXT),
+    ("More data", PURPLE_TEXT),
+    ("More training", PURPLE_TEXT),
+    ("Better models", PURPLE_TEXT),
+    ("Lower cost per task", PURPLE_TEXT),
+], fs=32, arc=PURPLE_TEXT)
 
-# ---- capacity: the loop a cloud product cannot copy (green, left) ----
-# It is drawn as a chain, not as three separate feeds, because the chain IS the
-# loop: people arrive with machines, the machines are idle at night, and that is
-# where the training capacity comes from.
-f.block(392, 156, ("More people, each", "arriving with a machine"), GREEN_TEXT, SAT_FS)
-f.bow(590, 188, TOP[0] - 244, TOP[1] - 26, lift=-30, colour=GREEN_TEXT)
-f.block(200, 450, ("Machines already idle at", "the hours training wants"), GREEN_TEXT, SAT_FS)
-f.bow(356, 200, 268, 392, lift=40, colour=GREEN_TEXT)
-f.bow(372, 486, LEFT[0] - 228, LEFT[1] - 28, lift=20, colour=GREEN_TEXT)
-f.block(226, 800, ("Capacity grows with", "headcount, not with", "your bill"), GREEN_TEXT, SAT_FS)
-f.bow(LEFT[0] - 232, LEFT[1] + 32, 386, 730, lift=20, colour=GREEN_TEXT)
+# The two joins that make it one wheel rather than two drawings: inference is
+# what gets connected to, and cheaper tasks are what come back as more inference.
+f.bow(CX, CY - 156, CX, 214, lift=0, colour=PURPLE_TEXT, width=RIM)
+f.bow(556, 616, CX - 150, CY - 48, lift=0, colour=PURPLE_TEXT, width=RIM)
 
-# ---- data: the loop that needs no new hardware at all (purple, right) ----
-f.block(1652, 156, ("More systems", "connected"), PURPLE_TEXT, SAT_FS)
-f.bow(1512, 188, TOP[0] + 246, TOP[1] - 26, lift=30, colour=PURPLE_TEXT)
-f.block(1848, 450, ("Outcomes come back:", "the ticket stayed solved,", "the deal closed"),
-        PURPLE_TEXT, SAT_FS)
-f.bow(1694, 200, 1790, 384, lift=-36, colour=PURPLE_TEXT)
-f.bow(1682, 522, RIGHT[0] + 234, RIGHT[1] - 28, lift=-20, colour=PURPLE_TEXT)
-f.block(1806, 800, ("A human edit outranks", "a model's own guess"), PURPLE_TEXT, SAT_FS)
-f.bow(1650, 764, RIGHT[0] + 228, RIGHT[1] + 32, lift=-20, colour=PURPLE_TEXT)
+# --- the third loop: specialisation. Hung off More data, because that is where a
+#     job's own examples accumulate.
+f.block(1930, 388, ("One model", "per job"), CORAL_TEXT, SAT_FS)
+f.block(1946, 726, ("More of that job", "routed to it"), CORAL_TEXT, SAT_FS)
+f.bow(1660, 540, 1852, 412, lift=26, colour=CORAL_TEXT)
+f.bow(1938, 452, 1944, 668, lift=-40, colour=CORAL_TEXT)
+f.bow(1852, 760, 1664, 620, lift=26, colour=CORAL_TEXT)
 
-# ---- what you are left holding (coral, bottom) ----
-f.block(536, 1176, ("One model per job,", "not one model for everything"), CORAL_TEXT, SAT_FS)
-f.bow(BOTTOM[0] - 238, BOTTOM[1] + 26, 716, 1134, lift=24, colour=CORAL_TEXT)
-f.block(1462, 1176, ("Weights you own, on data", "that never left the network"), CORAL_TEXT, SAT_FS)
-f.bow(BOTTOM[0] + 238, BOTTOM[1] + 26, 1272, 1134, lift=-24, colour=CORAL_TEXT)
-
-f.key(1706, 1024, [
-    (GREEN_TEXT, "Hardware you already own"),
-    (PURPLE_TEXT, "Work you already do"),
-    (CORAL_TEXT, "Nothing leaves your network"),
+f.key(120, 1146, [
+    (GREEN_TEXT, "Compute — turns with headcount"),
+    (PURPLE_TEXT, "Training — turns with usage"),
+    (CORAL_TEXT, "Specialisation — turns per job"),
 ])
 
 f.write(f"{OUT}/fig-flywheel.svg")

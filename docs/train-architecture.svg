@@ -1,34 +1,60 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1823 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1900 530" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="h" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
-    <marker id="H" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
   </defs>
-  <rect width="1823" height="450" fill="#fff"/>
-  <rect x="100" y="157" width="162" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="181" y="199" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Your work</text>
-  <rect x="382" y="157" width="286" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="525" y="199" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Machines you own</text>
-  <rect x="969" y="157" width="177" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1057" y="199" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">One trainer</text>
-  <rect x="1328" y="157" width="153" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1405" y="199" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The gate</text>
-  <path d="M274 190 L368 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <path d="M680 190 L955 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <text x="818" y="166" text-anchor="middle" fill="#2b2b29" font-size="22">eight attempts a task</text>
-  <path d="M1158 190 L1314 190" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <text x="1237" y="166" text-anchor="middle" fill="#2b2b29" font-size="22">an adapter</text>
-  <rect x="1601" y="57" width="122" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1662" y="99" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Served</text>
-  <rect x="1601" y="257" width="122" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1662" y="299" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Binned</text>
-  <path d="M1493 176 C1553 176, 1527 90, 1587 90" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#h)"/>
-  <path d="M1493 204 C1553 204, 1527 290, 1587 290" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <text x="1547" y="72" text-anchor="middle" fill="#2b2b29" font-size="22">better</text>
-  <text x="1555" y="342" text-anchor="middle" fill="#2b2b29" font-size="22">not better</text>
-  <path d="M1057 235 L1057 350 L525 350 L525 237" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#h)"/>
-  <text x="791" y="390" text-anchor="middle" fill="#2b2b29" font-size="22">the new adapter, every two steps</text>
+  <rect width="1900" height="530" fill="#fff"/>
+  <rect x="100" y="177" width="162" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="181" y="219" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Your work</text>
+  <rect x="412" y="67" width="236" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="530" y="109" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">MacBook Pro</text>
+  <rect x="412" y="177" width="236" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="530" y="219" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">Mac Studio</text>
+  <rect x="412" y="287" width="236" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="530" y="329" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">RTX box</text>
+  <rect x="948" y="177" width="177" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1036" y="219" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">One trainer</text>
+  <path d="M274 196 C336 196, 336 100, 398 100" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M660 100 C722 100, 872 196, 934 196" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M274 210 L398 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M660 210 L934 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M274 224 C336 224, 336 320, 398 320" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M660 320 C722 320, 872 224, 934 224" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="798" y="38" text-anchor="middle" fill="#2b2b29" font-size="22">eight attempts a task</text>
+  <rect x="1335" y="177" width="153" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1412" y="219" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The gate</text>
+  <path d="M1137 210 L1321 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1230" y="186" text-anchor="middle" fill="#2b2b29" font-size="22">an adapter</text>
+  <rect x="1608" y="67" width="122" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1669" y="109" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Served</text>
+  <rect x="1608" y="287" width="122" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1669" y="329" text-anchor="middle" fill="#ad5130" font-size="25" font-weight="600">Binned</text>
+  <path d="M1500 196 C1560 196, 1534 100, 1594 100" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1500 224 C1560 224, 1534 320, 1594 320" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="1554" y="82" text-anchor="middle" fill="#2b2b29" font-size="22">better</text>
+  <text x="1562" y="372" text-anchor="middle" fill="#2b2b29" font-size="22">not better</text>
+  <path d="M1036 255 L1036 430 L530 430 L530 367" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="783" y="470" text-anchor="middle" fill="#2b2b29" font-size="22">the new adapter, to every machine, every two steps</text>
 </svg>
