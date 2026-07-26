@@ -19,8 +19,14 @@ your fleet is already good at; the only new thing is one machine that adjusts we
 Start with the diagram from Sutton & Barto. An *agent* takes an *action*, the *environment* answers
 with a new *state* and a *reward*, and the agent adjusts. A control loop with a scoreboard.
 
+<p align="center">
+<img src="../docs/fig-sutton.png" width="620" alt="The agent takes an action A-t; the environment returns a reward R-t-plus-1 and a state S-t-plus-1 across a dashed time-step boundary, which reach the agent as its reward R-t and state S-t.">
+<br>
+<sub>Figure 3.1 of Sutton &amp; Barto, <i>Reinforcement Learning: An Introduction</i> (2nd ed.), redrawn.</sub>
+</p>
+
 Is it still the right picture for language models? **Yes — the loop is unchanged.** Three things
-collapse, and knowing which three is most of the intuition.
+collapse, and knowing which three is most of the intuition. The same loop, with our names on it:
 
 <p align="center">
 <img src="../docs/fig-loop.png" width="640" alt="A task goes to your model, which writes an attempt; a check scores the attempt, and a reward between 0 and 1 goes back to the model.">
