@@ -318,9 +318,15 @@ lazily, so the rest of the CLI — and every test in this repo — runs without 
 
 Said plainly, because this branch is open and someone will look.
 
-- **Nothing captures traffic yet.** The first two stations of §4 are a design: turning live grid
-  requests into tasks, and joining real outcomes to them, is what makes the loop continuous
-  rather than a run you launch by hand.
+- **Half of §4's first two stations is real; the other half is not, and the difference matters.**
+  *Turning live requests into tasks* is built — `train/capture.py` keeps every served exchange
+  locally, and `grid train autopilot` + `grid train schedule on` turn that into a nightly cycle
+  nobody starts by hand. *Joining real outcomes to them* is built only for the outcome a **person**
+  reports: an app quotes back `X-Grid-Request-Id` to `POST /v1/feedback` and says the human edited,
+  sent or discarded the answer. What is still a design is the join to the **system of record** —
+  the helpdesk knowing the ticket was solved and never reopened, the CRM knowing the deal closed.
+  Until that exists, a business gets continuous learning only where its app reports verdicts, and
+  the honest description of the rest is "nightly training on captured work", not "self-reinforcing".
 - **Training attempts still need vLLM or our MLX server.** Ollama and llama.cpp nodes serve
   inference, judging and evaluation fine, but not training attempts — they don't return the tokens
   they sampled. A per-engine shim is deliberately deferred.

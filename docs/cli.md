@@ -470,6 +470,149 @@ Codex apps; `grid chat -m codex:…` is refused client-side, before any network 
 guidance to point a Codex-compatible app at the grid instead
 ([Pointing a Codex app at your grid](#pointing-a-codex-app-at-your-grid-using-codex-models)).
 
+## Training
+
+```
+grid train doctor [--config <path>] [--json]      # what this computer can do right now
+grid train where                                  # which grids training can use (LAN and hosted)
+grid train init [--pack <name>] [--dest <dir>] [--config <path>] [--force]
+grid train packs [--json]                         # bundled task packs for business data
+
+grid train sft [--backend auto|mlx|torch] [--iters <n>] [--run-dir <dir>] [--config <path>]
+grid train run [--config <path>]                  # the feedback loop (GRPO via TRL)
+grid train eval --run <dir> --candidate <name> [--adapter <dir>] [--base <name>] [--config <path>]
+grid train deploy --adapter <dir> [--gate] [--run <dir>] [--node <url>]... [--name <n>] [--config <path>]
+
+grid train collect [--on | --off] [--teacher <model>]... [--sample <f>] [--retain-days <n>]
+                   [--no-redact] [--prune] [--days <n>] [--json]
+grid train autopilot [--stage auto|sft|rl] [--min-examples <n>] [--days <n>]
+                     [--no-deploy] [--ignore-host] [--history] [--config <path>]
+grid train nightly [--no-deploy] [--ignore-host] [--history] [--config <path>]
+grid train schedule [status|on|off] [--at HH:MM] [--name <label>] [--config <path>]
+
+grid train serve [--model <id>] [--adapter-path <dir>] [--host <h>] [--port <p>]
+grid train convert-adapter <source> <dest> [--to mlx|peft]
+grid train pull zendesk|hubspot [--out <file>] [--subdomain <s>] [--email <e>]
+                                [--max-rows <n>] [--status <s>]
+grid train ui [--port 8321]                       # read-only dashboard of runs and curves
+grid train web [--port 8322] [--host 127.0.0.1]   # the point-and-click interface
+```
+
+Training is the other half of owning your machines: the grid already runs inference on them, and
+these verbs make it **train small models on your own data, on the same machines, and serve the
+result only if it is better**. Nothing is uploaded anywhere — training is local in every topology
+([topologies](./topologies.md) covers why inference can be hybrid and training is not).
+
+**Start with `grid train doctor`.** It answers for two rungs separately, because they need
+different things:
+
+```text
+What this computer can do now
+  ok  learn from answers your team already wrote (`grid train sft`)  ·  MLX on this Mac's own chip
+  NO  learn from feedback (`grid train run`)  ·  needs an engine that serves the training contract
+                                                 — `grid train serve` on a Mac, or vLLM
+Ready for stage one. `grid train sft` works on this computer right now.
+```
+
+- **`grid train sft`** is imitation: it learns from the answers your team already wrote and needs
+  nothing but the machine in front of you. `--backend auto` picks MLX on Apple Silicon and torch
+  elsewhere.
+- **`grid train run`** is the feedback loop (GRPO through TRL). It needs an engine that returns the
+  **token ids it sampled and their logprobs** — the *rollout contract*. vLLM returns them natively;
+  `grid train serve` makes an Apple-Silicon Mac serve the same contract, which is why an all-Mac
+  office needs no CUDA and no vLLM. A chat-only API yields zero trainable samples, and `doctor`
+  says so before a night is wasted.
+
+### The gate
+
+`grid train eval` and `grid train deploy --gate` are the same check: score the model you serve
+today and the trained candidate over held-out work with the same graders training used, greedy
+both sides, per grader. A candidate that gains less than **0.01** overall, or loses more than
+**0.02** on any single grader, is refused — "tidier but less correct" does not ship.
+
+The candidate is judged as **weights**, not as a name: the incumbent is scored first, then the
+adapter is loaded under a checking name (`<name>-candidate`), then scored. Asking an engine for the
+candidate's serving name would score whatever weights it already holds. Afterwards the check puts
+back what the node was serving — always, whatever the verdict — so a check is an observation, and
+the winner is deployed once, afterwards. Each run writes `eval-card.{json,html}`: the per-grader
+table plus the same work answered by both models.
+
+### The loop that runs itself
+
+```bash
+grid train collect --on            # keep the work the grid does — local files, redacted, pruned
+grid train autopilot               # one unattended cycle over what has accumulated
+grid train schedule on --at 23:00  # and have this computer run it every night
+```
+
+`collect` is **off until you turn it on**. What it keeps is stored under `~/.grid/capture`, scrubbed
+of emails, phone numbers and card numbers unless you pass `--no-redact`, sampled with `--sample`,
+and pruned on `--retain-days`. `grid train collect` with no flags prints what has accumulated.
+
+An example earns its place from a signal, never from the model's own confidence: a human
+**correction** (weight 1.0) outranks a **stronger model's** answer (`--teacher <model>`, 0.8), which
+outranks **sent as-is** (0.6); a **rejected** answer is kept for the record and never imitated; and
+**a model's own unjudged output is never trained on**, which is the rule that stops a model
+agreeing with itself into drift. Apps report the human's verdict by quoting back the
+`X-Grid-Request-Id` header they got with the answer to `POST /v1/feedback`.
+
+`autopilot` is one cycle: check the machine is free, build tonight's dataset from captured work,
+refuse below `--min-examples` (120 by default — waiting is the correct outcome, not a failure),
+train, prove it, and serve it only if it won. `--history` prints the past cycles instead. `nightly`
+is the same shape for a dataset someone prepared rather than one captured.
+
+`schedule on` installs a real per-user job — a **LaunchAgent** on macOS, a **`systemd --user`
+timer** on Linux — after smoke-testing that the command can start at all; `off` deletes what it
+wrote. It refuses to take over a job another folder owns (use `--name` to run several models on one
+machine), and where there is no per-user scheduler it prints the cron line instead of pretending it
+installed one. Output goes to `autopilot.log` beside the model.
+
+**Training waits for the machine to be free** — mains power and an idle keyboard, checked in code.
+`--ignore-host` overrides it for a run you are watching.
+
+### For people who do not use a terminal
+
+`grid train web` is the same engine with none of the vocabulary: pick the job, upload an export,
+tick what a good answer looks like in plain language (it generates real Python graders), pick
+machines, watch the curve, and see a before/after card whose "start using this" button only exists
+if the model won. It writes an ordinary `grid-train.toml` and launches an ordinary `grid train`
+subprocess, so the two surfaces cannot drift into separate products.
+
+It binds to loopback by default. `--host 0.0.0.0` shares it with colleagues and prints a link with
+a code in it — that page shows real customer data and can start jobs on the machine, so on a shared
+network only that link works (`GRID_TRAIN_WEB_TOKEN` pins the code across restarts).
+
+`grid train ui` is the read-only dashboard: every run, its reward and held-out-eval curves.
+
+### Data to start from
+
+`grid train packs` lists bundled starting points for business data — `support-replies` and
+`sales-triage` — and `grid train init --pack support-replies` installs one (config, a prepare
+script, graders, and sample rows) into `./<pack>/`. `grid train init` on its own writes a starter
+`grid-train.toml`. The browser flow offers four jobs, including sorting work into your own
+categories and anything else your team answers in writing.
+
+`grid train pull zendesk|hubspot` fetches the examples instead of asking someone to export them.
+The token comes from `ZENDESK_API_TOKEN` / `HUBSPOT_ACCESS_TOKEN`, is never written to disk and
+never appears in a URL or an error; what lands on disk is raw rows, which go through exactly the
+same preparation and the same refusals as an uploaded file.
+
+### Where it runs
+
+`grid train where` prints the grids training can use in **both modes** — a LAN grid found on this
+network, and a hosted one you are signed in to — with the honest asymmetry: through the relay the
+trainer **cannot push weights back** to NAT'd nodes, so relay training keeps its serving machines
+reachable or accepts slower off-policy learning. `grid train convert-adapter` moves a LoRA adapter
+between the torch/peft and MLX layouts, so a trainer on one backend can feed nodes on the other.
+
+Runs land in `~/.grid/artifacts/train/`; browser workspaces in `~/.grid/train-workspaces/<slug>/`,
+each holding the upload verbatim, the generated `rewards.py`, the `grid-train.toml`, and the run.
+
+See [ADR 0019](./adr/0019-rl-training-plane.md) for the decisions and the honest limits,
+[start-on-a-mac](./start-on-a-mac.md) for the twenty-minute path from nothing to a trained model,
+[two-node-training](./two-node-training.md) for the smallest real fleet, and
+[`train/README.md`](../train/README.md) for what reinforcement learning is doing here at all.
+
 ## Members
 
 ```
