@@ -25,7 +25,7 @@ inference is what a grid already does. So the expensive part of training is work
 already good at, and the only new thing is one machine that adjusts weights.
 
 <p align="center">
-<img src="../docs/train-architecture.png" width="900" alt="Your work and the weights sit with the trainer, which asks the machines you own for several attempts at a task; the attempts and the token ids they sampled come back to it; it turns those into an adapter, and the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
+<img src="../docs/train-architecture.png" width="900" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer sits the fleet you own — a MacBook Pro, a Mac Studio and an RTX box — which the trainer asks for several attempts at a task and which return those attempts along with the token ids they sampled.">
 </p>
 
 ---
@@ -300,7 +300,7 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading DOMAIN-SPECIFIC INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees and runs over the top — your systems, then your data, then your models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading DOMAIN-SPECIFIC INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then domain-specific models — before rejoining the wheel at models.">
 </p>
 
 **The ring is the whole business in four words.** Computers run models. Models make the work
@@ -312,8 +312,9 @@ structurally cannot copy — its capacity is rented, and this walks in the door.
 because they are the ones who connect a system — the cheapest thing on this page, and what turns a
 general model into one that knows your tickets, your repos, your deals. That data is not one undifferentiated pile — it arrives sorted by the job
 that produced it, which is what makes a model *for that job* possible rather than one model asked
-to be good at everything. Those are models too, so the loop rejoins the wheel where models do. What
-it skips is the one station that needs somebody to buy something.
+to be good at everything. Those are models too — which is why the loop rejoins the wheel at
+models, and why the drawing spells out *domain-specific* there against the plain **Models** on the
+rim. What it skips is the one station that needs somebody to buy something.
 
 ## The code
 

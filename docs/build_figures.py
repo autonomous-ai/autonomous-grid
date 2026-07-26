@@ -176,51 +176,51 @@ for ry, label, weight, dashed in rows:
 f.write(f"{OUT}/fig-earns.svg")
 
 # ------------------------------------------------------- train-architecture
-# The first figure on the page, so it has to get the direction right: the trainer
-# holds your work and the weights and drives everything. It asks the machines for
-# attempts; they answer; it makes an adapter; the gate decides whether anyone ever
-# sees it. Drawn as one loop with the gate hanging off the end rather than as a
-# line, because a line said the trainer was the last stage of a pipeline.
-f = Fig(1900, 720)
-y = 330
-ww = box_w("Your work") - 8
+# The first figure on the page, so the direction has to be right: the trainer
+# holds your tasks and the weights and drives everything. One line across the top
+# is the story — tasks in, adapter out, gate decides. The fleet sits underneath
+# the trainer because it is not a stage in that line, it is what the trainer
+# reaches for and gets answers back from.
+f = Fig(1600, 780)
+y = 250
+ww = box_w("Your tasks") - 8
 wcx = M + ww / 2
-f.term(wcx, y, "Your work", w=ww)
+f.term(wcx, y, "Your tasks", w=ww)
 
 tw2 = box_w("The trainer")
 tcx = wcx + ww / 2 + 150 + tw2 / 2
 f.box(tcx, y, "The trainer", kind="purple", w=tw2)
 f.arrow(wcx + ww / 2 + 12, y, tcx - tw2 / 2 - 14, y)
 
-MW = 236
-mcx = tcx + tw2 / 2 + 210 + MW / 2
-rows = [y - 148, y, y + 148]
-for ry, name in zip(rows, ["MacBook Pro", "Mac Studio", "RTX box"]):
-    f.box(mcx, ry, name, w=MW)
-    curve = 0 if ry == y else 70
-    off = 14 if ry > y else -14 if ry < y else 0
-    f.arrow(tcx + tw2 / 2 + 12, y + off, mcx - MW / 2 - 14, ry, curve=curve)
-f.label(tcx + tw2 / 2 + 118, rows[0] - 58, "a task, several attempts")
-
-# What comes back is the loop closing, and it is why the trainer is not the last
-# box: the attempts are the thing it learns from.
-f.elbow([(mcx, rows[2] + H / 2 + 12), (mcx, 620), (tcx, 620), (tcx, y + H / 2 + 14)])
-f.label((tcx + mcx) / 2, 664, "the attempts, and the token ids they sampled")
-
 gw = box_w("The gate")
-gcx = mcx + MW / 2 + 260 + gw / 2
+gcx = tcx + tw2 / 2 + 300 + gw / 2
 f.box(gcx, y, "The gate", kind="purple", w=gw)
-f.elbow([(tcx, y - H / 2 - 12), (tcx, 92), (gcx, 92), (gcx, y - H / 2 - 14)], dashed=True)
-f.label((tcx + gcx) / 2, 58, "an adapter, once the climb is done")
+f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
+f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 26, "an adapter")
 
 ow = box_w("Served") - 8
 ocx = gcx + gw / 2 + GAP + ow / 2
-f.term(ocx, y - 128, "Served", w=ow)
-f.term(ocx, y + 128, "Binned", w=ow)
-f.arrow(gcx + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 128, curve=60)
-f.arrow(gcx + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 128, dashed=True, curve=60)
-f.label(gcx + gw / 2 + 62, y - 146, "better")
-f.label(gcx + gw / 2 + 70, y + 180, "not better")
+f.term(ocx, y - 110, "Served", w=ow)
+f.term(ocx, y + 110, "Binned", w=ow)
+f.arrow(gcx + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 110, curve=60)
+f.arrow(gcx + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 110, dashed=True, curve=60)
+f.label(gcx + gw / 2 + 62, y - 128, "better")
+f.label(gcx + gw / 2 + 70, y + 162, "not better")
+
+# The fleet, in a row under the trainer. Out on the left, back on the right —
+# two arrows with air between them, so the pair reads as a round trip rather
+# than as one line doing both jobs.
+MW = 236
+my = 580
+# Set close enough to touch: three boxes in a contiguous strip read as one fleet,
+# so one pair of arrows can address the group. Fanning to each of them meant six
+# lines that crossed, to say a thing the row already says.
+for bx, name in zip((tcx - 250, tcx, tcx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
+    f.box(bx, my, name, w=MW)
+f.arrow(tcx - 62, y + H / 2 + 12, tcx - 62, my - H / 2 - 14)
+f.arrow(tcx + 62, my - H / 2 - 14, tcx + 62, y + H / 2 + 12)
+f.label(tcx - 140, 396, "a task,", "several attempts", anchor="end")
+f.label(tcx + 140, 384, "the attempts, and", "the token ids they sampled", anchor="start")
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
@@ -277,19 +277,24 @@ f.block(258, 200, ("Your systems",), GREEN_TEXT, CORE_FS)
 f.block(258, 252, ("Gmail · Slack · Notion", "Drive · Salesforce"),
         LABEL_TEXT, SAT_FS, weight=400)
 f.block(800, 118, ("Your data",), GREEN_TEXT, CORE_FS)
-f.block(1396, 230, ("Your models",), PURPLE_TEXT, CORE_FS)
+# Spelled out rather than "Your DSI": the hub is the asset that accumulates, this
+# is the artifact that gets made, and naming both the same thing would collapse a
+# distinction the second loop exists to draw. It also puts the contrast on the
+# page — the ring's general Models, and the domain-specific ones joining them.
+f.block(1436, 212, ("Domain-specific", "models"), PURPLE_TEXT, CORE_FS)
 
 f.bow(336, 604, 274, 322, lift=-18, colour=INK, width=RIM)
+f.label(356, 470, "connect")
 f.bow(400, 168, 668, 132, lift=-24, colour=INK, width=RIM)
-f.bow(936, 132, 1252, 190, lift=-28, colour=INK, width=RIM)
-f.bow(1470, 292, 1256, 610, lift=-46, colour=INK, width=RIM)
+f.bow(936, 132, 1242, 184, lift=-28, colour=INK, width=RIM)
+f.bow(1502, 300, 1256, 610, lift=-52, colour=INK, width=RIM)
 
 # The one place a verb earns its keep: Computers is the only station that does two
 # different jobs, and without this second arrow the drawing shows only the first.
 # The same machines serve by day and train at night — section 4. The two arrows
 # leave Computers well apart: the rim departs at about 288 degrees, so this one
 # starts clear above it rather than from the same few pixels.
-f.bow(922, 236, 1240, 258, lift=-20, colour=INK, width=RIM)
+f.bow(922, 236, 1234, 256, lift=-20, colour=INK, width=RIM)
 f.label(1074, 292, "train")
 f.label(1042, 442, "serve")
 
