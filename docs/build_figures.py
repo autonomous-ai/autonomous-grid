@@ -181,7 +181,13 @@ f.write(f"{OUT}/fig-fleet.svg")
 f = Fig(1600, 430)
 X0, X1 = 100, 1500
 PER_HOUR = (X1 - X0) / 24
-at = lambda hour: X0 + ((hour - 9) % 24) * PER_HOUR   # the day starts at 09:00
+
+
+def at(hour):
+    """Where an hour sits on the axis. The working day starts at 09:00."""
+    return X0 + ((hour - 9) % 24) * PER_HOUR
+
+
 band_y = 132
 f.band(X0, at(17) - 6, band_y, "Inference")
 f.band(at(17) + 6, X1, band_y, "Training", kind="night")
