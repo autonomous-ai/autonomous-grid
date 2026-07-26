@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 460" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="g" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#8a8a8a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    .green { fill:#f1f8ec; stroke:#7fb35f; stroke-width:1.8 }
+    .purple{ fill:#f2f1fb; stroke:#7a6fd1; stroke-width:1.8 }
+    .coral { fill:#fdf1ed; stroke:#e0785c; stroke-width:1.8 }
+    .grey  { fill:#f7f7f7; stroke:#b4b4b4; stroke-width:1.8; stroke-dasharray:6 5 }
+    .tg { fill:#4e8b2c; font-size:16.5px; font-weight:750 }
+    .tp { fill:#5b4fc0; font-size:16.5px; font-weight:750 }
+    .tc { fill:#c2593a; font-size:16.5px; font-weight:750 }
+    .tk { fill:#7a7a7a; font-size:16.5px; font-weight:750 }
+    .sub{ fill:#6b6b6b; font-size:13.5px }
+    .lbl{ fill:#3a3a3a; font-size:14.5px }
+    .w  { font-size:13px; font-weight:700 }
+    .ln { stroke:#8a8a8a; stroke-width:1.8; fill:none }
+    .lnd{ stroke:#b4b4b4; stroke-width:1.8; fill:none; stroke-dasharray:6 5 }
+  </style>
+  <rect width="1160" height="460" fill="#ffffff"/>
+
+  <!-- source -->
+  <rect x="40" y="176" width="150" height="76" rx="38" class="coral"/>
+  <text x="115" y="206" text-anchor="middle" class="tc">An answer</text>
+  <text x="115" y="228" text-anchor="middle" class="sub">the grid served today</text>
+
+  <path d="M196 214 L262 214" class="ln" marker-end="url(#g)"/>
+
+  <!-- the question -->
+  <rect x="268" y="176" width="196" height="76" rx="6" class="purple"/>
+  <text x="366" y="208" text-anchor="middle" class="tp">What happened</text>
+  <text x="366" y="232" text-anchor="middle" class="tp">to it?</text>
+
+  <!-- four outcomes -->
+  <path d="M470 194 C520 194, 520 76, 570 76" class="ln" marker-end="url(#g)"/>
+  <path d="M470 206 C520 206, 520 152, 570 152" class="ln" marker-end="url(#g)"/>
+  <path d="M470 222 C520 222, 520 228, 570 228" class="ln" marker-end="url(#g)"/>
+  <path d="M470 234 C520 234, 520 336, 570 336" class="lnd" marker-end="url(#g)"/>
+
+  <rect x="576" y="48" width="300" height="56" rx="6" class="green"/>
+  <text x="596" y="72" class="tg">A person rewrote it</text>
+  <text x="596" y="93" class="sub">their version is the truth</text>
+  <text x="856" y="82" text-anchor="end" class="w" fill="#4e8b2c">1.0</text>
+
+  <rect x="576" y="124" width="300" height="56" rx="6" class="purple"/>
+  <text x="596" y="148" class="tp">A stronger model answered</text>
+  <text x="596" y="169" class="sub">a target, at no extra cost</text>
+  <text x="856" y="158" text-anchor="end" class="w" fill="#5b4fc0">0.8</text>
+
+  <rect x="576" y="200" width="300" height="56" rx="6" class="coral"/>
+  <text x="596" y="224" class="tc">Sent as it was</text>
+  <text x="596" y="245" class="sub">good enough, nobody objected</text>
+  <text x="856" y="234" text-anchor="end" class="w" fill="#c2593a">0.6</text>
+
+  <rect x="576" y="308" width="300" height="56" rx="6" class="grey"/>
+  <text x="596" y="332" class="tk">Binned — or nobody said</text>
+  <text x="596" y="353" class="sub">kept for the record, never imitated</text>
+
+  <!-- overnight -->
+  <path d="M882 76 C942 76, 942 200, 972 200" class="ln" marker-end="url(#g)"/>
+  <path d="M882 152 C942 152, 942 200, 972 200" class="ln" marker-end="url(#g)"/>
+  <path d="M882 228 C942 228, 942 205, 972 205" class="ln" marker-end="url(#g)"/>
+
+  <rect x="978" y="172" width="142" height="66" rx="6" class="green"/>
+  <text x="1049" y="200" text-anchor="middle" class="tg">Overnight</text>
+  <text x="1049" y="222" text-anchor="middle" class="sub">train on these</text>
+
+  <line x1="40" y1="400" x2="1120" y2="400" stroke="#e6e6e6" stroke-width="1.4"/>
+  <text x="40" y="426" class="sub"><tspan fill="#3a3a3a" font-weight="700">The rule that keeps this honest:</tspan> a model's own unjudged output is stored and never trained on. Imitating your own guesses is how a model drifts into agreeing with itself,</text>
+  <text x="40" y="448" class="sub">so an example has to earn its place — and every one of these signals costs somebody nothing, because it is a by-product of the work they were doing anyway.</text>
+</svg>

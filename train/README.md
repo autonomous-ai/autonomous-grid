@@ -8,6 +8,10 @@ The whole idea in one sentence: **reinforcement learning is about 75% sampling, 
 inference, and inference is what a grid already does.** The expensive part of training is work
 your fleet is already good at; the only new thing is one machine that adjusts weights.
 
+<p align="center">
+<img src="../docs/train-architecture.png" alt="Training on a grid: one trainer — an NVIDIA box or a Mac — sends each task eight times through the grid; every machine you own writes attempts and returns them with the tokens it sampled; the new adapter goes back every two steps; the gate refuses anything that did not beat the model you already serve." width="880">
+</p>
+
 ---
 
 ## 1. What reinforcement learning actually is
@@ -18,31 +22,9 @@ with a new *state* and a *reward*, and the agent adjusts. A control loop with a 
 Is it still the right picture for language models? **Yes — the loop is unchanged.** Three things
 collapse, and knowing which three is most of the intuition.
 
-```mermaid
-flowchart LR
-  subgraph classic[" a · the textbook loop "]
-    direction TB
-    A(["<b>AGENT</b><br/>picks the next action"])
-    E(["<b>ENVIRONMENT</b><br/>a world that answers back"])
-    A -- "action" --> E
-    E -- "state + reward" --> A
-  end
-  subgraph llm[" b · the same loop, on a model you own "]
-    direction TB
-    P(["<b>YOUR MODEL</b><br/>writes one attempt,<br/>token by token"])
-    T(["<b>YOUR WORK + A CHECK</b><br/>a real task from your records,<br/>and a way to score the answer"])
-    P -- "the tokens it chose" --> T
-    T -- "reward &nbsp;0 → 1" --> P
-  end
-  classic ~~~ llm
-
-  classDef agent fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
-  classDef world fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
-  class A,P agent
-  class E,T world
-  style classic fill:transparent,stroke:#cbd5e1,stroke-dasharray:4 4,color:#64748b
-  style llm fill:transparent,stroke:#cbd5e1,stroke-dasharray:4 4,color:#64748b
-```
+<p align="center">
+<img src="../docs/fig-loop.png" alt="The reinforcement-learning loop on a model you own: your model writes an attempt, your work plus a check scores it between 0 and 1, and the model adjusts." width="880">
+</p>
 
 **1 — The episode is short.** Classic RL imagines a long trajectory: move, observe, move again. For
 most business tasks there is one state (the prompt) and one action (the whole answer), and reward
@@ -60,35 +42,9 @@ consumer hardware.
 
 ## 2. One training step, exactly
 
-```mermaid
-flowchart TB
-  T["<b>1 · one task</b> from your data<br/><i>“Reverse the words: red house tree”</i>"]
-  G["<b>2 · eight attempts</b><br/>sampled, so they differ from each other"]
-  S["<b>3 · the grader scores each one</b><br/>1.00 · 0.67 · 0.67 · 0.50 · 0.42 · 0.33 · 0.17 · 0.00"]
-  M{"<b>4 · better or worse than<br/>the group's own average?</b><br/>0.47"}
-  U["make those token choices<br/><b>more</b> likely"]
-  D["make those token choices<br/><b>less</b> likely"]
-  O["<b>5 · one optimizer step</b><br/>on a small add-on layer — LoRA, ~84 MB"]
-  T --> G --> S --> M
-  M -- "&nbsp;better&nbsp;" --> U
-  M -- "&nbsp;worse&nbsp;" --> D
-  U --> O
-  D --> O
-  O -. "&nbsp;repeat a few hundred times&nbsp;" .-> T
-
-  classDef data fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
-  classDef work fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
-  classDef ask fill:#fff7ed,stroke:#ea580c,stroke-width:1.5px,color:#0f172a
-  classDef up fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#0f172a
-  classDef down fill:#fee2e2,stroke:#dc2626,stroke-width:1.5px,color:#0f172a
-  classDef step fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#0f172a
-  class T data
-  class G,S work
-  class M ask
-  class U up
-  class D down
-  class O step
-```
+<p align="center">
+<img src="../docs/fig-step.png" alt="One training step: a task, eight sampled attempts, their own average as the bar, the ones above it made likelier and the ones below less likely, and one optimizer step on a small add-on layer." width="880">
+</p>
 
 Note what is absent: **no labelled right answer is needed, only a way to score an attempt.** That
 is why RL reaches jobs where nobody wrote down the ideal output — and why the grader, not the
@@ -106,22 +62,9 @@ to a vendor). But those nodes cannot train: no vendor returns what a gradient ne
 an improvement to a model you rent, and renting compute by the hour is the expensive way to do the
 one job idle office hardware suits perfectly.
 
-```mermaid
-flowchart TB
-  POOL["<b>THE MACHINES THAT WRITE THE ATTEMPTS</b><br/><i>about 75% of the compute</i><br/><br/>MacBook Pro × N &nbsp;·&nbsp; Mac Studio<br/>they join and leave freely<br/>a sleeping laptop is skipped, never fatal"]
-  GRID{{"<b>THE GRID</b> &nbsp;·&nbsp; one endpoint<br/>decides which machine answers"}}
-  TR["<b>THE TRAINER</b> &nbsp;·&nbsp; one machine<br/><i>an RTX box, or simply the fastest Mac</i><br/>holds the weights &nbsp;·&nbsp; does the learning<br/>runs the held-out test on its own weights"]
-  POOL == "eight attempts per task, in parallel" ==> GRID
-  GRID == "the attempts, and the tokens it sampled" ==> TR
-  TR -. "<b>every 2 steps</b> · the new adapter goes back<br/>~84 MB, about a second on the LAN" .-> POOL
-
-  classDef mac fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#0f172a
-  classDef grid fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#0f172a
-  classDef trainer fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#0f172a
-  class POOL mac
-  class GRID grid
-  class TR trainer
-```
+<p align="center">
+<img src="../docs/train-grid.png" alt="The trainer sits above your grid: it sends one task eight times, every machine you own writes attempts and returns them with the tokens it sampled, and the new adapter goes back to those machines every two steps. The gate scores the result against the model you already serve." width="880">
+</p>
 
 Two facts make this work on ordinary hardware: attempts are **independent**, so they fan out
 perfectly; and what travels between machines is a small add-on layer, tens of megabytes, not a
@@ -136,33 +79,9 @@ the table below.
 The two halves want the same machines at different hours. People need inference while they work;
 training wants sustained capacity and nobody's lap getting hot. A scheduling gift, not a conflict.
 
-```mermaid
-flowchart LR
-  D["<b>09:00 · THE DAY</b><br/>people and agents work<br/><i>every answer is kept as a candidate</i>"]
-  A["<b>18:00 · WHAT HAPPENED</b><br/>the reply was edited · the ticket resolved<br/>the lead closed · the tests passed"]
-  N["<b>23:00 · THE CLIMB</b><br/>attempts on the idle machines<br/>learning on the trainer"]
-  G{"<b>07:00 · PROVE IT</b><br/>did it beat the model<br/>we already serve?"}
-  S["<b>serve it</b><br/>the grid sends it more work"]
-  X["<b>bin it</b><br/>production untouched"]
-  D ==> A ==> N ==> G
-  G == "&nbsp;yes&nbsp;" ==> S
-  G == "&nbsp;no, or no better&nbsp;" ==> X
-  S -. "&nbsp;tomorrow&nbsp;" .-> D
-  X -. "&nbsp;tomorrow&nbsp;" .-> D
-
-  classDef day fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
-  classDef truth fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
-  classDef night fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#0f172a
-  classDef ask fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#0f172a
-  classDef good fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#0f172a
-  classDef bad fill:#fee2e2,stroke:#dc2626,stroke-width:1.5px,color:#0f172a
-  class D day
-  class A truth
-  class N night
-  class G ask
-  class S good
-  class X bad
-```
+<p align="center">
+<img src="../docs/fig-day-night.png" alt="The day and night cycle: people work and every answer is kept, what happened is attached in the evening, the climb runs at 23:00 on idle machines, and at 07:00 the gate serves it or bins it." width="880">
+</p>
 
 **Cadence is set by the slowest arrow, and that is *attach truth*:** whether a support reply worked
 is known hours or days later, not minutes. So nightly is the honest ceiling — and by industry
@@ -261,44 +180,9 @@ guessing and refusals as an uploaded file — one code path decides whether data
 Everything above assumes someone exports a file and starts a run. The end state is that nobody
 has to: a business runs its grid, and its models get better on their own.
 
-```mermaid
-flowchart LR
-  W["<b>work goes through the grid</b><br/>every answer is a candidate example"]
-  V{"<b>what happened<br/>to that answer?</b>"}
-  E["<b>a person rewrote it</b><br/>their version is the truth<br/><i>weight 1.0</i>"]
-  T["<b>a stronger model answered</b><br/>a target, at no extra cost<br/><i>weight 0.8</i>"]
-  A["<b>sent as it was</b><br/>good enough<br/><i>weight 0.6</i>"]
-  X["<b>discarded — or nobody said</b><br/>kept for the record,<br/>never imitated"]
-  N["<b>overnight</b><br/>train on what earned its place"]
-  G{"<b>beat what<br/>we serve?</b>"}
-  S["<b>serve it</b>"]
-  D["<b>bin it</b><br/>production untouched"]
-  W ==> V
-  V ==> E ==> N
-  V ==> T ==> N
-  V ==> A ==> N
-  V -.-> X
-  N ==> G
-  G == "&nbsp;yes&nbsp;" ==> S
-  G == "&nbsp;no&nbsp;" ==> D
-
-  classDef src fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
-  classDef ask fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#0f172a
-  classDef human fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#0f172a
-  classDef teacher fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#0f172a
-  classDef weak fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
-  classDef never fill:#fee2e2,stroke:#dc2626,stroke-width:1.5px,color:#0f172a,stroke-dasharray:4 3
-  classDef night fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#0f172a
-  class W src
-  class V,G ask
-  class E human
-  class T teacher
-  class A weak
-  class X never
-  class N night
-  class S human
-  class D never
-```
+<p align="center">
+<img src="../docs/fig-earns.png" alt="What earns a place in the training set: a person's rewrite is truth at weight 1.0, a stronger model's answer 0.8, an answer sent as-is 0.6, and a binned or unjudged answer is kept for the record but never imitated." width="880">
+</p>
 
 The rule that keeps this honest is the box on the right: **a model's own unjudged output is stored
 but never trained on.** Imitating your own guesses is how a model drifts, so an example has to earn

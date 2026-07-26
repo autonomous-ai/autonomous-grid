@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 340" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="g" markerWidth="12" markerHeight="12" refX="9.5" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,0.5 L9.5,4 L1,7.5" fill="none" stroke="#8a8a8a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    .green { fill:#f1f8ec; stroke:#7fb35f; stroke-width:1.8 }
+    .purple{ fill:#f2f1fb; stroke:#7a6fd1; stroke-width:1.8 }
+    .coral { fill:#fdf1ed; stroke:#e0785c; stroke-width:1.8 }
+    .tg { fill:#4e8b2c; font-size:19px; font-weight:750 }
+    .tp { fill:#5b4fc0; font-size:19px; font-weight:750 }
+    .tc { fill:#c2593a; font-size:19px; font-weight:750 }
+    .sub{ fill:#6b6b6b; font-size:14px }
+    .lbl{ fill:#3a3a3a; font-size:15.5px }
+    .ln { stroke:#8a8a8a; stroke-width:1.8; fill:none }
+  </style>
+  <rect width="1040" height="340" fill="#ffffff"/>
+
+  <!-- the policy -->
+  <rect x="150" y="96" width="270" height="86" rx="6" class="green"/>
+  <text x="285" y="134" text-anchor="middle" class="tg">Your model</text>
+  <text x="285" y="160" text-anchor="middle" class="sub">writes one attempt, token by token</text>
+
+  <!-- the environment -->
+  <rect x="620" y="96" width="270" height="86" rx="6" class="purple"/>
+  <text x="755" y="134" text-anchor="middle" class="tp">Your work + a check</text>
+  <text x="755" y="160" text-anchor="middle" class="sub">a real task, and a way to score it</text>
+
+  <!-- forward -->
+  <path d="M424 128 L612 128" class="ln" marker-end="url(#g)"/>
+  <text x="518" y="116" text-anchor="middle" class="lbl">the tokens it chose</text>
+
+  <!-- back -->
+  <path d="M616 160 L428 160" class="ln" marker-end="url(#g)"/>
+  <text x="518" y="184" text-anchor="middle" class="lbl">a reward between 0 and 1</text>
+
+  <!-- what collapses -->
+  <line x1="150" y1="234" x2="890" y2="234" stroke="#e6e6e6" stroke-width="1.4"/>
+  <text x="150" y="266" class="sub"><tspan fill="#3a3a3a" font-weight="700">One state, one action.</tspan> The prompt is the state; the whole answer is the move.</text>
+  <text x="150" y="292" class="sub"><tspan fill="#3a3a3a" font-weight="700">The environment is your data.</tspan> No simulator to build — a ticket, and how it actually resolved.</text>
+  <text x="150" y="318" class="sub"><tspan fill="#3a3a3a" font-weight="700">No critic.</tspan> The group of attempts grades itself, which is the reason this fits on the machines you own.</text>
+</svg>
