@@ -18,6 +18,10 @@ frontier at your thing, which is the trade you want, because most of what your t
 your thing. The weights are yours, so nobody deprecates them, reprices them or swaps them out from
 under you. And the data they learned from never left the building.
 
+That is the *why*. The rest of this page is the *how* — and the reason it is drawn as a flywheel
+rather than a pipeline is that domain-specific intelligence, unlike a model you rent, **compounds**:
+every night's work is the next night's training set.
+
 ## How the training plane works
 
 Here is the whole idea. Reinforcement learning is roughly 75% sampling; sampling is inference;
@@ -25,7 +29,7 @@ inference is what a grid already does. So the expensive part of training is work
 already good at, and the only new thing is one machine that adjusts weights.
 
 <p align="center">
-<img src="../docs/train-architecture.png" width="900" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer sits the fleet you own — a MacBook Pro, a Mac Studio and an RTX box — which the trainer asks for several attempts at a task and which return those attempts along with the token ids they sampled.">
+<img src="../docs/train-architecture.png" width="900" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator places each task on whichever of a MacBook Pro, Mac Studio or RTX box is free, and the attempts come back to the trainer with the token ids they sampled.">
 </p>
 
 ---
@@ -300,8 +304,12 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading DOMAIN-SPECIFIC INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then domain-specific models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then domain-specific models — before rejoining the wheel at models.">
 </p>
+
+The hub says *compounding* rather than *domain-specific* for a reason worth stating: a wheel
+turning around a static noun does not say the noun is growing. What compounds is the intelligence
+specific to you — and *that* is on the rim, at the station where those models get made.
 
 **The ring is the whole business in four words.** Computers run models. Models make the work
 superhuman. Superhuman work brings employees. Employees arrive carrying the next computers.

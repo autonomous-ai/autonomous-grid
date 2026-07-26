@@ -41,7 +41,7 @@
   <path d="M420 554 A400 400 0 0 1 670 302" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <path d="M921 299 A400 400 0 0 1 1186 574" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <circle cx="800" cy="680" r="240" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="800" y="670" text-anchor="middle" fill="#5d579d" font-size="34" font-weight="700" letter-spacing="0.5">DOMAIN-SPECIFIC</text>
+  <text x="800" y="670" text-anchor="middle" fill="#5d579d" font-size="34" font-weight="700" letter-spacing="0.5">COMPOUNDING</text>
   <text x="800" y="712" text-anchor="middle" fill="#5d579d" font-size="34" font-weight="700" letter-spacing="0.5">INTELLIGENCE</text>
   <text x="258" y="212" text-anchor="middle" fill="#5a912f" font-size="35" font-weight="700">Your systems</text>
   <text x="258" y="244" text-anchor="middle" fill="#2b2b29" font-size="21" font-weight="400">Gmail · Slack · Notion</text>

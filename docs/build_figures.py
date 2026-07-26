@@ -181,7 +181,7 @@ f.write(f"{OUT}/fig-earns.svg")
 # is the story — tasks in, adapter out, gate decides. The fleet sits underneath
 # the trainer because it is not a stage in that line, it is what the trainer
 # reaches for and gets answers back from.
-f = Fig(1600, 780)
+f = Fig(1700, 900)
 y = 250
 ww = box_w("Your tasks") - 8
 wcx = M + ww / 2
@@ -207,20 +207,30 @@ f.arrow(gcx + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 110, dashed=True, curv
 f.label(gcx + gw / 2 + 62, y - 128, "better")
 f.label(gcx + gw / 2 + 70, y + 162, "not better")
 
-# The fleet, in a row under the trainer. Out on the left, back on the right —
-# two arrows with air between them, so the pair reads as a round trip rather
-# than as one line doing both jobs.
+# The fleet, under the trainer, reached THROUGH the orchestrator — the trainer
+# never talks to a machine directly, it asks the grid and the grid places the
+# work. The fleet figure says the same thing; these two must not disagree.
+ocw = box_w("The orchestrator")
+oy = 470
+f.box(tcx - 118, oy, "The orchestrator", kind="purple", w=ocw)
 MW = 236
-my = 580
+my = 700
 # Set close enough to touch: three boxes in a contiguous strip read as one fleet,
 # so one pair of arrows can address the group. Fanning to each of them meant six
 # lines that crossed, to say a thing the row already says.
 for bx, name in zip((tcx - 250, tcx, tcx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
     f.box(bx, my, name, w=MW)
-f.arrow(tcx - 62, y + H / 2 + 12, tcx - 62, my - H / 2 - 14)
-f.arrow(tcx + 62, my - H / 2 - 14, tcx + 62, y + H / 2 + 12)
-f.label(tcx - 140, 396, "a task,", "several attempts", anchor="end")
-f.label(tcx + 140, 384, "the attempts, and", "the token ids they sampled", anchor="start")
+
+f.arrow(tcx - 118, y + H / 2 + 12, tcx - 118, oy - H / 2 - 14)
+f.label(tcx - 156, 384, "a task,", "several attempts", anchor="end")
+for bx in (tcx - 250, tcx, tcx + 250):
+    f.arrow(tcx - 118, oy + H / 2 + 12, bx, my - H / 2 - 14, dashed=True,
+            curve=0 if bx == tcx - 250 else 70)
+f.label(tcx + 250, oy + 74, "placed on whichever machine is free", anchor="start")
+
+# The completions come back to the trainer, clear of the orchestrator box.
+f.arrow(tcx + 70, my - H / 2 - 14, tcx + 70, y + H / 2 + 12)
+f.label(tcx + 96, 386, "the attempts, and", "the token ids they sampled", anchor="start")
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
@@ -256,7 +266,7 @@ f.wheel(CX, CY, R, [
     ("Superhuman work", CORAL_TEXT),
     ("Employees", CORAL_TEXT),
     ("Computers", GREEN_TEXT),
-], hub_r=240, hub_lines=("DOMAIN-SPECIFIC", "INTELLIGENCE"), fs=CORE_FS, start=0,
+], hub_r=240, hub_lines=("COMPOUNDING", "INTELLIGENCE"), fs=CORE_FS, start=0,
    arc=INK)
 
 # The second loop leaves from Employees — they are the ones who connect a system —
