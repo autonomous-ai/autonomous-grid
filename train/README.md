@@ -1,12 +1,13 @@
 # `train/` — the training plane
 
-Grid pools your computers to **run** models. This package pools them to **improve** one: a small
-model taught your work, on machines you own, with the data, the attempts and the weights never
-leaving your network.
+Teaches a small model your work, on machines you already own. The data, the attempts and the
+weights never leave your network. About 8,900 lines of Python across 38 files, over TRL on the
+torch side and mlx-lm on the Apple side, and one command finishes a complete training run on a
+laptop CPU in about six minutes.
 
-The whole idea in one sentence: **reinforcement learning is about 75% sampling, sampling is
-inference, and inference is what a grid already does.** The expensive part of training is work
-your fleet is already good at; the only new thing is one machine that adjusts weights.
+Here is the whole idea. Reinforcement learning is roughly 75% sampling; sampling is inference;
+inference is what a grid already does. So the expensive part of training is work your fleet is
+already good at, and the only new thing is one machine that adjusts weights.
 
 <p align="center">
 <img src="../docs/train-architecture.png" width="900" alt="Your work goes to the machines you own, which write eight attempts a task; one trainer turns those attempts into an adapter and sends it back to the machines every two steps; the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
@@ -14,7 +15,7 @@ your fleet is already good at; the only new thing is one machine that adjusts we
 
 ---
 
-## 1. What reinforcement learning actually is
+## 1. The loop is unchanged; three things collapse
 
 Start with the diagram from Sutton & Barto. An *agent* takes an *action*, the *environment* answers
 with a new *state* and a *reward*, and the agent adjusts. A control loop with a scoreboard.
@@ -25,8 +26,8 @@ with a new *state* and a *reward*, and the agent adjusts. A control loop with a 
 <sub>Figure 3.1 of Sutton &amp; Barto, <i>Reinforcement Learning: An Introduction</i> (2nd ed.).</sub>
 </p>
 
-Is it still the right picture for language models? **Yes — the loop is unchanged.** Three things
-collapse, and knowing which three is most of the intuition. The same loop, with our names on it:
+Is it still the right picture for a language model? Yes. Three things collapse, and knowing which
+three is most of the intuition. Here is the same loop with our names on it:
 
 <p align="center">
 <img src="../docs/fig-loop.png" width="640" alt="A task goes to your model, which writes an attempt; a check scores the attempt, and a reward between 0 and 1 goes back to the model.">
@@ -46,27 +47,27 @@ is. GRPO — the algorithm here — throws that away: it samples *several* attem
 and uses their own average as the bar. Cheaper, simpler, and the direct reason this fits on
 consumer hardware.
 
-## 2. One training step, exactly
+## 2. No right answer needed — only a way to score one
 
 <p align="center">
 <img src="../docs/fig-step.png" width="880" alt="One task, eight attempts, each scored against their own average: the ones above it are made likelier, the ones below it less likely, and that is one step.">
 </p>
 
-Note what is absent: **no labelled right answer is needed, only a way to score an attempt.** That
-is why RL reaches jobs where nobody wrote down the ideal output — and why the grader, not the
-maths, is the hard part of the product.
+Notice what is absent. No labelled right answer — only a way to score an attempt. That is why RL
+reaches work where nobody ever wrote down the ideal output, and it is why the grader, not the
+maths, is the hard part of this product. You will spend your time on the grader.
 
-## 3. How the work spreads across the office
+## 3. Sampling is 70–82% of the work, and it fans out perfectly
 
-Count the compute in that step: writing eight attempts runs the model eight times; adjusting the
-weights happens once. Profiling across the field puts sampling at **70–82% of the total** — and
-sampling is plain inference, which a grid already spreads across machines.
+Count the compute in that step. Writing eight attempts runs the model eight times; adjusting the
+weights happens once. Profiling across the field puts sampling at 70–82% of the total, and sampling
+is plain inference — which a grid already spreads across machines.
 
-**Every machine below is one you own — training is local by design.** A grid can also hold
-frontier API nodes, and for *serving* answers that mix is often right (easy work local, hard work
-to a vendor). But those nodes cannot train: no vendor returns what a gradient needs, you cannot own
-an improvement to a model you rent, and renting compute by the hour is the expensive way to do the
-one job idle office hardware suits perfectly.
+Every machine below is one you own. A grid can also hold frontier API nodes, and for *serving*
+answers that mix is often right: easy work local, hard work out to a vendor. Those nodes cannot
+train, though. No vendor returns what a gradient needs, you cannot own an improvement to a model
+you rent, and renting compute by the hour is the expensive way to do the one job idle office
+hardware suits perfectly.
 
 <p align="center">
 <img src="../docs/fig-fleet.png" width="880" alt="Tasks go to the grid, which gives one task each to a MacBook Pro, a Mac Studio and an RTX box; each writes eight attempts and returns them to the trainer, which produces one adapter and sends it back to the machines every two steps.">
@@ -80,7 +81,7 @@ Without that dashed line, the workers keep sampling the **original** model, the 
 flattens, and the run silently learns nothing. We shipped exactly that bug and measured it — see
 the table below.
 
-## 4. Day and night
+## 4. Nightly is the honest ceiling
 
 The two halves want the same machines at different hours. People need inference while they work;
 training wants sustained capacity and nobody's lap getting hot. A scheduling gift, not a conflict.
@@ -89,18 +90,18 @@ training wants sustained capacity and nobody's lap getting hot. A scheduling gif
 <img src="../docs/fig-day-night.png" width="940" alt="A 24-hour timeline: from 09:00 to 17:00 the machines serve, eight hours; from 17:00 back round to 09:00 they train, sixteen hours; and the next day starts on a better model.">
 </p>
 
-**Cadence is set by the slowest arrow, and that is *attach truth*:** whether a support reply worked
-is known hours or days later, not minutes. So nightly is the honest ceiling — and by industry
-standards that is fast. Two guardrails are load-bearing: **the gate** (nothing serves customers
-until it beats the incumbent on held-back work) and **the source of truth** (reward comes from the
-world — a resolved ticket, a passing test — never from the model marking its own homework, which
-drifts and collapses).
+Cadence is set by the slowest arrow, and the slowest arrow is *attach truth*: whether a support
+reply worked is known hours or days later, not minutes. Nightly is the ceiling, and by industry
+standards nightly is fast. Two guardrails carry the weight. **The gate** — nothing reaches
+customers until it beats the incumbent on held-back work. **The source of truth** — reward comes
+from the world, a resolved ticket or a passing test, never from the model marking its own homework,
+which drifts and then collapses.
 
-### What "prove it" has to be careful about
+### A gate can lie to you with every test green
 
-The gate is one comparison, and it is easy to make it lie to yourself in ways that leave every
-test green. Three of them were real defects in this code, found and fixed on 26 July, and each is
-worth knowing about if you build one of these:
+The gate is one comparison between two models, which sounds like the easy part. It is not. Three of
+these were real defects in this code, found and fixed on 26 July, and each one left the whole suite
+green:
 
 * **The held-out set has to be the rows the trainer never saw.** Ours shuffled to choose what to
   withhold and then sliced the original list to choose what to train on — 8 of every 10 "unseen"
@@ -116,7 +117,7 @@ worth knowing about if you build one of these:
 
 None of these makes a run crash. They make it *mean* something else.
 
-## 5. What we measured
+## 5. Splitting the work costs nothing; cadence is the dial
 
 One CPU-only Intel iMac — no GPU at all — SmolLM2-135M, and the word-reversal task from the test
 suite. Score is on **held-out work the model never trained on**, re-measured every ten steps.
@@ -129,12 +130,13 @@ suite. Score is on **held-out work the model never trained on**, re-measured eve
 | two machines | every 5 steps | 40 | 0.188 → 0.261 | 5.2 min | under the bar |
 | two machines | **never** | 30 | 0.188 → 0.188 | 3.6 min | learned nothing |
 
-Three things follow. **Splitting the work costs nothing** — the two-machine run finished ahead.
-**Push cadence is the dial:** the same topology learned roughly eight times less per step at a
-five-step cadence. **And the last row is the lesson:** with no push at all the line is perfectly
-flat, which is what a broken training loop looks like from outside.
+Two of those readings are in the heading, and the numbers are there to be checked: the two-machine
+run finished ahead of the single-machine one, and the same topology learned roughly eight times
+less per step at a five-step cadence. The last row is the one to remember. With no push at all the
+line is perfectly flat — and a perfectly flat line is what a broken training loop looks like from
+outside.
 
-### Apple Silicon — run at last, and the four defects it was hiding
+### The Mac path inverted the model, and the suite stayed green
 
 Every number in the table above came from torch on an Intel iMac. The MLX path had never been
 run by anyone, which `docs/start-on-a-mac.md` said in as many words. It has now been run, on an
@@ -230,7 +232,7 @@ grid train pull hubspot         # deals + their stage: the answer key for lead t
 It writes raw rows to a JSONL, which then goes through exactly the same preparation, column
 guessing and refusals as an uploaded file — one code path decides whether data is trainable.
 
-## It can also learn from the work it is already doing
+## A model's own unjudged output is never trained on
 
 Everything above assumes someone exports a file and starts a run. The end state is that nobody
 has to: a business runs its grid, and its models get better on their own.
@@ -239,10 +241,10 @@ has to: a business runs its grid, and its models get better on their own.
 <img src="../docs/fig-earns.png" width="620" alt="One answer it served: the version you rewrote counts 1.0, a stronger model's answer 0.8, one you sent as it was 0.6, and one you binned is kept as a record but never imitated.">
 </p>
 
-The rule that keeps this honest is the last row: **a model's own unjudged output is stored
-but never trained on.** Imitating your own guesses is how a model drifts, so an example has to earn
-its place — a human's correction outranks a stronger model's answer, which outranks "nobody
-complained". Three signals, none of which costs anyone a minute of work.
+That is the rule in the last row of the figure: unjudged output is stored, and never imitated.
+Imitating your own guesses is how a model drifts, so an example has to earn its place — a person's
+correction outranks a stronger model's answer, which outranks "nobody complained". Three signals,
+and none of them costs anyone a minute of work.
 
 ```bash
 grid train collect --on          # keep the work; local files only, redacted, pruned
@@ -265,17 +267,17 @@ answer:
 curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"what we really sent"}'
 ```
 
-## Why it compounds
+## Two loops turn, and one of them needs no hardware
 
-Two loops turn here, and they are driven by different things.
+Two loops turn here, driven by different things.
 
-The wheel is the one a cloud product cannot copy. Every person who uses this brings a machine with
-them, so the fleet grows with headcount instead of with your bill — and those machines are idle
-exactly when training wants them. More people means more capacity means more training a night.
+The wheel is the one a cloud product cannot copy. Everyone who uses this brings a machine with them,
+so the fleet grows with headcount rather than with your bill — and those machines sit idle at
+exactly the hours training wants them. More people, more capacity, more training a night.
 
-The line across the middle is the faster loop. Work that someone edited, sent or binned is training
-data the moment it is judged, and that costs no hardware at all. A team that never adds a machine
-still gets a better model every morning.
+The line across the middle is faster. Work that someone edited, sent or binned becomes training data
+the moment it is judged, and judging it costs no hardware at all. A team that never adds a machine
+still wakes up to a better model.
 
 <p align="center">
 <img src="../docs/fig-flywheel.png" width="740" alt="A flywheel: more people brings more machines, which brings more idle hours, which brings more training a night, which produces a better model, whose answers people keep, which brings more people. Across the middle, judged work goes straight back to training with no new hardware. Connecting more systems feeds the wheel.">
@@ -333,7 +335,7 @@ lazily, so the rest of the CLI — and every test in this repo — runs without 
 
 Said plainly, because this branch is open and someone will look.
 
-- **Half of §4's first two stations is real; the other half is not, and the difference matters.**
+- **Half of the automatic loop is real; the other half is not, and the difference matters.**
   *Turning live requests into tasks* is built — `train/capture.py` keeps every served exchange
   locally, and `grid train autopilot` + `grid train schedule on` turn that into a nightly cycle
   nobody starts by hand. *Joining real outcomes to them* is built only for the outcome a **person**
