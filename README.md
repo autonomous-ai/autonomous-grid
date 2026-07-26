@@ -99,9 +99,9 @@ grid info --env
 Wire those two values into any OpenAI-compatible client.
 
 <details>
-<summary><b>OpenClaw</b>, <b>Hermes</b>, and <b>your own code</b></summary>
+<summary><b>OpenClaw</b></summary>
 
-**OpenClaw** — add Grid as a provider in `~/.openclaw/openclaw.json`
+Add Grid as a provider in `~/.openclaw/openclaw.json`
 ([docs](https://docs.openclaw.ai/concepts/model-providers)):
 
 ```json
@@ -120,7 +120,12 @@ Wire those two values into any OpenAI-compatible client.
 }
 ```
 
-**Hermes** — set the endpoint in `~/.hermes/config.yaml`
+</details>
+
+<details>
+<summary><b>Hermes</b></summary>
+
+Set the endpoint in `~/.hermes/config.yaml`
 ([docs](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)):
 
 ```yaml
@@ -134,7 +139,12 @@ model:
 echo 'OPENAI_API_KEY=local-grid' >> ~/.hermes/.env     # remote: use your access token
 ```
 
-**Your own app** — point any OpenAI SDK at the values from `grid info --env`:
+</details>
+
+<details>
+<summary><b>Your own code</b></summary>
+
+Point any OpenAI SDK at the values from `grid info --env`:
 
 ```python
 from openai import OpenAI
