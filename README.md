@@ -2,7 +2,7 @@
 
 # ⚡ Grid
 
-### A private network for local AI — inference and training across the computers you already own.
+### An AI intranet — inference and training on the computers you already own.
 
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -28,8 +28,12 @@ weights never leave your network. This belongs here rather than in a separate to
 RL fine-tuning is roughly 75% sampling, sampling is inference, and inference is what a grid already
 does. The expensive part of training is work your fleet is already good at.
 
-Run it on your own network, or sign in to reach the same computers from anywhere through
-**Autonomous Relay**, our hosted connection.
+**Intranet** is the old word for exactly this: a network that is yours, inside your building, not
+the public one. That is what this is, for AI.
+
+**Local by default — no account, no relay, nothing to sign into.** Your apps point at a machine on
+your own network, and it keeps working if we disappear. If you want to reach the same computers from
+outside your network, hosted grids do that: [Working from anywhere](#working-from-anywhere).
 
 ---
 
@@ -151,9 +155,15 @@ client.chat.completions.create(
 
 ### Working from anywhere
 
-The four steps above run on your own network. To reach the same computers from outside it, switch
-to **remote** mode: engines poll Autonomous Relay outbound, so they serve from behind a NAT with no
-inbound port and no public IP.
+The four steps above run on your own network and need nothing from us. To reach the same computers
+from outside it, switch to **remote** mode: engines poll Autonomous Relay outbound, so they serve
+from behind a NAT with no inbound port and no public IP.
+
+Be clear on what that trades. Your app calls the relay, the relay hands the request to one of your
+engines, and your engine posts the answer back through it. The computers doing the work are still
+yours and the weights still never move — but the request and the answer pass through our server,
+which local mode never does, and they are not encrypted end to end today. A hosted grid is a
+gateway to your intranet, not the intranet itself.
 
 ```bash
 grid mode remote     # persisted to ~/.grid/state.json; --local / --remote overrides one command
