@@ -130,30 +130,44 @@ class Fig:
             f'font-size="{NODE_FS}" font-weight="600">{label}</text>')
         self._saw(x2, cy + H / 2)
 
-    def panel(self, x1, x2, cy, title, halves, h=176):
-        """One thing with two halves inside it.
+    def panel(self, x1, x2, cy, title, stats, halves, h=240):
+        """One thing with two halves inside it, and what it knows about itself.
 
         The only container in the set, and it earns being one: the grid is a
         single address, and serving and training are two jobs it does — drawing
         them as three peers would say there are three things.
+
+        The title and its roll-up sit left; the halves take every pixel that is
+        left over, because the halves are the product and the roll-up is a
+        caption on it. Centring a title over two small boxes made the container
+        look like the subject — it is not, the two jobs it does are.
         """
+        top = cy - h / 2
         self.parts.append(
-            f'<rect x="{x1:.0f}" y="{cy - h / 2:.0f}" width="{x2 - x1:.0f}" height="{h}" '
+            f'<rect x="{x1:.0f}" y="{top:.0f}" width="{x2 - x1:.0f}" height="{h}" '
             f'fill="{PURPLE_FILL}" stroke="{PURPLE_LINE}" stroke-width="{BORDER}"/>')
+
+        lx = x1 + 54
         self.parts.append(
-            f'<text x="{(x1 + x2) / 2:.0f}" y="{cy - h / 2 + 42:.0f}" text-anchor="middle" '
-            f'fill="{PURPLE_TEXT}" font-size="{NODE_FS}" font-weight="700">{title}</text>')
-        iw = max(box_w(t) for t in halves) + 96
-        gap = 44
-        left = (x1 + x2) / 2 - (len(halves) * iw + (len(halves) - 1) * gap) / 2
+            f'<text x="{lx:.0f}" y="{top + 68:.0f}" fill="{PURPLE_TEXT}" '
+            f'font-size="{NODE_FS}" font-weight="700">{title}</text>')
+        for i, line in enumerate(stats):
+            self.parts.append(
+                f'<text x="{lx:.0f}" y="{top + 118 + i * 34:.0f}" fill="{LABEL_TEXT}" '
+                f'font-size="{LABEL_FS}">{line}</text>')
+
+        lw = max([text_w(title, NODE_FS)] + [text_w(s, LABEL_FS) for s in stats])
+        bx0, bx1, gap = lx + lw + 86, x2 - 54, 40
+        bw = (bx1 - bx0 - gap * (len(halves) - 1)) / len(halves)
+        bh = h - 76
         for i, t in enumerate(halves):
-            cx = left + iw / 2 + i * (iw + gap)
+            cx = bx0 + bw / 2 + i * (bw + gap)
             self.parts.append(
-                f'<rect x="{cx - iw / 2:.0f}" y="{cy + 6:.0f}" width="{iw:.0f}" height="{H}" '
-                f'fill="#fff" stroke="{PURPLE_LINE}" stroke-width="{BORDER}"/>')
+                f'<rect x="{cx - bw / 2:.0f}" y="{cy - bh / 2:.0f}" width="{bw:.0f}" '
+                f'height="{bh:.0f}" fill="#fff" stroke="{PURPLE_LINE}" stroke-width="{BORDER}"/>')
             self.parts.append(
-                f'<text x="{cx:.0f}" y="{cy + 6 + 42:.0f}" text-anchor="middle" '
-                f'fill="{PURPLE_TEXT}" font-size="{NODE_FS}" font-weight="600">{t}</text>')
+                f'<text x="{cx:.0f}" y="{cy + 13:.0f}" text-anchor="middle" '
+                f'fill="{PURPLE_TEXT}" font-size="{CORE_FS}" font-weight="700">{t}</text>')
         self._saw(x2, cy + h / 2)
 
     def axis(self, x1, x2, y, ticks):

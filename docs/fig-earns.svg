@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 508" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1075 508" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
@@ -31,23 +31,23 @@
       <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
-  <rect width="900" height="508" fill="#fff"/>
+  <rect width="1075" height="508" fill="#fff"/>
   <rect x="100" y="217" width="202" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="201" y="259" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">One answer</text>
   <rect x="502" y="52" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="632" y="94" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">You rewrote it</text>
-  <path d="M314 250 C424 250, 378 85, 488 85" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="456" y="93" text-anchor="end" fill="#2b2b29" font-size="24">1.0</text>
+  <path d="M314 232 C424 232, 378 85, 488 85" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="802" y="93" text-anchor="start" fill="#2b2b29" font-size="24">counts 1.0</text>
   <rect x="502" y="162" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="632" y="204" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">A stronger model</text>
-  <path d="M314 250 C424 250, 378 195, 488 195" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="456" y="203" text-anchor="end" fill="#2b2b29" font-size="24">0.8</text>
+  <path d="M314 244 C424 244, 378 195, 488 195" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="802" y="203" text-anchor="start" fill="#2b2b29" font-size="24">counts 0.8</text>
   <rect x="502" y="272" width="260" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="632" y="314" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">You sent it as-is</text>
-  <path d="M314 250 C424 250, 378 305, 488 305" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="456" y="313" text-anchor="end" fill="#2b2b29" font-size="24">0.6</text>
+  <path d="M314 256 C424 256, 378 305, 488 305" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="802" y="313" text-anchor="start" fill="#2b2b29" font-size="24">counts 0.6</text>
   <rect x="502" y="382" width="260" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="632" y="424" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">You binned it</text>
-  <path d="M314 250 C424 250, 378 415, 488 415" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
-  <text x="456" y="423" text-anchor="end" fill="#2b2b29" font-size="24">never imitated</text>
+  <path d="M314 268 C424 268, 378 415, 488 415" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="802" y="423" text-anchor="start" fill="#2b2b29" font-size="24">never imitated</text>
 </svg>

@@ -15,12 +15,12 @@ information was never on the internet to begin with. It is sitting in your syste
 Domain-specific intelligence is what is on the other side of that gap: a small model that has seen
 how your work actually goes — **an expert in your work rather than a generalist**. It is worse than
 the frontier at everything and better than the frontier at your thing, which is the trade you want,
-because most of what your team does all day is your thing. The weights are yours, so nobody deprecates them, reprices them or swaps them out from
-under you. And the data they learned from never left the building.
+because most of what your team does all day is your thing. The weights are yours, so nobody
+deprecates them, reprices them or swaps them out from under you. And the data they learned from
+never left the building.
 
-That is the *why*. The rest of this page is the *how*, and it is drawn as a flywheel rather than a
-pipeline because an expert you own, unlike a model you rent, **compounds** — every night's work is
-the next night's training set.
+That is the *why*. The rest of this page is the *how*. An expert you own, unlike a model you rent,
+**compounds** — every night's work is the next night's training set.
 
 ## How the training plane works
 
@@ -54,10 +54,10 @@ three is most of the intuition. Here is the same loop with our names on it:
 
 **1 — The episode is short.** Classic RL imagines a long trajectory: move, observe, move again. For
 most business tasks there is one prompt, one answer, and **one reward at the end** — no intermediate
-scoring to design, and nothing to shape. Be precise about what collapsed, though: the *scoring* did,
-not the decision. The model still chooses token by token and the gradient still lands per token —
-TRL gives every token in a completion that completion's own group-relative advantage. Long
-trajectories return the moment agents use tools, which is why the design leaves room for them.
+scoring to design, and nothing to shape. What collapsed is the *scoring*, not the decision. The
+model still chooses token by token and the gradient still lands per token — TRL gives every token
+in a completion that completion's own group-relative advantage. Long trajectories return the moment
+agents use tools, which is why the design leaves room for them.
 
 **2 — The environment is your data plus a check.** There is no simulator to build. The environment
 is a ticket from last month and how it actually resolved; a lead and whether it closed; a code
@@ -81,10 +81,10 @@ maths, is the hard part of this product. You will spend your time on the grader.
 ## 3. Sampling is 70–82% of the work, and it fans out perfectly
 
 Count the compute in that step. Writing eight attempts runs the model eight times; adjusting the
-weights happens once. (Eight is `group_size`, and it is TRL's default rather than a number we
-derived — the algorithm only requires two, since the baseline is the group's own mean. It is the
-whole cost dial, and nobody has swept it here.) Profiling across the field puts sampling at 70–82% of the total, and sampling
-is plain inference — which a grid already spreads across machines.
+weights happens once. (Eight is `group_size` — TRL's default. The algorithm needs only two, since
+the baseline is the group's own mean, and it is the whole cost dial; this repo ships that default
+unswept.) Profiling across the field puts sampling at 70–82% of the total, and sampling is plain
+inference — which a grid already spreads across machines.
 
 Our own runs come out higher. Every run now times its two phases and writes the split into its
 `summary.json`, and on an M2 Max sampling is **86–92%** of the work a grid could divide — 48s of
@@ -166,8 +166,7 @@ suite. Score is on **held-out work the model never trained on**, re-measured eve
 | two machines | every 5 steps | 40 | 0.188 → 0.261 | 5.2 min | under the bar |
 | two machines | **never** | 30 | 0.188 → 0.188 | 3.6 min | learned nothing |
 
-Two of those readings are in the heading, and the numbers are there to be checked: the two-machine
-run finished ahead of the single-machine one, and the same topology learned roughly eight times
+The two-machine run finished ahead of the single-machine one, and the same topology learned roughly eight times
 less per step at a five-step cadence. The last row is the one to remember. With no push at all the
 line is perfectly flat — and a perfectly flat line is what a broken training loop looks like from
 outside.
@@ -306,27 +305,21 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman ability, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then expert models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, productivity, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then expert models — before rejoining the wheel at models.">
 </p>
 
-The hub says *compounding* rather than *domain-specific* for a reason worth stating: a wheel
-turning around a static noun does not say the noun is growing. What compounds is the intelligence
-specific to you — and *that* is on the rim, at the station where those models get made.
-
-**The ring is the whole business in four words.** Computers run models. Models give people
-superhuman ability. That ability is what a company grows on, so it brings employees. Employees
-arrive carrying the next computers.
-Capacity grows with the team rather than with the bill, and that is the part a cloud product
-structurally cannot copy — its capacity is rented, and this walks in the door.
+**The ring is the whole business in four words.** Computers run models. Models make people more
+productive. Productivity is what a company grows on, so it brings employees. Employees arrive
+carrying the next computers. Capacity grows with the team rather than with the bill — the part a
+cloud product structurally cannot copy, because its capacity is rented and this walks in the door.
 
 **The second loop is the way to more models that buys no hardware.** It leaves from the employees,
 because they are the ones who connect a system — the cheapest thing on this page, and what turns a
-general model into one that knows your tickets, your repos, your deals. That data is not one undifferentiated pile — it arrives sorted by the job
-that produced it, which is what makes a model *for that job* possible rather than one model asked
-to be good at everything. Those are models too — which is why the loop rejoins the wheel at
-models, and why that station reads **Expert models** against the plain **Models** on the rim: not a
-different kind of thing, a narrower and better one. What it skips is the single station that needs
-somebody to buy something.
+general model into one that knows your tickets, your repos, your deals. That data is not one
+undifferentiated pile: it arrives sorted by the job that produced it, which is what makes a model
+*for that job* possible rather than one model asked to be good at everything. Expert models are
+models too, so the loop rejoins the wheel where the plain ones are — narrower and better, not a
+different kind of thing. What it skips is the single station that needs somebody to buy something.
 
 ## The code
 

@@ -26,16 +26,36 @@ FGAP = 26        # between machines: close enough that the row reads as one stri
 # and home-grid ordered it differently again. A reader who meets these machines
 # on the front page should recognise the same five, in the same order, in every
 # later figure; three spellings of one fleet reads as three different fleets.
-FLEET = ("MacBook Pro", "Mac Studio", "Mac mini", "RTX 6000", "RTX 5090")
+# Engine, memory and served model belong here too, so the roll-up on the front
+# page can be DERIVED rather than typed — a hand-typed total is a number that
+# goes stale the first time this tuple changes.
+FLEET = (
+    # name           engine     GB   the model it serves
+    ("MacBook Pro",  "MLX",      64, "Qwen3-30B-A3B"),
+    ("Mac Studio",   "MLX",     256, "MiniMax-M2"),
+    ("Mac mini",     "Ollama",   24, "Gemma 3 12B"),
+    ("RTX 6000",     "vLLM",     48, "Qwen3-32B"),
+    ("RTX 5090",     "vLLM",     32, "Gemma 3 27B"),
+)
+NAMES = tuple(name for name, *_ in FLEET)
 
 
-def fleet_row(f, page_w, y):
-    """Draw the fleet centred on the page. Returns each box's centre x."""
+def fleet_row(f, page_w, y, detail=False):
+    """Draw the fleet centred on the page. Returns each box's centre x.
+
+    `detail` hangs the engine, the memory and the served model under each box.
+    Only the front page wants them: there the fleet IS the subject, and a bare
+    row of product names does not say what makes one machine different from the
+    next. Inside the training figures the same row is scenery for an argument
+    about placement, and three extra lines per box would drown it.
+    """
     span = len(FLEET) * MW + (len(FLEET) - 1) * FGAP
     x0 = (page_w - span) / 2
     xs = [x0 + MW / 2 + i * (MW + FGAP) for i in range(len(FLEET))]
-    for cx, name in zip(xs, FLEET):
+    for cx, (name, engine, gb, model) in zip(xs, FLEET):
         f.box(cx, y, name, w=MW)
+        if detail:
+            f.label(cx, y + H / 2 + 38, f"{engine} · {gb} GB", model)
     return xs
 
 
@@ -133,7 +153,7 @@ mcx = gcx + gw / 2 + GAP + MW / 2
 # free machine, and five rows would make the fleet the subject instead. Names
 # come from FLEET so it is visibly a subset, never a different set.
 rows = [y - 120, y, y + 120]
-for ry, name in zip(rows, [FLEET[0], FLEET[1], FLEET[3]]):
+for ry, name in zip(rows, [NAMES[0], NAMES[1], NAMES[3]]):
     f.box(mcx, ry, name, w=MW)
     curve = 0 if ry == y else 64
     off = 14 if ry > y else -14 if ry < y else 0
@@ -180,20 +200,27 @@ tcx = M + tw / 2
 f.term(tcx, cy, "One answer", w=tw)
 BW = 260
 bcx = tcx + tw / 2 + 200 + BW / 2
-rows = [(cy - 165, "You rewrote it", "1.0", False),
-        (cy - 55, "A stronger model", "0.8", False),
-        (cy + 55, "You sent it as-is", "0.6", False),
+# The weights are train/capture.py's, not illustrative: edited 1.0, teacher 0.8,
+# accepted 0.6, discarded stored but never used as a target.
+rows = [(cy - 165, "You rewrote it", "counts 1.0", False),
+        (cy - 55, "A stronger model", "counts 0.8", False),
+        (cy + 55, "You sent it as-is", "counts 0.6", False),
         (cy + 165, "You binned it", "never imitated", True)]
-for ry, label, weight, dashed in rows:
+for i, (ry, label, weight, dashed) in enumerate(rows):
     if dashed:
         f.term(bcx, ry, label, w=BW)
     else:
         f.box(bcx, ry, label, w=BW)
-    # every arrow leaves the same point; the curve alone separates them, as in
-    # the article's parallelisation figure
-    f.arrow(tcx + tw / 2 + 12, cy, bcx - BW / 2 - 14, ry, dashed=dashed, curve=110)
-    # the weight sits against its own row, never floating between two of them
-    f.label(bcx - BW / 2 - 46, ry + 8, weight, anchor="end")
+    # Each leaves its own point down the stadium's edge. All four from one pixel
+    # made a knot at the origin that read as an arrowhead pointing back INTO the
+    # answer — the exact opposite of the direction the figure means.
+    f.arrow(tcx + tw / 2 + 12, cy - 18 + i * 12, bcx - BW / 2 - 14, ry,
+            dashed=dashed, curve=110)
+    # Past the boxes, not before them. Four arrows converge on the left edge and
+    # a number parked in that convergence is unreadable at any size; to the right
+    # the four stack into a column that scans on its own, and "counts" on each
+    # row means the column needs no header to say what it measures.
+    f.label(bcx + BW / 2 + 40, ry + 8, weight, anchor="start")
 f.write(f"{OUT}/fig-earns.svg")
 
 # ------------------------------------------------------- train-architecture
@@ -278,8 +305,10 @@ f = Fig(1700, 1180)
 CX, CY, R = 800, 680, 400
 INK = ARROW   # grey, never black — docs/STYLE.md section 1
 
-# "Ability", not "work": the superhuman part belongs to the person. "Superhuman
-# work" can be read as the AI doing the work, which is the opposite of the claim.
+# "Productivity", not "Superhuman ability": every other station on this wheel is
+# a concrete noun, and a claim sits badly among them. It is also what a buyer
+# actually calls this. Not "Employee productivity" — Employees is the very next
+# station, so the adjacency already says whose.
 #
 # Nouns, not quantities. The reference says Sellers, Selection, Traffic — never
 # "more sellers" — because a flywheel already means "more of this drives more of
@@ -288,7 +317,7 @@ INK = ARROW   # grey, never black — docs/STYLE.md section 1
 # what you already own, purple is the intelligence layer, coral is the human edge.
 f.wheel(CX, CY, R, [
     ("Models", PURPLE_TEXT),
-    ("Superhuman ability", CORAL_TEXT),
+    ("Productivity", CORAL_TEXT),
     ("Employees", CORAL_TEXT),
     ("Computers", GREEN_TEXT),
 ], hub_r=240, hub_lines=("COMPOUNDING", "INTELLIGENCE"), fs=CORE_FS, start=0,
@@ -386,15 +415,20 @@ for i, a in enumerate(APPS):
     f.term(cx, app_y, a, w=aw4)
     app_x.append(cx)
 
-gy = 344
-f.panel(M, 1660 - M, gy, "Your grid", ["Inference", "Training"])
+gy = 372
+PH = 240
+# Derived, never typed: these three go stale the moment FLEET changes otherwise.
+STATS = [f"{len(FLEET)} nodes",
+         f"{len({model for *_, model in FLEET})} models",
+         f"{sum(gb for _, _, gb, _ in FLEET)} GB GPU memory"]
+f.panel(M, 1660 - M, gy, "Your grid", STATS, ["Inference", "Training"], h=PH)
 for cx in app_x:
-    f.arrow(cx, gy - 176 / 2 - 12, cx, app_y + H / 2 + 14)
+    f.arrow(cx, gy - PH / 2 - 12, cx, app_y + H / 2 + 14)
 
-mach_y = 624
-for cx in fleet_row(f, 1660, mach_y):
-    f.arrow(cx, mach_y - H / 2 - 12, cx, gy + 176 / 2 + 14)
-f.label(1660 / 2, mach_y + 78, "MLX · Ollama · vLLM · LM Studio · ComfyUI — the engines you already run")
+mach_y = 650
+for cx in fleet_row(f, 1660, mach_y, detail=True):
+    f.arrow(cx, mach_y - H / 2 - 12, cx, gy + PH / 2 + 14)
+f.label(1660 / 2, mach_y + H / 2 + 128, "each machine keeps the engine it already runs")
 f.write(f"{OUT}/home-grid.svg")
 
 print("wrote nine figures")
