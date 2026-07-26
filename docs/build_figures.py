@@ -41,21 +41,23 @@ def chain(f, y, items, edges=None):
     x, placed = M, []
     for i, ((kind, label, *_), w) in enumerate(zip(items, widths)):
         cx = x + w / 2
-        (f.term if kind == "term" else f.box)(
-            cx, y, label, **({} if kind == "term" else {"kind": kind}), w=w)
-        placed.append((cx, w))
+        draw = f.term if kind == "term" else f.stack if kind == "stack" else f.box
+        draw(cx, y, label, **({} if kind == "term" else {"kind": kind.replace("stack", "green")}), w=w)
+        placed.append((cx, w, kind))
         if i < len(gaps):
             x += w + gaps[i]
         else:
             x += w
     for i, e in enumerate(edges):
-        (cx1, w1), (cx2, w2) = placed[i], placed[i + 1]
-        f.arrow(cx1 + w1 / 2 + 12, y, cx2 - w2 / 2 - 14, y)
+        (cx1, w1, k1), (cx2, w2, _) = placed[i], placed[i + 1]
+        # a stack's back cards sit up and to the right, so its edge is further out
+        lead = 12 + (20 if k1 == "stack" else 0)
+        f.arrow(cx1 + w1 / 2 + lead, y, cx2 - w2 / 2 - 14, y)
         if e is not None:
             lines = (e,) if isinstance(e, str) else e
             top = y - 24 - 28 * (len(lines) - 1)
             f.label((cx1 + w1 / 2 + cx2 - w2 / 2) / 2, top, *lines)
-    return placed
+    return [(cx, w) for cx, w, _ in placed]
 
 
 # ---------------------------------------------------------------- fig-loop
@@ -72,7 +74,7 @@ f.write(f"{OUT}/fig-loop.svg")
 f = Fig(1620, 400)
 y = 190
 (task, tw), (att, aw), (avg, vw) = chain(
-    f, y, [("term", "One task"), ("green", "Several attempts"), ("purple", "Their average")],
+    f, y, [("term", "One task"), ("stack", "Several attempts"), ("purple", "Their average")],
     edges=[None, "scored against"])
 OW = 190
 up, dn = y - 100, y + 100
@@ -234,6 +236,7 @@ for bx in (tcx - 250, tcx, tcx + 250):
             curve=0 if bx == tcx else 74)
 f.label(tcx + 330, my - 84, "placed on whichever", "machine is free", anchor="start")
 f.write(f"{OUT}/train-architecture.svg")
+f.write(f"{OUT}/fig-training.svg")
 
 # -------------------------------------------------------------- fig-flywheel
 # Amazon's flywheel, station for station. Two loops, because theirs is two, and
@@ -314,7 +317,36 @@ f.label(1042, 442, "serve")
 
 f.write(f"{OUT}/fig-flywheel.svg")
 
-print("wrote seven figures")
+# ------------------------------------------------------------ fig-inference
+# The serving half, drawn in the same shape as the training half so the two read
+# as one system: one line across the top, the fleet underneath the thing that
+# places work on it. Simpler than training because there is no gate and no
+# adapter — a request goes out, an answer comes back.
+f = Fig(1220, 540)
+y = 200
+aw3 = box_w("Your apps") - 8
+acx = M + aw3 / 2
+f.term(acx, y, "Your apps", w=aw3)
+f.label(acx, y + 66, "OpenClaw · Hermes", "your own code")
+
+ocw2 = box_w("The orchestrator")
+occx = acx + aw3 / 2 + 300 + ocw2 / 2
+f.box(occx, y, "The orchestrator", kind="purple", w=ocw2)
+f.arrow(acx + aw3 / 2 + 12, y - 18, occx - ocw2 / 2 - 14, y - 18)
+f.label((acx + aw3 / 2 + occx - ocw2 / 2) / 2, y - 40, "one OpenAI-compatible endpoint")
+f.arrow(occx - ocw2 / 2 - 14, y + 18, acx + aw3 / 2 + 12, y + 18)
+f.label((acx + aw3 / 2 + occx - ocw2 / 2) / 2, y + 58, "the answer")
+
+MW2 = 236
+my2 = 450
+for bx, name in zip((occx - 250, occx, occx + 250), ("MacBook Pro", "Mac Studio", "RTX box")):
+    f.box(bx, my2, name, w=MW2)
+f.arrow(occx - 64, y + H / 2 + 12, occx - 64, my2 - H / 2 - 14)
+f.arrow(occx + 64, my2 - H / 2 - 14, occx + 64, y + H / 2 + 12)
+f.label(occx - 96, 322, "whichever computer", "serves that model", anchor="end")
+f.write(f"{OUT}/fig-inference.svg")
+
+print("wrote eight figures")
 # NOTE: this writes SVGs only. The README embeds the PNGs beside them, and nothing
 # here regenerates those — a redrawn figure keeps showing the old picture on the
 # page, with nothing failing. Converting on mtime does not work, because every run

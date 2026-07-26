@@ -175,6 +175,10 @@ serve to one, and `grid members add research <email>` invites people ([Members](
 
 ## Inference
 
+<p align="center">
+<img src="docs/fig-inference.png" width="820" alt="Your apps — OpenClaw, Hermes, your own code — call one OpenAI-compatible endpoint; the orchestrator sends each request to whichever computer serves that model, out of a MacBook Pro, a Mac Studio and an RTX box, and the answer comes back the same way.">
+</p>
+
 ### Bring your own engine
 
 No inference server on a computer yet? Grid ships two — `llama.cpp` for text, ComfyUI for media.
@@ -257,6 +261,10 @@ Contract and transparency table in [docs/cli.md](docs/cli.md#router) · [ADR 001
 Serving is half of it. The other half is **teaching a small model your own work** — your tickets,
 your repos, your deals — on the same machines, where the data, the attempts and the weights never
 leave your network.
+
+<p align="center">
+<img src="docs/fig-training.png" width="880" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator places each task on whichever of a MacBook Pro, Mac Studio or RTX box is free, and the attempts come back with the token ids they sampled.">
+</p>
 
 Why bother, when the models you can rent are so good? Because they know nothing about you, and
 waiting for a bigger general model does not fix that: the information was never on the internet to

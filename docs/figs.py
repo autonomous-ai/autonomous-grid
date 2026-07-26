@@ -88,6 +88,28 @@ class Fig:
         self._saw(cx + w / 2, cy + H / 2)
         return w
 
+    def stack(self, cx, cy, label, kind="green", w=None, depth=2, off=9):
+        """A node that stands for several of the same thing.
+
+        Drawn as a deck rather than as N labelled boxes: the count is a knob, and
+        naming one would assert a number the code does not derive. What matters is
+        that there is more than one and they are peers — which is the whole reason
+        GRPO can use their average as its baseline.
+        """
+        fill, line, _ = {
+            "green": (GREEN_FILL, GREEN_LINE, GREEN_TEXT),
+            "purple": (PURPLE_FILL, PURPLE_LINE, PURPLE_TEXT),
+        }[kind]
+        w = w or box_w(label)
+        for i in range(depth, 0, -1):
+            self.parts.append(
+                f'<rect x="{cx - w / 2 + i * off:.0f}" y="{cy - H / 2 - i * off:.0f}" '
+                f'width="{w:.0f}" height="{H}" fill="{fill}" stroke="{line}" '
+                f'stroke-width="{BORDER}"/>')
+        self.box(cx, cy, label, kind=kind, w=w)
+        self._saw(cx + w / 2 + depth * off, cy + H / 2)
+        return w
+
     def band(self, x1, x2, cy, label, kind="green"):
         """A stretch of time. Same tokens as a node; the width carries the hours."""
         fill, line, text = {
