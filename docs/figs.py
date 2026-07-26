@@ -22,6 +22,7 @@ CORE_FS = 35      # a station on the driving loop — the only text at this size
 SAT_FS = 21       # a station on a feeder loop, subordinate to the core by size and colour
 NODE_FS = 28      # node label
 LABEL_FS = 24     # edge label
+PANEL_FS = 38     # the panel's own name — the container is bigger than what it holds
 PAD = 22          # horizontal padding inside a box
 
 FONT = "Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif"
@@ -110,6 +111,35 @@ class Fig:
         self._saw(cx + w / 2 + depth * off, cy + H / 2)
         return w
 
+    CARD_H = 148
+
+    def card(self, cx, cy, name, *details, w=None, kind="green"):
+        """A machine and the things that are true of it, in one shape.
+
+        The only node in the set taller than H, and it earns it: the engine, the
+        memory and the model are properties OF the machine. Hung underneath as a
+        caption they read as an annotation on the drawing; inside the box they
+        read as the machine's own spec, which is what they are.
+        """
+        fill, line, text = {
+            "green": (GREEN_FILL, GREEN_LINE, GREEN_TEXT),
+            "purple": (PURPLE_FILL, PURPLE_LINE, PURPLE_TEXT),
+        }[kind]
+        w = w or box_w(name)
+        h = self.CARD_H
+        self.parts.append(
+            f'<rect x="{cx - w / 2:.0f}" y="{cy - h / 2:.0f}" width="{w:.0f}" height="{h}" '
+            f'fill="{fill}" stroke="{line}" stroke-width="{BORDER}"/>')
+        self.parts.append(
+            f'<text x="{cx:.0f}" y="{cy - 30:.0f}" text-anchor="middle" fill="{text}" '
+            f'font-size="{NODE_FS}" font-weight="600">{name}</text>')
+        for i, d in enumerate(details):
+            self.parts.append(
+                f'<text x="{cx:.0f}" y="{cy + 10 + i * 32:.0f}" text-anchor="middle" '
+                f'fill="{LABEL_TEXT}" font-size="{LABEL_FS}">{d}</text>')
+        self._saw(cx + w / 2, cy + h / 2)
+        return w
+
     def band(self, x1, x2, cy, label, kind="green"):
         """A stretch of time. Same tokens as a node; the width carries the hours.
 
@@ -149,14 +179,14 @@ class Fig:
 
         lx = x1 + 54
         self.parts.append(
-            f'<text x="{lx:.0f}" y="{top + 68:.0f}" fill="{PURPLE_TEXT}" '
-            f'font-size="{NODE_FS}" font-weight="700">{title}</text>')
+            f'<text x="{lx:.0f}" y="{top + 74:.0f}" fill="{PURPLE_TEXT}" '
+            f'font-size="{PANEL_FS}" font-weight="700">{title}</text>')
         for i, line in enumerate(stats):
             self.parts.append(
-                f'<text x="{lx:.0f}" y="{top + 118 + i * 34:.0f}" fill="{LABEL_TEXT}" '
+                f'<text x="{lx:.0f}" y="{top + 126 + i * 34:.0f}" fill="{LABEL_TEXT}" '
                 f'font-size="{LABEL_FS}">{line}</text>')
 
-        lw = max([text_w(title, NODE_FS)] + [text_w(s, LABEL_FS) for s in stats])
+        lw = max([text_w(title, PANEL_FS)] + [text_w(s, LABEL_FS) for s in stats])
         bx0, bx1, gap = lx + lw + 86, x2 - 54, 40
         bw = (bx1 - bx0 - gap * (len(halves) - 1)) / len(halves)
         bh = h - 76
@@ -165,9 +195,14 @@ class Fig:
             self.parts.append(
                 f'<rect x="{cx - bw / 2:.0f}" y="{cy - bh / 2:.0f}" width="{bw:.0f}" '
                 f'height="{bh:.0f}" fill="#fff" stroke="{PURPLE_LINE}" stroke-width="{BORDER}"/>')
-            self.parts.append(
-                f'<text x="{cx:.0f}" y="{cy + 13:.0f}" text-anchor="middle" '
-                f'fill="{PURPLE_TEXT}" font-size="{CORE_FS}" font-weight="700">{t}</text>')
+            # A half may be two lines — "Local AI" over the job it does — so the
+            # qualifier reads once and the job stays the word the eye lands on.
+            lines = (t,) if isinstance(t, str) else tuple(t)
+            y0 = cy + 13 - (len(lines) - 1) * 23
+            for j, ln in enumerate(lines):
+                self.parts.append(
+                    f'<text x="{cx:.0f}" y="{y0 + j * 46:.0f}" text-anchor="middle" '
+                    f'fill="{PURPLE_TEXT}" font-size="{CORE_FS}" font-weight="700">{ln}</text>')
         self._saw(x2, cy + h / 2)
 
     def axis(self, x1, x2, y, ticks):

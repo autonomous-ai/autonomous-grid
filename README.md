@@ -2,7 +2,7 @@
 
 # ⚡ Grid
 
-### Local AI inference and training, across the computers you already own.
+### A private network for local AI — inference and training across the computers you already own.
 
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -15,10 +15,9 @@
 
 </div>
 
-Grid is the orchestration layer for **local AI** — a private network across the computers you
-already own. An inference server runs a model on one machine; Grid makes every machine you have —
-your Mac, your NVIDIA desktop, the workstation in the corner — answer as one, behind **one
-OpenAI-compatible endpoint**, and does two things with them.
+An inference server runs a model on one machine. Grid makes every machine you have — your Mac,
+your NVIDIA desktop, the workstation in the corner — answer as one, behind **one OpenAI-compatible
+endpoint**, and does two things with them.
 
 **Inference.** Each request routes to whichever computer runs the right model. The inference servers
 you already run — Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI — stay exactly where they are.

@@ -66,6 +66,7 @@ room for it. A node whose text has to wrap is a node that is doing two jobs.
 | **band**, a box stretched along an axis | a span of time; its width means hours |
 | **bare text**, no shape at all | a station on a flywheel |
 | **deck**, a box with copies offset behind it | several of the same thing, count unstated |
+| **card**, a taller box with detail lines inside it | a thing and the properties that belong to it |
 | **panel**, a wide container holding boxes | one thing with two halves — the only container in the set |
 
 A deck says *several* without saying how many. Drawing N labelled copies asserts a number, and the
@@ -75,6 +76,12 @@ training are jobs it does, and three peer boxes would say there are three things
 
 Every box, stadium and band is **66px tall** with a **2px** border. One height for everything is
 what makes a row of unlike things read as one row.
+
+A **card** is the one node allowed to break that, at 148px, and only for properties that belong to
+the thing itself — a machine's engine, its memory, the model it serves. Hung underneath as a caption
+those read as an annotation on the drawing; inside the shape they read as the machine's own spec.
+A card is not a licence for a taller box: if the extra lines are commentary rather than properties,
+they go on an arrow or nowhere.
 
 A flywheel is the exception that proves it: its stations carry no shape at all, because a box around
 each one turns a wheel into six separate objects and the circle stops being the subject.

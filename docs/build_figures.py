@@ -53,9 +53,10 @@ def fleet_row(f, page_w, y, detail=False):
     x0 = (page_w - span) / 2
     xs = [x0 + MW / 2 + i * (MW + FGAP) for i in range(len(FLEET))]
     for cx, (name, engine, gb, model) in zip(xs, FLEET):
-        f.box(cx, y, name, w=MW)
         if detail:
-            f.label(cx, y + H / 2 + 38, f"{engine} · {gb} GB", model)
+            f.card(cx, y, name, f"{engine} · {gb} GB", model, w=MW)
+        else:
+            f.box(cx, y, name, w=MW)
     return xs
 
 
@@ -418,18 +419,16 @@ for i, a in enumerate(APPS):
 gy = 372
 PH = 240
 # Derived, never typed: these three go stale the moment FLEET changes otherwise.
-STATS = [f"{len(FLEET)} nodes",
-         f"{len({model for *_, model in FLEET})} models",
+STATS = [f"{len(FLEET)} nodes · {len({model for *_, model in FLEET})} models",
          f"{sum(gb for _, _, gb, _ in FLEET)} GB GPU memory"]
 f.panel(M, 1660 - M, gy, "Your grid", STATS,
-        ["Local AI Inference", "Local AI Training"], h=PH)
+        [("Local AI", "Inference"), ("Local AI", "Training")], h=PH)
 for cx in app_x:
     f.arrow(cx, gy - PH / 2 - 12, cx, app_y + H / 2 + 14)
 
-mach_y = 650
+mach_y = 690
 for cx in fleet_row(f, 1660, mach_y, detail=True):
-    f.arrow(cx, mach_y - H / 2 - 12, cx, gy + PH / 2 + 14)
-f.label(1660 / 2, mach_y + H / 2 + 128, "each machine keeps the engine it already runs")
+    f.arrow(cx, mach_y - Fig.CARD_H / 2 - 12, cx, gy + PH / 2 + 14)
 f.write(f"{OUT}/home-grid.svg")
 
 print("wrote nine figures")
