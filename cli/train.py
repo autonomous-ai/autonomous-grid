@@ -141,10 +141,22 @@ def _healthy(report: dict) -> bool:
 
 def cmd_train_run(args: argparse.Namespace) -> int:
     from train.config import load_config
-    from train.run import run_training
+    from train.sft import pick_backend
 
     cfg = load_config(args.config or DEFAULT_CONFIG)
-    adapter_dir = run_training(cfg)
+    backend = pick_backend(getattr(args, "backend", "auto"))
+    steps = getattr(args, "steps", None)
+    if backend == "mlx":
+        # In-process sampling: on one Mac that is the fast path, and the rollout contract exists
+        # for spreading a group across machines, which is the torch path's job.
+        from train.mlx.grpo import run_grpo
+
+        print("Learning from feedback on mlx — sampling and updating on this Mac.")
+        adapter_dir = run_grpo(cfg, steps=steps)
+    else:
+        from train.run import run_training
+
+        adapter_dir = run_training(cfg)
     print(f"Adapter saved: {adapter_dir}")
     # Training NEVER serves the result on its own. It used to: whenever [deploy].nodes was set,
     # a finished run pushed the fresh adapter straight onto the serving machines — which made the

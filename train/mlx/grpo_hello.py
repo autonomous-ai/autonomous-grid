@@ -53,27 +53,13 @@ from ..hello_task import (
     make_task,
     reward,
 )
+from .core import Policy
 
 # The same model the torch twin starts from, so the two hello worlds report comparable numbers.
 # It is deliberately weak: Qwen2.5-0.5B already scores ~0.84 on this task untrained, and a smoke
 # test whose baseline is near the ceiling cannot show a climb no matter how well the loop works.
 DEFAULT_MODEL = "mlx-community/SmolLM2-135M-Instruct"
 
-
-def _import_mlx():
-    try:
-        import mlx.core as mx
-        import mlx.optimizers as optim
-        from mlx import nn
-        from mlx_lm import load
-        from mlx_lm.models.cache import make_prompt_cache
-        from mlx_lm.tuner.utils import linear_to_lora_layers
-    except ImportError as exc:
-        raise SystemExit(
-            f"grid train (mlx): missing dependency ({exc.name}) — this hello world needs an "
-            "Apple Silicon Mac with `pip install mlx-lm`."
-        ) from exc
-    return mx, nn, optim, load, make_prompt_cache, linear_to_lora_layers
 
 
 def main() -> int:
@@ -104,21 +90,14 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=17)
     args = parser.parse_args()
 
-    mx, nn, optim, load, make_prompt_cache, linear_to_lora_layers = _import_mlx()
-    mx.random.seed(args.seed)
     rng = random.Random(args.seed)
 
     print(f"Loading {args.model} …")
-    model, tokenizer = load(args.model)
-    model.freeze()
-    lora_layers = len(model.layers) if args.lora_layers < 0 else args.lora_layers
-    linear_to_lora_layers(
-        model,
-        lora_layers,
-        {"rank": args.lora_rank, "scale": args.lora_scale, "dropout": 0.0},
+    policy = Policy(
+        args.model,
+        lora_rank=args.lora_rank, lora_scale=args.lora_scale, lora_layers=args.lora_layers,
+        learning_rate=args.learning_rate, clip_eps=args.clip_eps, seed=args.seed,
     )
-    optimizer = optim.Adam(learning_rate=args.learning_rate)
-    eos_ids = set(tokenizer.eos_token_ids)
 
     run_dir = (
         Path("~/.grid/artifacts/train").expanduser()
@@ -128,78 +107,10 @@ def main() -> int:
     log_path = run_dir / "log.jsonl"
 
     def encode_prompt(user_text: str) -> list[int]:
-        return tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text},
-            ],
-            add_generation_prompt=True,
-        )
-
-    def sample(prompt_ids: list[int], greedy: bool = False) -> tuple[list[int], list[float], str]:
-        """One completion from the current policy: (token_ids, sampled logprobs, text)."""
-        cache = make_prompt_cache(model)
-        logits = model(mx.array(prompt_ids)[None], cache=cache)[:, -1, :]
-        ids: list[int] = []
-        logprobs: list[float] = []
-        for _ in range(args.max_tokens):
-            logp = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-            token = (
-                mx.argmax(logp, axis=-1) if greedy else mx.random.categorical(logits)
-            )
-            token_id = token.item()
-            ids.append(token_id)
-            logprobs.append(logp[0, token_id].item())
-            if token_id in eos_ids:
-                break
-            logits = model(token[None], cache=cache)[:, -1, :]
-        # The loss trains on the eos token (stopping is part of the action); the *graded* text
-        # must exclude it — a decoded "<|im_end|>" would be normalized into junk words and
-        # silently cap the reward below 1.0 while punishing the model for stopping.
-        return ids, logprobs, tokenizer.decode(ids, skip_special_tokens=True)
-
-    def loss_fn(model, inputs, targets, mask, behavior_lp, advantages):
-        logits = model(inputs)
-        token_lp = -nn.losses.cross_entropy(logits, targets, reduction="none")
-        ratio = mx.exp(token_lp - behavior_lp)
-        clipped = mx.clip(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps)
-        adv = advantages[:, None]
-        per_token = -mx.minimum(ratio * adv, clipped * adv)
-        return (per_token * mask).sum() / mx.maximum(mask.sum(), 1)
-
-    loss_and_grad = nn.value_and_grad(model, loss_fn)
-
-    def train_step(prompt_ids: list[int], completions: list[tuple[list[int], list[float]]],
-                   advantages: list[float]) -> float:
-        """One clipped policy-gradient update on a padded [group, seq] batch."""
-        p_len = len(prompt_ids)
-        longest = max(len(ids) for ids, _ in completions)
-        total = p_len + longest
-        batch_inputs, batch_targets, batch_mask, batch_blp = [], [], [], []
-        for ids, lps in completions:
-            full = prompt_ids + ids + [0] * (longest - len(ids))
-            batch_inputs.append(full[: total - 1])
-            batch_targets.append(full[1:total])
-            # Completion token j sits at full[p_len + j]; as a *target* it is predicted at
-            # position p_len - 1 + j. Prompt and pad positions stay masked out.
-            row_mask = [0.0] * (total - 1)
-            row_lp = [0.0] * (total - 1)
-            for j in range(len(ids)):
-                row_mask[p_len - 1 + j] = 1.0
-                row_lp[p_len - 1 + j] = lps[j]
-            batch_mask.append(row_mask)
-            batch_blp.append(row_lp)
-        loss, grads = loss_and_grad(
-            model,
-            mx.array(batch_inputs),
-            mx.array(batch_targets),
-            mx.array(batch_mask),
-            mx.array(batch_blp),
-            mx.array(advantages),
-        )
-        optimizer.update(model, grads)
-        mx.eval(model.parameters(), optimizer.state, loss)
-        return loss.item()
+        return policy.encode([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_text},
+        ])
 
     eval_set = make_eval_set(
         seed=args.seed + 1000,
@@ -212,7 +123,8 @@ def main() -> int:
     def evaluate() -> float:
         scores = []
         for user_text, target in eval_set:
-            _, _, text = sample(encode_prompt(user_text), greedy=True)
+            _, _, text = policy.sample(encode_prompt(user_text),
+                                       max_tokens=args.max_tokens, greedy=True)
             scores.append(reward(text, target))
         return sum(scores) / len(scores)
 
@@ -237,7 +149,7 @@ def main() -> int:
         completions, rewards = [], []
         t0 = time.time()
         for _ in range(args.group_size):
-            ids, lps, text = sample(prompt_ids)
+            ids, lps, text = policy.sample(prompt_ids, max_tokens=args.max_tokens)
             completions.append((ids, lps))
             rewards.append(reward(text, target))
         spent["sample_s"] += time.time() - t0
@@ -246,7 +158,7 @@ def main() -> int:
         record = {"step": step, "reward_mean": round(mean_reward, 4)}
         if any(advantages):
             t0 = time.time()
-            record["loss"] = round(train_step(prompt_ids, completions, advantages), 5)
+            record["loss"] = round(policy.step(prompt_ids, completions, advantages), 5)
             spent["update_s"] += time.time() - t0
         else:
             record["skipped"] = "no reward spread in group"
@@ -263,7 +175,7 @@ def main() -> int:
             fh.write(json.dumps(record) + "\n")
 
     final = history[-1].get("eval", 0.0)
-    _save_adapters(mx, model, run_dir, args)
+    policy.save_adapter(run_dir / "adapters")
     (run_dir / "summary.json").write_text(
         json.dumps(
             {
@@ -298,37 +210,6 @@ def main() -> int:
     print("CLIMB CONFIRMED" if verdict else "No meaningful climb — inspect log.jsonl")
     return 0 if verdict else 1
 
-
-def _save_adapters(mx, model, run_dir: Path, args: argparse.Namespace) -> None:
-    from mlx.utils import tree_flatten
-
-    adapter_dir = run_dir / "adapters"
-    adapter_dir.mkdir(exist_ok=True)
-    mx.save_safetensors(
-        str(adapter_dir / "adapters.safetensors"),
-        dict(tree_flatten(model.trainable_parameters())),
-    )
-    # The config mlx_lm expects next to the weights so `--adapter-path` just works. Both values
-    # must be what training actually used, not what the flags said: `load_adapters` rebuilds the
-    # LoRA layers from this file, so a `scale` that disagrees with the run applies the trained
-    # delta at the wrong magnitude on every serving node, and `num_layers` is written resolved
-    # rather than as the -1 sentinel so it does not depend on mlx-lm clamping a negative index.
-    (adapter_dir / "adapter_config.json").write_text(
-        json.dumps(
-            {
-                "fine_tune_type": "lora",
-                "num_layers": len(model.layers) if args.lora_layers < 0 else args.lora_layers,
-                "lora_parameters": {
-                    "rank": args.lora_rank,
-                    "scale": args.lora_scale,
-                    "dropout": 0.0,
-                },
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 if __name__ == "__main__":

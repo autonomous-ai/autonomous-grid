@@ -671,8 +671,13 @@ def _add_train(sub) -> None:
     doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     doctor.set_defaults(handler=cmd_train_doctor)
 
-    run = train_sub.add_parser("run", help="Run the training climb (GRPO via TRL)")
+    run = train_sub.add_parser("run", help="Run the training climb (GRPO)")
     run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    # Same flag the imitation stage has taken all along. Its absence here is what left Apple
+    # Silicon able to do stage one and not stage two, with a working MLX GRPO loop in the tree.
+    run.add_argument("--backend", choices=("auto", "mlx", "torch"), default="auto",
+                     help="auto picks MLX on Apple Silicon, torch elsewhere.")
+    run.add_argument("--steps", type=int, default=None, help="Override [trainer].steps.")
     run.set_defaults(handler=cmd_train_run)
 
     collect = train_sub.add_parser(

@@ -29,7 +29,8 @@ dev = [
     "numpy>=1.26",
     "safetensors>=0.4",
 ]
-# The RL training plane (`grid train`) — CUDA trainer box only; the rest of the CLI never needs
+# The RL training plane (`grid train`) — the torch trainer wants a CUDA box; Apple Silicon runs
+# the same GRPO loop on MLX (`--backend mlx`). The rest of the CLI never needs
 # these. TRL is pinned to the 1.x line because the rollout_func hook it relies on is experimental
 # (ADR 0019); bump deliberately, with `grid train doctor` as the compatibility check.
 train = [
