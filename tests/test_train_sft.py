@@ -215,3 +215,37 @@ def test_doctor_does_not_call_a_working_mac_not_ready(monkeypatch, capsys):
     report["data"] = {"ok": False, "detail": "no examples yet"}
     assert cmd_train_doctor(argparse.Namespace(config=None, json=False)) == 1
     assert "Not ready" in capsys.readouterr().out
+
+
+def test_the_mac_path_trains_the_lora_the_config_asked_for(tmp_path):
+    """mlx-lm has no --lora-rank flag, so rank came from its own defaults: a workspace configured
+    rank 16 trained rank 8 on a Mac and rank 16 on torch, from one config, silently."""
+    from train.config import (
+        DataConfig,
+        DeployConfig,
+        RewardsConfig,
+        RolloutConfig,
+        TrainerConfig,
+        TrainRunConfig,
+    )
+    from train.sft import mlx_command, mlx_lora_config
+
+    cfg = TrainRunConfig(
+        model_name="mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        rollout=RolloutConfig(base_url="http://x/v1"),
+        data=DataConfig(prompts_jsonl=str(tmp_path / "p.jsonl")),
+        rewards=RewardsConfig(python_file=str(tmp_path / "r.py")),
+        trainer=TrainerConfig(output_dir=str(tmp_path), lora_rank=16, lora_alpha=32),
+        deploy=DeployConfig(nodes=("http://x/v1",), adapter_name="m"),
+        source_path=tmp_path / "grid-train.toml",
+    )
+    config_file = mlx_lora_config(cfg, tmp_path)
+    body = config_file.read_text(encoding="utf-8")
+    assert "rank: 16" in body
+    assert "scale: 2.0" in body          # peft's effective scaling is alpha / rank, not alpha
+
+    command = mlx_command(cfg, tmp_path, tmp_path / "adapter", iters=10, layers=8,
+                          config_file=config_file)
+    assert "--config" in command and str(config_file) in command
+    # and the command still carries what mlx-lm DOES take on the line
+    assert "--num-layers" in command and "--learning-rate" in command
