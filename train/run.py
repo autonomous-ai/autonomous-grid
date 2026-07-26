@@ -234,6 +234,23 @@ def doctor(cfg: TrainRunConfig) -> dict:
 
     report["endpoint"] = probe_endpoint(cfg.rollout, cfg.rollout_model)
 
+    # Can this machine run the TRAINER, as opposed to serve rollouts to one? The two are
+    # separate and the difference is not cosmetic: `grid train run` is TRL's GRPO on torch,
+    # which wants CUDA. On an M2 Max it spent 84 CPU-minutes stuck at "Loading weights: 0/338"
+    # and never reached step 1, while the reachable MLX engine beside it served nothing.
+    # Reporting only the engine told that machine it was "ready" for a run it cannot finish.
+    trainer = {"ok": False, "detail": "torch is not installed — `pip install 'grid[train]'`"}
+    if report["deps"].get("torch"):
+        import torch
+        if torch.cuda.is_available():
+            trainer = {"ok": True, "detail": f"CUDA ({torch.cuda.get_device_name(0)})"}
+        else:
+            trainer = {"ok": False, "detail": (
+                "no CUDA — the GRPO trainer is a CUDA job. This machine can still serve "
+                "rollouts to one (`grid train serve`) and can train the imitation stage "
+                "locally (`grid train sft`)")}
+    report["trainer"] = trainer
+
     try:
         prompts = load_prompts(cfg.data)
         rewards = load_reward_funcs(cfg.rewards, cfg.data)

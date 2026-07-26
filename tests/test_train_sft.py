@@ -217,6 +217,40 @@ def test_doctor_does_not_call_a_working_mac_not_ready(monkeypatch, capsys):
     assert "Not ready" in capsys.readouterr().out
 
 
+def test_a_reachable_engine_alone_is_not_ready_for_the_feedback_rung(monkeypatch, capsys):
+    """A healthy engine used to be reported as "ready" for `grid train run`.
+
+    The feedback rung needs two things and they live on different machines: an engine to sample
+    from, and a trainer to learn with. On an Apple Silicon box with `grid train serve` running,
+    the engine probe passes and the GRPO trainer still cannot run — it is a CUDA job. Saying
+    "ready" there cost a real run 84 CPU-minutes stuck on "Loading weights: 0/338" before the
+    machine, not the code, turned out to be the problem.
+    """
+    import argparse
+
+    from cli.train import cmd_train_doctor
+
+    report = {
+        "deps": {"torch": "2.13.0", "transformers": "5.14", "trl": "1.9", "peft": "0.19",
+                 "datasets": "5.0", "verifiers": "0.2"},
+        "endpoint": {"ok": True, "model": "qwen", "detail": "token ids + logprobs verified"},
+        "trainer": {"ok": False, "detail": "no CUDA — the GRPO trainer is a CUDA job"},
+        "data": {"ok": True, "prompts": 1070, "reward_funcs": 3},
+    }
+    monkeypatch.setattr("train.run.doctor", lambda cfg: report)
+    monkeypatch.setattr("train.config.load_config", lambda path: object())
+    assert cmd_train_doctor(argparse.Namespace(config=None, json=False)) == 0
+    out = capsys.readouterr().out
+    assert "NO learn from feedback" in out          # engine up, trainer missing -> still NO
+    assert "Ready to train, both rungs" not in out
+    assert "Ready for stage one" in out             # sft still works on this machine
+
+    # ...and with a CUDA trainer, the same report is ready for both.
+    report["trainer"] = {"ok": True, "detail": "CUDA (NVIDIA RTX 6000)"}
+    assert cmd_train_doctor(argparse.Namespace(config=None, json=False)) == 0
+    assert "Ready to train, both rungs" in capsys.readouterr().out
+
+
 def test_the_mac_path_trains_the_lora_the_config_asked_for(tmp_path):
     """mlx-lm has no --lora-rank flag, so rank came from its own defaults: a workspace configured
     rank 16 trained rank 8 on a Mac and rank 16 on torch, from one config, silently."""

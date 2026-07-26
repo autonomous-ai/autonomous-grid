@@ -82,14 +82,27 @@ def cmd_train_doctor(args: argparse.Namespace) -> int:
     # Two rungs, two verdicts. Reporting only the feedback rung's needs told a Mac owner
     # "Not ready" on the exact machine where the browser and the nightly cycle train fine — the
     # imitation rung needs no engine at all.
+    trainer = report.get("trainer") or {}
+    print("Trainer")
+    print(f"  {'ok ' if trainer.get('ok') else 'NO '}{trainer.get('detail', 'unknown')}")
     imitation_ok, imitation_note = _imitation_ready(report)
-    feedback_ok = _healthy(report)
+    # The feedback rung needs BOTH halves: an engine to sample from and a trainer to learn with.
+    # Reporting only the engine told a Mac with `grid train serve` running that it was ready for
+    # a run whose trainer is a CUDA job, and the failure surfaced 20 minutes later as a model
+    # that never finished loading.
+    feedback_ok = _healthy(report) and trainer.get("ok", False)
+    if feedback_ok:
+        feedback_note = "ready"
+    elif not _healthy(report):
+        feedback_note = ("needs an engine that serves the training contract "
+                         "— `grid train serve` on a Mac, or vLLM")
+    else:
+        feedback_note = "the engine is ready; the trainer above is not"
     print("What this computer can do now")
     print(f"  {'ok ' if imitation_ok else 'NO '}learn from answers your team already wrote "
           f"(`grid train sft`)  ·  {imitation_note}")
     print(f"  {'ok ' if feedback_ok else 'NO '}learn from feedback (`grid train run`)  ·  "
-          + ("ready" if feedback_ok else "needs an engine that serves the training contract "
-                                         "— `grid train serve` on a Mac, or vLLM"))
+          f"{feedback_note}")
     if feedback_ok:
         print("Ready to train, both rungs.")
     elif imitation_ok:
