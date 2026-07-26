@@ -9,7 +9,7 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-[**Quickstart**](#quickstart) · [Inference](#inference) · [Training](#training) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
+[**Quickstart**](#quickstart) · [Inference](#inference) · [Training](#training-experimental) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 <img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one local AI grid spanning every machine you own. The grid is a single box holding two halves — local AI inference, and local AI training marked experimental — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
 
@@ -257,12 +257,12 @@ Contract and transparency table in [docs/cli.md](docs/cli.md#router) · [ADR 001
 
 ---
 
-## Training
+## Training (Experimental)
 
-> **Experimental.** The loop runs end to end and the measured runs in
-> [`train/README.md`](train/README.md) are real, but the capture path, the gate and the MLX backend
-> are young. The join from real outcomes back into tasks exists only where your app reports a
-> verdict — [what is and is not built](train/README.md#not-built-yet) is written out plainly.
+> The loop runs end to end and the measured runs in [`train/README.md`](train/README.md) are real,
+> but the capture path, the gate and the MLX backend are young. The join from real outcomes back
+> into tasks exists only where your app reports a verdict —
+> [what is and is not built](train/README.md#not-built-yet) is written out plainly.
 
 Serving is half of it. The other half is **teaching a small model your own work** — your tickets,
 your repos, your deals — on the same machines, where the data, the attempts and the weights never
