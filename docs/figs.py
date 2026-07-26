@@ -17,7 +17,7 @@ ARROW, LABEL_TEXT = "#a1a099", "#2b2b29"
 H = 66            # every node is this tall
 BORDER = 2
 STROKE = 2
-RIM = 4           # the flywheel rim — heavy enough to read as one wheel, not six links
+RIM = 3           # the flywheel rim — heavier than an edge so a ring reads as one wheel
 CORE_FS = 35      # a station on the driving loop — the only text at this size
 SAT_FS = 21       # a station on a feeder loop, subordinate to the core by size and colour
 NODE_FS = 25      # node label
@@ -168,7 +168,7 @@ class Fig:
         return placed
 
     def wheel(self, cx, cy, r, stations, hub_r=0, hub_lines=(), hub_fill=None, fs=None,
-              start=-90, arc=None):
+              start=-90, arc=None, hub_line=None, hub_text=None):
         """A flywheel drawn the way the ones people remember are drawn.
 
         The reference (Amazon's) works because of three things this deliberately
@@ -219,14 +219,17 @@ class Fig:
             self._saw(cx + r, cy + r)
 
         if hub_r:
+            # Tinted paper with ink on it, like every other shape in the system —
+            # a solid disc is the one thing here that would read as a block of colour.
             self.parts.append(
                 f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{hub_r}" '
-                f'fill="{hub_fill or PURPLE_TEXT}"/>')
+                f'fill="{hub_fill or PURPLE_FILL}" stroke="{hub_line or PURPLE_LINE}" '
+                f'stroke-width="{BORDER}"/>')
             top = cy - (len(hub_lines) - 1) * 21 + 11
             for i, ln in enumerate(hub_lines):
                 self.parts.append(
                     f'<text x="{cx:.0f}" y="{top + i * 42:.0f}" text-anchor="middle" '
-                    f'fill="#fff" font-size="34" font-weight="700" '
+                    f'fill="{hub_text or PURPLE_TEXT}" font-size="34" font-weight="700" '
                     f'letter-spacing="0.5">{ln}</text>')
         return placed
 

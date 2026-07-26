@@ -5,8 +5,10 @@ weights never leave your network. About 8,900 lines of Python across 38 files, o
 torch side and mlx-lm on the Apple side, and one command finishes a complete training run on a
 laptop CPU in about six minutes.
 
-First, why train anything at all. The models you can rent are general and they are very good. They
-also know nothing about you — not your codebase, not last quarter's tickets, not the way your team
+## Domain-specific intelligence
+
+Why train anything at all. The models you can rent are general and they are very good. They also
+know nothing about you — not your codebase, not last quarter's tickets, not the way your team
 actually writes a reply. Waiting for a bigger general model does not close that gap, because the
 information was never on the internet to begin with. It is sitting in your systems.
 
@@ -15,6 +17,8 @@ how your work actually goes. It is worse than the frontier at everything and bet
 frontier at your thing, which is the trade you want, because most of what your team does all day is
 your thing. The weights are yours, so nobody deprecates them, reprices them or swaps them out from
 under you. And the data they learned from never left the building.
+
+## How the training plane works
 
 Here is the whole idea. Reinforcement learning is roughly 75% sampling; sampling is inference;
 inference is what a grid already does. So the expensive part of training is work your fleet is

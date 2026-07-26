@@ -2,6 +2,7 @@
 import os
 
 from figs import (  # noqa
+    ARROW,
     CORAL_TEXT,
     CORE_FS,
     GREEN_TEXT,
@@ -237,16 +238,18 @@ f.write(f"{OUT}/train-architecture.svg")
 #   the second loop: connectors -> domain-specific data -> domain-specific models
 f = Fig(1700, 1180)
 CX, CY, R = 800, 680, 400
-INK = LABEL_TEXT
+INK = ARROW   # grey, never black — docs/STYLE.md section 1
 
 # Nouns, not quantities. The reference says Sellers, Selection, Traffic — never
 # "more sellers" — because a flywheel already means "more of this drives more of
 # that", and repeating it in every label is the diagram explaining its own form.
+# Colour carries the same meaning it carries everywhere else in the set: green is
+# what you already own, purple is the intelligence layer, coral is the human edge.
 f.wheel(CX, CY, R, [
-    ("Models", LABEL_TEXT),
-    ("Superhuman work", LABEL_TEXT),
-    ("Employees", LABEL_TEXT),
-    ("Computers", LABEL_TEXT),
+    ("Models", PURPLE_TEXT),
+    ("Superhuman work", CORAL_TEXT),
+    ("Employees", CORAL_TEXT),
+    ("Computers", GREEN_TEXT),
 ], hub_r=240, hub_lines=("DOMAIN-SPECIFIC", "INTELLIGENCE"), fs=CORE_FS, start=0,
    arc=INK)
 
@@ -261,9 +264,9 @@ f.wheel(CX, CY, R, [
 # arrows with air between them rather than from a shared dot: a junction reads as
 # a knot at this line weight. And the whole loop is held a clear band away from
 # the rim, because two curves running close together read as one thick curve.
-f.block(252, 220, ("Connected systems",), LABEL_TEXT, CORE_FS)
-f.block(800, 118, ("Your data",), LABEL_TEXT, CORE_FS)
-f.block(1396, 230, ("Your models",), LABEL_TEXT, CORE_FS)
+f.block(252, 220, ("Connected systems",), GREEN_TEXT, CORE_FS)
+f.block(800, 118, ("Your data",), GREEN_TEXT, CORE_FS)
+f.block(1396, 230, ("Your models",), PURPLE_TEXT, CORE_FS)
 
 f.bow(330, 600, 268, 288, lift=-20, colour=INK, width=RIM)
 f.bow(404, 186, 668, 132, lift=-26, colour=INK, width=RIM)
