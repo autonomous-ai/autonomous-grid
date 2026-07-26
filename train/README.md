@@ -25,7 +25,7 @@ inference is what a grid already does. So the expensive part of training is work
 already good at, and the only new thing is one machine that adjusts weights.
 
 <p align="center">
-<img src="../docs/train-architecture.png" width="900" alt="Your work goes to the machines you own, which write eight attempts a task; one trainer turns those attempts into an adapter and sends it back to the machines every two steps; the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
+<img src="../docs/train-architecture.png" width="900" alt="Your work and the weights sit with the trainer, which asks the machines you own for several attempts at a task; the attempts and the token ids they sampled come back to it; it turns those into an adapter, and the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
 </p>
 
 ---
@@ -65,7 +65,7 @@ consumer hardware.
 ## 2. No right answer needed — only a way to score one
 
 <p align="center">
-<img src="../docs/fig-step.png" width="880" alt="One task, eight attempts, each scored against their own average: the ones above it are made likelier, the ones below it less likely, and that is one step.">
+<img src="../docs/fig-step.png" width="880" alt="One task, several attempts, each scored against their own average: the ones above it are made likelier, the ones below it less likely, and that is one step.">
 </p>
 
 Notice what is absent. No labelled right answer — only a way to score an attempt. That is why RL
@@ -75,7 +75,9 @@ maths, is the hard part of this product. You will spend your time on the grader.
 ## 3. Sampling is 70–82% of the work, and it fans out perfectly
 
 Count the compute in that step. Writing eight attempts runs the model eight times; adjusting the
-weights happens once. Profiling across the field puts sampling at 70–82% of the total, and sampling
+weights happens once. (Eight is `group_size`, and it is TRL's default rather than a number we
+derived — the algorithm only requires two, since the baseline is the group's own mean. It is the
+whole cost dial, and nobody has swept it here.) Profiling across the field puts sampling at 70–82% of the total, and sampling
 is plain inference — which a grid already spreads across machines.
 
 Our own runs come out higher. Every run now times its two phases and writes the split into its
@@ -92,7 +94,7 @@ you rent, and renting compute by the hour is the expensive way to do the one job
 hardware suits perfectly.
 
 <p align="center">
-<img src="../docs/fig-fleet.png" width="880" alt="The trainer sends one task and asks for eight attempts; the orchestrator places that work on whichever of a MacBook Pro, Mac Studio or RTX box is free; the completions and the token ids they sampled come back to the trainer, which pushes each new adapter straight to every machine, every two steps.">
+<img src="../docs/fig-fleet.png" width="880" alt="The trainer sends one task and asks for several attempts; the orchestrator places that work on whichever of a MacBook Pro, Mac Studio or RTX box is free; the completions and the token ids they sampled come back to the trainer, which pushes each new adapter straight to every machine, every two steps.">
 </p>
 
 Note who is driving. The trainer holds the tasks and the weights and opens every request; the

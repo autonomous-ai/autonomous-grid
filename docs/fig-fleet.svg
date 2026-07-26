@@ -37,7 +37,7 @@
   <rect x="607" y="267" width="247" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
   <text x="730" y="309" text-anchor="middle" fill="#5d579d" font-size="25" font-weight="600">The orchestrator</text>
   <path d="M289 300 L593 300" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="442" y="274" text-anchor="middle" fill="#2b2b29" font-size="22">one task, eight attempts</text>
+  <text x="442" y="274" text-anchor="middle" fill="#2b2b29" font-size="22">one task, several attempts</text>
   <rect x="974" y="147" width="220" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="1084" y="189" text-anchor="middle" fill="#5a912f" font-size="25" font-weight="600">MacBook Pro</text>
   <path d="M866 286 C930 286, 896 180, 960 180" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>

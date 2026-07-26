@@ -72,7 +72,7 @@ f.write(f"{OUT}/fig-loop.svg")
 f = Fig(1620, 400)
 y = 190
 (task, tw), (att, aw), (avg, vw) = chain(
-    f, y, [("term", "One task"), ("green", "Eight attempts"), ("purple", "Their average")],
+    f, y, [("term", "One task"), ("green", "Several attempts"), ("purple", "Their average")],
     edges=[None, "scored against"])
 OW = 190
 up, dn = y - 100, y + 100
@@ -105,7 +105,7 @@ gw = box_w("The orchestrator")
 gcx = tcx + tw2 / 2 + 330 + gw / 2
 f.box(gcx, y, "The orchestrator", kind="purple", w=gw)
 f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
-f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 26, "one task, eight attempts")
+f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 26, "one task, several attempts")
 
 MW = 220
 mcx = gcx + gw / 2 + GAP + MW / 2
@@ -176,58 +176,51 @@ for ry, label, weight, dashed in rows:
 f.write(f"{OUT}/fig-earns.svg")
 
 # ------------------------------------------------------- train-architecture
-# The machines are drawn as a fan of three, not as one box saying "machines you
-# own". This is the first figure on the page and the claim it has to land is that
-# the work spreads across whatever you already have — a single box says "a
-# server", which is the opposite of the point, and the fan says it without a
-# caption. Named machines rather than generic ones, and the same three the fleet
-# figure uses later, so the second time a reader meets them they recognise them.
-f = Fig(1900, 520)
-y = 210
+# The first figure on the page, so it has to get the direction right: the trainer
+# holds your work and the weights and drives everything. It asks the machines for
+# attempts; they answer; it makes an adapter; the gate decides whether anyone ever
+# sees it. Drawn as one loop with the gate hanging off the end rather than as a
+# line, because a line said the trainer was the last stage of a pipeline.
+f = Fig(1900, 720)
+y = 330
 ww = box_w("Your work") - 8
 wcx = M + ww / 2
 f.term(wcx, y, "Your work", w=ww)
 
+tw2 = box_w("The trainer")
+tcx = wcx + ww / 2 + 150 + tw2 / 2
+f.box(tcx, y, "The trainer", kind="purple", w=tw2)
+f.arrow(wcx + ww / 2 + 12, y, tcx - tw2 / 2 - 14, y)
+
 MW = 236
-mcx = wcx + ww / 2 + 150 + MW / 2
-rows = [y - 110, y, y + 110]
+mcx = tcx + tw2 / 2 + 210 + MW / 2
+rows = [y - 148, y, y + 148]
 for ry, name in zip(rows, ["MacBook Pro", "Mac Studio", "RTX box"]):
     f.box(mcx, ry, name, w=MW)
-
-tw2 = box_w("One trainer")
-tcx = mcx + MW / 2 + 300 + tw2 / 2
-f.box(tcx, y, "One trainer", kind="purple", w=tw2)
-
-# Out of one point and into one point, the curve alone separating the three —
-# the same treatment the fleet figure uses, so the two read as one system.
-for ry in rows:
-    curve = 0 if ry == y else 62
+    curve = 0 if ry == y else 70
     off = 14 if ry > y else -14 if ry < y else 0
-    f.arrow(wcx + ww / 2 + 12, y + off, mcx - MW / 2 - 14, ry, curve=curve)
-    f.arrow(mcx + MW / 2 + 12, ry, tcx - tw2 / 2 - 14, y + off, curve=curve)
-# over the gap it describes — the fan-IN carries the attempts, not the fan-out
-f.label((mcx + MW / 2 + tcx - tw2 / 2) / 2, rows[0] - 62, "eight attempts a task")
+    f.arrow(tcx + tw2 / 2 + 12, y + off, mcx - MW / 2 - 14, ry, curve=curve)
+f.label(tcx + tw2 / 2 + 118, rows[0] - 58, "a task, several attempts")
+
+# What comes back is the loop closing, and it is why the trainer is not the last
+# box: the attempts are the thing it learns from.
+f.elbow([(mcx, rows[2] + H / 2 + 12), (mcx, 620), (tcx, 620), (tcx, y + H / 2 + 14)])
+f.label((tcx + mcx) / 2, 664, "the attempts, and the token ids they sampled")
 
 gw = box_w("The gate")
-gcx = tcx + tw2 / 2 + 210 + gw / 2
+gcx = mcx + MW / 2 + 260 + gw / 2
 f.box(gcx, y, "The gate", kind="purple", w=gw)
-f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
-f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 24, "an adapter")
+f.elbow([(tcx, y - H / 2 - 12), (tcx, 92), (gcx, 92), (gcx, y - H / 2 - 14)], dashed=True)
+f.label((tcx + gcx) / 2, 58, "an adapter, once the climb is done")
 
 ow = box_w("Served") - 8
 ocx = gcx + gw / 2 + GAP + ow / 2
-f.term(ocx, y - 110, "Served", w=ow)
-f.term(ocx, y + 110, "Binned", w=ow)
-f.arrow(gcx + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 110, curve=60)
-f.arrow(gcx + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 110, dashed=True, curve=60)
-f.label(gcx + gw / 2 + 66, y - 128, "better")
-f.label(gcx + gw / 2 + 74, y + 162, "not better")
-
-# The adapter goes back to EVERY machine, and the single return line can only
-# touch one box, so the caption carries what the geometry cannot.
-f.elbow([(tcx, y + H / 2 + 12), (tcx, 430), (mcx, 430), (mcx, rows[2] + H / 2 + 14)],
-        dashed=True)
-f.label((mcx + tcx) / 2, 470, "the new adapter, to every machine, every two steps")
+f.term(ocx, y - 128, "Served", w=ow)
+f.term(ocx, y + 128, "Binned", w=ow)
+f.arrow(gcx + gw / 2 + 12, y - 14, ocx - ow / 2 - 14, y - 128, curve=60)
+f.arrow(gcx + gw / 2 + 12, y + 14, ocx - ow / 2 - 14, y + 128, dashed=True, curve=60)
+f.label(gcx + gw / 2 + 62, y - 146, "better")
+f.label(gcx + gw / 2 + 70, y + 180, "not better")
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
