@@ -159,11 +159,9 @@ The four steps above run on your own network and need nothing from us. To reach 
 from outside it, switch to **remote** mode: engines poll Autonomous Relay outbound, so they serve
 from behind a NAT with no inbound port and no public IP.
 
-Be clear on what that trades. Your app calls the relay, the relay hands the request to one of your
-engines, and your engine posts the answer back through it. The computers doing the work are still
-yours and the weights still never move — but the request and the answer pass through our server,
-which local mode never does, and they are not encrypted end to end today. A hosted grid is a
-gateway to your intranet, not the intranet itself.
+**The trade:** your request and its answer pass through our relay, which local mode never does. We
+forward and keep nothing — no stored prompts, no training on your traffic — but that hop is not
+encrypted end to end today. A hosted grid is a gateway to your intranet, not the intranet itself.
 
 ```bash
 grid mode remote     # persisted to ~/.grid/state.json; --local / --remote overrides one command
