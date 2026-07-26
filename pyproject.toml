@@ -22,6 +22,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # tests/test_train_adapters.py builds synthetic tensors — no torch, no mlx, no download — so it
+    # is cheap enough to always run, and it covers the peft <-> MLX key mapping and transpose a
+    # mixed fleet depends on being exact. Declared rather than skipped: a machine that happened to
+    # have numpy ran these, CI did not, and the whole gap hid in that difference.
+    "numpy>=1.26",
+    "safetensors>=0.4",
 ]
 # The RL training plane (`grid train`) — CUDA trainer box only; the rest of the CLI never needs
 # these. TRL is pinned to the 1.x line because the rollout_func hook it relies on is experimental

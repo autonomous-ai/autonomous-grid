@@ -28,6 +28,15 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_schedule, "_launchctl", lambda *a: (0, ""))
     monkeypatch.setattr(_schedule, "_systemctl", lambda *a: (0, ""))
+
+    # What this computer can train is probed off the host — mlx_lm on an Apple laptop, torch/trl/
+    # peft anywhere else. Left real, the wizard renders one page on a machine that happens to have
+    # them and a different one on CI, and these tests are about the wizard, not about what is
+    # pip-installed. Pinned to the torch rung, which reads the same on macOS and Linux.
+    from train.web import machines as _machines
+
+    monkeypatch.setattr(_machines, "_installed", lambda mod: mod in {"torch", "trl", "peft"})
+    monkeypatch.setattr(_machines, "_has_feedback_trainer", lambda: True)
     return TestClient(build_app(), follow_redirects=False)
 
 
