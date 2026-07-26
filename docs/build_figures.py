@@ -1,7 +1,7 @@
 """Generate the six training figures. One system, six drawings."""
 import os
 
-from figs import (  # noqa
+from figs import (
     ARROW,
     CORAL_TEXT,
     CORE_FS,
@@ -91,30 +91,43 @@ f.arrow(ocx + OW / 2 + 12, dn, scx - sw / 2 - 14, y + 14, curve=70)
 f.write(f"{OUT}/fig-step.svg")
 
 # --------------------------------------------------------------- fig-fleet
-f = Fig(1560, 470)
-y = 200
-(tasks, tw), (grid, gw) = chain(f, y, [("term", "Tasks"), ("purple", "The grid")])
+# The trainer DRIVES. It holds the tasks and the weights and it opens every
+# request; the orchestrator places that request on whichever machine is free.
+# Drawn left to right in that order, because the old version read as a pipeline
+# ending at the trainer, which is the opposite of how the loop runs.
+f = Fig(1580, 730)
+y = 300
+tw2 = box_w("The trainer")
+tcx = M + tw2 / 2
+f.box(tcx, y, "The trainer", kind="purple", w=tw2)
+
+gw = box_w("The orchestrator")
+gcx = tcx + tw2 / 2 + 330 + gw / 2
+f.box(gcx, y, "The orchestrator", kind="purple", w=gw)
+f.arrow(tcx + tw2 / 2 + 12, y, gcx - gw / 2 - 14, y)
+f.label((tcx + tw2 / 2 + gcx - gw / 2) / 2, y - 26, "one task, eight attempts")
+
 MW = 220
-mcx = grid + gw / 2 + GAP + MW / 2
-rows = [y - 110, y, y + 110]
+mcx = gcx + gw / 2 + GAP + MW / 2
+rows = [y - 120, y, y + 120]
 for ry, name in zip(rows, ["MacBook Pro", "Mac Studio", "RTX box"]):
     f.box(mcx, ry, name, w=MW)
-trw = box_w("The trainer")
-tcx = mcx + MW / 2 + GAP + trw / 2
-f.box(tcx, y, "The trainer", kind="purple", w=trw)
-for ry in rows:
-    curve = 0 if ry == y else 60
-    f.arrow(grid + gw / 2 + 12, y + (14 if ry > y else -14 if ry < y else 0),
-            mcx - MW / 2 - 14, ry, dashed=True, curve=curve)
-    f.arrow(mcx + MW / 2 + 12, ry, tcx - trw / 2 - 14,
-            y + (14 if ry > y else -14 if ry < y else 0), dashed=True, curve=curve)
-f.label(mcx, rows[0] - 60, "one task each, eight attempts")
-aw2 = box_w("One adapter") - 8
-acx = tcx + trw / 2 + GAP + aw2 / 2
-f.term(acx, y, "One adapter", w=aw2)
-f.arrow(tcx + trw / 2 + 12, y, acx - aw2 / 2 - 14, y)
-f.elbow([(tcx, y + H / 2 + 12), (tcx, 404), (grid, 404), (grid, y + H / 2 + 14)], dashed=True)
-f.label((grid + tcx) / 2, 444, "back to the machines, every two steps")
+    curve = 0 if ry == y else 64
+    off = 14 if ry > y else -14 if ry < y else 0
+    f.arrow(gcx + gw / 2 + 12, y + off, mcx - MW / 2 - 14, ry, dashed=True, curve=curve)
+
+
+# What comes back is not just text: the ids the engine actually sampled, which is
+# the behaviour-policy term of the loss and the reason a chat API will not do.
+f.label(mcx, rows[2] + H / 2 + 46, "placed on whichever machine is free")
+f.elbow([(mcx + MW / 2 + 12, rows[2]), (mcx + MW / 2 + 128, rows[2]),
+         (mcx + MW / 2 + 128, 604), (tcx, 604), (tcx, y + H / 2 + 14)])
+f.label((tcx + mcx) / 2, 648, "completions, and the token ids they sampled")
+
+# The adapter does not go back through the orchestrator — the trainer pushes it
+# straight to the machines that sample.
+f.elbow([(tcx, y - H / 2 - 12), (tcx, 96), (mcx, 96), (mcx, rows[0] - H / 2 - 14)], dashed=True)
+f.label((tcx + mcx) / 2, 62, "the adapter, straight to every machine, every two steps")
 f.write(f"{OUT}/fig-fleet.svg")
 
 # ----------------------------------------------------------- fig-day-night
@@ -264,14 +277,26 @@ f.wheel(CX, CY, R, [
 # arrows with air between them rather than from a shared dot: a junction reads as
 # a knot at this line weight. And the whole loop is held a clear band away from
 # the rim, because two curves running close together read as one thick curve.
-f.block(252, 220, ("Connected systems",), GREEN_TEXT, CORE_FS)
+f.block(258, 200, ("Your systems",), GREEN_TEXT, CORE_FS)
+# Named rather than badged. Real logos would be the only thing on any of these
+# seven figures that is not drawn by this file — an external asset to license,
+# keep current and re-export — and the names carry the meaning on their own.
+f.block(258, 252, ("Gmail · Slack · Notion", "Drive · Salesforce"),
+        LABEL_TEXT, SAT_FS, weight=400)
 f.block(800, 118, ("Your data",), GREEN_TEXT, CORE_FS)
 f.block(1396, 230, ("Your models",), PURPLE_TEXT, CORE_FS)
 
-f.bow(330, 600, 268, 288, lift=-20, colour=INK, width=RIM)
-f.bow(404, 186, 668, 132, lift=-26, colour=INK, width=RIM)
+f.bow(336, 604, 274, 322, lift=-18, colour=INK, width=RIM)
+f.bow(400, 168, 668, 132, lift=-24, colour=INK, width=RIM)
 f.bow(936, 132, 1252, 190, lift=-28, colour=INK, width=RIM)
 f.bow(1470, 292, 1256, 610, lift=-46, colour=INK, width=RIM)
+
+# The one place a verb earns its keep: Computers is the only station that does two
+# different jobs, and without this second arrow the drawing shows only the first.
+# The same machines serve by day and train at night — section 4.
+f.bow(910, 302, 1236, 262, lift=-22, colour=INK, width=RIM)
+f.label(1058, 348, "train")
+f.label(1064, 486, "serve")
 
 f.write(f"{OUT}/fig-flywheel.svg")
 

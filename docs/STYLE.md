@@ -79,6 +79,11 @@ Arrowheads are open chevrons, never filled triangles, and they come in one size 
 one is drawn in its line's own colour — an SVG marker carries its own fill, so a coloured line with
 the shared grey head ends in a grey tip.
 
+**Verbs on arrows, almost never.** Adjacency already implies causation, and a figure whose every
+arrow is labelled has stopped trusting its own shape. The exception that earns one: a node with two
+outgoing arrows that mean *different things* — the flywheel's Computers both `serve` and `train`,
+and without those two words the drawing shows one job where there are two.
+
 **Curve vocabulary.** A straight line where nothing is in the way. A single bend where two things sit
 at different heights. An arc where several lines leave one point and must stay apart — the curve
 alone separates them, and no two lines in one figure should cross if a bend would avoid it.
@@ -93,6 +98,11 @@ alone separates them, and no two lines in one figure should cross if a bend woul
   running underneath it.
 - **Nothing is added to help the reader.** No legend, no key, no colour scale, no title inside the
   frame. The README's prose is the caption. A legend is a sign that the drawing has not done its job.
+
+**Names, not logos.** When a station needs examples — what "your systems" actually means — set them
+as a smaller line beneath it (`Gmail · Slack · Notion`). A real logo would be the only thing in the
+whole set not drawn by `figs.py`: an external asset to license, keep current and re-export, in a
+figure system whose whole premise is that a drawing is code.
 
 ## 6. Output
 

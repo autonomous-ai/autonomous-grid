@@ -92,8 +92,14 @@ you rent, and renting compute by the hour is the expensive way to do the one job
 hardware suits perfectly.
 
 <p align="center">
-<img src="../docs/fig-fleet.png" width="880" alt="Tasks go to the grid, which gives one task each to a MacBook Pro, a Mac Studio and an RTX box; each writes eight attempts and returns them to the trainer, which produces one adapter and sends it back to the machines every two steps.">
+<img src="../docs/fig-fleet.png" width="880" alt="The trainer sends one task and asks for eight attempts; the orchestrator places that work on whichever of a MacBook Pro, Mac Studio or RTX box is free; the completions and the token ids they sampled come back to the trainer, which pushes each new adapter straight to every machine, every two steps.">
 </p>
+
+Note who is driving. The trainer holds the tasks and the weights and opens every request; the
+orchestrator's job is placement, deciding which machine answers. Nothing is queued up in the grid
+ahead of time — `train/rollout.py`: *the trainer never generates text itself*, it asks for
+completions through the same OpenAI-compatible endpoint every other consumer uses, with two extras
+RL needs: the ids the engine actually sampled and their logprobs.
 
 Two facts make this work on ordinary hardware: attempts are **independent**, so they fan out
 perfectly; and what travels between machines is a small add-on layer, tens of megabytes, not a
@@ -292,7 +298,7 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading DOMAIN-SPECIFIC INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. A second loop forks off the wheel at employees and runs over the top — connected systems, then your data, then your models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading DOMAIN-SPECIFIC INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees and runs over the top — your systems, then your data, then your models — before rejoining the wheel at models.">
 </p>
 
 **The ring is the whole business in four words.** Computers run models. Models make the work
