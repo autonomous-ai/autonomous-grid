@@ -304,15 +304,16 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman work, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then expert models — before rejoining the wheel at models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a hub reading COMPOUNDING INTELLIGENCE. The ring turns clockwise from the top: computers, models, superhuman ability, employees, and back to computers. Computers has two outgoing arrows, marked serve and train. A second loop forks off the wheel at employees, marked connect, and runs over the top — your systems, then your data, then expert models — before rejoining the wheel at models.">
 </p>
 
 The hub says *compounding* rather than *domain-specific* for a reason worth stating: a wheel
 turning around a static noun does not say the noun is growing. What compounds is the intelligence
 specific to you — and *that* is on the rim, at the station where those models get made.
 
-**The ring is the whole business in four words.** Computers run models. Models make the work
-superhuman. Superhuman work brings employees. Employees arrive carrying the next computers.
+**The ring is the whole business in four words.** Computers run models. Models give people
+superhuman ability. That ability is what a company grows on, so it brings employees. Employees
+arrive carrying the next computers.
 Capacity grows with the team rather than with the bill, and that is the part a cloud product
 structurally cannot copy — its capacity is rented, and this walks in the door.
 

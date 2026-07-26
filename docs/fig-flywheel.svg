@@ -33,11 +33,11 @@
   </defs>
   <rect width="1700" height="1180" fill="#fff"/>
   <text x="1200" y="692" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Models</text>
-  <text x="800" y="1092" text-anchor="middle" fill="#ad5130" font-size="35" font-weight="700">Superhuman work</text>
+  <text x="800" y="1092" text-anchor="middle" fill="#ad5130" font-size="35" font-weight="700">Superhuman ability</text>
   <text x="400" y="692" text-anchor="middle" fill="#ad5130" font-size="35" font-weight="700">Employees</text>
   <text x="800" y="292" text-anchor="middle" fill="#5a912f" font-size="35" font-weight="700">Computers</text>
-  <path d="M1188 777 A400 400 0 0 1 981 1037" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
-  <path d="M626 1040 A400 400 0 0 1 423 814" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
+  <path d="M1188 777 A400 400 0 0 1 989 1033" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
+  <path d="M618 1036 A400 400 0 0 1 423 814" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <path d="M420 554 A400 400 0 0 1 670 302" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <path d="M921 299 A400 400 0 0 1 1186 574" fill="none" stroke="#a1a099" stroke-width="3" marker-end="url(#Ha)"/>
   <circle cx="800" cy="680" r="240" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>

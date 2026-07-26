@@ -258,6 +258,9 @@ f = Fig(1700, 1180)
 CX, CY, R = 800, 680, 400
 INK = ARROW   # grey, never black — docs/STYLE.md section 1
 
+# "Ability", not "work": the superhuman part belongs to the person. "Superhuman
+# work" can be read as the AI doing the work, which is the opposite of the claim.
+#
 # Nouns, not quantities. The reference says Sellers, Selection, Traffic — never
 # "more sellers" — because a flywheel already means "more of this drives more of
 # that", and repeating it in every label is the diagram explaining its own form.
@@ -265,7 +268,7 @@ INK = ARROW   # grey, never black — docs/STYLE.md section 1
 # what you already own, purple is the intelligence layer, coral is the human edge.
 f.wheel(CX, CY, R, [
     ("Models", PURPLE_TEXT),
-    ("Superhuman work", CORAL_TEXT),
+    ("Superhuman ability", CORAL_TEXT),
     ("Employees", CORAL_TEXT),
     ("Computers", GREEN_TEXT),
 ], hub_r=240, hub_lines=("COMPOUNDING", "INTELLIGENCE"), fs=CORE_FS, start=0,
