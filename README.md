@@ -56,8 +56,7 @@ The four steps below are the **local** path — your own network, no account, no
 
 ```bash
 grid up
-# grid=home
-# grid_url=http://192.168.1.25:8090            ← the one address engines and apps use
+# grid_url=http://192.168.1.25:8090
 ```
 
 ### 2 · Add a computer
@@ -67,8 +66,6 @@ Point Grid at an inference server you already run — here a machine running vLL
 
 ```bash
 grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
-# Joined engine gpu-4090 to http://192.168.1.25:8090 (pid=12345)
-# models=qwen3-coder
 ```
 
 Repeat for each computer. No inference server on it yet? See [Bring your own engine](#bring-your-own-engine).
@@ -95,8 +92,8 @@ Two computers, two frameworks, one endpoint.
 
 ```bash
 grid info --env
-# export OPENAI_BASE_URL="http://192.168.1.25:8090/v1"
-# export OPENAI_API_KEY="local-grid"
+# OPENAI_BASE_URL=http://192.168.1.25:8090/v1
+# OPENAI_API_KEY=local-grid
 ```
 
 Wire those two values into any OpenAI-compatible client.
@@ -160,8 +157,8 @@ from outside it, switch to **remote** mode: engines poll Autonomous Relay outbou
 from behind a NAT with no inbound port and no public IP.
 
 **The trade:** your request and its answer pass through our relay, which local mode never does. We
-forward and keep nothing — no stored prompts, no training on your traffic — but that hop is not
-encrypted end to end today. A hosted grid is a gateway to your intranet, not the intranet itself.
+forward and keep nothing: no stored prompts, no training on your traffic. A hosted grid is a
+gateway to your intranet, not the intranet itself.
 
 ```bash
 grid mode remote     # persisted to ~/.grid/state.json; --local / --remote overrides one command
