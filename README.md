@@ -2,7 +2,7 @@
 
 # ⚡ Grid
 
-### Inference and training on the computers you already own.
+### Local AI inference and training, on the computers you already own.
 
 [![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -11,12 +11,13 @@
 
 [**Quickstart**](#quickstart) · [Inference](#inference) · [Training](#training) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
-<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one grid. The grid is a single box holding two halves — inference and training — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
+<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one local AI grid. The grid is a single box holding two halves — inference and training — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
 
 </div>
 
-Grid pools the computers you already have — your Mac, your NVIDIA desktop, the workstation in the
-corner — behind **one OpenAI-compatible endpoint**, and does two things with them.
+Grid is the orchestration layer for **local AI**. It pools the computers you already have — your
+Mac, your NVIDIA desktop, the workstation in the corner — behind **one OpenAI-compatible
+endpoint**, and does two things with them.
 
 **Inference.** Each request routes to whichever computer runs the right model. The inference servers
 you already run — Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI — stay exactly where they are.

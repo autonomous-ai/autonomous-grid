@@ -41,14 +41,14 @@
   <rect x="1143" y="63" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="1258" y="105" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Your own app</text>
   <rect x="100" y="252" width="1460" height="240" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="154" y="320" fill="#5d579d" font-size="28" font-weight="700">Your grid</text>
+  <text x="154" y="320" fill="#5d579d" font-size="28" font-weight="700">Your local AI grid</text>
   <text x="154" y="370" fill="#2b2b29" font-size="24">5 nodes</text>
   <text x="154" y="404" fill="#2b2b29" font-size="24">5 models</text>
   <text x="154" y="438" fill="#2b2b29" font-size="24">424 GB GPU memory</text>
-  <rect x="480" y="290" width="493" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="727" y="385" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Inference</text>
-  <rect x="1013" y="290" width="493" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1260" y="385" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Training</text>
+  <rect x="485" y="290" width="490" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="385" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Inference</text>
+  <rect x="1016" y="290" width="490" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1261" y="385" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Training</text>
   <path d="M402 240 L402 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M688 240 L688 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M972 240 L972 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
