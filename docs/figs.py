@@ -17,6 +17,7 @@ ARROW, LABEL_TEXT = "#a1a099", "#2b2b29"
 H = 66            # every node is this tall
 BORDER = 2
 STROKE = 2
+RIM = 4           # the flywheel rim — heavy enough to read as one wheel, not six links
 NODE_FS = 25      # node label
 LABEL_FS = 22     # edge label
 PAD = 22          # horizontal padding inside a box
@@ -154,6 +155,80 @@ class Fig:
             self._saw(cx + ra, cy + ra)
         return placed
 
+    def wheel(self, cx, cy, r, stations, hub_r=0, hub_lines=(), hub_fill=None):
+        """A flywheel drawn the way the ones people remember are drawn.
+
+        The reference (Amazon's) works because of three things this deliberately
+        copies. The stations are *bare words sitting on the circle* — a box around
+        each one turns a wheel into six separate objects and the circle stops being
+        the subject. The arcs are heavy enough to read as one continuous rim rather
+        than six thin connectors. And the middle is not empty: the payoff the loop
+        produces is a filled disc, the heaviest thing in the frame, so the eye lands
+        in the centre and the ring explains itself around it.
+
+        `stations` are (label, colour) and are placed clockwise from the top. The
+        arc between two stations stops clear of each one's own text width, so a long
+        label never has the rim running through it.
+        """
+        import math
+        n = len(stations)
+        placed = []
+        for k, st in enumerate(stations):
+            label, colour = (st + (GREEN_TEXT,))[:2] if len(st) < 2 else st[:2]
+            deg = -90 + k * (360 / n)
+            th = math.radians(deg)
+            x, y = cx + r * math.cos(th), cy + r * math.sin(th)
+            self.parts.append(
+                f'<text x="{x:.0f}" y="{y + NODE_FS / 3:.0f}" text-anchor="middle" '
+                f'fill="{colour}" font-size="{NODE_FS}" font-weight="700">{label}</text>')
+            self._saw(x + text_w(label) / 2, y + H / 2)
+            placed.append((x, y, text_w(label), deg))
+
+        for k in range(n):
+            _, _, w1, a1 = placed[k]
+            _, _, w2, a2 = placed[(k + 1) % n]
+            g1 = math.degrees(math.atan((w1 / 2 + 34) / r))
+            g2 = math.degrees(math.atan((w2 / 2 + 44) / r))
+            s1, s2 = math.radians(a1 + g1), math.radians(a2 - g2)
+            p1 = (cx + r * math.cos(s1), cy + r * math.sin(s1))
+            p2 = (cx + r * math.cos(s2), cy + r * math.sin(s2))
+            self.parts.append(
+                f'<path d="M{p1[0]:.0f} {p1[1]:.0f} A{r:.0f} {r:.0f} 0 0 1 '
+                f'{p2[0]:.0f} {p2[1]:.0f}" fill="none" stroke="{ARROW}" '
+                f'stroke-width="{RIM}" marker-end="url(#H)"/>')
+            self._saw(cx + r, cy + r)
+
+        if hub_r:
+            self.parts.append(
+                f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{hub_r}" '
+                f'fill="{hub_fill or PURPLE_TEXT}"/>')
+            top = cy - (len(hub_lines) - 1) * 21 + 11
+            for i, ln in enumerate(hub_lines):
+                self.parts.append(
+                    f'<text x="{cx:.0f}" y="{top + i * 42:.0f}" text-anchor="middle" '
+                    f'fill="#fff" font-size="34" font-weight="700" '
+                    f'letter-spacing="0.5">{ln}</text>')
+        return placed
+
+    def inner_arc(self, cx, cy, r, a1, a2, label=()):
+        """A shortcut that stays inside the rim instead of cutting across it.
+
+        A straight chord through the middle reads as the wheel being broken in half;
+        an arc in the band between hub and rim reads as what it is — a faster way
+        round that skips most of the loop.
+        """
+        import math
+        p1 = (cx + r * math.cos(math.radians(a1)), cy + r * math.sin(math.radians(a1)))
+        p2 = (cx + r * math.cos(math.radians(a2)), cy + r * math.sin(math.radians(a2)))
+        self.parts.append(
+            f'<path d="M{p1[0]:.0f} {p1[1]:.0f} A{r:.0f} {r:.0f} 0 0 0 '
+            f'{p2[0]:.0f} {p2[1]:.0f}" fill="none" stroke="{ARROW}" stroke-width="{STROKE}" '
+            f'stroke-dasharray="8 8" marker-end="url(#h)"/>')
+        if label:
+            mid = math.radians((a1 + a2) / 2)
+            lx, ly = cx + (r - 34) * math.cos(mid), cy + (r - 34) * math.sin(mid)
+            self.label(lx, ly, *label)
+
     def hub(self, cx, cy, *lines):
         for i, ln in enumerate(lines):
             self.parts.append(
@@ -177,6 +252,11 @@ class Fig:
             f'orient="auto" markerUnits="userSpaceOnUse">\n'
             f'      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="{ARROW}" '
             f'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>\n'
+            f'    </marker>\n'
+            f'    <marker id="H" markerWidth="19" markerHeight="19" refX="13" refY="6.5" '
+            f'orient="auto" markerUnits="userSpaceOnUse">\n'
+            f'      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="{ARROW}" '
+            f'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>\n'
             f'    </marker>\n'
             f'  </defs>\n'
             f'  <rect width="{self.w}" height="{self.h}" fill="#fff"/>\n  ')

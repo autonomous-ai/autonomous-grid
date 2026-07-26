@@ -280,7 +280,7 @@ the moment it is judged, and judging it costs no hardware at all. A team that ne
 still wakes up to a better model.
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="740" alt="A flywheel: more people brings more machines, which brings more idle hours, which brings more training a night, which produces a better model, whose answers people keep, which brings more people. Across the middle, judged work goes straight back to training with no new hardware. Connecting more systems feeds the wheel.">
+<img src="../docs/fig-flywheel.png" width="740" alt="A flywheel turning around a better model. On the rim, clockwise: more people brings more machines, which brings more idle hours, which brings more training a night, whose answers people keep, which brings more people. Inside the rim a shorter arc runs the other way, from answers kept straight back to training: judged work needs no new hardware. Connecting more systems feeds the wheel from outside.">
 </p>
 
 Connecting a system feeds both: the model reaches more of the real work, so more of the work comes

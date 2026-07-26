@@ -1,7 +1,7 @@
 """Generate the six training figures. One system, six drawings."""
 import os
 
-from figs import Fig, box_w, H
+from figs import GREEN_TEXT, Fig, H, box_w
 
 OUT = os.path.dirname(os.path.abspath(__file__))
 M = 100          # page margin
@@ -15,7 +15,7 @@ def chain(f, y, items, edges=None):
     grows to fit its label so a caption can never sit on top of a box — the
     thing that was wrong with every earlier version of these figures.
     """
-    from figs import text_w, LABEL_FS
+    from figs import LABEL_FS, text_w
     edges = edges or [None] * (len(items) - 1)
     widths = [rest[0] if rest else (box_w(label) - 8 if kind == "term" else box_w(label))
               for kind, label, *rest in items]
@@ -174,30 +174,44 @@ f.write(f"{OUT}/train-architecture.svg")
 # Two loops, not one. The ring is the loop nobody else has: everyone who uses it
 # brings a machine, so headcount is capacity. The chord across the middle is the
 # faster loop — judged work needs no new hardware at all.
-f = Fig(1460, 1260)
-CX, CY, R = 730, 630, 500
-f.ring(CX, CY, R, [
-    ("More people", "green", 200),
-    ("More machines", "green", 240),
-    ("Idle hours", "green", 180),
-    ("More training", "green", 210),
-    ("A better model", "purple", 224),
-    ("Answers kept", "green", 215),
-])
-f.hub(CX, CY - 46, "the models you own,")
-f.hub(CX, CY - 12, "better every night")
+f = Fig(1180, 1030)
+CX, CY, R = 620, 560, 396
+# A better model is not a station on this wheel — it is what the wheel is *for*,
+# so it sits in the middle the way growth does on the flywheel everyone knows.
+# What is left on the rim is the mechanism, and every station on it is the same
+# kind of thing, so they are all one colour.
+f.wheel(CX, CY, R, [
+    ("More people", GREEN_TEXT),
+    ("More machines", GREEN_TEXT),
+    ("Idle hours", GREEN_TEXT),
+    ("More training", GREEN_TEXT),
+    ("Answers kept", GREEN_TEXT),
+], hub_r=176, hub_lines=("A BETTER", "MODEL"))
 
-# the data loop: judged work goes straight back to training, skipping the whole
-# hardware arc
-f.arrow(340, 408, 660, 1100, dashed=True)
-f.label(548, 806, "judged work,", anchor="start")
-f.label(548, 834, "no new hardware", anchor="start")
+# The faster loop, and the only one that runs against the rim: judged work goes
+# straight back to training without waiting for anyone to bring a machine. Drawn
+# inside the rim — a chord across the middle reads as the wheel cut in half — and
+# it is deliberately the short way between the only two stations it needs.
+# Hugging the hub, not the rim: at a rim-like radius the two arcs run parallel and
+# the shortcut reads as a second rim rather than a way across.
+f.inner_arc(CX, CY, 224, 198, 126)
+# The caption sits under the hub rather than beside the arc it describes: the left
+# wedge already carries the rim, the shortcut and two station names, and anything
+# placed there lands on one of them.
+f.label(CX - 54, CY + 240, "judged work,", "no new hardware")
 
-# connectors reach more of the real work, which is what brings the next team in
+# Connectors reach more of the real work, which is what brings the next team in.
+# It feeds the wheel from outside, like the cost/price loop on the reference. One
+# straight run, because a curve here has to bend twice and reads as a squiggle.
 cw = box_w("More systems connected") - 8
-f.term(50 + cw / 2, 66, "More systems connected", w=cw)
-f.arrow(50 + cw + 12, 86, CX - 100 - 16, 116, curve=70)
+f.term(CX - 366, 88, "More systems connected", w=cw)
+f.arrow(CX - 366 + cw / 2 + 14, 112, CX - 126, 172)
 
 f.write(f"{OUT}/fig-flywheel.svg")
 
 print("wrote seven figures")
+# NOTE: this writes SVGs only. The README embeds the PNGs beside them, and nothing
+# here regenerates those — a redrawn figure keeps showing the old picture on the
+# page, with nothing failing. Converting on mtime does not work, because every run
+# rewrites every SVG; it would have to compare content, and only for the figures
+# this file actually owns (fig-sutton, home-grid and train-grid come from elsewhere).
