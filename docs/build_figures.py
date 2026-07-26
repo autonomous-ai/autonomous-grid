@@ -427,8 +427,11 @@ PH = 240
 # Derived, never typed: these three go stale the moment FLEET changes otherwise.
 STATS = [f"{len(FLEET)} nodes · {len({model for *_, model in FLEET})} models",
          f"{sum(gb for _, _, gb, _ in FLEET)} GB GPU memory"]
+# One word each. "Local AI" was Ollama's category word, and it is wrong for a
+# hosted grid anyway; "Distributed" would claim model sharding we do not do. The
+# five machines underneath already show what "across your fleet" means.
 f.panel(M, 1660 - M, gy, "Your grid", STATS,
-        [("Local AI", "Inference"), ("Local AI", "Training")],
+        [("Inference",), ("Training",)],
         notes=[None, "experimental"], h=PH)
 for cx in app_x:
     f.arrow(cx, gy - PH / 2 - 12, cx, app_y + H / 2 + 14)
