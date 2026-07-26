@@ -8,9 +8,6 @@ The whole idea in one sentence: **reinforcement learning is about 75% sampling, 
 inference, and inference is what a grid already does.** The expensive part of training is work
 your fleet is already good at; the only new thing is one machine that adjusts weights.
 
-> A designed version of this explainer, with proper figures and the real measured curves:
-> **https://claude.ai/code/artifact/b7acee0f-029f-442b-b50d-3427b14c6342**
-
 ---
 
 ## 1. What reinforcement learning actually is
@@ -23,16 +20,28 @@ collapse, and knowing which three is most of the intuition.
 
 ```mermaid
 flowchart LR
-  subgraph classic["a · the textbook loop"]
+  subgraph classic[" a · the textbook loop "]
     direction TB
-    A["AGENT<br/>picks the next action"] -- "action" --> E["ENVIRONMENT<br/>a world that answers back"]
+    A(["<b>AGENT</b><br/>picks the next action"])
+    E(["<b>ENVIRONMENT</b><br/>a world that answers back"])
+    A -- "action" --> E
     E -- "state + reward" --> A
   end
-  subgraph llm["b · the same loop, for a model you own"]
+  subgraph llm[" b · the same loop, on a model you own "]
     direction TB
-    P["POLICY — your model<br/>writes one attempt, token by token"] -- "completion (the tokens it chose)" --> T["TASK + GRADER<br/>real work from your records,<br/>and a check on the result"]
-    T -- "reward 0 → 1" --> P
+    P(["<b>YOUR MODEL</b><br/>writes one attempt,<br/>token by token"])
+    T(["<b>YOUR WORK + A CHECK</b><br/>a real task from your records,<br/>and a way to score the answer"])
+    P -- "the tokens it chose" --> T
+    T -- "reward &nbsp;0 → 1" --> P
   end
+  classic ~~~ llm
+
+  classDef agent fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
+  classDef world fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
+  class A,P agent
+  class E,T world
+  style classic fill:transparent,stroke:#cbd5e1,stroke-dasharray:4 4,color:#64748b
+  style llm fill:transparent,stroke:#cbd5e1,stroke-dasharray:4 4,color:#64748b
 ```
 
 **1 — The episode is short.** Classic RL imagines a long trajectory: move, observe, move again. For
@@ -53,17 +62,32 @@ consumer hardware.
 
 ```mermaid
 flowchart TB
-  T["1 · one task from your data<br/><i>Reverse the words: red house tree</i>"]
-  G["2 · the model writes 8 attempts<br/>sampled, so they differ"]
-  S["3 · the grader scores each one<br/>1.00 · 0.67 · 0.67 · 0.50 · 0.42 · 0.33 · 0.17 · 0.00"]
-  M{"4 · above or below the<br/>group average of 0.47?"}
+  T["<b>1 · one task</b> from your data<br/><i>“Reverse the words: red house tree”</i>"]
+  G["<b>2 · eight attempts</b><br/>sampled, so they differ from each other"]
+  S["<b>3 · the grader scores each one</b><br/>1.00 · 0.67 · 0.67 · 0.50 · 0.42 · 0.33 · 0.17 · 0.00"]
+  M{"<b>4 · better or worse than<br/>the group's own average?</b><br/>0.47"}
   U["make those token choices<br/><b>more</b> likely"]
-  D["make them<br/><b>less</b> likely"]
-  O["5 · one optimizer step on a small<br/>add-on layer — LoRA, ~84 MB"]
+  D["make those token choices<br/><b>less</b> likely"]
+  O["<b>5 · one optimizer step</b><br/>on a small add-on layer — LoRA, ~84 MB"]
   T --> G --> S --> M
-  M -- above --> U --> O
-  M -- below --> D --> O
-  O -. "repeat a few hundred times" .-> T
+  M -- "&nbsp;better&nbsp;" --> U
+  M -- "&nbsp;worse&nbsp;" --> D
+  U --> O
+  D --> O
+  O -. "&nbsp;repeat a few hundred times&nbsp;" .-> T
+
+  classDef data fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
+  classDef work fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
+  classDef ask fill:#fff7ed,stroke:#ea580c,stroke-width:1.5px,color:#0f172a
+  classDef up fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#0f172a
+  classDef down fill:#fee2e2,stroke:#dc2626,stroke-width:1.5px,color:#0f172a
+  classDef step fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#0f172a
+  class T data
+  class G,S work
+  class M ask
+  class U up
+  class D down
+  class O step
 ```
 
 Note what is absent: **no labelled right answer is needed, only a way to score an attempt.** That
@@ -83,19 +107,20 @@ an improvement to a model you rent, and renting compute by the hour is the expen
 one job idle office hardware suits perfectly.
 
 ```mermaid
-flowchart LR
-  subgraph pool["rollout pool — writes the attempts · ~75% of the compute"]
-    direction TB
-    M1["MacBook Pro<br/>M-series · MLX"]
-    M2["MacBook Pro<br/>M-series · MLX"]
-    M3["MacBook Pro ×N<br/>join and leave freely"]
-    ST["Mac Studio 512 GB<br/>big memory · the local judge"]
-  end
-  GRID["<b>THE GRID</b><br/>one endpoint · decides which machine answers"]
-  TR["<b>THE TRAINER</b><br/>RTX PRO 6000 · or a 4090 · or one Mac<br/>holds the weights, does the learning,<br/>runs the held-out test on its own weights"]
-  pool --> GRID
-  GRID -- "attempts + the tokens it sampled" --> TR
-  TR -. "every 2 steps · push the new adapter back (~84 MB, about a second on the LAN)" .-> pool
+flowchart TB
+  POOL["<b>THE MACHINES THAT WRITE THE ATTEMPTS</b><br/><i>about 75% of the compute</i><br/><br/>MacBook Pro × N &nbsp;·&nbsp; Mac Studio<br/>they join and leave freely<br/>a sleeping laptop is skipped, never fatal"]
+  GRID{{"<b>THE GRID</b> &nbsp;·&nbsp; one endpoint<br/>decides which machine answers"}}
+  TR["<b>THE TRAINER</b> &nbsp;·&nbsp; one machine<br/><i>an RTX box, or simply the fastest Mac</i><br/>holds the weights &nbsp;·&nbsp; does the learning<br/>runs the held-out test on its own weights"]
+  POOL == "eight attempts per task, in parallel" ==> GRID
+  GRID == "the attempts, and the tokens it sampled" ==> TR
+  TR -. "<b>every 2 steps</b> · the new adapter goes back<br/>~84 MB, about a second on the LAN" .-> POOL
+
+  classDef mac fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#0f172a
+  classDef grid fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#0f172a
+  classDef trainer fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#0f172a
+  class POOL mac
+  class GRID grid
+  class TR trainer
 ```
 
 Two facts make this work on ordinary hardware: attempts are **independent**, so they fan out
@@ -113,17 +138,30 @@ training wants sustained capacity and nobody's lap getting hot. A scheduling gif
 
 ```mermaid
 flowchart LR
-  D["09:00 · INFERENCE<br/>people and agents work;<br/>each request is real business work"]
-  A["18:00 · ATTACH TRUTH<br/>the ticket resolved · the lead closed<br/>· the tests passed"]
-  N["23:00 · THE CLIMB<br/>attempts on idle machines,<br/>learning on the trainer"]
-  G{"07:00 · PROVE IT<br/>did it beat the model<br/>we already serve?"}
-  S["serve it today — the grid<br/>sends it more work"]
-  X["discard it"]
-  D --> A --> N --> G
-  G -- yes --> S
-  G -- "no / flat" --> X
-  S -. "tomorrow" .-> D
-  X -. "tomorrow" .-> D
+  D["<b>09:00 · THE DAY</b><br/>people and agents work<br/><i>every answer is kept as a candidate</i>"]
+  A["<b>18:00 · WHAT HAPPENED</b><br/>the reply was edited · the ticket resolved<br/>the lead closed · the tests passed"]
+  N["<b>23:00 · THE CLIMB</b><br/>attempts on the idle machines<br/>learning on the trainer"]
+  G{"<b>07:00 · PROVE IT</b><br/>did it beat the model<br/>we already serve?"}
+  S["<b>serve it</b><br/>the grid sends it more work"]
+  X["<b>bin it</b><br/>production untouched"]
+  D ==> A ==> N ==> G
+  G == "&nbsp;yes&nbsp;" ==> S
+  G == "&nbsp;no, or no better&nbsp;" ==> X
+  S -. "&nbsp;tomorrow&nbsp;" .-> D
+  X -. "&nbsp;tomorrow&nbsp;" .-> D
+
+  classDef day fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
+  classDef truth fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
+  classDef night fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#0f172a
+  classDef ask fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#0f172a
+  classDef good fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#0f172a
+  classDef bad fill:#fee2e2,stroke:#dc2626,stroke-width:1.5px,color:#0f172a
+  class D day
+  class A truth
+  class N night
+  class G ask
+  class S good
+  class X bad
 ```
 
 **Cadence is set by the slowest arrow, and that is *attach truth*:** whether a support reply worked
@@ -225,22 +263,41 @@ has to: a business runs its grid, and its models get better on their own.
 
 ```mermaid
 flowchart LR
-  W["work goes through the grid<br/>every answer is a candidate example"]
-  V{"what happened next?"}
-  E["a person EDITED it<br/><b>their version is the truth</b>"]
-  T["a stronger model answered<br/><b>a target, free of charge</b>"]
-  A["sent as-is<br/>good enough"]
-  X["discarded, or nobody said<br/><b>never imitated</b>"]
-  N["overnight: train on what earned it"]
-  G{"beat what we serve?"}
-  W --> V
-  V --> E --> N
-  V --> T --> N
-  V --> A --> N
-  V --> X
-  N --> G
-  G -- yes --> S["serve it"]
-  G -- "no" --> D["bin it, production untouched"]
+  W["<b>work goes through the grid</b><br/>every answer is a candidate example"]
+  V{"<b>what happened<br/>to that answer?</b>"}
+  E["<b>a person rewrote it</b><br/>their version is the truth<br/><i>weight 1.0</i>"]
+  T["<b>a stronger model answered</b><br/>a target, at no extra cost<br/><i>weight 0.8</i>"]
+  A["<b>sent as it was</b><br/>good enough<br/><i>weight 0.6</i>"]
+  X["<b>discarded — or nobody said</b><br/>kept for the record,<br/>never imitated"]
+  N["<b>overnight</b><br/>train on what earned its place"]
+  G{"<b>beat what<br/>we serve?</b>"}
+  S["<b>serve it</b>"]
+  D["<b>bin it</b><br/>production untouched"]
+  W ==> V
+  V ==> E ==> N
+  V ==> T ==> N
+  V ==> A ==> N
+  V -.-> X
+  N ==> G
+  G == "&nbsp;yes&nbsp;" ==> S
+  G == "&nbsp;no&nbsp;" ==> D
+
+  classDef src fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#0f172a
+  classDef ask fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#0f172a
+  classDef human fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#0f172a
+  classDef teacher fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#0f172a
+  classDef weak fill:#eef2f7,stroke:#94a3b8,stroke-width:1.5px,color:#0f172a
+  classDef never fill:#fee2e2,stroke:#dc2626,stroke-width:1.5px,color:#0f172a,stroke-dasharray:4 3
+  classDef night fill:#fef3c7,stroke:#d97706,stroke-width:1.5px,color:#0f172a
+  class W src
+  class V,G ask
+  class E human
+  class T teacher
+  class A weak
+  class X never
+  class N night
+  class S human
+  class D never
 ```
 
 The rule that keeps this honest is the box on the right: **a model's own unjudged output is stored
