@@ -28,7 +28,8 @@ FONT = "Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif"
 
 # An SVG marker carries its own colour, so a coloured arc drawn with the grey
 # arrowhead ends in a grey tip. One marker pair per colour the drawings use.
-MARKERS = {ARROW: "a", GREEN_TEXT: "g", PURPLE_TEXT: "p", CORAL_TEXT: "c"}
+MARKERS = {ARROW: "a", GREEN_TEXT: "g", PURPLE_TEXT: "p", CORAL_TEXT: "c",
+           LABEL_TEXT: "k"}
 
 
 def head(colour=None, heavy=False):
@@ -266,6 +267,12 @@ class Fig:
             f'stroke="{colour or ARROW}" stroke-width="{width or STROKE}"{dash} '
             f'marker-end="url(#{head(colour, heavy=(width or STROKE) >= RIM)})"/>')
         self._saw(max(x1, x2), max(y1, y2))
+
+    def dot(self, x, y, r=9, colour=None):
+        """Where a second loop leaves the wheel. The reference marks this point, and
+        marking it is what makes a fork read as a fork instead of a collision."""
+        self.parts.append(
+            f'<circle cx="{x:.0f}" cy="{y:.0f}" r="{r}" fill="{colour or LABEL_TEXT}"/>')
 
     def key(self, x, y, items, title=None):
         """The legend. Each entry names one advantage and the colour that carries it."""

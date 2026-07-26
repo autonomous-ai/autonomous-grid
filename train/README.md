@@ -270,7 +270,7 @@ curl $GRID/v1/feedback -d '{"request_id":"…","verdict":"edited","final_text":"
 ## The flywheel
 
 <p align="center">
-<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise: more computers, more models, superhuman work, more employees, and back to more computers. Two further arcs leave the hub and rejoin the ring at superhuman work — over the top, more connectors then more context; underneath, more training then sharper models.">
+<img src="../docs/fig-flywheel.png" width="820" alt="A flywheel around a filled hub reading INTELLIGENCE. The ring turns clockwise: more computers, more models, superhuman work, more employees, and back to more computers. Two further arcs fork off the rim at marked points and rejoin the ring at superhuman work — over the top, more connectors then more context; underneath, more training then sharper models.">
 </p>
 
 **The ring is the whole business in four words.** More employees arrive, and each arrives with a

@@ -217,42 +217,48 @@ f.label((mcx + tcx) / 2, 470, "the new adapter, to every machine, every two step
 f.write(f"{OUT}/train-architecture.svg")
 
 # -------------------------------------------------------------- fig-flywheel
-# Amazon's flywheel, station for station, because the mapping is exact and the
-# thing that makes theirs work is that it is SMALL: one ring, one arc that leaves
-# the hub and rejoins the ring, one filled centre, and nothing else. No legend,
-# no colour coding — the structure carries the argument, so anything added to
-# help the reader is a thing the reader has to read.
+# Amazon's flywheel, station for station. Four things make theirs read the way it
+# does, and all four are structural rather than decorative:
 #
-#   sellers -> more computers      selection -> more models
-#   traffic -> more employees      customer experience -> the end goal
-#   growth  -> intelligence
-#   lower cost structure -> more connectors   lower prices -> more context
-f = Fig(1560, 1300)
-CX, CY, R = 790, 640, 366
+#   1. the second loop FORKS off the wheel at a marked point — it does not cross
+#      it. Two lines leaving one dot read as a branch; two lines meeting in open
+#      space read as a mistake, which is what the first attempt looked like.
+#   2. the centre is large against the ring — a little over half its diameter —
+#      so the wheel reads as a disc with words round it, not a hoop.
+#   3. the lines are near-black and heavy. Thin grey says "annotation"; this is
+#      the argument.
+#   4. nothing else is on the page. No legend, no colour coding.
+#
+#   growth -> intelligence            sellers -> more computers
+#   selection -> more models          traffic -> more employees
+#   customer experience -> superhuman work
+#   lower cost structure -> more connectors    lower prices -> more context
+f = Fig(1620, 1330)
+CX, CY, R = 800, 650, 430
+INK = LABEL_TEXT
 
 f.wheel(CX, CY, R, [
     ("More models", LABEL_TEXT),
     ("Superhuman work", LABEL_TEXT),
     ("More employees", LABEL_TEXT),
     ("More computers", LABEL_TEXT),
-], hub_r=168, hub_lines=("INTELLIGENCE",), fs=CORE_FS)
+], hub_r=250, hub_lines=("INTELLIGENCE",), fs=CORE_FS, arc=INK)
 
-# The second loop leaves the hub, runs over the top, and comes back down into the
-# station it improves — the same path Amazon's cost/price loop takes.
-f.block(1150, 174, ("More context",), LABEL_TEXT, CORE_FS)
-f.block(372, 200, ("More connectors",), LABEL_TEXT, CORE_FS)
-f.bow(668, 522, 430, 258, lift=-54)
-f.bow(536, 172, 986, 154, lift=-46)
-f.bow(1216, 218, 1186, 592, lift=-48)
+# Both second loops fork off the rim rather than leaving the hub, so neither one
+# crosses the wheel. Each lands back on the station it improves.
+f.dot(448, 403)
+f.block(330, 176, ("More connectors",), LABEL_TEXT, CORE_FS)
+f.bow(448, 403, 392, 232, lift=-30, colour=INK, width=RIM)
+f.bow(492, 168, 1082, 152, lift=-58, colour=INK, width=RIM)
+f.bow(1310, 208, 1258, 596, lift=-56, colour=INK, width=RIM)
+f.block(1238, 160, ("More context",), LABEL_TEXT, CORE_FS)
 
-# The third loop is the same shape underneath: training makes the models sharper
-# at the jobs you actually run, and that lands in the same place. Both arcs come
-# home to the work, because that is what the whole thing is for.
-f.block(384, 1082, ("More training",), LABEL_TEXT, CORE_FS)
-f.block(1176, 1108, ("Sharper models",), LABEL_TEXT, CORE_FS)
-f.bow(668, 758, 436, 1030, lift=54)
-f.bow(548, 1122, 1010, 1140, lift=46)
-f.bow(1236, 1070, 1190, 692, lift=48)
+f.dot(448, 897)
+f.block(342, 1134, ("More training",), LABEL_TEXT, CORE_FS)
+f.bow(448, 897, 396, 1078, lift=30, colour=INK, width=RIM)
+f.bow(500, 1146, 1096, 1160, lift=58, colour=INK, width=RIM)
+f.bow(1330, 1108, 1262, 706, lift=56, colour=INK, width=RIM)
+f.block(1256, 1152, ("Sharper models",), LABEL_TEXT, CORE_FS)
 
 f.write(f"{OUT}/fig-flywheel.svg")
 
