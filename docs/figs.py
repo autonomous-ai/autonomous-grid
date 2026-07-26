@@ -160,7 +160,7 @@ class Fig:
             f'font-size="{NODE_FS}" font-weight="600">{label}</text>')
         self._saw(x2, cy + H / 2)
 
-    def panel(self, x1, x2, cy, title, stats, halves, h=240):
+    def panel(self, x1, x2, cy, title, stats, halves, notes=None, h=240):
         """One thing with two halves inside it, and what it knows about itself.
 
         The only container in the set, and it earns being one: the grid is a
@@ -198,11 +198,20 @@ class Fig:
             # A half may be two lines — "Local AI" over the job it does — so the
             # qualifier reads once and the job stays the word the eye lands on.
             lines = (t,) if isinstance(t, str) else tuple(t)
-            y0 = cy + 13 - (len(lines) - 1) * 23
+            note = (notes or [None] * len(halves))[i]
+            span = (len(lines) - 1) * 46
+            y0 = cy + 13 - span / 2 - (17 if note else 0)
             for j, ln in enumerate(lines):
                 self.parts.append(
                     f'<text x="{cx:.0f}" y="{y0 + j * 46:.0f}" text-anchor="middle" '
                     f'fill="{PURPLE_TEXT}" font-size="{CORE_FS}" font-weight="700">{ln}</text>')
+            # A maturity note is set small and grey on its own line. At the half's
+            # own size it would read as part of the name; the demotion IS the
+            # meaning — this half works, and is not finished.
+            if note:
+                self.parts.append(
+                    f'<text x="{cx:.0f}" y="{y0 + span + 44:.0f}" text-anchor="middle" '
+                    f'fill="{ARROW}" font-size="{LABEL_FS}">{note}</text>')
         self._saw(x2, cy + h / 2)
 
     def axis(self, x1, x2, y, ticks):

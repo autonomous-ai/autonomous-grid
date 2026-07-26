@@ -48,8 +48,9 @@
   <text x="727" y="362" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Local AI</text>
   <text x="727" y="408" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Inference</text>
   <rect x="1013" y="290" width="493" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1260" y="362" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Local AI</text>
-  <text x="1260" y="408" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Training</text>
+  <text x="1260" y="345" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Local AI</text>
+  <text x="1260" y="391" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Training</text>
+  <text x="1260" y="435" text-anchor="middle" fill="#a1a099" font-size="24">experimental</text>
   <path d="M402 240 L402 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M688 240 L688 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M972 240 L972 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
