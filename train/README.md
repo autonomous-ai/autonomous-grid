@@ -9,7 +9,7 @@ inference, and inference is what a grid already does.** The expensive part of tr
 your fleet is already good at; the only new thing is one machine that adjusts weights.
 
 <p align="center">
-<img src="../docs/train-architecture.png" alt="Training on a grid: one trainer — an NVIDIA box or a Mac — sends each task eight times through the grid; every machine you own writes attempts and returns them with the tokens it sampled; the new adapter goes back every two steps; the gate refuses anything that did not beat the model you already serve." width="880">
+<img src="../docs/train-architecture.png" width="900" alt="Your work goes to the machines you own, which write eight attempts a task; one trainer — a Mac or an NVIDIA box — turns those attempts into an adapter and sends it back every two steps; the gate serves the result only if it beats the model you already serve, and bins it otherwise.">
 </p>
 
 ---
@@ -23,7 +23,7 @@ Is it still the right picture for language models? **Yes — the loop is unchang
 collapse, and knowing which three is most of the intuition.
 
 <p align="center">
-<img src="../docs/fig-loop.png" width="620" alt="The reinforcement-learning loop on a model you own: your model writes an attempt, your work plus a check scores it between 0 and 1, and the model adjusts." width="880">
+<img src="../docs/fig-loop.png" width="720" alt="The reinforcement-learning loop on a model you own: your model writes an attempt, your work plus a check scores it between 0 and 1, and the model adjusts.">
 </p>
 
 **1 — The episode is short.** Classic RL imagines a long trajectory: move, observe, move again. For
@@ -43,7 +43,7 @@ consumer hardware.
 ## 2. One training step, exactly
 
 <p align="center">
-<img src="../docs/fig-step.png" width="620" alt="One training step: a task, eight sampled attempts, their own average as the bar, the ones above it made likelier and the ones below less likely, and one optimizer step on a small add-on layer." width="880">
+<img src="../docs/fig-step.png" width="800" alt="One training step: a task, eight sampled attempts, their own average as the bar, the ones above it made likelier and the ones below less likely, and one optimizer step on a small add-on layer.">
 </p>
 
 Note what is absent: **no labelled right answer is needed, only a way to score an attempt.** That
@@ -63,7 +63,7 @@ an improvement to a model you rent, and renting compute by the hour is the expen
 one job idle office hardware suits perfectly.
 
 <p align="center">
-<img src="../docs/train-grid.png" alt="The trainer sits above your grid: it sends one task eight times, every machine you own writes attempts and returns them with the tokens it sampled, and the new adapter goes back to those machines every two steps. The gate scores the result against the model you already serve." width="880">
+<img src="../docs/fig-fleet.png" width="900" alt="Tonight's tasks go to the grid, which gives one task to each machine — a MacBook Pro, a Mac Studio, an RTX box — and each writes eight attempts and returns them to the trainer. The new adapter goes back to the grid every two steps.">
 </p>
 
 Two facts make this work on ordinary hardware: attempts are **independent**, so they fan out
@@ -80,7 +80,7 @@ The two halves want the same machines at different hours. People need inference 
 training wants sustained capacity and nobody's lap getting hot. A scheduling gift, not a conflict.
 
 <p align="center">
-<img src="../docs/fig-day-night.png" width="470" alt="The day and night cycle: people work and every answer is kept, what happened is attached in the evening, the climb runs at 23:00 on idle machines, and at 07:00 the gate serves it or bins it." width="880">
+<img src="../docs/fig-day-night.png" width="940" alt="The day and night cycle: people work and every answer is kept, what happened is attached in the evening, the climb runs at 23:00 on idle machines, and at 07:00 the gate serves it or bins it.">
 </p>
 
 **Cadence is set by the slowest arrow, and that is *attach truth*:** whether a support reply worked
@@ -230,10 +230,10 @@ Everything above assumes someone exports a file and starts a run. The end state 
 has to: a business runs its grid, and its models get better on their own.
 
 <p align="center">
-<img src="../docs/fig-earns.png" width="620" alt="What earns a place in the training set: a person's rewrite is truth at weight 1.0, a stronger model's answer 0.8, an answer sent as-is 0.6, and a binned or unjudged answer is kept for the record but never imitated." width="880">
+<img src="../docs/fig-earns.png" width="760" alt="What earns a place in the training set: a person's rewrite is truth at weight 1.0, a stronger model's answer 0.8, an answer sent as-is 0.6, and a binned or unjudged answer is kept for the record but never imitated.">
 </p>
 
-The rule that keeps this honest is the box on the right: **a model's own unjudged output is stored
+The rule that keeps this honest is the last row: **a model's own unjudged output is stored
 but never trained on.** Imitating your own guesses is how a model drifts, so an example has to earn
 its place — a human's correction outranks a stronger model's answer, which outranks "nobody
 complained". Three signals, none of which costs anyone a minute of work.

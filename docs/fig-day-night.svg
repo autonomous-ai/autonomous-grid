@@ -1,48 +1,62 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 430" shape-rendering="geometricPrecision"
-     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1330 380" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
   <style>
-    .box  { fill:#fff; stroke:#000; stroke-width:3 }
-    .data { fill:#d0d1d3; stroke:#000; stroke-width:3 }
-    .term { fill:#a9a9a9; stroke:#000; stroke-width:3 }
-    .pri  { fill:none; stroke:#000; stroke-width:4.5 }
-    .sec  { fill:none; stroke:#000; stroke-width:2.25 }
-    .spine{ fill:none; stroke:#9eb5ce; stroke-width:9 }
-    .nm   { font-size:30px; fill:#000 }
-    .sm   { font-size:22px; fill:#000 }
-    .wd   { font-size:20px; fill:#000 }
+    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
+    .p  { fill:#f0eefb; stroke:#7a6fd1; stroke-width:1.7 }
+    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
+    .tg { fill:#4a8b2c; font-size:18px; font-weight:700 }
+    .tp { fill:#5b4fc0; font-size:18px; font-weight:700 }
+    .tc { fill:#c2593a; font-size:18px; font-weight:700 }
+    .s  { fill:#5c6470; font-size:13.5px }
+    .l  { fill:#3a3a3a; font-size:15px }
+    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
+    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
   </style>
-  <rect width="720" height="430" fill="#fff"/>
+  <rect width="1330" height="380" fill="#fff"/>
 
-  <rect x="286" y="16" width="148" height="66" rx="13" ry="13" class="box"/>
-  <text x="360" y="58" text-anchor="middle" class="nm">Serving</text>
+  <ellipse cx="78" cy="150" rx="60" ry="40" class="c"/>
+  <text x="78" y="145" text-anchor="middle" class="tc">The</text>
+  <text x="78" y="167" text-anchor="middle" class="tc">workday</text>
 
-  <rect x="276" y="120" width="168" height="48" rx="24" ry="24" class="data"/>
-  <text x="360" y="152" text-anchor="middle" class="sm">answers</text>
+  <rect x="186" y="110" width="196" height="80" rx="3" class="g"/>
+  <text x="284" y="145" text-anchor="middle" class="tg">Every answer</text>
+  <text x="284" y="168" text-anchor="middle" class="tg">is kept</text>
 
-  <rect x="276" y="206" width="168" height="48" rx="24" ry="24" class="data"/>
-  <text x="360" y="238" text-anchor="middle" class="sm">outcomes</text>
+  <rect x="438" y="110" width="196" height="80" rx="3" class="p"/>
+  <text x="536" y="145" text-anchor="middle" class="tp">What happened</text>
+  <text x="536" y="168" text-anchor="middle" class="tp">is attached</text>
+  <text x="536" y="212" text-anchor="middle" class="s">evening</text>
 
-  <rect x="286" y="292" width="148" height="66" rx="13" ry="13" class="box"/>
-  <text x="360" y="334" text-anchor="middle" class="nm">Training</text>
+  <rect x="690" y="110" width="196" height="80" rx="3" class="g"/>
+  <text x="788" y="145" text-anchor="middle" class="tg">The climb</text>
+  <text x="788" y="168" text-anchor="middle" class="tg">runs</text>
+  <text x="788" y="212" text-anchor="middle" class="s">23:00, on idle machines</text>
 
-  <g class="pri">
-    <path d="M360 82 V112"/><path d="M360 168 V198"/><path d="M360 254 V284"/>
-  </g>
-  <g fill="#000" stroke="#000" stroke-width="4.5">
-    <path d="M360 112 l-6 -15 h12 Z" transform="translate(0,15)"/>
-    <path d="M360 198 l-6 -15 h12 Z" transform="translate(0,15)"/>
-    <path d="M360 284 l-6 -15 h12 Z" transform="translate(0,15)"/>
-  </g>
+  <rect x="942" y="110" width="150" height="80" rx="3" class="p"/>
+  <text x="1017" y="156" text-anchor="middle" class="tp">The gate</text>
+  <text x="1017" y="212" text-anchor="middle" class="s">07:00</text>
 
-  <path d="M434 325 H612 V49 H434" class="spine"/>
-  <path d="M446 49 l-14 -6 v12 Z" fill="#9eb5ce" stroke="#9eb5ce" stroke-width="9"/>
+  <rect x="1160" y="14" width="150" height="56" rx="3" class="g"/>
+  <text x="1235" y="49" text-anchor="middle" class="tg">Served</text>
 
-  <path d="M286 325 H108 V392" class="sec"/>
-  <path d="M108 392 l-5 -14 h10 Z" fill="#000" stroke="#000" stroke-width="2.25" transform="translate(0,14)"/>
-  <rect x="94.4" y="392" width="27.3" height="27.3" class="term"/>
+  <rect x="1160" y="248" width="150" height="56" rx="3" class="c"/>
+  <text x="1235" y="283" text-anchor="middle" class="tc">Binned</text>
 
-  <path d="M420 358 m-60 26 a72 72 0 0 0 -156 -18" class="sec"/>
-  <text x="152" y="360" text-anchor="end" class="wd">gate</text>
-  <text x="628" y="196" class="wd">better</text>
-  <text x="132" y="440" text-anchor="middle" class="wd"></text>
+  <path d="M140 150 H176" class="ln" marker-end="url(#a)"/>
+  <path d="M382 150 H428" class="ln" marker-end="url(#a)"/>
+  <path d="M634 150 H680" class="ln" marker-end="url(#a)"/>
+  <path d="M886 150 H932" class="ln" marker-end="url(#a)"/>
+
+  <path d="M1092 132 C1124 132, 1128 42, 1150 42" class="ln" marker-end="url(#a)"/>
+  <text x="1108" y="100" text-anchor="middle" class="l">better</text>
+  <path d="M1092 168 C1124 168, 1128 276, 1150 276" class="dn" marker-end="url(#a)"/>
+  <text x="1110" y="228" text-anchor="middle" class="l">not better</text>
+
+  <path d="M1235 70 V92 H78 V100" class="dn" marker-end="url(#a)"/>
+  <text x="640" y="82" text-anchor="middle" class="l">tomorrow, on a better model</text>
 </svg>

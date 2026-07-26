@@ -1,92 +1,55 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 620"
-     font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 340" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#6e6e6e" stroke-width="1.6"
+      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
             stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
   <style>
-    .panel { fill:#ebeae3 }
-    .node  { fill:#b9d6ee }
-    .gate  { fill:#f2c9b8 }
-    .h  { fill:#3d3d3d; font-size:30px; font-weight:800 }
-    .ph { fill:#6a6a6a; font-size:21px; font-weight:800 }
-    .n  { fill:#33424d; font-size:19px; font-weight:750 }
-    .s  { fill:#4f5c66; font-size:14px }
-    .l  { fill:#5a5a5a; font-size:14.5px; font-weight:700 }
-    .ln { fill:none; stroke:#6e6e6e; stroke-width:1.6 }
-    .dn { fill:none; stroke:#9a9a9a; stroke-width:1.6; stroke-dasharray:6 5 }
+    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
+    .p  { fill:#f0eefb; stroke:#7a6fd1; stroke-width:1.7 }
+    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
+    .tg { fill:#4a8b2c; font-size:18px; font-weight:700 }
+    .tp { fill:#5b4fc0; font-size:18px; font-weight:700 }
+    .tc { fill:#c2593a; font-size:18px; font-weight:700 }
+    .s  { fill:#5c6470; font-size:13.5px }
+    .l  { fill:#3a3a3a; font-size:15px }
+    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
+    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
   </style>
-  <rect width="1280" height="620" fill="#fff"/>
-  <text x="640" y="52" text-anchor="middle" class="h">Training on the machines you own</text>
+  <rect width="1240" height="340" fill="#fff"/>
 
-  <!-- left: the data -->
-  <rect x="40" y="92" width="250" height="470" rx="22" class="panel"/>
-  <text x="165" y="142" text-anchor="middle" class="ph">Your data</text>
+  <ellipse cx="80" cy="150" rx="62" ry="40" class="c"/>
+  <text x="80" y="145" text-anchor="middle" class="tc">Your</text>
+  <text x="80" y="167" text-anchor="middle" class="tc">work</text>
 
-  <rect x="76" y="184" width="178" height="72" rx="8" class="node"/>
-  <text x="165" y="216" text-anchor="middle" class="n">Work it did</text>
-  <text x="165" y="240" text-anchor="middle" class="s">kept locally, redacted</text>
+  <rect x="196" y="108" width="230" height="84" rx="3" class="g"/>
+  <text x="311" y="145" text-anchor="middle" class="tg">Machines you own</text>
+  <text x="311" y="169" text-anchor="middle" class="s">eight attempts a task</text>
 
-  <rect x="76" y="292" width="178" height="72" rx="8" class="node"/>
-  <text x="165" y="324" text-anchor="middle" class="n">Or an export</text>
-  <text x="165" y="348" text-anchor="middle" class="s">tickets, deals, labels</text>
+  <rect x="502" y="108" width="230" height="84" rx="3" class="p"/>
+  <text x="617" y="145" text-anchor="middle" class="tp">One trainer</text>
+  <text x="617" y="169" text-anchor="middle" class="s">a Mac or an NVIDIA box</text>
 
-  <rect x="76" y="400" width="178" height="72" rx="8" class="node"/>
-  <text x="165" y="432" text-anchor="middle" class="n">Verdicts</text>
-  <text x="165" y="456" text-anchor="middle" class="s">edited · sent · binned</text>
+  <rect x="808" y="108" width="170" height="84" rx="3" class="p"/>
+  <text x="893" y="145" text-anchor="middle" class="tp">The gate</text>
+  <text x="893" y="169" text-anchor="middle" class="s">better than today's?</text>
 
-  <!-- right: training -->
-  <rect x="358" y="92" width="882" height="470" rx="22" class="panel"/>
-  <text x="799" y="142" text-anchor="middle" class="ph">Training</text>
+  <rect x="1054" y="30" width="160" height="60" rx="3" class="g"/>
+  <text x="1134" y="67" text-anchor="middle" class="tg">Served</text>
 
-  <rect x="596" y="184" width="286" height="88" rx="8" class="node"/>
-  <text x="739" y="222" text-anchor="middle" class="n">Trainer</text>
-  <text x="739" y="248" text-anchor="middle" class="s">one machine — NVIDIA or Mac</text>
+  <rect x="1054" y="216" width="160" height="60" rx="3" class="c"/>
+  <text x="1134" y="253" text-anchor="middle" class="tc">Binned</text>
 
-  <rect x="410" y="196" width="140" height="64" rx="8" class="gate"/>
-  <text x="480" y="223" text-anchor="middle" class="n">Gate</text>
-  <text x="480" y="245" text-anchor="middle" class="s">better?</text>
+  <path d="M144 150 H186" class="ln" marker-end="url(#a)"/>
+  <path d="M426 150 H492" class="ln" marker-end="url(#a)"/>
+  <text x="459" y="138" text-anchor="middle" class="l">attempts</text>
+  <path d="M732 150 H798" class="ln" marker-end="url(#a)"/>
+  <text x="765" y="138" text-anchor="middle" class="l">adapter</text>
 
-  <rect x="928" y="196" width="150" height="64" rx="8" class="node"/>
-  <text x="1003" y="223" text-anchor="middle" class="n">Adapter</text>
-  <text x="1003" y="245" text-anchor="middle" class="s">84 MB</text>
+  <path d="M978 132 C1018 132, 1022 60, 1044 60" class="ln" marker-end="url(#a)"/>
+  <path d="M978 168 C1018 168, 1022 246, 1044 246" class="dn" marker-end="url(#a)"/>
 
-  <rect x="654" y="330" width="170" height="56" rx="8" class="node"/>
-  <text x="739" y="365" text-anchor="middle" class="n">Grid</text>
-
-  <rect x="440" y="454" width="212" height="72" rx="8" class="node"/>
-  <text x="546" y="486" text-anchor="middle" class="n">MacBook Pro × 12</text>
-  <text x="546" y="510" text-anchor="middle" class="s">a task each, eight attempts</text>
-
-  <rect x="686" y="454" width="180" height="72" rx="8" class="node"/>
-  <text x="776" y="486" text-anchor="middle" class="n">Mac Studio</text>
-  <text x="776" y="510" text-anchor="middle" class="s">a task, eight attempts</text>
-
-  <rect x="900" y="454" width="180" height="72" rx="8" class="node"/>
-  <text x="990" y="486" text-anchor="middle" class="n">RTX box</text>
-  <text x="990" y="510" text-anchor="middle" class="s">a task, eight attempts</text>
-
-  <!-- flows -->
-  <path d="M300 228 H586" class="ln" marker-end="url(#a)"/>
-  <text x="443" y="216" text-anchor="middle" class="l">Tasks</text>
-  <path d="M586 196 H300" class="dn" marker-end="url(#a)"/>
-  <text x="443" y="184" text-anchor="middle" class="l">A better model, or none</text>
-
-  <path d="M596 228 H562" class="ln" marker-end="url(#a)"/>
-  <path d="M882 216 H918" class="ln" marker-end="url(#a)"/>
-  <path d="M918 244 H882" class="ln" marker-end="url(#a)"/>
-
-  <path d="M722 272 V320" class="ln" marker-end="url(#a)"/>
-  <path d="M756 320 V272" class="ln" marker-end="url(#a)"/>
-  <text x="690" y="302" text-anchor="end" class="l">Tasks</text>
-  <text x="788" y="302" class="l">Attempts</text>
-
-  <path d="M700 386 L570 444" class="ln" marker-end="url(#a)"/>
-  <path d="M739 386 V444" class="ln" marker-end="url(#a)"/>
-  <path d="M778 386 L966 444" class="ln" marker-end="url(#a)"/>
-
-  <path d="M1003 260 C1130 260, 1140 420, 1080 480" class="dn" marker-end="url(#a)"/>
-  <text x="1150" y="372" text-anchor="middle" class="l">every 2 steps</text>
+  <path d="M617 192 V250 H311 V202" class="dn" marker-end="url(#a)"/>
+  <text x="464" y="272" text-anchor="middle" class="l">the new adapter, every two steps</text>
 </svg>

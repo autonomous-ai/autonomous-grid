@@ -1,45 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 260" shape-rendering="geometricPrecision"
-     font-family="Helvetica, Arial, sans-serif" stroke-linejoin="miter" stroke-linecap="butt">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" font-family="Avenir Next, Nunito, Poppins, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="13" markerHeight="13" refX="10" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1,1 L9.5,4.5 L1,8" fill="none" stroke="#8a8a8a" stroke-width="1.7"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
   <style>
-    .n   { stroke:#000; stroke-width:2; fill:#fff }
-    .dot { fill:#000 }
-    .term{ fill:#a9a9a9; stroke:#000; stroke-width:2 }
-    .e   { stroke:#000; stroke-width:2; fill:none }
-    .hd  { font-size:20px; fill:#000 }
-    .num { font-family:Georgia,'Times New Roman',serif; font-size:22px; fill:#000 }
+    .g  { fill:#eef7ea; stroke:#7cb342; stroke-width:1.7 }
+    .c  { fill:#fdf0ec; stroke:#e8967c; stroke-width:1.7 }
+    .tg { fill:#4a8b2c; font-size:18px; font-weight:700 }
+    .tc { fill:#c2593a; font-size:18px; font-weight:700 }
+    .w  { fill:#4a8b2c; font-size:26px; font-weight:800 }
+    .wc { fill:#c2593a; font-size:16px; font-weight:700 }
+    .s  { fill:#5c6470; font-size:13.5px }
+    .ln { fill:none; stroke:#8a8a8a; stroke-width:1.9 }
+    .dn { fill:none; stroke:#a8a8a8; stroke-width:1.9; stroke-dasharray:7 6 }
   </style>
-  <rect width="720" height="260" fill="#fff"/>
+  <rect width="1000" height="400" fill="#fff"/>
 
-  <!-- four columns: one served answer, one thing that became of it -->
-  <g class="hd" text-anchor="middle">
-    <text x="136" y="42">rewritten</text>
-    <text x="304" y="42">teacher</text>
-    <text x="472" y="42">sent</text>
-    <text x="640" y="42">binned</text>
-  </g>
+  <ellipse cx="92" cy="200" rx="72" ry="44" class="c"/>
+  <text x="92" y="195" text-anchor="middle" class="tc">One answer</text>
+  <text x="92" y="217" text-anchor="middle" class="tc">it served</text>
 
-  <g class="n">
-    <circle cx="136" cy="88" r="15"/> <circle cx="304" cy="88" r="15"/>
-    <circle cx="472" cy="88" r="15"/> <circle cx="640" cy="88" r="15"/>
-  </g>
+  <rect x="290" y="24" width="330" height="70" rx="3" class="g"/>
+  <text x="314" y="56" class="tg">You rewrote it</text>
+  <text x="314" y="78" class="s">what you meant, in your words</text>
+  <text x="700" y="68" text-anchor="middle" class="w">1.0</text>
 
-  <g class="e">
-    <path d="M136 103 V166"/> <path d="M304 103 V166"/>
-    <path d="M472 103 V166"/> <path d="M640 103 V166"/>
-  </g>
-  <g fill="#000" stroke="#000" stroke-width="2">
-    <path d="M136 175 l-5 -13.5 h10 Z"/> <path d="M304 175 l-5 -13.5 h10 Z"/>
-    <path d="M472 175 l-5 -13.5 h10 Z"/> <path d="M640 175 l-5 -13.5 h10 Z"/>
-  </g>
+  <rect x="290" y="118" width="330" height="70" rx="3" class="g"/>
+  <text x="314" y="150" class="tg">A stronger model answered</text>
+  <text x="314" y="172" class="s">good, but not yours</text>
+  <text x="700" y="162" text-anchor="middle" class="w">0.8</text>
 
-  <circle cx="136" cy="190" r="7.5" class="dot"/>
-  <circle cx="304" cy="190" r="7.5" class="dot"/>
-  <circle cx="472" cy="190" r="7.5" class="dot"/>
-  <rect x="626.4" y="176.4" width="27.3" height="27.3" class="term"/>
+  <rect x="290" y="212" width="330" height="70" rx="3" class="g"/>
+  <text x="314" y="244" class="tg">You sent it as it was</text>
+  <text x="314" y="266" class="s">approval, quietly</text>
+  <text x="700" y="256" text-anchor="middle" class="w">0.6</text>
 
-  <g class="num" text-anchor="middle">
-    <text x="136" y="238">1.0</text>
-    <text x="304" y="238">0.8</text>
-    <text x="472" y="238">0.6</text>
-  </g>
+  <rect x="290" y="306" width="330" height="70" rx="3" class="c"/>
+  <text x="314" y="338" class="tc">You binned it</text>
+  <text x="314" y="360" class="s">kept as a record</text>
+  <text x="700" y="350" text-anchor="middle" class="wc">never imitated</text>
+
+  <path d="M164 178 C226 178, 236 59, 280 59" class="ln" marker-end="url(#a)"/>
+  <path d="M164 192 C226 192, 236 153, 280 153" class="ln" marker-end="url(#a)"/>
+  <path d="M164 208 C226 208, 236 247, 280 247" class="ln" marker-end="url(#a)"/>
+  <path d="M164 222 C226 222, 236 341, 280 341" class="dn" marker-end="url(#a)"/>
+
+  <text x="700" y="16" text-anchor="middle" class="s">weight in the training set</text>
 </svg>
