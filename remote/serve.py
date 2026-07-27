@@ -305,11 +305,12 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                 print(f"Stopping ComfyUI failed (ignoring): {exc}", file=sys.stderr)
         if not registered:
             # Reap the on-disk record for an engine that died before registering (e.g. a media engine
-            # whose ComfyUI never became ready), so it doesn't linger and force a `grid leave --all`.
-            try:
-                run_records.record_path(grid_id, engine_id).unlink(missing_ok=True)
-            except OSError as exc:  # best-effort teardown; never mask the real exit
-                print(f"Reaping stale record failed (ignoring): {exc}", file=sys.stderr)
+            # whose ComfyUI never became ready), so it doesn't linger and force a `grid leave --all` —
+            # but ONLY while that record still points at us. A record a newer serve child now owns is
+            # left alone: unlinking it would strand that live child untracked (issue 05's audit).
+            # No guard needed here — like every other step in this `finally`, it is best-effort and
+            # reports its own failures to stderr rather than raising over the real exit error.
+            run_records.discard_own_record(grid_id, engine_id)
     return rc
 
 

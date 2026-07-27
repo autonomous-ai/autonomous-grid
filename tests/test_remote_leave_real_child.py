@@ -1,5 +1,6 @@
-"""The one deliberate real-subprocess test in this suite: a **real** detached ``__remote-engine``
-serve child, torn down by the **real** ``grid leave`` handler, against a **fake in-process relay**.
+"""The deliberate real-subprocess tests in this suite: a **real** detached ``__remote-engine`` serve
+child — torn down by the **real** ``grid leave`` handler, or dying on its own before it ever
+registered — against a **fake in-process relay**.
 
 Why this exists (`.scratch/grid-leave/` issue 04). `grid leave` used to kill the serve child by the
 run record's pid *alone* and then delete the record unconditionally, so a stale or missing record
@@ -19,6 +20,11 @@ same question ``grid models`` / ``grid engines`` do. Each regime asserts the sym
 
 Nothing in the leave path is mocked — real dispatch, real ``_stop_engine``, real POSIX argv sweep
 (shelling out to the host's ``ps``), real ``PUT`` over real HTTP.
+
+The second test (grid-leave issue 05) covers the other end of the same orphan class: the record
+*deletion* a serve child performs from its own exit path when it dies before registering. Mocked,
+that unlink and an ownership-checked one look identical — it takes a real child, really stamping its
+real pid into a real record, to show which record it actually removes.
 
 One subtlety worth stating plainly, because it decides what this file can prove. The child's own
 exit-path unregister sends a ``PUT`` byte-identical to the CLI's backstop deregister, and leave runs
@@ -197,7 +203,18 @@ class _Handler(BaseHTTPRequestHandler):
             pass  # the child was signalled mid-request — that IS the teardown under test
 
     def do_PUT(self) -> None:  # register / the child's own unregister / the CLI backstop deregister
-        self._state.put_node(self.path, self._read_body())
+        body = self._read_body()
+        gate = self.server.register_gate  # type: ignore[attr-defined]
+        if gate is not None and body.get("role") == "provider":
+            # Park the child INSIDE its registration so the test can act while it is demonstrably
+            # past its startup pid self-stamp and demonstrably not yet registered, then fail it. No
+            # sleep-and-hope: `register_seen` says "it's blocked here now".
+            self.server.register_seen.set()  # type: ignore[attr-defined]
+            gate.wait(timeout=_WAIT_TIMEOUT)
+            self._state.put_node(self.path, body)
+            self._send_json(500, {"error": "relay unavailable"})
+            return
+        self._state.put_node(self.path, body)
         self._send_json(200, {"status": "updated"})
 
     def do_POST(self) -> None:
@@ -227,14 +244,22 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class _FakeRelay(ThreadingHTTPServer):
-    """The grid's relay and control plane on one ephemeral loopback port."""
+    """The grid's relay and control plane on one ephemeral loopback port.
+
+    With ``gate_register`` the register ``PUT`` is held open until the test releases it and then
+    answered ``500`` — a relay that is up but unwell, which is what a master mid-respawn looks like
+    to a joining child (the PRD's field confirmation #2) and the only way to fail a *real* child
+    after its startup self-stamp without mocking anything inside it.
+    """
 
     daemon_threads = True  # a parked poll handler must never hold up interpreter exit
 
-    def __init__(self) -> None:
+    def __init__(self, *, gate_register: bool = False) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
         self.relay_state = _RelayState()
         self.base_url = f"http://127.0.0.1:{self.server_address[1]}"
+        self.register_gate = threading.Event() if gate_register else None
+        self.register_seen = threading.Event()
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
 
@@ -348,13 +373,41 @@ def _seed_grid_home(monkeypatch, tmp_path, *, network_id: str, node_id: str, rel
     })
 
 
+class _Spawned:
+    """Everything a spawning fixture must tear down, split by how it may be killed.
+
+    ``children`` are detached serve children (``start_new_session=True`` → their own process group,
+    so ``_kill_process_group`` is confined to them). ``helpers`` are ordinary ``Popen`` processes that
+    share pytest's process group — killed by pid ONLY, never by group, or the run kills itself."""
+
+    def __init__(self) -> None:
+        self.relays: list[_FakeRelay] = []
+        self.children: list[subprocess.Popen] = []
+        self.helpers: list[subprocess.Popen] = []
+
+
 @pytest.fixture
-def live_engine(monkeypatch, tmp_path):
+def spawned():
+    box = _Spawned()
+    yield box
+    for proc in box.children:  # children first, so none is left polling a relay that's going away
+        _kill_process_group(proc)
+    for proc in box.helpers:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    for relay in box.relays:
+        relay.shutdown()
+        relay.server_close()
+
+
+@pytest.fixture
+def live_engine(monkeypatch, tmp_path, spawned):
     """Seed a remote-mode ``GRID_HOME``, start the relay double, spawn the **real** detached serve
     child, and block until the relay sees it as a live provider. Yields a factory (the per-regime
-    network id has to be unique) and guarantees teardown of whatever it started."""
-    relays: list[_FakeRelay] = []
-    procs: list[subprocess.Popen] = []
+    network id has to be unique); ``spawned`` guarantees teardown of whatever it started."""
+    relays = spawned.relays
+    procs = spawned.children
 
     def start(tag: str) -> _LiveEngine:
         # A unique network id per regime, because the argv sweep under test is the REAL one: it
@@ -392,17 +445,46 @@ def live_engine(monkeypatch, tmp_path):
             record_path=run_records.record_path(network_id, _ENGINE_ID),
         )
 
-    yield start
+    return start
 
-    for proc in procs:  # children first, so none is left polling a relay that's going away
-        _kill_process_group(proc)
-    for relay in relays:
-        relay.shutdown()
-        relay.server_close()
+
+@pytest.fixture
+def dying_engine(monkeypatch, tmp_path, spawned):
+    """Same real spawn, but against a relay that holds the register ``PUT`` open and then fails it.
+    Returns once the child is parked inside its registration — past its startup pid self-stamp,
+    never registered — which is the only window where the exit-path record reap under test decides
+    anything. The caller releases the gate (``engine.relay.register_gate.set()``)."""
+
+    def start(tag: str) -> _LiveEngine:
+        network_id = f"itest-{os.getpid()}-{tag}"  # unique per regime — see `live_engine`
+        node_id = f"node-{tag}"
+        relay = _FakeRelay(gate_register=True)
+        spawned.relays.append(relay)
+
+        _seed_grid_home(monkeypatch, tmp_path, network_id=network_id, node_id=node_id,
+                        relay_base=relay.base_url)
+        monkeypatch.setattr(runtime, "cli_command", lambda: [sys.executable, "-m", "cli"])
+        proc = cli.remote_provider._spawn_remote_engine(network_id, _ENGINE_ID)
+        spawned.children.append(proc)
+        relay.relay_state.child_pid = proc.pid
+        # Reap on exit, or the dead child lingers as a zombie and `pid_alive` keeps calling it alive
+        # (the same trap `live_engine` documents — and the one this file's waits depend on).
+        threading.Thread(target=proc.wait, daemon=True).start()
+
+        assert relay.register_seen.wait(_WAIT_TIMEOUT), (
+            f"the serve child never reached its register PUT (exit={proc.poll()}). "
+            f"Child log:\n{_log_tail(network_id)}"
+        )
+        return _LiveEngine(
+            network_id=network_id, node_id=node_id, relay=relay, proc=proc,
+            record_path=run_records.record_path(network_id, _ENGINE_ID),
+        )
+
+    return start
 
 
 # ---------------------------------------------------------------------------
-# The regression test
+# The regression tests
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("regime", ["healthy", "stale_pid", "orphan"])
@@ -492,3 +574,53 @@ def test_real_child_leave_kills_the_child_and_deregisters(live_engine, capsys, r
     else:  # orphan
         assert reaped_line in out
         assert f"No engines were tracked for {_GRID_NAME}; deregistered it from the relay" in out
+
+
+@pytest.mark.parametrize("owner", ["itself", "newer-child"])
+def test_real_child_dying_before_registration_reaps_only_its_own_record(dying_engine, spawned, owner):
+    """A serve child that dies before it ever registered removes its run record — unless that record
+    has meanwhile been handed to a **live** newer child, in which case it must leave it alone.
+
+    The other half of the audited orphan class (`.scratch/grid-leave/` issue 05). The unlink used to
+    be unconditional and keyed by ``(grid, engine_id)`` rather than by process, so a child wedged in
+    bring-up — minutes, in the field — would, whenever it finally died, delete the record of the
+    child that had since replaced it. That leaves a live serve child with nothing on disk pointing at
+    it: exactly the untracked orphan the argv sweep had to be invented to reap, manufactured here by
+    the CLI itself rather than by an outside deleter.
+
+    Real child, real self-stamp, real record files: with ``Popen`` mocked, an unlink that checks
+    ownership and one that doesn't are indistinguishable.
+    """
+    engine = dying_engine(owner)
+    stamped = int(run_records.read_record(engine.network_id, _ENGINE_ID)["pid"])
+    assert stamped == engine.proc.pid, (
+        "the child had not self-stamped its pid by the time it reached its register PUT, so this "
+        "test would prove nothing about which record it reaps"
+    )
+
+    successor = None
+    if owner == "newer-child":
+        # Stand in for the serve child a re-join would have started while this one hung: any live
+        # process that is neither the dying child nor its parent (the reap treats a launcher-shim
+        # parent as its own — see `run_records.discard_own_record`).
+        successor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        spawned.helpers.append(successor)
+        run_records.update_record(engine.network_id, _ENGINE_ID, pid=successor.pid)
+
+    engine.relay.register_gate.set()  # 500 → the child dies having never registered
+
+    assert _wait_until(lambda: not run_records.pid_alive(engine.proc.pid)), (
+        f"the serve child (pid {engine.proc.pid}) never exited after its registration failed. "
+        f"Child log:\n{_log_tail(engine.network_id)}"
+    )
+    if owner == "itself":
+        assert not engine.record_path.exists(), (
+            "a died-before-registering child must still clear its own record, or every failed "
+            "bring-up leaves a ghost that only `grid leave --all` can remove"
+        )
+    else:
+        assert engine.record_path.exists(), (
+            f"the dying child deleted the record now owned by live pid {successor.pid} — that child "
+            "keeps serving with no record, untracked by `grid leave` and invisible to `grid join`"
+        )
+        assert int(run_records.read_record(engine.network_id, _ENGINE_ID)["pid"]) == successor.pid

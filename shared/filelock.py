@@ -28,6 +28,31 @@ except ModuleNotFoundError:  # Windows (consumer/playground scope) — msvcrt fa
     _HAVE_FCNTL = False
 
 
+def _open_lock_fd(path: Path) -> int:
+    """The fd the lock is taken on: a sibling ``<path>.lock``, so it never collides with the
+    atomic-rename target. Parent directories are created as needed."""
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+
+
+def _release(fd: int) -> None:
+    if _HAVE_FCNTL:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    else:
+        os.lseek(fd, 0, os.SEEK_SET)
+        with contextlib.suppress(OSError):
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
+def _seed_windows_byte(fd: int) -> None:
+    """``msvcrt.locking`` locks from the current file offset and needs a byte to lock, so seed a
+    sentinel byte and rewind before locking a 1-byte region at offset 0."""
+    if os.fstat(fd).st_size == 0:
+        os.write(fd, b"\0")
+    os.lseek(fd, 0, os.SEEK_SET)
+
+
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
     """Hold an exclusive advisory lock for the body of the ``with`` block.
@@ -40,25 +65,54 @@ def file_lock(path: Path) -> Iterator[None]:
     Both are advisory locks tied to the open fd and released on ``close``/process exit, so a crashed
     holder never strands the lock.
     """
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = _open_lock_fd(path)
     try:
         if _HAVE_FCNTL:
             fcntl.flock(fd, fcntl.LOCK_EX)  # blocks until no other holder
         else:
-            # msvcrt.locking locks from the current file offset and needs a byte to lock,
-            # so seed a sentinel byte and lock a 1-byte region at offset 0.
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
-            os.lseek(fd, 0, os.SEEK_SET)
+            _seed_windows_byte(fd)
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # blocks (retries) until no other holder
         yield
     finally:
-        if _HAVE_FCNTL:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        else:
-            os.lseek(fd, 0, os.SEEK_SET)
-            with contextlib.suppress(OSError):
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        _release(fd)
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def try_file_lock(path: Path) -> Iterator[bool]:
+    """Non-blocking sibling of ``file_lock``: yields whether the lock was acquired.
+
+    For a caller that must never *wait* for the record's critical section — an engine child unlinking
+    its own run record from its exit path, where the contending holder is a `grid join`/`leave` that
+    is already authoritative over that record. Blocking there would be worse than skipping: leave
+    holds this lock across its whole teardown, so the dying child would stall until leave's stop grace
+    expired and SIGKILLed it (`shared.run_records.discard_own_record`).
+
+    Yields ``False`` without waiting when another holder has it — the body must then do nothing. The
+    lock is released on exit only when it was actually taken.
+
+    Only *contention* yields ``False``. A lock that is genuinely broken here (``ENOLCK``, a
+    filesystem that can't ``flock``) propagates, so the caller reports a real fault instead of
+    silently skipping its work under a "someone else has it" reading.
+    """
+    fd = _open_lock_fd(path)
+    acquired = False
+    try:
+        try:
+            if _HAVE_FCNTL:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                _seed_windows_byte(fd)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # raises OSError instead of retrying
+            acquired = True
+        except BlockingIOError:  # POSIX EAGAIN/EWOULDBLOCK — another holder, the expected case
+            acquired = False
+        except OSError:
+            if _HAVE_FCNTL:
+                raise  # not contention: a real lock failure the caller must hear about
+            acquired = False  # Windows reports LK_NBLCK contention as a plain OSError (EACCES)
+        yield acquired
+    finally:
+        if acquired:
+            _release(fd)
         os.close(fd)

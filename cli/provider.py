@@ -704,8 +704,9 @@ def _run_engine(args: SimpleNamespace) -> int:
         if not registered:
             # An engine that exited before registering (e.g. a media engine whose ComfyUI never became
             # ready — it slips past the 3s spawn grace, so nothing else reaps it) must not leave a stale
-            # record, or `grid leave --all` is needed just to clear the ghost.
-            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
+            # record, or `grid leave --all` is needed just to clear the ghost. Ownership-checked: a
+            # record a newer live engine child owns is kept, never unlinked (issue 05's audit).
+            run_records.discard_own_record(args.grid, args.name)
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +825,9 @@ def _run_api_media_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: 
         print(f"Stopped {args.api_kind} media bridge.")
         if not registered:
             # Mirrors _run_engine: an engine that died before registering must not leave a ghost
-            # record behind for `grid leave --all` to clean up.
-            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
+            # record behind for `grid leave --all` to clean up — and must not unlink a record a
+            # newer live engine child owns (issue 05's audit).
+            run_records.discard_own_record(args.grid, args.name)
 
 
 def _api_media_capabilities(models: list[str]) -> dict[str, Any]:

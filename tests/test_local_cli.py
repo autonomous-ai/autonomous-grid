@@ -3294,12 +3294,17 @@ def test_leave_media_engine_without_ownership_skips_comfyui(monkeypatch, tmp_pat
 
 def test_run_engine_reaps_record_when_never_registered(monkeypatch, tmp_path):
     """A media engine that dies before registering (ComfyUI never ready) must reap its own record,
-    not leave a ghost that needs `grid leave --all` to clear."""
+    not leave a ghost that needs `grid leave --all` to clear.
+
+    The record's pid is this process on purpose: `_spawn_engine` writes the child's own `proc.pid`,
+    and since issue 05 the reap is ownership-checked, so an arbitrary stand-in pid no longer models
+    production (pid 123 is a live root daemon on macOS, which now — correctly — blocks the reap)."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     cfg = runtime.init_grid_config(name="home", port=8090)
     grid_id = cfg["grid_id"]
-    cli.provider._write_record(grid_id, "media1",
-                               {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": 123, "media": True})
+    cli.provider._write_record(
+        grid_id, "media1",
+        {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": os.getpid(), "media": True})
 
     def boom(_args):
         raise SystemExit("ComfyUI did not become ready")
@@ -3309,6 +3314,92 @@ def test_run_engine_reaps_record_when_never_registered(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         cli.provider._run_engine(args)
     assert cli.provider._read_records(grid_id) == {}
+
+
+def test_run_engine_reports_its_own_death_not_a_record_read_failure(monkeypatch, tmp_path):
+    """The exit-path record cleanup must never replace the reason the engine actually died.
+
+    It runs in a `finally`, where a fresh exception *becomes* the one the caller sees (the original
+    is demoted to `__context__`, which nothing prints) — and this cleanup reads the grid's record
+    directory, so one corrupt sibling record used to turn "ComfyUI did not become ready" into
+    "Cannot read …/engine-legacy.json" in the very log an operator opens to diagnose the failure."""
+    from shared import run_records as rr
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(
+        grid_id, "media1",
+        {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": os.getpid(), "media": True})
+    rr.record_path(grid_id, "engine-legacy").write_text("{truncated")
+
+    monkeypatch.setattr(cli.provider, "_prepare_media_engine",
+                        lambda _args: (_ for _ in ()).throw(SystemExit("ComfyUI did not become ready")))
+    args = _engine_args(grid=grid_id, name="media1", enable_media=True)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.provider._run_engine(args)
+
+    assert "ComfyUI did not become ready" in str(excinfo.value)
+    assert "Cannot read" not in str(excinfo.value)
+
+
+def test_run_engine_keeps_a_record_a_newer_live_engine_owns(monkeypatch, tmp_path):
+    """The audited orphan-maker, at the local engine child's own seam: an engine dying before it
+    registered must NOT unlink a record that a newer, live child now owns — that is what leaves a
+    live engine process running with nothing on disk pointing at it."""
+    from shared import run_records as rr
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    cli.provider._write_record(
+        grid_id, "media1",
+        {"engine_id": "media1", "node_id": "n", "grid_id": grid_id, "pid": 424242, "media": True})
+    monkeypatch.setattr(rr, "pid_alive", lambda pid: pid == 424242)  # the newer child, still serving
+
+    def boom(_args):
+        raise SystemExit("ComfyUI did not become ready")
+
+    monkeypatch.setattr(cli.provider, "_prepare_media_engine", boom)
+    args = _engine_args(grid=grid_id, name="media1", enable_media=True)
+    with pytest.raises(SystemExit):
+        cli.provider._run_engine(args)
+    assert cli.provider._read_records(grid_id)["media1"]["pid"] == 424242
+
+
+@pytest.mark.parametrize(
+    "owner_pid, still_there",
+    [("mine", False), (424242, True)],
+    ids=["reaps-its-own-record", "keeps-a-newer-live-childs-record"],
+)
+def test_run_api_media_engine_reap_is_ownership_checked(monkeypatch, tmp_path, owner_pid, still_there):
+    """The third died-before-registering reap (`grid join --api <kind>` in local mode) follows the
+    same rule as its two siblings: drop the ghost record it owns, never one a live child owns."""
+    from shared import run_records as rr
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setenv("GRID_API_MEDIA_KEY", "sk-test")
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    grid_id = cfg["grid_id"]
+    pid = os.getpid() if owner_pid == "mine" else owner_pid
+    cli.provider._write_record(grid_id, "api1",
+                               {"engine_id": "api1", "node_id": "n", "grid_id": grid_id, "pid": pid})
+    monkeypatch.setattr(rr, "pid_alive", lambda p: p == 424242)
+
+    from local import media_runtime
+
+    monkeypatch.setattr(media_runtime, "start_api_media_server",
+                        lambda **kw: SimpleNamespace(pid=999))
+    monkeypatch.setattr(media_runtime, "stop_media_server", lambda proc: None)
+    monkeypatch.setattr(cli.provider, "_register_engine",
+                        lambda *a, **k: (_ for _ in ()).throw(SystemExit("registration failed (500)")))
+
+    args = _engine_args(grid=grid_id, name="api1", models=["fal:flux"],
+                        api_kind="fal", api_base_url="https://fal.example", api_media_port=8190)
+    with pytest.raises(SystemExit):
+        cli.provider._run_api_media_engine(args, cfg, "http://127.0.0.1:8090", "node-1")
+
+    assert ("api1" in cli.provider._read_records(grid_id)) is still_there
 
 
 def test_run_engine_persists_comfyui_ownership(monkeypatch, tmp_path):
@@ -3744,6 +3835,191 @@ def test_file_lock_is_mutually_exclusive_and_reusable(tmp_path):
     with file_lock(target):  # released → reacquirable
         pass
     assert (target.parent / "remote.json.lock").exists()
+
+
+def test_try_file_lock_reports_contention_instead_of_blocking(tmp_path):
+    """`try_file_lock` never waits: it yields False while another holder has the lock (so an exiting
+    engine child's record cleanup steps aside for a `grid join`/`leave` that is mid-critical-section
+    instead of deadlocking against leave's 25s stop grace), and True once the lock is free."""
+    from shared.filelock import file_lock, try_file_lock
+
+    target = tmp_path / "engines" / "n1" / "remote.json"  # parent dirs don't exist yet
+    with file_lock(target):
+        with try_file_lock(target) as acquired:
+            assert acquired is False
+
+    with try_file_lock(target) as acquired:  # released → acquirable
+        assert acquired is True
+    with try_file_lock(target) as acquired:  # ...and released again, not stranded
+        assert acquired is True
+
+
+def test_try_file_lock_does_not_disguise_a_broken_lock_as_contention(monkeypatch, tmp_path):
+    """"Someone else holds it" and "locking is broken here" must not look the same. Contention is
+    `BlockingIOError` and yields False; anything else (ENOLCK, a filesystem that can't `flock`) is a
+    real fault and propagates, so the caller reports it instead of silently skipping its work."""
+    import errno
+    import fcntl
+
+    from shared.filelock import try_file_lock
+
+    def enolck(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", enolck)
+    with pytest.raises(OSError):
+        with try_file_lock(tmp_path / "remote.json"):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# discard_own_record — the exiting child's record cleanup (grid-leave issue 05)
+# ---------------------------------------------------------------------------
+
+def _seed_reapable_record(tmp_path, monkeypatch, pid: int):
+    """A run record for `n1`/`remote` carrying ``pid``, plus the run_records module under GRID_HOME."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": pid})
+    return run_records, run_records.record_path("n1", "remote")
+
+
+def test_discard_own_record_removes_the_record_when_it_still_points_at_us(monkeypatch, tmp_path):
+    """The died-before-registering cleanup itself is unchanged: a child whose record still names it
+    drops that record on the way out, so no ghost survives to need a `grid leave --all`."""
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, os.getpid())
+
+    assert run_records.discard_own_record("n1", "remote") is True
+    assert not path.exists()
+
+
+def test_discard_own_record_keeps_a_record_a_newer_live_child_owns(monkeypatch, tmp_path):
+    """The orphan-maker this closes: a child that dies before registering must NOT unlink a record
+    that a newer, live serve child now owns — that is what strands a live process with no record."""
+    from shared import run_records as rr
+
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, 424242)
+    monkeypatch.setattr(rr, "pid_alive", lambda pid: pid == 424242)
+
+    assert run_records.discard_own_record("n1", "remote") is False
+    assert path.exists(), "deleting it would leave the live child untracked and unkillable via the CLI"
+    assert run_records.read_record("n1", "remote")["pid"] == 424242  # and untouched
+
+
+def test_discard_own_record_treats_its_launcher_parent_as_itself(monkeypatch, tmp_path):
+    """A record naming our *launcher* is still ours to reap.
+
+    The Linux distribution is a Nuitka `--standalone --onefile` binary (`packaging/build_binary.sh`;
+    only macOS gets the wheel), and its bootstrap unpacks the real executable and stays its PARENT —
+    so `proc.pid`, which the spawner writes into the record, is the bootstrap's, not the running
+    engine's. Without this allowance a local engine child (which has no pid self-stamp) could never
+    recognise its own record on the binary install, and would leave a ghost after every failed
+    bring-up. The bootstrap is alive throughout — it is waiting on us — so the liveness probe alone
+    would read it as "a different live process"."""
+    from shared import run_records as rr
+
+    launcher_pid = 424242
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, launcher_pid)
+    monkeypatch.setattr(rr.os, "getppid", lambda: launcher_pid)
+    monkeypatch.setattr(rr, "pid_alive", lambda pid: True)
+
+    assert run_records.discard_own_record("n1", "remote") is True
+    assert not path.exists()
+
+
+def test_discard_own_record_removes_a_record_whose_pid_is_dead(monkeypatch, tmp_path):
+    """Drifted pid, nobody alive behind it (the spawner's stale value, or the join write-race `0`):
+    still a ghost, still reaped — the guard only protects records with a LIVE owner."""
+    from shared import run_records as rr
+
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, 424242)
+    monkeypatch.setattr(rr, "pid_alive", lambda pid: False)
+
+    assert run_records.discard_own_record("n1", "remote") is True
+    assert not path.exists()
+
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, 0)  # never stamped
+    assert run_records.discard_own_record("n1", "remote") is True
+    assert not path.exists()
+
+
+def test_discard_own_record_is_a_noop_when_the_record_is_already_gone(monkeypatch, tmp_path):
+    """A concurrent `grid leave` already removed it — report "nothing removed", never raise."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    assert run_records.discard_own_record("n1", "remote") is False
+
+
+@pytest.mark.parametrize("garbled", ["abc", [], {}, 0.0, True, 2**31, 2**63, -5])
+def test_discard_own_record_keeps_a_record_whose_pid_is_unreadable(monkeypatch, tmp_path, garbled):
+    """A pid that isn't a plain, signalable process id proves nothing either way, and this runs in a
+    dying engine's `finally`: keep the record (recoverable) instead of deleting on a guess.
+
+    The falsy shapes (`[]`, `{}`, `0.0`) matter because `int(x or 0)` would silently coerce them to
+    the "never stamped" 0 and take the *delete* branch; the out-of-range ints matter because they
+    reach `os.kill` and raise `OverflowError` — not an `OSError`, so no caller catches it."""
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, os.getpid())
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": garbled})
+
+    assert run_records.discard_own_record("n1", "remote") is False
+    assert path.exists()
+
+
+def test_discard_own_record_ignores_a_corrupt_sibling_record(monkeypatch, tmp_path):
+    """One unreadable record must not decide another one's fate. `read_record` globs and parses the
+    WHOLE grid directory, so a corrupt legacy `engine-<uuid>.json` sibling would raise `SystemExit`
+    out of a cleanup that has nothing to do with it; reading our own file by path scopes the blast
+    radius to the record we actually own."""
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, os.getpid())
+    run_records.record_path("n1", "engine-legacy").write_text("{truncated")
+
+    assert run_records.discard_own_record("n1", "remote") is True
+    assert not path.exists()
+
+
+def test_discard_own_record_survives_its_own_corrupt_record(monkeypatch, tmp_path, capsys):
+    """Never raise over the real exit error. This runs inside the `finally` of an engine that is
+    already dying of something else, so any exception here *replaces* the operator's actual failure
+    reason (Python demotes the original to `__context__`, which nothing prints).
+
+    A corrupt record raises `SystemExit` out of `jsonio.load_json` — and `SystemExit` is not an
+    `Exception`, so neither the call sites' handlers nor a plain `except Exception` would catch it."""
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, os.getpid())
+    path.write_text("{truncated")
+
+    assert run_records.discard_own_record("n1", "remote") is False
+    assert path.exists()
+    assert "Could not reap the run record" in capsys.readouterr().err  # said so, didn't fail mute
+
+
+def test_pid_alive_refuses_pids_no_process_can_have(monkeypatch, tmp_path):
+    """`pid_alive` answers "not alive" for values the OS can never hand out, instead of letting them
+    reach `os.kill`. Two distinct hazards: a pid above the C-int range raises `OverflowError` (which
+    is not an `OSError`, so it crashes every caller — the terminator, the join live-filter, the
+    orphan sweep); a NEGATIVE pid is worse, because `os.kill(-N, sig)` signals the whole process
+    GROUP N, so a drifted negative record pid would make `terminate_pid` SIGTERM an unrelated group.
+    """
+    from shared import run_records
+
+    for pid in (2**31, 2**63, -1, -5):
+        assert run_records.pid_alive(pid) is False
+        # ...and the terminator therefore never signals it (it short-circuits on a dead probe).
+        assert run_records.terminate_pid(pid) is True
+
+
+def test_discard_own_record_keeps_the_record_while_another_holder_has_the_lock(monkeypatch, tmp_path):
+    """Contended lock = a `grid join`/`leave` is mid read-merge-write on this record. Step aside: both
+    of those end up authoritative over the record anyway (leave unlinks it once our death is
+    confirmed, join rewrites it), and blocking here would stall leave's teardown for its full grace."""
+    from shared.filelock import file_lock
+
+    run_records, path = _seed_reapable_record(tmp_path, monkeypatch, os.getpid())
+
+    with file_lock(path):
+        assert run_records.discard_own_record("n1", "remote") is False
+    assert path.exists()
 
 
 def test_terminate_pid_sigterms_but_does_not_touch_the_record(monkeypatch, tmp_path):
