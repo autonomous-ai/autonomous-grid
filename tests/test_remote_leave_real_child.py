@@ -456,6 +456,13 @@ def test_real_child_leave_kills_the_child_and_deregisters(live_engine, capsys, r
     )
     # ...and the flip was not merely the child's own parting courtesy: this PUT arrived after the
     # child was already gone, so only the CLI's unconditional backstop can have sent it (issue 01).
+    # Exactly-one, not `>= 1`: both PUTs target the same path, so if the child's were ever mis-stamped
+    # dead too, the list would be length 2 and fail here rather than passing. The one residual needs
+    # BOTH a handler starved past `unregister_node`'s 15s client timeout (it does a dict update and a
+    # JSON encode) AND the real backstop failing to land — and this file's other budgets
+    # (_WAIT_TIMEOUT, _STOP_GRACE_SECONDS) would blow first. Deliberately NOT closed by also asserting
+    # a live-stamped PUT: that would couple this test to the child's own unregister, which the leave
+    # contract designates an optimization, not the mechanism of record.
     assert relay_state.backstop_put_paths() == [f"/nodes/{engine.node_id}"], (
         "no consumer PUT arrived after the child was dead, so the CLI backstop deregister never "
         f"fired — a SIGKILLed or already-dead child would leave the node registered. Consumer PUTs "
