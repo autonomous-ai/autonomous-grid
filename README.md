@@ -169,20 +169,20 @@ client.chat.completions.create(
 
 ## Working from anywhere
 
-The four steps above run on your own network and need nothing from us. To reach the same computers
-from outside it, switch to **remote** mode: engines poll Autonomous Relay outbound, so they serve
-from behind a NAT with no inbound port and no public IP.
+The four steps above need nothing from us. To reach the same computers from outside your network,
+switch to remote mode: engines poll Autonomous Relay outbound, so they serve from behind a NAT with
+no inbound port and no public IP.
 
-**The trade:** your request and its answer pass through our relay, which local mode never does. We
-forward and keep nothing: no stored prompts, no training on your traffic. A hosted grid is a
-gateway to your intranet, not the intranet itself.
+**The trade is that your request and its answer pass through our relay, which local mode never
+does.** We forward and keep nothing — no stored prompts, no training on your traffic. A hosted grid
+is a gateway to your intranet, not the intranet itself.
 
 ```bash
 grid mode remote     # persisted to ~/.grid/state.json; --local / --remote overrides one command
 grid login           # device-code flow, opens a browser; --no-browser prints the code
 ```
 
-**Three commands change. Everything else — `chat`, `models`, `info`, and your apps — is identical.**
+Three commands change. `chat`, `models`, `info` and your apps are identical.
 
 | | 🏠 local | 🌐 remote |
 |---|---|---|
@@ -190,9 +190,9 @@ grid login           # device-code flow, opens a browser; --no-browser prints th
 | **add a computer** | `grid join <grid_url> --at <address on your network>` | `grid join research --at http://localhost:8000/v1` |
 | **API key** | `local-grid` — auth is off | your per-grid token, from `grid info --env` |
 
-Remote `--at` is `localhost` because the engine polls outbound; nothing has to reach *in*.
-`grid ls` lists the grids your sign-in can reach, `--type permissioned-providers` restricts who may
-serve to one, and `grid members add research <email>` invites people ([Members](docs/cli.md#members)).
+Remote `--at` is `localhost` because the engine polls outbound; nothing reaches in. `grid ls` lists
+the grids your sign-in can reach, `--type permissioned-providers` restricts who may serve, and
+`grid members add research <email>` invites people ([Members](docs/cli.md#members)).
 
 ---
 
@@ -204,9 +204,9 @@ serve to one, and `grid members add research <email>` invites people ([Members](
 
 ### Engines and models
 
-Grid runs no model code of its own; an inference engine does. Bring one, or let Grid install one
-of the two it ships: `llama.cpp` for text, ComfyUI for media. Both work the same in either mode —
-only the grid you join differs (a remote **name**, or a local **`grid_url`**).
+**Grid runs no model code of its own; an inference engine does.** Bring one, or let Grid install
+one of the two it ships: `llama.cpp` for text, ComfyUI for media. Both work the same in either mode
+— only the grid you join differs (a remote name, or a local `grid_url`).
 
 ```bash
 grid engine install llama.cpp           # the text engine
@@ -224,9 +224,8 @@ the positional argument is the prompt.
 
 ### No GPU at all? Join with an API key
 
-A provider can contribute capacity with just a paid **OpenAI** account. `grid join --api openai`
-serves OpenAI's models to your grid under your own key — an **API engine**, **remote only**. See
-what a join would serve first, with no key and no network call:
+`grid join --api openai` serves OpenAI's models to your grid under your own key — an API engine,
+remote only. See what a join would serve first, with no key and no network call:
 
 ```bash
 grid catalog --api openai
@@ -237,14 +236,14 @@ export OPENAI_API_KEY=sk-…
 grid join research --api openai         # or -m openai:gpt-5.4-mini to narrow
 ```
 
-The key comes from the environment or a hidden prompt — never a command-line flag — and is stored
-`0o600`. It survives `grid logout`, being your vendor credential rather than your grid sign-in.
-Requests to `openai:*` models **leave the grid for OpenAI** under your own account's terms, which
-the prefix keeps visible in every model list. There is no grid-side spend cap; put a budget on the
-key's OpenAI project if you want one.
+The key comes from the environment or a hidden prompt, never a flag, and is stored `0o600`. It
+survives `grid logout` — it is your vendor credential, not your grid sign-in. **Requests to
+`openai:*` models leave the grid for OpenAI under your own account's terms**, which the prefix keeps
+visible in every model list. There is no grid-side spend cap; put a budget on the key's OpenAI
+project.
 
-**A ChatGPT subscription instead of a key?** `grid join --api codex` contributes a Codex
-**subscription seat** — no API key; the CLI signs into your ChatGPT account (browser OAuth,
+A ChatGPT subscription works instead of a key. `grid join --api codex` contributes a Codex
+subscription seat — no API key; the CLI signs into your ChatGPT account (browser OAuth,
 `--no-browser` for headless) and probes the seat and your egress IP before advertising anything.
 Datacenter and VPS addresses are typically refused, so serve from a residential connection.
 
@@ -253,8 +252,8 @@ grid catalog --api codex        # per-tier table, offline, no sign-in
 grid join research --api codex
 ```
 
-`codex:*` models serve OpenAI's **Responses API** for external Codex apps — point a Codex
-CLI/Desktop at your grid using `grid info --env`
+`codex:*` models serve OpenAI's Responses API for external Codex apps — point a Codex CLI/Desktop
+at your grid with `grid info --env`
 ([how](docs/cli.md#pointing-a-codex-app-at-your-grid-using-codex-models)); `grid chat` refuses them
 with that same guidance. Jobs spend the seat's own monthly allowance.
 Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md) · [ADR 0015](docs/adr/0015-codex-subscription-engine.md).
@@ -262,8 +261,8 @@ Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md) · [ADR 0015](
 ### Don't know which model to ask for? Send `auto`
 
 A grid's catalog shifts as engines join and leave. Rather than hardcoding a model name, an app can
-send the reserved name **`auto`** and the grid picks a capable model that is free — so requests
-don't queue behind a busy model while idle ones sit unused.
+send the reserved name `auto` and the grid picks a capable model that is free, so requests don't
+queue behind a busy model while idle ones sit unused.
 
 ```bash
 grid router set-advisors openai:gpt-5-mini --grid research   # by name — no key, no URL
@@ -271,7 +270,7 @@ grid router enable --grid research
 grid chat -m auto "summarize this file in one line"
 ```
 
-Only a **bounded excerpt** of each request — never the full conversation — reaches the Advisor, on
+**Only a bounded excerpt of each request — never the full conversation — reaches the Advisor**, on
 the platform's key. A dead Advisor falls back to a deterministic pick, so `auto`'s availability
 equals your grid's rather than a vendor's. The `model` field and the `X-Grid-Routed-Model` header
 name whichever model actually answered.
@@ -286,20 +285,16 @@ Contract and transparency table in [docs/cli.md](docs/cli.md#router) · [ADR 001
 > into tasks exists only where your app reports a verdict —
 > [what is and is not built](train/README.md#not-built-yet) is written out plainly.
 
-Serving is half of it. The other half is **teaching a small model your own work** — your tickets,
-your repos, your deals — on the same machines, where the data, the attempts and the weights never
-leave your network.
+The same fleet teaches a small model your own work — your tickets, your repos, your deals. The
+data, the attempts and the weights never leave your network.
 
 <p align="center">
 <img src="docs/train-architecture.png" width="880" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator fans each task out across all five of your machines — a MacBook Pro, a Mac Studio, a Mac mini, an RTX 6000 and an RTX 5090 — placing it wherever there is room, and the attempts come back with the token ids they sampled.">
 </p>
 
-Why bother, when the models you can rent are so good? Because they know nothing about you, and
-waiting for a bigger general model does not fix that: the information was never on the internet to
-begin with. It is sitting in your systems. What you get on the other side of that gap is an **expert
-in your work rather than a generalist** — worse than the frontier at everything, better than the
-frontier at your thing. That is the trade you want, because most of what your team does all day is
-your thing.
+The models you can rent know nothing about you, and a bigger one will not fix that: the information
+was never on the internet. It is in your systems. **What you get is an expert in your work rather
+than a generalist — worse than the frontier at everything, better at your thing.**
 
 ```bash
 grid train packs                        # ready-made setups for real business data
@@ -309,28 +304,28 @@ grid train run                          # the climb
 grid train ui                           # watch the reward and eval curves
 ```
 
-The grid generates the rollouts across its nodes, one machine holds the trainer, and the trained
-LoRA adapter is pushed back to the serving nodes under a stable name — where `auto` keeps routing
-to it. Inference by day, training at night, on the same hardware.
+The grid samples rollouts across its nodes, one machine holds the trainer, and the LoRA adapter it
+produces goes back to the serving nodes under a stable name — where `auto` keeps routing to it.
+Inference by day, training at night, same hardware.
 
-**Training needs local nodes.** API nodes (`--api openai`, `--api codex`) cannot serve rollouts:
-vendors return neither the token ids they sampled nor their logprobs, and you cannot own an
-improvement to a model you rent. In a **hybrid** grid that becomes the useful loop — `auto` sends
-what the local model can't do yet to a frontier node, those tasks are exactly what tonight's run
-consumes, and the frontier share shrinks as the local model catches up.
+API nodes (`--api openai`, `--api codex`) cannot serve rollouts: vendors return neither the token
+ids they sampled nor their logprobs, and you cannot own an improvement to a model you rent. In a
+hybrid grid that becomes the useful loop — `auto` sends what the local model can't do yet to a
+frontier node, those tasks are what tonight's run consumes, and the frontier share shrinks as the
+local model catches up.
 
-**Both backends train.** vLLM returns sampled ids and logprobs natively, and `grid train serve`
-does it from MLX — so an all-Apple-Silicon fleet needs no CUDA and no vLLM. A trainer on one
-backend can feed nodes on the other via `grid train convert-adapter`.
+Both backends train. vLLM returns sampled ids and logprobs natively; `grid train serve` does it from
+MLX, so an all-Apple-Silicon fleet needs no CUDA. `grid train convert-adapter` moves an adapter
+between them.
 
-Try the hello world first — a complete GRPO climb in minutes, no GPU required:
+A complete GRPO climb, no GPU:
 
 ```bash
-python -m train.torch_grpo_hello        # any machine, CUDA or CPU
-python -m train.mlx.grpo_hello          # Apple Silicon, needs: pip install mlx-lm
+python -m train.torch_grpo_hello        # any machine, CUDA or CPU — ~6 min
+python -m train.mlx.grpo_hello          # Apple Silicon — ~1 min, needs: pip install mlx-lm
 ```
 
-Full explainer with figures and measured curves: **[train/README.md](train/README.md)**. One Mac:
+Figures and measured curves: [train/README.md](train/README.md). One Mac:
 [docs/start-on-a-mac.md](docs/start-on-a-mac.md) · two machines:
 [docs/two-node-training.md](docs/two-node-training.md) · which topologies make sense:
 [docs/topologies.md](docs/topologies.md) · design and honest limits:
@@ -340,25 +335,26 @@ Full explainer with figures and measured curves: **[train/README.md](train/READM
 
 ## How it works
 
-Grid sits **above** your computers — like an API gateway above your services, or Tailscale above
-your network. Each computer runs one or more inference servers (an **engine** — Ollama, vLLM,
-llama.cpp, ComfyUI); your grid is the one address everything talks through.
+Grid sits above your computers the way an API gateway sits above services: one address in front of
+many. The analogy stops there — a gateway routes by path, Grid routes by model name.
 
-- **the grid** — one endpoint that routes each request to a computer serving that model. Locally
-  it's a proxy you create with `grid up`; remotely it's a hosted grid on Autonomous Relay you bring
-  up the same way after `grid login`.
-- **engines** — what actually runs a model, yours or one Grid installed. `grid join` advertises a
-  computer's engines and
-  heartbeats them; Grid never restarts or replaces them. Locally they register directly with the
-  grid; remotely they poll the relay outbound, so they serve from behind a NAT with no inbound port.
-- **apps** — anything that speaks the OpenAI API. Text on `/v1/chat`, images and video on
-  `/v1/media`.
-- **the trainer** — a *consumer* of the grid, not a second control plane. It holds your tasks and
-  the weights, asks the grid for completions like any other client, and pushes the adapter it
-  produces back to the serving nodes.
+- **the grid** — one endpoint routing each request to a computer serving that model. Locally a
+  proxy from `grid up`; remotely a hosted grid on Autonomous Relay after `grid login`.
+- **engines** — what runs a model, yours or one Grid installed. `grid join` advertises a computer's
+  engines and heartbeats them; Grid never restarts or replaces them. Locally they register with the
+  grid directly, remotely they poll the relay outbound — behind a NAT, no inbound port.
+- **apps** — anything speaking the OpenAI API. Text on `/v1/chat`, media on `/v1/media`.
+- **the trainer** — a consumer of the grid, not a second control plane. It holds your tasks and the
+  weights, asks for completions like any other client, and pushes its adapter back to the serving
+  nodes.
 
-Full request flow in **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**; the complete command surface —
-including membership (`grid members`) and remote grid types — in **[docs/cli.md](docs/cli.md)**.
+```bash
+grid engines           # what each computer serves, and how many requests at once
+grid models --verbose  # every model, and which computer answers for it
+```
+
+Request flow: [ARCHITECTURE.md](docs/ARCHITECTURE.md). Full command surface, including membership
+and remote grid types: [docs/cli.md](docs/cli.md).
 
 ## Contributing
 
