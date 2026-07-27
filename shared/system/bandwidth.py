@@ -15,10 +15,11 @@ import re
 
 # Apple unified-memory bandwidth by (generation, tier). Tiers scale ~2× each step; generations drift.
 _APPLE_GBPS = {
-    (1, "base"): 68, (1, "pro"): 200, (1, "max"): 400, (1, "ultra"): 800,
+    (1, "base"): 67, (1, "pro"): 200, (1, "max"): 400, (1, "ultra"): 800,
     (2, "base"): 100, (2, "pro"): 200, (2, "max"): 400, (2, "ultra"): 800,
     (3, "base"): 100, (3, "pro"): 150, (3, "max"): 400, (3, "ultra"): 800,
     (4, "base"): 120, (4, "pro"): 273, (4, "max"): 546, (4, "ultra"): 1092,
+    (5, "base"): 153, (5, "pro"): 307, (5, "max"): 614, (5, "ultra"): 1228,
 }
 _APPLE_TIER_DEFAULT = {"base": 100, "pro": 200, "max": 400, "ultra": 800}
 
@@ -31,11 +32,26 @@ _NVIDIA_GBPS = (
     ("3060", 360), ("2080 ti", 616), ("2080", 448), ("2070", 448), ("2060", 336),
 )
 
-# GFLOPS-per-core estimates (dense FP16/BF16 matmul), rounded — order-of-magnitude only. Apple
-# does not publish per-chip compute figures, and GPU-core architecture hasn't shifted more than
-# ~2x generation to generation, so one flat per-core constant beats guessing a precise number per
-# chip name (the mistake made once already with a hardcoded llama.cpp-arch list).
-_APPLE_GFLOPS_PER_CORE = 400.0
+# Intel MacBook memory bandwidth by CPU model fragment. LPDDR/DDR is soldered on every MacBook so
+# each model has exactly one config; these are published peak rates rounded down to the nearest GB/s,
+# longest/most-specific match wins (same convention as _NVIDIA_GBPS).
+_INTEL_MACBOOK_GBPS = (
+    # 10th-gen Ice Lake / Comet Lake — LPDDR4X-3733 dual-channel (~60 GB/s peak)
+    ("i7-1068ng7", 60), ("i5-1038ng7", 60), ("i7-1060ng7", 60), ("i5-1030ng7", 60),
+    # 11th-gen Tiger Lake — LPDDR4X-4266 (~68 GB/s peak)
+    ("i7-1185g7", 68), ("i5-1145g7", 68), ("i7-1165g7", 68),
+    # 9th-gen Coffee Lake — DDR4-2666 dual-channel (MacBook Pro 16")
+    ("i9-9980hk", 42), ("i9-9880h", 42), ("i7-9750h", 42), ("i9-9880hk", 42),
+    # 8th-gen Coffee Lake — DDR4-2400/2666 (MacBook Pro 15" 2018)
+    ("i9-8950hk", 38), ("i7-8850h", 38), ("i7-8750h", 38),
+    # 7th-gen Kaby Lake — LPDDR3-2133 (MacBook Pro 13" 2017)
+    ("i7-7567u", 34), ("i7-7660u", 34), ("i5-7360u", 34), ("i5-7267u", 34),
+)
+
+# GFLOPS per Apple GPU core, dense FP16/BF16 matmul (FP32 × 2). Per-generation because each
+# generation widens SIMD lanes / adds matrix units; a flat per-core constant under-counts M3+ badly.
+# Source: published FP32 TFLOPS ÷ core count, doubled for FP16 (Apple GPUs do matmul in FP16/BF16).
+_APPLE_GFLOPS_PER_CORE = {"m1": 650.0, "m2": 714.0, "m3": 710.0, "m4": 852.0, "m5": 1050.0}
 # CPU matmul with no dedicated tensor/AVX-512 path is well below a GPU's per-unit throughput but
 # modern AVX2/FMA cores still move real work — calibrated so a small (~3B active) dense model's
 # prefill still clears a normal interactive bar, while a much larger active model does not.
@@ -53,12 +69,19 @@ _NVIDIA_TFLOPS = (
 )
 
 
-def _apple_compute_gflops(core_count: int | None) -> float | None:
-    """Apple GPU compute (GFLOPS) from its core count — the same field `device_info` already
-    collects (`apple.gpu_core_count()`); no new probe needed."""
+def _apple_compute_gflops(core_count: int | None, chip: str = "") -> float | None:
+    """Apple GPU compute (GFLOPS) from its core count and generation — the same fields
+    ``device_info`` already collects (``apple.gpu_core_count()``, ``apple.describe_chip()``).
+    Per-generation because each gen widens SIMD lanes; a flat per-core constant under-counts M3+."""
     if not core_count or core_count <= 0:
         return None
-    return core_count * _APPLE_GFLOPS_PER_CORE
+    gen = ""
+    if chip:
+        m = re.search(r"\bm(\d+)\b", chip.lower())
+        if m:
+            gen = f"m{m.group(1)}"
+    per_core = _APPLE_GFLOPS_PER_CORE.get(gen, 700.0)  # M5+ until measured
+    return core_count * per_core
 
 
 def _nvidia_compute_gflops(name: str) -> float | None:
@@ -103,27 +126,46 @@ def _nvidia_bandwidth(name: str) -> float | None:
     return float(best[1]) if best else None
 
 
+def _cpu_bandwidth(brand: str) -> float | None:
+    """Bandwidth for an Intel MacBook CPU by model fragment. RAM is soldered on every MacBook so each
+    model has exactly one config; non-Mac Intel machines (NUCs, hackintoshes, generic PCs) don't match
+    any fragment and fall back to the caller's per-backend default."""
+    if not brand:
+        return None
+    text = brand.lower()
+    best = None
+    for fragment, gbps in _INTEL_MACBOOK_GBPS:
+        if fragment in text and (best is None or len(fragment) > best[0]):
+            best = (len(fragment), gbps)
+    return float(best[1]) if best else None
+
+
 def estimate(device_class: str, chip: str, gpus: list[dict]) -> float | None:
     """Best-effort memory bandwidth (GB/s) for the machine, or ``None`` when the part isn't recognised.
 
     Apple reads from the chip name (unified memory); NVIDIA from the fastest recognised card's VRAM;
-    a plain CPU is left to the caller's DDR fallback (channels/speed aren't exposed to detect here).
+    Intel MacBooks from the CPU model fragment (LPDDR/DDR is soldered so each model has one config);
+    anything else (AMD CPUs, generic PCs, unknown parts) falls back to the caller's per-backend default.
     """
     if device_class == "apple-silicon":
         return _apple_bandwidth(chip)
     if device_class == "nvidia":
         rates = [r for g in (gpus or []) if (r := _nvidia_bandwidth(g.get("name") or "")) is not None]
         return max(rates) if rates else None
+    if device_class == "cpu":
+        return _cpu_bandwidth(chip)
     return None
 
 
-def estimate_compute_gflops(device_class: str, gpus: list[dict], physical_cores: int | None) -> float | None:
+def estimate_compute_gflops(device_class: str, gpus: list[dict], physical_cores: int | None,
+                            chip: str = "") -> float | None:
     """Best-effort compute throughput (GFLOPS) — the second bottleneck alongside `estimate()`'s
     memory bandwidth. Decode is memory-bound (see `estimate`); prefill (prompt processing) is
-    compute-bound, so a consumer sizing prefill time needs this instead."""
+    compute-bound, so a consumer sizing prefill time needs this instead. ``chip`` (e.g. ``"M2 Pro"``)
+    lets the Apple path pick a per-generation per-core figure; ignored on other backends."""
     if device_class == "apple-silicon":
         core_count = (gpus or [{}])[0].get("core_count") if gpus else None
-        return _apple_compute_gflops(core_count)
+        return _apple_compute_gflops(core_count, chip)
     if device_class == "nvidia":
         rates = [r for g in (gpus or []) if (r := _nvidia_compute_gflops(g.get("name") or "")) is not None]
         return max(rates) if rates else None

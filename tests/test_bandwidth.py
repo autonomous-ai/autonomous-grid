@@ -6,11 +6,16 @@ from shared.system import bandwidth
 
 def test_apple_scales_with_tier_and_generation():
     assert bandwidth.estimate("apple-silicon", "Apple M3 Max", []) == 400
-    assert bandwidth.estimate("apple-silicon", "Apple M1", []) == 68
+    assert bandwidth.estimate("apple-silicon", "Apple M1", []) == 67
     assert bandwidth.estimate("apple-silicon", "M2 Ultra", []) == 800
     # An Ultra always outpaces a base of the same generation by a wide margin.
     assert bandwidth.estimate("apple-silicon", "M3 Ultra", []) > \
         4 * bandwidth.estimate("apple-silicon", "M3", [])
+    # M5 family (Oct 2025): base 153, pro 307, max 614, ultra 1228 GB/s.
+    assert bandwidth.estimate("apple-silicon", "Apple M5", []) == 153
+    assert bandwidth.estimate("apple-silicon", "Apple M5 Pro", []) == 307
+    assert bandwidth.estimate("apple-silicon", "Apple M5 Max", []) == 614
+    assert bandwidth.estimate("apple-silicon", "Apple M5 Ultra", []) == 1228
 
 
 def test_apple_unknown_generation_falls_back_to_tier_default():
@@ -29,15 +34,38 @@ def test_nvidia_reads_the_fastest_recognised_card_most_specific_first():
     assert bandwidth.estimate("nvidia", "", [{"name": "Some Unknown Card"}]) is None
 
 
-def test_plain_cpu_is_left_to_the_caller_fallback():
-    assert bandwidth.estimate("cpu", "Intel(R) Core(TM) i9-9980HK", []) is None
+def test_cpu_recognises_intel_macbook_models_by_brand_fragment():
+    # 10th-gen Ice Lake — LPDDR4X-3733 dual-channel.
+    assert bandwidth.estimate("cpu", "Intel(R) Core(TM) i7-1068NG7", []) == 60
+    # 9th-gen Coffee Lake — DDR4-2666 (MacBook Pro 16").
+    assert bandwidth.estimate("cpu", "Intel(R) Core(TM) i9-9980HK", []) == 42
+    # 8th-gen Coffee Lake — DDR4-2400.
+    assert bandwidth.estimate("cpu", "Intel(R) Core(TM) i7-8750H", []) == 38
+    # 7th-gen Kaby Lake — LPDDR3-2133.
+    assert bandwidth.estimate("cpu", "Intel(R) Core(TM) i5-7360U", []) == 34
+    # Unknown / non-Mac Intel falls back to the caller's per-backend default.
+    assert bandwidth.estimate("cpu", "Intel(R) Core(TM) i7-12700K", []) is None
+    assert bandwidth.estimate("cpu", "", []) is None
+    assert bandwidth.estimate("cpu", "Some AMD Ryzen 9 7950X", []) is None
+
+
+def test_cpu_bandwidth_picks_most_specific_fragment():
+    # Longest fragment wins when multiple could match.
+    assert bandwidth.estimate(
+        "cpu", "Intel(R) Core(TM) i7-1068NG7 vs i7 generic", []
+    ) == 60
 
 
 def test_apple_compute_scales_with_core_count():
-    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 10}], None) == 4000.0
-    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 68}], None) == 27200.0
-    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": None}], None) is None
-    assert bandwidth.estimate_compute_gflops("apple-silicon", [], None) is None
+    # Per-generation FP16 GFLOPS/core (FP32 × 2). M1=650, M2=714, M3=710, M4=852, M5=1050.
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 8}], None, "Apple M1") == 5200.0
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 10}], None, "M2 Pro") == 7140.0
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 10}], None, "Apple M3") == 7100.0
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 10}], None, "Apple M4") == 8520.0
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 10}], None, "Apple M5") == 10500.0
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": 40}], None, "M4 Max") == 34080.0
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [{"core_count": None}], None, "M2") is None
+    assert bandwidth.estimate_compute_gflops("apple-silicon", [], None, "M2") is None
 
 
 def test_nvidia_compute_reads_the_fastest_recognised_card():
