@@ -19,9 +19,10 @@ An inference server serves whatever models fit on one machine. Grid makes every 
 your NVIDIA desktop, the workstation in the corner — answer as one, behind **one OpenAI-compatible
 endpoint**, and does two things with them.
 
-**Inference.** Each request routes to whichever computer runs the right model. The inference servers
-you already run — Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI — stay exactly where they are.
-Grid does not replace them; it networks them, so five machines answer on one address.
+**Inference.** Each request routes to whichever computer runs the right model. A machine needs an
+engine to run one — bring the ones you have, or let Grid install one on a bare computer. Ollama,
+vLLM, LM Studio, MLX, llama.cpp and ComfyUI all stay exactly where they are: Grid does not replace
+them, it networks them, so five machines answer on one address.
 
 **Training.** The same fleet teaches a small model *your* work, and the data, the attempts and the
 weights never leave your network. This belongs here rather than in a separate tool for one reason:
@@ -61,14 +62,24 @@ grid up
 
 ### 2 · Add a computer
 
-Point Grid at an inference server you already run — here a machine running vLLM — and name it.
-`--at` is the engine's address on your network, since the grid forwards requests to it.
+Nothing installed on it yet? Grid ships an engine, so a bare machine takes three commands and no
+addresses:
+
+```bash
+grid engine install llama.cpp                     # Metal on macOS, CUDA on Linux NVIDIA
+grid pull qwen36-35b-a3b-mtp                      # `grid catalog`, or any GGUF: <hf-repo>:<file>
+grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp --name mac-studio
+```
+
+**Already running Ollama, vLLM or LM Studio?** Point Grid at it instead and keep it exactly where
+it is. `--at` is the engine's address on your network, since the grid forwards requests to it.
 
 ```bash
 grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
 ```
 
-Repeat for each computer. No inference server on it yet? See [Bring your own engine](#bring-your-own-engine).
+Repeat for each computer — the two kinds mix freely in one grid. More on either:
+[Engines and models](#engines-and-models).
 
 > A beefy engine can serve **several requests at once** — `--max-concurrency N` matches its batch
 > width (llama.cpp `--parallel`, vLLM `max_num_seqs`) so it stays fed in parallel rather than one
@@ -197,11 +208,11 @@ serve to one, and `grid members add research <email>` invites people ([Members](
 <img src="docs/fig-inference.png" width="880" alt="Your apps — OpenClaw, Hermes, your own code — call one OpenAI-compatible endpoint. Below the orchestrator sits your fleet: a MacBook Pro, a Mac Studio, a Mac mini, an RTX 6000 and an RTX 5090. A request goes down to the single machine already serving that model and the answer comes back the same way; the rest stay idle.">
 </p>
 
-### Bring your own engine
+### Engines and models
 
-No inference server on a computer yet? Grid ships two — `llama.cpp` for text, ComfyUI for media.
-Install, pull a model, and serve it in one join. These work the same in both modes; only the grid
-you join differs (a remote **name**, or a local **`grid_url`**).
+Grid runs no model code of its own — an engine does, and you can either bring one or let Grid
+install it. It ships two: `llama.cpp` for text, ComfyUI for media. These work the same in both
+modes; only the grid you join differs (a remote **name**, or a local **`grid_url`**).
 
 ```bash
 grid engine install llama.cpp           # the text engine
@@ -342,7 +353,8 @@ llama.cpp, ComfyUI); your grid is the one address everything talks through.
 - **the grid** — one endpoint that routes each request to a computer serving that model. Locally
   it's a proxy you create with `grid up`; remotely it's a hosted grid on Autonomous Relay you bring
   up the same way after `grid login`.
-- **engines** — the tools you already run. `grid join` advertises a computer's engines and
+- **engines** — what actually runs a model, yours or one Grid installed. `grid join` advertises a
+  computer's engines and
   heartbeats them; Grid never restarts or replaces them. Locally they register directly with the
   grid; remotely they poll the relay outbound, so they serve from behind a NAT with no inbound port.
 - **apps** — anything that speaks the OpenAI API. Text on `/v1/chat`, images and video on
