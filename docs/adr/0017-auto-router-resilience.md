@@ -43,6 +43,19 @@ Choices a future reader will otherwise re-litigate:
   provider would fail identically), extended from re-dispatch to the health classifier. The broader
   *union blast-radius on a genuine failure* — one engine's real 5xx still demoting its siblings under a
   shared `node_id` — is a pre-existing property left as a separate follow-up, not closed here.
+  **Amendment (2026-07-27, prod):** the model-level classifier also reads *"no provider(s) available for
+  [this] model"* — how an **aggregating** upstream reports a model it has lost: an API-engine proxy
+  fronting many vendors, or a nested grid emitting this relay's own `no_providers_available` wording. It
+  arrives as a **5xx, not a 404**, and carries none of the existing markers, so it took the box-level
+  path: on Nightshift a dead `deepreinforce-ai/ornith-1.0-397b` demoted its whole three-model node every
+  ~10 minutes and took its two healthy siblings offline with it — this ADR's own opening symptom,
+  reached through a phrasing gap rather than a design gap. Provider-side servability reconciliation
+  (issue 03) cannot cover it: that runs **at startup**, and the model died afterwards — which is exactly
+  the case `servability.py` names the master-side prune as the reactive net for. The rule is
+  deliberately narrow: the `for [this] model` tail is what makes it model-level, so a box reporting no
+  provider or capacity **at all** (no model reference) still demotes the node. Accepted cost of the
+  widening: an upstream that has lost *every* model now burns the failure threshold **per model**
+  instead of once per node before that node goes quiet — bounded by (models × threshold).
 
 - **An empty candidate pool returns one of three answers, by cause — a demotion-emptied pool is now a
   503, not a 400.** No live model → 503 `no_providers_available`; otherwise-capable providers all
