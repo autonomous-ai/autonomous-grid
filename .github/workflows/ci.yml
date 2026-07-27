@@ -31,3 +31,27 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Pytest
         run: uv run --extra dev pytest
+
+  # `grid leave`'s orphan sweep shells out to PowerShell/WMI on Windows, and that command's real
+  # behaviour — the -EncodedCommand round-trip, the console code-page decode, PowerShell's habit of
+  # exiting 0 on a non-terminating error, taskkill /F /T — is precisely what a mocked subprocess
+  # cannot vouch for. This job is the only place it runs for real.
+  #
+  # Deliberately ONE file, not the suite: the rest of tests/ has never been run on Windows and fails
+  # there for unrelated reasons (POSIX-only signals and locking). Widening it is its own piece of
+  # work, and a job that is allowed to be red would prove nothing, so this one blocks.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      # Every test in that file is skipped off win32, and pytest exits 0 on an all-skipped run — so
+      # without this the one job that is supposed to block would report success having asserted
+      # nothing, the moment an image change or a shell wrapper resolved a non-win32 interpreter.
+      - name: Fail if this runner is not actually Windows
+        run: uv run --extra dev python -c "import sys; sys.exit(0 if sys.platform == 'win32' else 1)"
+      - name: Pytest (Windows-native orphan sweep)
+        run: uv run --extra dev pytest tests/test_windows_orphan_sweep.py -q

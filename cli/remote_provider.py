@@ -42,13 +42,14 @@ _REMOTE_IDENTITY = "remote"
 # One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
 _VENDOR_LIST_TIMEOUT = 15.0
 
-# Appended to a full-leave success line when the argv sweep could not read the process table (ps
-# down): the backstop still dropped the model, but we couldn't verify no stray child remains, so the
-# success is qualified rather than an unconditional "Left". One definition, shared by both full-leave
-# report paths (bare/`--all` and the `--engine <last>` teardown).
+# Appended to a full-leave success line when the argv sweep could not read the process table: the
+# backstop still dropped the model, but we couldn't verify no stray child remains, so the success is
+# qualified rather than an unconditional "Left". One definition, shared by both full-leave report
+# paths (bare/`--all` and the `--engine <last>` teardown). Worded without naming `ps` because the
+# sweep now reads a process table on Windows too, where the reason is a PowerShell/WMI failure.
 _SWEEP_UNSCANNED_NOTE = (
-    " Couldn't scan for stray serve processes (ps unavailable); any that remain drop after the "
-    "node TTL (~120s)."
+    " Couldn't scan for stray serve processes (the process table was unreadable); any that remain "
+    "drop after the node TTL (~120s)."
 )
 
 
@@ -677,7 +678,7 @@ def _live_records(network_id: str) -> list[dict[str, object]]:
     can adopt their engines and stop their processes (they share the token node_id)."""
     return [
         rec for rec in run_records.read_records(network_id).values()
-        if run_records.pid_alive(int(rec.get("pid") or 0))
+        if run_records.pid_alive(run_records.recorded_pid(rec) or 0)
     ]
 
 
@@ -1094,10 +1095,35 @@ def _full_leave_survivor_exit(survivors: list[int], label: str, sent: bool) -> N
         else f"could not stop serve child(ren) pid(s) {pids} (and the relay deregister didn't land — "
         "see above)"
     )
+    # The remedy has to be a command the operator can actually run. `kill -9` was safe while the argv
+    # sweep was POSIX-only; the sweep reaches Windows now, so this line does too — and that is the last
+    # place to print a command that doesn't exist on the machine reading it.
+    remedy = (
+        f"taskkill /F /PID {survivors[0]}" if sys.platform == "win32" else f"kill -9 {survivors[0]}"
+    )
     raise SystemExit(
         f"grid leave: {outcome}. A retried `grid leave` will target them again; investigate before "
-        f"re-joining (e.g. `kill -9 {survivors[0]}`)."
+        f"re-joining (e.g. `{remedy}`)."
     )
+
+
+def _recorded_pids(records: dict[str, dict[str, object]]) -> set[int]:
+    """The real process ids among a grid's records. A `pid` field can be absent, the join write-race's
+    `0`, or — on a hand-edited/corrupt record — not a number at all; `int(...)` on the last would raise
+    from inside a teardown, ahead of the deregister that is the mechanism of record.
+
+    A decimal *string* is accepted because `run_records.stop_engine` still coerces one and would kill
+    it: reading pids more narrowly than the code that kills them would let a child be terminated by
+    the record path yet stay eligible for the sweep, breaking the disjointness the caller documents
+    and listing one process twice in a failure message."""
+    pids: set[int] = set()
+    for record in records.values():
+        pid = record.get("pid")
+        if isinstance(pid, str) and pid.isdecimal():
+            pid = int(pid)
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            pids.add(pid)
+    return pids
 
 
 def _full_leave_reap(
@@ -1109,20 +1135,40 @@ def _full_leave_reap(
     ``(surviving_pids, scanned)``: the survivors are recorded children wedged past SIGKILL PLUS swept
     orphans that survived — disjoint by construction (the sweep excludes the recorded pids, so a
     wedged recorded child is never re-terminated); ``scanned`` is False when the sweep could not read
-    the process table (ps down), so the caller qualifies its success line instead of claiming a
+    the process table, so the caller qualifies its success line instead of claiming a
     teardown it never verified. The backstop + report stay in the caller (so ``cmd_remote_leave``
     stays small).
     """
-    from remote import orphan_sweep  # POSIX argv sweep (lazy: remote.* imports stay in-handler)
+    from remote import orphan_sweep  # argv sweep (lazy: remote.* imports stay in-handler)
     from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
 
-    record_pids = {int(record.get("pid") or 0) for record in records.values()}
+    record_pids = _recorded_pids(records)
+    # BEFORE the kills, not after: a recorded child's launcher shim carries the same argv it does, and
+    # the only way to tell them apart is the parent link — which disappears from the process table the
+    # moment the kill below succeeds. Asked afterwards this returns nothing, and a healthy leave would
+    # then sweep its own launcher and announce a reaped orphan.
+    # Guarded for the same reason the sweep below is, and more so: this runs EARLIER, so an exception
+    # here would abort the leave before the record kills as well as before the deregister.
+    try:
+        shim_pids = orphan_sweep.launcher_ancestors(network_id, record_pids)
+    except (Exception, SystemExit) as exc:
+        print(f"Note: couldn't identify launcher processes ({exc}).", file=sys.stderr)
+        shim_pids = frozenset()
     record_survivors: list[int] = []
     for engine_id, record in records.items():
         survivor = provider._stop_engine(network_id, engine_id, record)
         if survivor:  # survived even SIGKILL — its record was kept; the caller fails loud, never "Left"
             record_survivors.append(survivor)
-    swept = orphan_sweep.sweep_orphans(network_id, exclude_pids=record_pids)
+    # The sweep is a best-effort diagnostic; the backstop deregister that follows it is the mechanism
+    # of record. Anything unforeseen here — `taskkill` missing from a stripped Windows image, a parse
+    # the enumerators didn't anticipate — must degrade to an honest "couldn't check", never propagate
+    # and take the deregister with it, which would leave the model advertised for the full ~120s TTL.
+    # (`SystemExit` is this repo's clean-error idiom and is not an `Exception`, hence both.)
+    try:
+        swept = orphan_sweep.sweep_orphans(network_id, exclude_pids=record_pids | shim_pids)
+    except (Exception, SystemExit) as exc:
+        print(f"Note: the scan for orphaned serve children failed ({exc}).", file=sys.stderr)
+        swept = orphan_sweep.SweepResult((), (), (), scanned=False)
     if swept.reaped:
         print(
             f"Reaped {len(swept.reaped)} orphaned serve child(ren) on {label} "
@@ -1155,7 +1201,7 @@ def _full_leave_teardown(
 
 def _full_leave_report(label: str, had_records: bool, sent: bool, scanned: bool) -> None:
     """Print the honest outcome of a full leave with no surviving child. ``scanned`` False means the
-    argv sweep couldn't read the process table (ps down) — the backstop still dropped the model, but a
+    argv sweep couldn't read the process table — the backstop still dropped the model, but a
     stray child may persist, so the success line is qualified rather than an unconditional "Left"
     (silent-failure review: "couldn't check" must not read as "verified clean")."""
     unscanned = "" if scanned else _SWEEP_UNSCANNED_NOTE
@@ -1275,7 +1321,7 @@ def _leave_one_engine(
     leave; otherwise the singleton is respawned serving the reduced union (no backstop — still a
     provider). Operates on the live record(s), adopting any legacy sibling.
     """
-    survivors = [rec for rec in records.values() if run_records.pid_alive(int(rec.get("pid") or 0))]
+    survivors = [rec for rec in records.values() if run_records.pid_alive(run_records.recorded_pid(rec) or 0)]
     survivors = survivors or list(records.values())
     union = _engine_union(survivors)
     to_drop = _drop_spec(union, args.engine, label)

@@ -4093,6 +4093,55 @@ def test_stop_engine_keeps_record_when_child_survives_sigkill(monkeypatch, tmp_p
     assert record_file.exists()  # record kept so a retried `grid leave` still has a handle
 
 
+@pytest.mark.parametrize(
+    "open_fails_with, expected_alive",
+    [(87, False),   # ERROR_INVALID_PARAMETER — the only code that means "no such pid"
+     (5, True),     # ERROR_ACCESS_DENIED — another user's or a protected process: it EXISTS
+     (0, True)],    # anything else: we could not look, so we must not report it dead
+)
+def test_win_pid_alive_only_calls_a_pid_dead_when_windows_says_it_does_not_exist(
+    monkeypatch, open_fails_with, expected_alive
+):
+    """The decision logic behind the Windows liveness probe, pinned off Windows (the ctypes call
+    itself is exercised by the `test-windows` CI job).
+
+    `OpenProcess` returning NULL was previously read as "no such pid" for every reason, but the access
+    right asked for is *grantable* across users, not granted — so another user's process failed to
+    open and read as dead. `terminate_pid` then short-circuits and returns True, and the sweep reports
+    it **reaped**: a live child announced as torn down, which is the one lie this whole feature exists
+    to end. POSIX already chose the safe direction here (EPERM → alive)."""
+    import ctypes
+
+    from shared import run_records
+
+    class _FakeKernel32:
+        def OpenProcess(self, *a):
+            return 0  # NULL
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **k: _FakeKernel32(), raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: open_fails_with, raising=False)
+    monkeypatch.setattr(run_records, "_IS_WINDOWS", True)
+
+    assert run_records.pid_alive(4242) is expected_alive
+
+
+def test_stop_engine_does_not_raise_on_an_unreadable_pid(monkeypatch, tmp_path):
+    """`stop_engine` reads the pid tolerantly, not with `int(...)`. It runs inside a full leave ahead
+    of the relay deregister that is the mechanism of record, so a hand-edited or corrupt `pid` field
+    raising here would take that deregister with it — the model then stays advertised for the whole
+    ~120s node TTL, behind a traceback. An unreadable pid names no live child, so there is nothing to
+    stop and the junk record goes."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    from shared import run_records
+
+    record_file = run_records.record_path("n1", "remote")
+    record_file.parent.mkdir(parents=True, exist_ok=True)
+    record_file.write_text("{}")
+
+    assert run_records.stop_engine("n1", "remote", {"pid": "not-a-number"}) == 0
+    assert not record_file.exists()
+
+
 def test_stop_engine_unlinks_record_when_confirmed_gone(monkeypatch, tmp_path):
     """The confirmed-gone branch: `terminate_pid` reports the child dead → the record is unlinked and
     `stop_engine` returns 0, so a healthy leave still clears its handle."""
@@ -4164,7 +4213,7 @@ def test_sweep_orphans_reaps_killable_and_flags_survivor(monkeypatch):
         "  111 /bin/grid __remote-engine n1 remote",
         "  222 /bin/grid __remote-engine n1 remote",
     ])
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: ps)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: ps)
     monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: pid == 111)  # 222 wedged
 
     result = orphan_sweep.sweep_orphans("n1")
@@ -4181,22 +4230,13 @@ def test_sweep_orphans_reports_eperm_as_foreign_not_fatal(monkeypatch):
     def raise_eperm(pid):
         raise PermissionError()
 
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  333 /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  333 /bin/grid __remote-engine n1 remote")
     monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", raise_eperm)
 
     result = orphan_sweep.sweep_orphans("n1")
     assert result.foreign == (333,)
     assert result.survivors == () and result.reaped == ()
-
-
-def test_sweep_orphans_is_empty_on_windows(monkeypatch):
-    """Windows keeps the record-pid path (follow-up F2); the argv sweep is a no-op there and never
-    shells out to `ps`."""
-    from remote import orphan_sweep
-
-    monkeypatch.setattr(orphan_sweep.sys, "platform", "win32")
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: pytest.fail("must not run ps on Windows"))
-    assert orphan_sweep.sweep_orphans("n1") == orphan_sweep.SweepResult((), (), ())
 
 
 def test_sweep_orphans_degrades_when_ps_unavailable(monkeypatch, capsys):
@@ -4214,18 +4254,21 @@ def test_sweep_orphans_degrades_when_ps_unavailable(monkeypatch, capsys):
     assert "couldn't list processes" in capsys.readouterr().err
 
 
-def test_ps_output_treats_nonzero_ps_exit_as_couldnt_scan(monkeypatch, capsys):
+def test_posix_ps_output_treats_nonzero_ps_exit_as_couldnt_scan(monkeypatch, capsys):
     """A `ps` that runs but exits non-zero (unsupported flags on a minimal/BusyBox ps) must not read
-    as a clean empty scan — `_ps_output` returns None (→ scanned=False) with a note, not "".."""
+    as a clean empty scan — `_posix_ps_output` returns None (→ scanned=False) with a note, not "".."""
     from remote import orphan_sweep
 
     class _Proc:
         returncode = 1
         stdout = ""
+        stderr = "ps: illegal option -- w"
 
     monkeypatch.setattr(orphan_sweep.subprocess, "run", lambda *a, **k: _Proc())
-    assert orphan_sweep._ps_output() is None
-    assert "ps" in capsys.readouterr().err.lower()
+    assert orphan_sweep._posix_ps_output() is None
+    err = capsys.readouterr().err.lower()
+    assert "ps" in err
+    assert "illegal option" in err  # the tool's own reason travels with the note, not just our text
 
 
 def test_sweep_orphans_never_targets_its_own_pid(monkeypatch):
@@ -4236,11 +4279,420 @@ def test_sweep_orphans_never_targets_its_own_pid(monkeypatch):
     from remote import orphan_sweep
 
     mypid = _os.getpid()
-    monkeypatch.setattr(orphan_sweep, "_ps_output",
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
                         lambda: f"  {mypid} /bin/grid __remote-engine n1 remote")
     monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
                         lambda pid: pytest.fail(f"must never terminate own pid {pid}"))
     assert orphan_sweep.sweep_orphans("n1") == orphan_sweep.SweepResult((), (), ())
+
+
+# --- Windows parity (grid-leave issue 06) --------------------------------------------------------
+# The sweep is no longer POSIX-only: `_process_table_output` dispatches to a PowerShell/CIM
+# enumerator on Windows. Everything below runs on macOS/Linux — the Windows branch is reachable by
+# flipping `orphan_sweep.sys.platform` and mocking `subprocess.run`, which is what makes the whole
+# platform branch testable on the ubuntu CI. The one thing that cannot be faked (does the real
+# PowerShell command actually work?) lives in `tests/test_windows_orphan_sweep.py`.
+
+def test_orphan_sweep_matcher_matches_windows_command_lines():
+    """The matcher is platform-neutral: fed `Win32_Process` rows (`pid ppid <command line>`) it picks
+    the same children by the same rule. A quoted `C:\\Program Files\\…` path splits into two tokens
+    but the marker and the network id stay whole adjacent tokens, and the extra leading `ppid` column
+    is harmless because matching is positional *relative to the marker*, not absolute."""
+    from remote import orphan_sweep
+
+    rows = "\n".join([
+        r'1234 1200 "C:\Program Files\Grid\grid.exe" __remote-engine n1 remote',  # quoted path → match
+        r'1235 1234 C:\Python312\python.exe -m cli __remote-engine n1 remote',    # ours → match
+        r'1236 1200 "C:\Program Files\Grid\grid.exe" __remote-engine n2 remote',  # grid B → skip
+        r'1237 1000 C:\Windows\system32\svchost.exe -k netsvcs -p',               # unrelated → skip
+        r'1238 1200 C:\Windows\...\powershell.exe -EncodedCommand RwBlAHQA',      # our probe → skip
+    ])
+    assert orphan_sweep._match_orphan_pids(rows, "n1", exclude_pids=set()) == [1234, 1235]
+    assert orphan_sweep._match_orphan_pids(rows, "n2", exclude_pids=set()) == [1236]
+
+
+def test_ppid_by_pid_reads_three_column_rows_and_ignores_two_column():
+    """The parent index is built from the same text the matcher reads. A two-column row (no ppid
+    column at all) must not mistake the command for a ppid — it yields no entry, so the shim rule
+    simply goes inert rather than acting on garbage."""
+    from remote import orphan_sweep
+
+    three = "\n".join([
+        "  1234  1200 /bin/grid __remote-engine n1 remote",
+        "  1235  1234 /usr/bin/python3 -m cli __remote-engine n1 remote",
+        "  PID  PPID COMMAND",  # header → skipped
+    ])
+    assert orphan_sweep._ppid_by_pid(three) == {1234: 1200, 1235: 1234}
+    assert orphan_sweep._ppid_by_pid("  4242 /bin/grid __remote-engine n1 remote") == {}
+
+
+_SHIM_ROWS = "\n".join([
+    "  1234  1200 /bin/grid __remote-engine n1 remote",              # launcher shim
+    "  1235  1234 /usr/bin/python3 -m cli __remote-engine n1 remote",  # the interpreter it spawned
+])
+
+
+def test_tree_roots_targets_the_root_and_names_its_descendants():
+    """A launcher shim (uv/pip trampoline on Windows, the Nuitka --onefile bootstrap on Linux) carries
+    the SAME argv as the interpreter it spawns, so one record-less orphan matches twice. Only the root
+    is targeted — terminating it can take the tree — and the descendant is named so the caller can
+    prove it actually died rather than assume the tree kill reached it."""
+    from remote import orphan_sweep
+
+    assert orphan_sweep._tree_roots([1234, 1235], {1234: 1200, 1235: 1234}) == ([1234], [1235])
+
+
+def test_tree_roots_falls_back_to_targeting_everything_it_cannot_order():
+    """Both degenerate inputs fail toward *terminating*, the only direction that cannot strand a live
+    serve child: with no ppid column at all (a `ps` that accepted the flags but ignored `ppid=`) every
+    match is a root, exactly the pre-shim-rule behaviour; and an ancestry cycle — reachable under pid
+    reuse — must not make the sweep decline to try at all."""
+    from remote import orphan_sweep
+
+    assert orphan_sweep._tree_roots([1234, 1235], {}) == ([1234, 1235], [])
+    assert orphan_sweep._tree_roots([100, 200], {100: 200, 200: 100}) == ([100, 200], [])
+
+
+def test_launcher_ancestors_names_a_recorded_childs_shim_but_not_an_unrelated_parent():
+    """The shim is spared by *excluding* it, and the parent link that identifies it can only be read
+    while the recorded child still has a row — which is why this is asked before the kill, not after.
+
+    A parent qualifies only if its own argv carries the marker and this exact network id. That matters
+    because a stale recorded pid is this feature's premise, not an edge case: once recycled, its new
+    parent could be anything — including a real orphan, which a looser rule would quietly exclude from
+    the sweep."""
+    from remote import orphan_sweep
+
+    monkeypatched = "\n".join([
+        _SHIM_ROWS,
+        "  7777  4242 /usr/bin/some-unrelated-tool --flag",  # a recycled stale record pid...
+        "  4242  1200 /bin/grid __remote-engine n1 remote",  # ...whose parent is a REAL orphan
+    ])
+    from unittest import mock
+    with mock.patch.object(orphan_sweep, "_process_table_output", lambda: monkeypatched):
+        assert orphan_sweep.launcher_ancestors("n1", {1235}) == frozenset({1234})
+        assert orphan_sweep.launcher_ancestors("n1", {7777}) == frozenset()  # 4242 must stay sweepable
+
+
+def test_launcher_ancestors_walks_a_multi_link_chain_and_terminates_on_a_cycle():
+    """A launcher chain can be longer than one link (a `.cmd` shim into `grid.exe` into the
+    interpreter). Stopping at the first parent would spare the inner shim and sweep the outer one —
+    the same false "Reaped 1" on a healthy leave, moved up a level. The walk stops as soon as an
+    ancestor is not itself a serve child of this grid, so it can never climb out into the operator's
+    shell, and it terminates on the ancestry cycle pid reuse can produce."""
+    from remote import orphan_sweep
+    from unittest import mock
+
+    chain = "\n".join([
+        "  1230     1 /bin/grid __remote-engine n1 remote",              # outer shim
+        "  1234  1230 /bin/grid __remote-engine n1 remote",              # inner shim
+        "  1235  1234 /usr/bin/python3 -m cli __remote-engine n1 remote",  # the recorded interpreter
+    ])
+    cycle = "\n".join([
+        "  100  200 /bin/grid __remote-engine n1 remote",
+        "  200  100 /bin/grid __remote-engine n1 remote",
+        "  300  100 /usr/bin/python3 -m cli __remote-engine n1 remote",
+    ])
+    with mock.patch.object(orphan_sweep, "_process_table_output", lambda: chain):
+        assert orphan_sweep.launcher_ancestors("n1", {1235}) == frozenset({1234, 1230})
+    with mock.patch.object(orphan_sweep, "_process_table_output", lambda: cycle):
+        assert orphan_sweep.launcher_ancestors("n1", {300}) == frozenset({100, 200})
+
+
+def test_sweep_orphans_stays_silent_on_a_healthy_leave_with_a_launcher_shim(monkeypatch):
+    """The healthy case end to end: the caller excludes the recorded interpreter AND the shim
+    `launcher_ancestors` named for it, so nothing is terminated and nothing is reported. Without the
+    exclusion a perfectly healthy `grid leave` announces "Reaped 1 orphaned serve child(ren)"."""
+    from remote import orphan_sweep
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: _SHIM_ROWS)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
+                        lambda pid: pytest.fail(f"must not terminate the shim of a recorded child ({pid})"))
+
+    shims = orphan_sweep.launcher_ancestors("n1", {1235})
+    assert orphan_sweep.sweep_orphans("n1", exclude_pids={1235} | shims) == orphan_sweep.SweepResult((), (), ())
+
+
+def test_sweep_orphans_terminates_a_descendant_the_tree_kill_missed(monkeypatch):
+    """Naming a descendant is a targeting decision, NOT a claim it died — and on POSIX the tree kill
+    usually never happens at all, because `terminate_pid` only reaches `killpg` after the target
+    ignores SIGTERM for the whole grace. So a descendant still alive after the settle gets its own
+    full escalation. Reporting it without terminating would turn a case the sweep used to finish in
+    one pass into a loud failure needing a retry."""
+    from remote import orphan_sweep
+
+    killed: list[int] = []
+    alive = {1234, 1235}
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: _SHIM_ROWS)
+    monkeypatch.setattr(orphan_sweep.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(orphan_sweep.run_records, "pid_alive", lambda pid: pid in alive)
+
+    def terminate(pid):
+        killed.append(pid)
+        alive.discard(pid)  # this one really dies; the tree kill had simply not reached it
+        return True
+
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", terminate)
+    alive.discard(1234)  # the root exited on its own SIGTERM without signalling its child
+
+    result = orphan_sweep.sweep_orphans("n1")
+    assert killed == [1234, 1235]          # the descendant was escalated, not merely reported
+    assert result.reaped == (1234, 1235)   # ...and honestly counted as two processes reaped
+    assert result.survivors == ()
+
+
+def test_sweep_orphans_flags_a_descendant_that_survives_its_own_escalation(monkeypatch):
+    """The other half: a descendant that outlives the tree kill AND its own SIGTERM→SIGKILL is a
+    survivor, so leave fails loud naming it rather than printing "Reaped" over a live child."""
+    from remote import orphan_sweep
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: _SHIM_ROWS)
+    monkeypatch.setattr(orphan_sweep.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(orphan_sweep.run_records, "pid_alive", lambda pid: pid == 1235)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: pid != 1235)
+
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result.reaped == (1234,)
+    assert result.survivors == (1235,)
+
+
+def test_sweep_orphans_settles_before_judging_a_descendant(monkeypatch):
+    """A process that was just signalled is briefly still there — Windows `TerminateProcess` returns
+    before the process is gone, and a POSIX child is a zombie until reaped, which `pid_alive` calls
+    alive. Probing the instant the root dies would report a successful teardown as a survivor and hand
+    the operator a kill command for a pid that is already dying, or by then belongs to something
+    else."""
+    from remote import orphan_sweep
+
+    probes = {"n": 0}
+
+    def pid_alive(pid):
+        if pid != 1235:
+            return False
+        probes["n"] += 1
+        return probes["n"] < 3  # gone by the third look
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: _SHIM_ROWS)
+    monkeypatch.setattr(orphan_sweep.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(orphan_sweep.run_records, "pid_alive", pid_alive)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
+                        lambda pid: pid == 1234 or pytest.fail("descendant died on its own; must not escalate"))
+
+    assert orphan_sweep.sweep_orphans("n1") == orphan_sweep.SweepResult((1234,), (), ())
+
+
+def test_sweep_orphans_uses_the_windows_process_table_on_win32(monkeypatch):
+    """Windows is no longer a no-op (grid-leave issue 06 closes follow-up F2): the sweep runs, but
+    through the CIM enumerator — it must never shell out to `ps` there."""
+    from remote import orphan_sweep
+
+    monkeypatch.setattr(orphan_sweep.sys, "platform", "win32")
+    monkeypatch.setattr(orphan_sweep, "_posix_ps_output",
+                        lambda: pytest.fail("must not run ps on Windows"))
+    monkeypatch.setattr(orphan_sweep, "_win_process_output",
+                        lambda: r'4242 4000 C:\g\grid.exe __remote-engine n1 remote')
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: True)
+
+    assert orphan_sweep.sweep_orphans("n1").reaped == (4242,)
+
+
+def test_win_process_output_invocation_never_carries_a_grid_id(monkeypatch):
+    """The enumeration script is a CONSTANT and all filtering happens in Python. If the network id
+    were interpolated into the command line, the helper's own row would carry marker+id and the sweep
+    would match itself. `-EncodedCommand` makes that structural: the base64 alphabet has no `_`, so
+    `__remote-engine` cannot appear in our argv at all. Also locks the absolute interpreter path
+    (`CreateProcess` searches the CWD, and `grid leave` runs wherever the operator is), the
+    non-raising decode, and the console-free spawn."""
+    import base64
+
+    from remote import orphan_sweep
+    from shared import run_records
+
+    seen: dict[str, object] = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "  1 0 C:\\Windows\\System32\\svchost.exe -k netsvcs\n"
+        stderr = ""
+
+    def capture(argv, **kwargs):
+        seen["argv"], seen["kwargs"] = argv, kwargs
+        return _Proc()
+
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(orphan_sweep.subprocess, "run", capture)
+    assert orphan_sweep._win_process_output() is not None
+
+    argv, kwargs = seen["argv"], seen["kwargs"]
+    assert argv[0] == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    encoded = argv[argv.index("-EncodedCommand") + 1]
+    assert base64.b64decode(encoded).decode("utf-16-le") == orphan_sweep._WIN_PROCESS_LIST_SCRIPT
+    assert run_records.REMOTE_ENGINE_MARKER not in " ".join(argv)
+    assert kwargs["errors"] == "replace"  # a rogue argv must not raise UnicodeDecodeError (a ValueError)
+    assert kwargs["timeout"] == orphan_sweep._WIN_PROCESS_TIMEOUT_SECONDS
+    # CREATE_NO_WINDOW: no console flash from a GUI/service-hosted CLI. Asserted by VALUE — merely
+    # asserting the key is present passes for any value, including a wrong one.
+    assert kwargs["creationflags"] == getattr(orphan_sweep.subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def test_win_powershell_path_never_consults_the_environment(monkeypatch):
+    """`SystemRoot` decides which binary would run, and it is attacker-writable and survives UAC
+    elevation — so the path is built from what the kernel reports, not from the environment.
+
+    Validating the string instead was tried and does not work; each of these defeats the obvious
+    regex `^[A-Za-z]:\\\\(Windows|WINNT)$` with `IGNORECASE`, and all three were measured: a mapped
+    drive (`subst`/`net use` bind a UNC share to a letter unprivileged), U+017F (which Unicode
+    case-folding matches to `s`, and standard users can create folders at the root of `C:`), and a
+    trailing newline (`$` matches before it, and the control character then makes the path unopenable
+    — silently switching the sweep off rather than falling back)."""
+    from remote import orphan_sweep
+
+    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    expected = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    for hostile in [r"W:\Windows", "C:\\Window\u017f", "C:\\Windows\n", r"\\evil-host\share", ""]:
+        monkeypatch.setenv("SystemRoot", hostile)
+        assert orphan_sweep._win_powershell_path() == expected, hostile
+
+    # A non-default Windows directory is still honoured — it just has to come from the kernel.
+    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: "D:\\WINNT\\")
+    assert orphan_sweep._win_powershell_path() == r"D:\WINNT\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def test_orphan_sweep_matcher_ignores_a_bystander_that_merely_mentions_the_marker():
+    """The marker must be followed by EXACTLY the two arguments `cli/_main.py` parses for it. Without
+    the count, an operator's own `pgrep -f "__remote-engine <nid>"` or a `watch` wrapper matches — and
+    the next `grid leave` force-kills it, on Windows as a whole process tree with no grace period.
+    Reproduced against the real process table before this guard existed."""
+    from remote import orphan_sweep
+
+    rows = "\n".join([
+        "  4242  1 /bin/grid __remote-engine n1 remote",                    # a real serve child → match
+        "  4243  1 grep --color=auto __remote-engine n1",                   # the operator's own grep → skip
+        "  4244  1 pgrep -f __remote-engine n1 remote extra",               # trailing junk → skip
+        "  4245  1 tail -f log __remote-engine n1",                         # one token after → skip
+    ])
+    assert orphan_sweep._match_orphan_pids(rows, "n1", exclude_pids=set()) == [4242]
+    # The rule is a token-count discriminator, not an identity check: a bystander whose command line
+    # happens to END in the exact `__remote-engine <nid> <engine>` shape still matches. Closing that
+    # needs an owner or executable check — the trade-off tracked in issue 15.
+    lookalike = "  4246  1 /bin/sh -c pgrep __remote-engine n1 remote"
+    assert orphan_sweep._match_orphan_pids(lookalike, "n1", exclude_pids=set()) == [4246]
+
+
+def test_sweep_orphans_keeps_its_findings_when_one_kill_cannot_be_carried_out(monkeypatch, capsys):
+    """A kill that cannot even be attempted — `taskkill` missing from a stripped Windows image is the
+    concrete case — is classified here rather than allowed to escape. If it escaped, the caller's
+    guard would substitute an EMPTY result and throw away every survivor already found: a leave that
+    had positively identified a live child outliving SIGKILL would print "Left …", exit 0, and blame
+    the process table in a footnote. Both pids are alive and unstopped, which is what survivors are."""
+    from remote import orphan_sweep
+
+    rows = "\n".join(f"  {pid}  1 /bin/grid __remote-engine n1 remote" for pid in (111, 222))
+
+    def terminate(pid):
+        if pid == 222:
+            raise FileNotFoundError("taskkill")
+        return False  # 111 outlived SIGKILL — a genuine, positively identified survivor
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: rows)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", terminate)
+
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result.survivors == (111, 222)
+    assert result.scanned is True  # the table read fine; blaming it would be the wrong diagnosis
+    assert "couldn't stop serve child pid 222" in capsys.readouterr().err
+
+
+def test_sweep_orphans_stops_terminating_once_it_is_out_of_budget(monkeypatch):
+    """The number of matches is attacker-influenced — the network id is public in every serve child's
+    command line — and each `terminate_pid` can burn the full 25s stop grace on a process that traps
+    SIGTERM. Unbounded, that stalls leave for minutes while the relay deregister, which runs after the
+    sweep, has not fired and the node keeps taking inference jobs. Past the deadline the rest are
+    reported as survivors: alive, and we did not stop them."""
+    from remote import orphan_sweep
+
+    rows = "\n".join(f"  {pid}  1 /bin/grid __remote-engine n1 remote" for pid in (101, 102, 103))
+    clock = iter([0.0, 0.0, 999.0])  # deadline computed, first kill allowed, then out of budget
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: rows)
+    monkeypatch.setattr(orphan_sweep.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: True)
+
+    monkeypatch.setattr(orphan_sweep.run_records, "pid_alive", lambda pid: pid != 103)  # 103 exited
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result.reaped == (101,)
+    # Named so leave fails loud instead of hanging — but only the one still ALIVE. A pid we never got
+    # to may have exited on its own, and naming a dead one tells the operator to `kill -9` a pid that
+    # by now belongs to something else.
+    assert result.survivors == (102,)
+
+
+def test_win_process_list_script_filters_non_ascii_per_row_not_across_rows():
+    """The ASCII fold exists so the output decodes identically under any console/ANSI code page. It
+    MUST be applied to `$_.CommandLine` inside the loop: applied to the joined output it would
+    replace CR/LF too (0x0A/0x0D are outside \\x20-\\x7E), collapsing the whole table into one row —
+    after which the matcher reads a single line and silently finds at most one pid. A mocked
+    `subprocess.run` cannot catch that, so the shape is asserted here and the row count is asserted
+    for real in `tests/test_windows_orphan_sweep.py`."""
+    from remote import orphan_sweep
+
+    assert r"($_.CommandLine -replace '[^\x20-\x7E]', '?')" in orphan_sweep._WIN_PROCESS_LIST_SCRIPT
+    assert "-join" not in orphan_sweep._WIN_PROCESS_LIST_SCRIPT
+
+
+def test_win_process_output_treats_a_nonzero_exit_as_couldnt_scan(monkeypatch, capsys):
+    """`$ErrorActionPreference='Stop'` + try/catch turns a WMI failure into exit 1; that must read as
+    "couldn't check", never as a clean empty scan."""
+    from remote import orphan_sweep
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "Get-CimInstance : Access is denied.\nAt line:1 char:1"
+
+    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(orphan_sweep.subprocess, "run", lambda *a, **k: _Proc())
+    assert orphan_sweep._win_process_output() is None
+    err = capsys.readouterr().err.lower()
+    assert "couldn't scan" in err
+    # The tool's own reason travels with the note: a stopped Winmgmt service, a corrupt WMI
+    # repository and access denied are three problems with three remedies behind one message.
+    assert "access is denied" in err
+
+
+def test_win_process_output_treats_empty_output_as_couldnt_scan(monkeypatch, capsys):
+    """The guard the POSIX path doesn't need. PowerShell reports a *non-terminating* cmdlet error
+    (Winmgmt stopped, a corrupt WMI repository, access denied) on stderr and still exits 0 with empty
+    stdout — which under the `ps` contract means "checked, clean" and would let leave print an
+    unqualified "Left …" having verified nothing. A live Windows box always has at least our own
+    powershell.exe with a readable command line, so zero rows is evidence of failure."""
+    from remote import orphan_sweep
+
+    class _Proc:
+        returncode = 0
+        stdout = "﻿Execution policy banner\n"  # non-blank, but not one parseable process row
+        stderr = ""
+
+    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(orphan_sweep.subprocess, "run", lambda *a, **k: _Proc())
+    assert orphan_sweep._win_process_output() is None
+    assert "no processes" in capsys.readouterr().err.lower()
+
+
+def test_win_process_output_degrades_when_powershell_is_missing(monkeypatch, capsys):
+    """Same degradation contract as a missing `ps`: a note on stderr and `None`, never a traceback —
+    the record-pid kills and the relay backstop have already run."""
+    from remote import orphan_sweep
+
+    def boom(*a, **k):
+        raise FileNotFoundError("powershell.exe")
+
+    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(orphan_sweep.sys, "platform", "win32")
+    monkeypatch.setattr(orphan_sweep.subprocess, "run", boom)
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result == orphan_sweep.SweepResult((), (), (), scanned=False)
+    assert "couldn't list processes" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -6550,11 +7002,20 @@ def _capture_relay_puts(monkeypatch, *, status=200):
 
 def _disable_orphan_sweep(monkeypatch):
     """Neutralize the full-leave argv sweep in a test that isn't exercising it: patch the
-    lazily-imported ``remote.orphan_sweep._ps_output`` (NOT an attribute on ``remote_provider``) to a
-    successfully-read but EMPTY process table (``""``, not ``None``) — so ``sweep_orphans`` finds no
-    orphan AND reports ``scanned=True`` (a clean sweep, not a ps failure), and never shells out to the
-    real host ``ps``."""
-    monkeypatch.setattr("remote.orphan_sweep._ps_output", lambda **k: "")
+    lazily-imported ``remote.orphan_sweep._process_table_output`` (NOT an attribute on
+    ``remote_provider``) to a successfully-read but EMPTY process table (``""``, not ``None``) — so
+    ``sweep_orphans`` finds no orphan AND reports ``scanned=True`` (a clean sweep, not a read failure),
+    and never shells out to the real host process table.
+
+    ``_process_table_output`` is the ONE platform-neutral seam; both per-platform implementations are
+    poisoned as well, so a future refactor that stops routing through the seam fails loudly here
+    instead of quietly shelling out to the developer's real ``ps`` in twelve tests that would still
+    pass (their network ids match nothing) while silently no longer being hermetic."""
+    monkeypatch.setattr("remote.orphan_sweep._process_table_output", lambda **k: "")
+    monkeypatch.setattr("remote.orphan_sweep._posix_ps_output",
+                        lambda **k: pytest.fail("the sweep must go through _process_table_output"))
+    monkeypatch.setattr("remote.orphan_sweep._win_process_output",
+                        lambda **k: pytest.fail("the sweep must go through _process_table_output"))
 
 
 def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=False,
@@ -6621,7 +7082,8 @@ def test_remote_leave_stale_pid_sweep_reaps_live_child(monkeypatch, tmp_path):
     )
     from remote import orphan_sweep
     # The real live child is pid 4242, discoverable ONLY by the argv sweep (the record points at 9999).
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  4242 /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  4242 /bin/grid __remote-engine n1 remote")
     killed = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
                         lambda pid: killed.append(pid) or True)
@@ -6641,7 +7103,8 @@ def test_remote_leave_no_records_sweep_reaps_orphan(monkeypatch, tmp_path, capsy
                             "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
     from remote import orphan_sweep
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  7777 /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  7777 /bin/grid __remote-engine n1 remote")
     killed = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
                         lambda pid: killed.append(pid) or True)
@@ -6661,6 +7124,10 @@ def test_remote_leave_sweep_survivor_fails_loud_after_backstop(monkeypatch, tmp_
         [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
         pid=0, access_token=_jwt({"node_id": "node-jwt"}),
     )
+    # Patching `sweep_orphans` alone stopped being enough once `_full_leave_reap` also called
+    # `launcher_ancestors`: that reads the real process table, so the test quietly depended on the
+    # developer's machine while still passing. Patch the seam too.
+    _disable_orphan_sweep(monkeypatch)
     from remote import orphan_sweep
     monkeypatch.setattr(orphan_sweep, "sweep_orphans",
                         lambda network_id, **k: orphan_sweep.SweepResult((), (9999,), ()))
@@ -6673,6 +7140,128 @@ def test_remote_leave_sweep_survivor_fails_loud_after_backstop(monkeypatch, tmp_
     assert puts == [("/nodes/node-jwt", "consumer", [])]        # ...the backstop really fired first
 
 
+@pytest.mark.parametrize("failure", [FileNotFoundError("taskkill"), SystemExit("corrupt record")])
+def test_remote_leave_backstop_still_lands_when_the_sweep_blows_up(monkeypatch, tmp_path, capsys, failure):
+    """The sweep is a best-effort diagnostic; the backstop deregister is the mechanism of record. An
+    unforeseen exception in the scan must therefore degrade to an honest "couldn't check", never
+    propagate and take the deregister with it — that would leave the model advertised for the full
+    ~120s TTL over a traceback. Newly reachable on Windows, where `kill_group` invokes `taskkill` by
+    bare name: a stripped image raises `FileNotFoundError` from inside `terminate_pid`, which the
+    sweep's per-pid handler (`PermissionError` only) does not catch.
+
+    Parametrised over `SystemExit` deliberately. It is this repo's clean-error idiom (`jsonio` turns a
+    corrupt record into one) and it is NOT an `Exception`, so a later tidy-up of the handler to a bare
+    `except Exception` would silently reinstate exactly the failure this guards — and merge green."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+
+    def boom(network_id, **k):
+        raise failure
+
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans", boom)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # the deregister still fired
+    captured = capsys.readouterr()
+    assert "scan for orphaned serve children failed" in captured.err  # ...and said why it couldn't check
+    assert "Couldn't scan" in captured.out  # the success line is qualified, not an unconditional "Left"
+
+
+def test_recorded_pids_reads_every_pid_the_record_kill_would_act_on(monkeypatch, tmp_path):
+    """The exclusion set must not be narrower than what `run_records.stop_engine` will actually kill,
+    or a child is terminated by the record path yet stays eligible for the sweep — escalated twice and
+    named twice in the failure message, contradicting the disjointness `_full_leave_reap` documents.
+    A decimal string is the case that drifted: `stop_engine` coerces one, so this must read it too.
+
+    The junk values are the other half: they must not raise. This runs ahead of the relay deregister
+    that is the mechanism of record, and a traceback here means the model stays advertised."""
+    reap = cli.remote_provider._recorded_pids
+
+    assert reap({"a": {"pid": 4242}, "b": {"pid": "4243"}}) == {4242, 4243}
+    assert reap({"a": {"pid": 0}, "b": {"pid": None}, "c": {}}) == set()          # never stamped
+    assert reap({"a": {"pid": True}, "b": {"pid": []}, "c": {"pid": "nope"}}) == set()  # junk, no raise
+    assert reap({"a": {"pid": -1}}) == set()                                       # never a real pid
+
+
+def test_remote_leave_backstop_still_lands_when_the_ancestry_lookup_blows_up(monkeypatch, tmp_path, capsys):
+    """Sibling of the test above, for the OTHER process-table read. `launcher_ancestors` runs even
+    earlier than the sweep, so an exception there aborts the leave before the record kills as well as
+    before the deregister — nothing is stopped AND the model stays advertised for the full ~120s TTL,
+    behind a traceback. Guarding only the sweep would leave the wider hole open."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+
+    def boom(network_id, pids):
+        raise AttributeError("ctypes has no attribute windll")
+
+    monkeypatch.setattr(orphan_sweep, "launcher_ancestors", boom)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # the deregister still fired
+    assert "couldn't identify launcher processes" in capsys.readouterr().err
+
+
+def test_remote_leave_reads_launcher_ancestry_before_killing_the_recorded_child(monkeypatch, tmp_path):
+    """Ordering is the whole guard. A recorded child's launcher shim carries the same argv it does,
+    and the only thing telling them apart is the parent link — which vanishes from the process table
+    the moment the kill succeeds. Asked afterwards the query returns nothing and a healthy leave
+    sweeps its own launcher; this asserts the call really happens first."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+
+    order: list[str] = []
+
+    def ancestry(network_id, pids):
+        order.append(f"ancestry{sorted(pids)}")
+        return frozenset()
+
+    def terminate(pid):
+        order.append(f"kill{pid}")
+        return True
+
+    monkeypatch.setattr(orphan_sweep, "launcher_ancestors", ancestry)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", terminate)
+    _capture_relay_puts(monkeypatch)
+
+    cli.main(["leave"])
+    assert order == ["ancestry[4242]", "kill4242"]
+
+
+def test_full_leave_survivor_message_names_a_remedy_the_operator_can_run(monkeypatch):
+    """The loud failure tells the operator how to finish the job by hand, so the command it names has
+    to exist on their machine. `kill -9` was safe while the argv sweep was POSIX-only; issue 06 makes
+    this path reachable on Windows, which is the last place to hand an operator a POSIX command."""
+    exiter = cli.remote_provider._full_leave_survivor_exit
+
+    with pytest.raises(SystemExit) as posix:
+        exiter([4242], "team", True)
+    assert "kill -9 4242" in str(posix.value)
+
+    monkeypatch.setattr(cli.remote_provider.sys, "platform", "win32")
+    with pytest.raises(SystemExit) as windows:
+        exiter([4242], "team", True)
+    assert "taskkill /F /PID 4242" in str(windows.value)
+    assert "kill -9" not in str(windows.value)
+
+
 def test_remote_leave_sweep_reports_foreign_process(monkeypatch, tmp_path, capsys):
     """A matched process owned by another user is reported (stderr note) but never fails the leave —
     it isn't ours to reap, so exit 0 and 'Left' stand."""
@@ -6681,6 +7270,10 @@ def test_remote_leave_sweep_reports_foreign_process(monkeypatch, tmp_path, capsy
         [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
         pid=0, access_token=_jwt({"node_id": "node-jwt"}),
     )
+    # Patching `sweep_orphans` alone stopped being enough once `_full_leave_reap` also called
+    # `launcher_ancestors`: that reads the real process table, so the test quietly depended on the
+    # developer's machine while still passing. Patch the seam too.
+    _disable_orphan_sweep(monkeypatch)
     from remote import orphan_sweep
     monkeypatch.setattr(orphan_sweep, "sweep_orphans",
                         lambda network_id, **k: orphan_sweep.SweepResult((), (), (1234,)))
@@ -6702,7 +7295,8 @@ def test_remote_leave_ps_failure_qualifies_success(monkeypatch, tmp_path, capsys
         pid=0, access_token=_jwt({"node_id": "node-jwt"}),
     )
     from remote import orphan_sweep
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: None)  # ps unavailable → couldn't scan
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: None)  # process table unreadable → couldn't scan
     puts = _capture_relay_puts(monkeypatch)
 
     assert cli.main(["leave"]) == 0
@@ -6971,7 +7565,8 @@ def test_remote_leave_engine_last_stale_pid_sweeps_and_backstops(monkeypatch, tm
         pid=9999, access_token=_jwt({"node_id": "node-jwt"}),  # 9999 = stale (dead) recorded pid
     )
     from remote import orphan_sweep
-    monkeypatch.setattr(orphan_sweep, "_ps_output", lambda: "  4242 /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  4242 /bin/grid __remote-engine n1 remote")
     killed = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
                         lambda pid: killed.append(pid) or True)

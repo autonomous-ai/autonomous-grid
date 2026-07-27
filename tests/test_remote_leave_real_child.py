@@ -60,10 +60,18 @@ from local import runtime
 from remote import credentials
 from shared import paths, run_records, state
 
+# The sweep half of the old skip reason is gone — grid-leave issue 06 gave the argv sweep Windows
+# parity, and `tests/test_windows_orphan_sweep.py` proves it against the real process table. What
+# remains is a property of what THIS file asserts, not of the sweep: the teardown it measures is
+# SIGTERM → a 25s grace loop → `killpg` of a `start_new_session` group, and Windows has none of those
+# (`run_records.terminate_pid` short-circuits straight to `taskkill /F /T`, no grace, no group). The
+# spawn differs too — `start_new_session=True` is silently ignored on Windows — so the detached child
+# these regimes depend on would not be detached at all.
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="the leave argv sweep is POSIX-only by design (grid-leave follow-up F2), and the "
-           "SIGTERM/killpg teardown this asserts has no Windows equivalent",
+    reason="asserts the POSIX teardown itself (SIGTERM → 25s grace → killpg of a start_new_session "
+           "group), which has no Windows equivalent; the Windows sweep is covered by "
+           "tests/test_windows_orphan_sweep.py",
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]

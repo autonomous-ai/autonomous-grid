@@ -167,14 +167,21 @@ def _win_pid_alive(pid: int) -> bool:
 
     process_query_limited_information = 0x1000
     still_active = 259
-    kernel32 = ctypes.windll.kernel32
+    error_invalid_parameter = 87
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
     if not handle:
-        return False  # no such pid (OpenProcess fails with ERROR_INVALID_PARAMETER)
+        # Only ERROR_INVALID_PARAMETER means "no such pid". Every other failure — ERROR_ACCESS_DENIED
+        # for another user's or a protected process — means the process EXISTS and we are simply not
+        # allowed to look, so reporting it dead would let `terminate_pid` short-circuit and claim it
+        # reaped something still running. That is the false success this whole feature exists to end,
+        # and it is the direction the POSIX branch already chose (EPERM → alive). The access right
+        # asked for is *grantable* across users, which is not the same as granted.
+        return ctypes.get_last_error() != error_invalid_parameter
     try:
         code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return False
+            return True  # opened it but couldn't read it — uncertain, so not "dead"
         return code.value == still_active
     finally:
         kernel32.CloseHandle(handle)
@@ -309,7 +316,7 @@ def discard_own_record(grid_id: str, engine_id: str) -> bool:
         return False
 
 
-def _recorded_pid(record: dict[str, Any]) -> int | None:
+def recorded_pid(record: dict[str, Any]) -> int | None:
     """A record's ``pid`` as something safe to reason about: ``0`` when it was never stamped (absent
     or null — the value the join write-race leaves behind), the pid itself when it is a plain
     in-range process id, and ``None`` when the field is any other shape.
@@ -342,7 +349,7 @@ def _discard_own_record(grid_id: str, engine_id: str) -> bool:
         record = jsonio.load_json(path)
         if not record:
             return False  # already gone (a concurrent leave), or empty — nothing to reap, nothing to say
-        pid = _recorded_pid(record)
+        pid = recorded_pid(record)
         if pid is None:
             print(
                 f"Kept the run record for {engine_id}@{grid_id}: its pid field ({record.get('pid')!r}) "
@@ -372,7 +379,12 @@ def stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> int:
     SIGKILL keeps its record — so a retried ``grid leave`` still has a handle and the caller can fail
     loudly naming the pid — the honest teardown that stops leave printing "Left …" over a live child.
     """
-    pid = int(record.get("pid") or 0)
+    # Tolerant read, not ``int(...)``: this runs inside a full leave, ahead of the relay
+    # deregister that is the mechanism of record, and a hand-edited/corrupt ``pid`` field would
+    # otherwise raise and take that deregister with it — the model then stays advertised for the
+    # whole node TTL behind a traceback. An unreadable pid names no live child, so there is
+    # nothing to stop and the junk record goes.
+    pid = recorded_pid(record) or 0
     if terminate_pid(pid):
         record_path(grid_id, engine_id).unlink(missing_ok=True)
         return 0
