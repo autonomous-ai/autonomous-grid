@@ -31,6 +31,52 @@ _NVIDIA_GBPS = (
     ("3060", 360), ("2080 ti", 616), ("2080", 448), ("2070", 448), ("2060", 336),
 )
 
+# GFLOPS-per-core estimates (dense FP16/BF16 matmul), rounded — order-of-magnitude only. Apple
+# does not publish per-chip compute figures, and GPU-core architecture hasn't shifted more than
+# ~2x generation to generation, so one flat per-core constant beats guessing a precise number per
+# chip name (the mistake made once already with a hardcoded llama.cpp-arch list).
+_APPLE_GFLOPS_PER_CORE = 400.0
+# CPU matmul with no dedicated tensor/AVX-512 path is well below a GPU's per-unit throughput but
+# modern AVX2/FMA cores still move real work — calibrated so a small (~3B active) dense model's
+# prefill still clears a normal interactive bar, while a much larger active model does not.
+_CPU_GFLOPS_PER_CORE = 190.0
+
+# NVIDIA dense FP16/BF16 Tensor-core TFLOPS by name fragment (no sparsity — sparsity needs a
+# structured-pruned model, which nothing in this catalog assumes). Published spec sheets, rounded;
+# reuses the exact fragment set as `_NVIDIA_GBPS` above.
+_NVIDIA_TFLOPS = (
+    ("h200", 990), ("h100", 990), ("a100", 310), ("v100", 125),
+    ("a6000", 155), ("a40", 150), ("a10", 125), ("l40", 180), ("l4", 120), ("t4", 65),
+    ("5090", 420), ("4090", 165), ("4080", 97), ("4070 ti", 80), ("4070", 60),
+    ("4060", 30), ("3090 ti", 80), ("3090", 71), ("3080", 60), ("3070", 40),
+    ("3060", 25), ("2080 ti", 28), ("2080", 20), ("2070", 15), ("2060", 13),
+)
+
+
+def _apple_compute_gflops(core_count: int | None) -> float | None:
+    """Apple GPU compute (GFLOPS) from its core count — the same field `device_info` already
+    collects (`apple.gpu_core_count()`); no new probe needed."""
+    if not core_count or core_count <= 0:
+        return None
+    return core_count * _APPLE_GFLOPS_PER_CORE
+
+
+def _nvidia_compute_gflops(name: str) -> float | None:
+    if not name:
+        return None
+    text = name.lower()
+    best = None
+    for fragment, tflops in _NVIDIA_TFLOPS:
+        if fragment in text and (best is None or len(fragment) > best[0]):
+            best = (len(fragment), tflops)
+    return float(best[1]) * 1000.0 if best else None
+
+
+def _cpu_compute_gflops(physical_cores: int | None) -> float | None:
+    if not physical_cores or physical_cores <= 0:
+        return None
+    return physical_cores * _CPU_GFLOPS_PER_CORE
+
 
 def _apple_bandwidth(chip: str) -> float | None:
     """Bandwidth for an Apple chip string like ``"Apple M3 Max"`` / ``"M1 Ultra"`` / ``"M2"``."""
@@ -68,4 +114,19 @@ def estimate(device_class: str, chip: str, gpus: list[dict]) -> float | None:
     if device_class == "nvidia":
         rates = [r for g in (gpus or []) if (r := _nvidia_bandwidth(g.get("name") or "")) is not None]
         return max(rates) if rates else None
+    return None
+
+
+def estimate_compute_gflops(device_class: str, gpus: list[dict], physical_cores: int | None) -> float | None:
+    """Best-effort compute throughput (GFLOPS) — the second bottleneck alongside `estimate()`'s
+    memory bandwidth. Decode is memory-bound (see `estimate`); prefill (prompt processing) is
+    compute-bound, so a consumer sizing prefill time needs this instead."""
+    if device_class == "apple-silicon":
+        core_count = (gpus or [{}])[0].get("core_count") if gpus else None
+        return _apple_compute_gflops(core_count)
+    if device_class == "nvidia":
+        rates = [r for g in (gpus or []) if (r := _nvidia_compute_gflops(g.get("name") or "")) is not None]
+        return max(rates) if rates else None
+    if device_class == "cpu":
+        return _cpu_compute_gflops(physical_cores)
     return None
