@@ -377,6 +377,8 @@ The `grid join` flag set is the union of both modes, gated by mode:
   (how many requests this engine serves at once; the provider runs one poll worker per slot —
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
   them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default).
+  Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
+  extra slots queue behind a batch that was never widened to take them.
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
   `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.

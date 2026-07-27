@@ -19,10 +19,10 @@ An inference server serves whatever models fit on one machine. Grid makes every 
 your NVIDIA desktop, the workstation in the corner — answer as one, behind **one OpenAI-compatible
 endpoint**, and does two things with them.
 
-**Inference.** Each request routes to whichever computer runs the right model. A machine needs an
-engine to run one — bring the ones you have, or let Grid install one on a bare computer. Ollama,
-vLLM, LM Studio, MLX, llama.cpp and ComfyUI all stay exactly where they are: Grid does not replace
-them, it networks them, so five machines answer on one address.
+**Inference.** Each request routes to whichever computer runs the right model. Running one takes an
+inference engine — bring yours, or let Grid install one. Ollama, vLLM, LM Studio, MLX, llama.cpp and
+ComfyUI stay where they are: Grid does not replace them, it networks them, so five machines answer
+on one address.
 
 **Training.** The same fleet teaches a small model *your* work, and the data, the attempts and the
 weights never leave your network. This belongs here rather than in a separate tool for one reason:
@@ -62,8 +62,7 @@ grid up
 
 ### 2 · Add a computer
 
-Nothing installed on it yet? Grid ships an engine, so a bare machine takes three commands and no
-addresses:
+Nothing installed on it yet? Grid ships an inference engine:
 
 ```bash
 grid engine install llama.cpp                     # Metal on macOS, CUDA on Linux NVIDIA
@@ -71,19 +70,14 @@ grid pull qwen36-35b-a3b-mtp                      # `grid catalog`, or any GGUF:
 grid join http://192.168.1.25:8090 --serve qwen36-35b-a3b-mtp --name mac-studio
 ```
 
-**Already running Ollama, vLLM or LM Studio?** Point Grid at it instead and keep it exactly where
-it is. `--at` is the engine's address on your network, since the grid forwards requests to it.
+**Already running Ollama, vLLM or LM Studio?** Point Grid at it instead. `--at` is its address on
+your network.
 
 ```bash
 grid join http://192.168.1.25:8090 --at http://192.168.1.20:8000/v1 -m qwen3-coder --name gpu-4090
 ```
 
-Repeat for each computer — the two kinds mix freely in one grid. More on either:
-[Engines and models](#engines-and-models).
-
-> A beefy engine can serve **several requests at once** — `--max-concurrency N` matches its batch
-> width (llama.cpp `--parallel`, vLLM `max_num_seqs`) so it stays fed in parallel rather than one
-> job at a time. Defaults to 1. `grid engines` shows what each is serving.
+Repeat for each computer.
 
 ### 3 · Ask it something
 
@@ -210,9 +204,9 @@ serve to one, and `grid members add research <email>` invites people ([Members](
 
 ### Engines and models
 
-Grid runs no model code of its own — an engine does, and you can either bring one or let Grid
-install it. It ships two: `llama.cpp` for text, ComfyUI for media. These work the same in both
-modes; only the grid you join differs (a remote **name**, or a local **`grid_url`**).
+Grid runs no model code of its own; an inference engine does. Bring one, or let Grid install one
+of the two it ships: `llama.cpp` for text, ComfyUI for media. Both work the same in either mode —
+only the grid you join differs (a remote **name**, or a local **`grid_url`**).
 
 ```bash
 grid engine install llama.cpp           # the text engine
