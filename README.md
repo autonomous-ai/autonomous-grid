@@ -15,26 +15,23 @@
 
 </div>
 
-An inference server serves whatever models fit on one machine. Grid makes every machine you have — your Mac,
-your NVIDIA desktop, the workstation in the corner — answer as one, behind **one OpenAI-compatible
-endpoint**, and does two things with them.
+An inference server serves whatever models fit on one machine. Grid puts every machine you have
+behind **one OpenAI-compatible endpoint**.
 
 **Inference.** Each request routes to whichever computer runs the right model. Running one takes an
 inference engine — bring yours, or let Grid install one. Ollama, vLLM, LM Studio, MLX, llama.cpp and
-ComfyUI stay where they are: Grid does not replace them, it networks them, so five machines answer
-on one address.
+ComfyUI stay where they are; Grid does not replace them, it networks them.
 
-**Training.** The same fleet teaches a small model *your* work, and the data, the attempts and the
-weights never leave your network. This belongs here rather than in a separate tool for one reason:
-RL fine-tuning is roughly 75% sampling, sampling is inference, and inference is what a grid already
-does. The expensive part of training is work your fleet is already good at.
+**Training.** The same fleet teaches a small model your work, and the data, the attempts and the
+weights never leave your network. It belongs here because RL fine-tuning is roughly 75% sampling,
+sampling is inference, and inference is what a grid already does.
 
-**Intranet** — the old word for a network that is yours, not the public one. An AI intranet is
-every computer you own, answering as one, on your own network.
+**Intranet** — the old word for a private network. An AI intranet is every computer you own,
+answering as one.
 
-**Local by default — no account, no relay, nothing to sign into.** Your apps point at a machine on
-your own network, and it keeps working if we disappear. If you want to reach the same computers from
-outside your network, hosted grids do that: [Working from anywhere](#working-from-anywhere).
+**Local by default: no account, no relay, nothing to sign into.** Your apps point at a machine on
+your own network, and it keeps working if we disappear. From outside your network:
+[Working from anywhere](#working-from-anywhere).
 
 ---
 
@@ -50,8 +47,8 @@ You get `grid` (and the `agrid` alias) on your PATH — a self-contained binary 
 [uv](https://docs.astral.sh/uv/)-managed install on macOS. Pin a release with `GRID_VERSION=0.1.0`.
 Contributors can instead clone and `uv tool install -e . --force`.
 
-The four steps below are the **local** path. Remote mode is the same four steps with
-[three commands changed](#working-from-anywhere).
+These four steps are the local path; remote mode changes
+[three commands](#working-from-anywhere).
 
 ### 1 · Start a grid
 
@@ -89,19 +86,15 @@ grid models --verbose
 # gemma4-31b   mac-studio  http://192.168.1.10:8080/v1
 ```
 
-Two computers, two frameworks, one endpoint.
-
 ### 4 · Point your apps at it
 
-`grid info --env` prints copy-pasteable exports for whichever mode you are in:
+`grid info --env` prints the exports for whichever mode you are in:
 
 ```bash
 grid info --env
 # OPENAI_BASE_URL=http://192.168.1.25:8090/v1
 # OPENAI_API_KEY=local-grid
 ```
-
-Wire those two values into any OpenAI-compatible client.
 
 <details>
 <summary><b>OpenClaw</b></summary>
@@ -163,19 +156,15 @@ client.chat.completions.create(
 
 </details>
 
-**That's it.** Every model on every computer answers at one endpoint.
-
 ---
 
 ## Working from anywhere
 
-The four steps above need nothing from us. To reach the same computers from outside your network,
-switch to remote mode: engines poll Autonomous Relay outbound, so they serve from behind a NAT with
-no inbound port and no public IP.
+To reach the same computers from outside your network, switch to remote mode: engines poll
+Autonomous Relay outbound, so they serve from behind a NAT with no inbound port and no public IP.
 
 **The trade is that your request and its answer pass through our relay, which local mode never
-does.** We forward and keep nothing — no stored prompts, no training on your traffic. A hosted grid
-is a gateway to your intranet, not the intranet itself.
+does.** We forward and keep nothing — no stored prompts, no training on your traffic.
 
 ```bash
 grid mode remote     # persisted to ~/.grid/state.json; --local / --remote overrides one command
@@ -283,10 +272,7 @@ Contract and transparency table in [docs/cli.md](docs/cli.md#router) · [ADR 001
 > The loop runs end to end and the measured runs in [`train/README.md`](train/README.md) are real,
 > but the capture path, the gate and the MLX backend are young. The join from real outcomes back
 > into tasks exists only where your app reports a verdict —
-> [what is and is not built](train/README.md#not-built-yet) is written out plainly.
-
-The same fleet teaches a small model your own work — your tickets, your repos, your deals. The
-data, the attempts and the weights never leave your network.
+> [what is and is not built](train/README.md#not-built-yet).
 
 <p align="center">
 <img src="docs/train-architecture.png" width="880" alt="Your tasks and the weights sit with the trainer, which drives everything: across the top it takes your tasks, produces an adapter and hands it to the gate, which serves the result only if it beats the model you already serve and bins it otherwise. Below the trainer, the orchestrator fans each task out across all five of your machines — a MacBook Pro, a Mac Studio, a Mac mini, an RTX 6000 and an RTX 5090 — placing it wherever there is room, and the attempts come back with the token ids they sampled.">
@@ -306,8 +292,6 @@ grid train ui                           # watch the reward and eval curves
 
 The grid samples rollouts across its nodes, one machine holds the trainer, and the LoRA adapter it
 produces goes back to the serving nodes under a stable name — where `auto` keeps routing to it.
-Inference by day, training at night, same hardware.
-
 API nodes (`--api openai`, `--api codex`) cannot serve rollouts: vendors return neither the token
 ids they sampled nor their logprobs, and you cannot own an improvement to a model you rent. In a
 hybrid grid that becomes the useful loop — `auto` sends what the local model can't do yet to a
@@ -327,8 +311,8 @@ python -m train.mlx.grpo_hello          # Apple Silicon — ~1 min, needs: pip i
 
 Figures and measured curves: [train/README.md](train/README.md). One Mac:
 [docs/start-on-a-mac.md](docs/start-on-a-mac.md) · two machines:
-[docs/two-node-training.md](docs/two-node-training.md) · which topologies make sense:
-[docs/topologies.md](docs/topologies.md) · design and honest limits:
+[docs/two-node-training.md](docs/two-node-training.md) · topologies:
+[docs/topologies.md](docs/topologies.md) · design and limits:
 [ADR 0019](docs/adr/0019-rl-training-plane.md).
 
 ---
@@ -358,8 +342,6 @@ and remote grid types: [docs/cli.md](docs/cli.md).
 
 ## Contributing
 
-Grid is small and readable by design — clone to PR in minutes.
-
 ```bash
 git clone https://github.com/autonomous-ai/autonomous-grid
 cd autonomous-grid
@@ -368,8 +350,8 @@ uv run --extra dev pytest
 ```
 
 Good first PRs: add a model to the catalog (`shared/models/catalog.py`) or a media bundle
-(`shared/models/media_bundles.py`). Start with **[CONTRIBUTING.md](docs/CONTRIBUTING.md)** and
-**[ARCHITECTURE.md](docs/ARCHITECTURE.md)**. Figures follow **[docs/STYLE.md](docs/STYLE.md)**.
+(`shared/models/media_bundles.py`). Start with [CONTRIBUTING.md](docs/CONTRIBUTING.md) and
+[ARCHITECTURE.md](docs/ARCHITECTURE.md). Figures follow [docs/STYLE.md](docs/STYLE.md).
 
 Local state lives under `~/.grid` (override with `GRID_HOME`).
 
