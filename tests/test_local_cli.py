@@ -9092,8 +9092,13 @@ def test_serve_loop_teardown_bounded_by_drain_timeout(monkeypatch, tmp_path, cap
 
     # One shared 0.2s deadline → ~0.2s total; a per-worker join would be ~8 × 0.2 = 1.6s.
     assert elapsed < 1.0
+    err = capsys.readouterr().err
     # Workers still in flight at the deadline are logged, not dropped silently.
-    assert "still in flight after" in capsys.readouterr().err
+    assert "still in flight after" in err
+    # So is the heartbeat, which is joined BEFORE the reload thread against the same deadline — so a
+    # heartbeat that overruns (e.g. a slow engine-health sweep) is also what ate the reload thread's
+    # turn. Without this line an operator sees the consequence and never the cause.
+    assert "Heartbeat thread still running" in err
 
 
 def test_serve_state_inflight_counter_is_thread_safe(monkeypatch, tmp_path):
@@ -16148,3 +16153,392 @@ def test_poll_loop_traces_each_cycle_when_debug_enabled(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "[engine] poll: job txn=txn-1 model='qwen3:0.6b' handled" in err
     assert "[engine] poll: no job (204)" in err
+
+
+# ---------------------------------------------------------------------------
+# Engine health carried on the heartbeat (ADR 0019 / grid-leave issue 07)
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_withdraws_models_of_an_unreachable_engine(monkeypatch, tmp_path):
+    """Two consecutive failed reachability probes withdraw that engine's models from the heartbeat
+    load, so the grid stops advertising capacity this box cannot serve."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", lambda url, *, timeout: False)
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["qwen3:0.6b"], routes={"qwen3:0.6b": "http://127.0.0.1:8081/v1"},
+    )
+
+    serve._maybe_probe_engines(state)  # first failure — debounced, nothing withdrawn yet
+    serve._maybe_probe_engines(state)  # second — the verdict
+
+    assert state.load()["unhealthy_models"] == ["qwen3:0.6b"]
+
+
+@pytest.mark.parametrize("boom", [RuntimeError("round exploded"), SystemExit("corrupt state")])
+def test_engine_probe_fault_warns_instead_of_stopping_the_engine(monkeypatch, tmp_path, capsys, boom):
+    """A fault ANYWHERE in the round must degrade to a warning, never escape.
+
+    `_maybe_probe_engines` runs on the heartbeat thread under `_supervise`, which catches
+    BaseException and stops the WHOLE engine — so a bug in an advisory health probe would take a
+    perfectly good provider offline. SystemExit is included because it is this house's clean-error
+    idiom and daemon-thread hazard, exactly as `_maybe_refresh_codex` guards it.
+
+    The fault is injected OUTSIDE the per-URL loop on purpose. A raising *probe* is now caught by
+    `sweep`'s own per-URL guard (see the unprobeable-engine test), so injecting it there would
+    exercise that inner guard and leave this outer one — which covers the snapshot read, the URL
+    build, the ordering and the reporting — with no test at all.
+    """
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    def explode(routes, api_kind_by_url):
+        raise boom
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_urls", explode)
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["qwen3:0.6b"], routes={"qwen3:0.6b": "http://127.0.0.1:8081/v1"},
+    )
+
+    serve._maybe_probe_engines(state)
+
+    assert "unhealthy_models" not in state.load()  # a broken probe withholds nothing
+    assert "health probe" in capsys.readouterr().err
+
+
+def test_api_engines_are_never_probed_for_health(monkeypatch, tmp_path):
+    """A vendor's uptime is not this box's health, and pinging a metered key or a flat-rate seat every
+    30s would spend the operator's credential to learn something the grid cannot act on. So an API
+    engine's URL never reaches the probe — and is never withdrawn, even when the probe says down.
+    """
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    hardware = "http://127.0.0.1:8081/v1"
+    vendor = "https://api.openai.com/v1"
+    probed: list[str] = []
+
+    def record(url, *, timeout):
+        probed.append(url)
+        return False
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", record)
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["qwen3:0.6b", "openai:gpt-4o-mini"],
+        routes={"qwen3:0.6b": hardware, "openai:gpt-4o-mini": vendor},
+        api_kind_by_url={vendor: "openai"},
+    )
+
+    for _ in range(engine_health.UNHEALTHY_AFTER):
+        serve._maybe_probe_engines(state)
+
+    assert probed == [hardware] * engine_health.UNHEALTHY_AFTER  # the vendor was never called
+    assert state.load()["unhealthy_models"] == ["qwen3:0.6b"]
+
+
+def test_engine_health_transitions_are_logged(monkeypatch, tmp_path, capsys):
+    """Withdrawing a model from the grid — and putting it back — must leave a trace in the child's
+    own log, naming the engine and the models. That log is the artifact an orphan investigation
+    starts from; a model silently vanishing from `grid models` is the failure mode, not the fix."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    url = "http://127.0.0.1:8081/v1"
+    reachable = {"now": False}
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", lambda u, *, timeout: reachable["now"])
+    state = _serve_state(monkeypatch, tmp_path, models=["qwen3:0.6b"], routes={"qwen3:0.6b": url})
+
+    for _ in range(engine_health.UNHEALTHY_AFTER):
+        serve._maybe_probe_engines(state)
+    withdrawn = capsys.readouterr().err
+
+    serve._maybe_probe_engines(state)  # still dead, nothing changed
+    unchanged = capsys.readouterr().err
+
+    reachable["now"] = True
+    serve._maybe_probe_engines(state)
+    restored = capsys.readouterr().err
+
+    assert "unreachable" in withdrawn and url in withdrawn and "qwen3:0.6b" in withdrawn
+    # The crossing is logged, the steady state is not: a permanently dead engine heartbeats every
+    # 30s forever, and a per-tick line would bury the event that matters under its own repetition.
+    assert unchanged == ""
+    assert "answering again" in restored and "qwen3:0.6b" in restored
+    assert "unhealthy_models" not in state.load()
+
+
+def test_engine_health_probe_stops_at_its_budget(monkeypatch, tmp_path, capsys):
+    """The probe rides the heartbeat thread, so an unbounded sweep over a large union of slow engines
+    would push the next heartbeat past the relay's 120s node TTL and unlist EVERYTHING this box
+    serves — the catastrophic version of the problem this feature exists to fix. Past the budget the
+    remaining engines keep their previous verdict and the truncation is reported: "didn't check" must
+    never read as "checked, clean"."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    urls = {name: f"http://127.0.0.1:808{i}/v1" for i, name in enumerate("abc")}
+    now = {"t": 0.0}
+
+    def slow(url, *, timeout):
+        now["t"] += 6.0  # two probes exhaust the 10s budget, so the third never runs
+        return False
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "_clock", lambda: now["t"])
+    monkeypatch.setattr(engine_health, "probe_reachable", slow)
+    state = _serve_state(
+        monkeypatch, tmp_path, models=list(urls), routes={m: u for m, u in urls.items()},
+    )
+
+    for _ in range(engine_health.UNHEALTHY_AFTER):
+        serve._maybe_probe_engines(state)
+
+    err = capsys.readouterr().err
+    # Only the engine actually probed twice is withdrawn. The ones the budget cut off carry their
+    # previous verdict forward — never counted as failures for a round nobody checked them in.
+    # (Round 1 probes a, b and skips c; round 2 owes c the first slot, probes c then a, skips b.)
+    assert state.load()["unhealthy_models"] == ["a"]
+    assert urls["c"] in err and "not checked" in err
+
+
+def test_heartbeat_loop_probes_engine_health_once_per_tick(monkeypatch, tmp_path):
+    """The heartbeat loop is the only thing that runs the probe in production — and it IS the rate
+    limit, one round per 30s tick. An unwired probe would be dead code that no unit test notices."""
+    from remote import serve
+
+    calls: list[str] = []
+
+    def stop_after_one(state):
+        calls.append("heartbeat")
+        state.stop.set()  # let the loop finish this tick, then exit
+        return "ok"
+
+    monkeypatch.setattr(serve, "heartbeat_once", stop_after_one)
+    monkeypatch.setattr(serve, "_maybe_probe_engines", lambda state: calls.append("probe"))
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._heartbeat_loop(state)
+
+    assert calls == ["heartbeat", "probe"]  # probe AFTER the heartbeat it could have informed
+
+
+def test_a_stop_aborts_the_probe_round_immediately(monkeypatch, tmp_path):
+    """A leave/SIGTERM must not wait out a sweep.
+
+    `_serve_loop` drains the poll workers, the heartbeat and the reload daemon against ONE shared
+    `_DRAIN_TIMEOUT`, in that order — and the reload daemon MUST get its turn: it can have a
+    `register_once` in flight, and a PUT landing after the caller's `unregister_node` resurrects the
+    node being torn down (ADR 0010 C5). An uninterruptible sweep spends the whole deadline inside
+    the heartbeat's join and leaves the reload daemon zero, so the round watches `state.stop` the
+    same way the tick's own wait does."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    urls = {name: f"http://127.0.0.1:808{i}/v1" for i, name in enumerate("abc")}
+    probed: list[str] = []
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path, models=list(urls), routes=dict(urls))
+
+    def probe(url, *, timeout):
+        probed.append(url)
+        state.stop.set()  # a leave lands while the round is in flight
+        return True
+
+    monkeypatch.setattr(engine_health, "probe_reachable", probe)
+
+    serve._maybe_probe_engines(state)
+
+    assert probed == [urls["a"]]  # the rest are abandoned, not probed
+
+
+def test_one_probe_cannot_outlast_the_teardown_drain():
+    """A cross-file invariant that would otherwise rot silently: `PROBE_TIMEOUT` lives in
+    `engine_health`, `_DRAIN_TIMEOUT` in `serve`, and a single probe outlasting the drain re-creates
+    the starvation above even with an abort — the call already in flight still has to return.
+
+    The timeout shape is explicit for the same reason: httpx expands a BARE FLOAT to all four
+    phases independently, so `timeout=3.0` really means a slow connect AND then a slow read, ~6s."""
+    from remote import engine_health, serve
+
+    budget = engine_health.PROBE_TIMEOUT
+    assert budget.connect + budget.read < serve._DRAIN_TIMEOUT
+
+
+def test_an_engine_left_unchecked_is_probed_first_next_round(monkeypatch, tmp_path):
+    """Probe order is the snapshot's stable route order, so a fixed order starves whoever is last.
+
+    The harmful case is not the missed withdrawal (that is the pre-feature behaviour) — it is an
+    engine ALREADY withdrawn that can never be re-probed, so the single success that would restore
+    it never happens: a retry that can never succeed, with nothing saying so. Whatever a round could
+    not check goes first in the next one."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    urls = {name: f"http://127.0.0.1:808{i}/v1" for i, name in enumerate("abc")}
+    last = urls["c"]
+    now = {"t": 0.0}
+    rounds: list[list[str]] = []
+
+    def slow(url, *, timeout):
+        now["t"] += 6.0  # two probes exhaust the 10s budget
+        rounds[-1].append(url)
+        return True
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "_clock", lambda: now["t"])
+    monkeypatch.setattr(engine_health, "probe_reachable", slow)
+    state = _serve_state(monkeypatch, tmp_path, models=list(urls), routes=dict(urls))
+
+    for _ in range(2):
+        rounds.append([])
+        serve._maybe_probe_engines(state)
+
+    assert last not in rounds[0]   # the budget cut it off...
+    assert rounds[1][0] == last    # ...so the next round owes it the first probe
+
+
+def test_one_unprobeable_engine_does_not_veto_the_rest_of_the_round(monkeypatch, tmp_path, capsys):
+    """`sweep` classifies per URL, exactly as `orphan_sweep` classifies per pid.
+
+    A probe that RAISES is reachable in production: `httpx.InvalidURL` is NOT an `HTTPError`
+    subclass, so a malformed engine URL escapes `probe_reachable`'s own guard. Without a per-URL
+    guard that one engine aborts the whole round, and every sibling's verdict freezes — including an
+    engine that just recovered and would have been restored. The raiser itself is treated as
+    UNCHECKED, never as a failure: capacity is only ever withdrawn by a probe that positively
+    observed a transport failure.
+    """
+    import httpx
+
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    bad, dead = "http://127.0.0.1:1/v1", "http://127.0.0.1:8081/v1"
+
+    def probe(url, *, timeout):
+        if url == bad:
+            raise httpx.InvalidURL("malformed engine url")
+        return False
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", probe)
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["m-bad", "m-dead"], routes={"m-bad": bad, "m-dead": dead},
+    )
+
+    for _ in range(engine_health.UNHEALTHY_AFTER):
+        serve._maybe_probe_engines(state)
+
+    assert state.load()["unhealthy_models"] == ["m-dead"]  # the sibling still got its verdict
+    err = capsys.readouterr().err
+    assert bad in err and "InvalidURL" in err  # and the round names what broke, not just "something"
+    # Once, not once per tick. A malformed URL never fixes itself, and it is re-probed first every
+    # round (it goes into the backlog), so a per-round line would bury the withdrawals that matter
+    # under thousands of copies of a condition that has not changed. Same rule as `transitions`.
+    assert err.count("could not check") == 1
+
+
+def test_a_reachable_engine_is_never_withdrawn(monkeypatch, tmp_path):
+    """The polarity corollary (ADR 0019): a healthy box's heartbeat payload stays byte-identical to a
+    pre-feature build. The key is OMITTED, not emitted empty — "absent" is what makes an old master,
+    an old CLI, and a probe that never ran all mean the same safe thing."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", lambda url, *, timeout: True)
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["qwen3:0.6b"], routes={"qwen3:0.6b": "http://127.0.0.1:8081/v1"},
+    )
+
+    for _ in range(3):
+        serve._maybe_probe_engines(state)
+
+    assert state.load() == {"active_tasks": 0, "platform": "linux"}
+
+
+def test_a_single_failed_probe_withdraws_nothing(monkeypatch, tmp_path):
+    """Debounce: one blip — a dropped packet, a listener restarting between ticks — must not unlist a
+    working model, and a success in between resets the count so two NON-consecutive failures never
+    add up to a withdrawal."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    reachable = {"now": False}
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", lambda url, *, timeout: reachable["now"])
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["qwen3:0.6b"], routes={"qwen3:0.6b": "http://127.0.0.1:8081/v1"},
+    )
+
+    serve._maybe_probe_engines(state)
+    assert "unhealthy_models" not in state.load()
+
+    reachable["now"] = True
+    serve._maybe_probe_engines(state)
+    reachable["now"] = False
+    serve._maybe_probe_engines(state)
+
+    assert "unhealthy_models" not in state.load()  # failure, success, failure — never two in a row
+
+
+def test_only_the_unreachable_engines_models_are_withdrawn(monkeypatch, tmp_path):
+    """One identity serves several engines under one union (ADR 0010). A box-level verdict would take
+    the healthy siblings down with the dead engine — the Nightshift outage rerun as a design choice,
+    where one dead model demoted a three-model node and took its two working siblings with it."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    dead, alive = "http://127.0.0.1:8081/v1", "http://127.0.0.1:9000/v1"
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", lambda url, *, timeout: url != dead)
+    state = _serve_state(
+        monkeypatch, tmp_path,
+        models=["qwen3:0.6b", "llama3:8b", "mistral:7b"],
+        routes={"qwen3:0.6b": dead, "llama3:8b": alive, "mistral:7b": alive},
+    )
+
+    for _ in range(engine_health.UNHEALTHY_AFTER):
+        serve._maybe_probe_engines(state)
+
+    assert state.load()["unhealthy_models"] == ["qwen3:0.6b"]
+
+
+def test_engine_health_follows_a_hot_reload_that_repoints_a_model(monkeypatch, tmp_path):
+    """The verdict is keyed by engine URL and expanded to models only at read time, so a SIGHUP
+    hot-reload that re-points a model onto a different engine can never carry the old engine's
+    verdict across with the name."""
+    from remote import engine_health, serve
+    from shared.system import gpu
+
+    dead, alive = "http://127.0.0.1:8081/v1", "http://127.0.0.1:9000/v1"
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(engine_health, "probe_reachable", lambda url, *, timeout: url != dead)
+    state = _serve_state(
+        monkeypatch, tmp_path, models=["qwen3:0.6b"], routes={"qwen3:0.6b": dead},
+    )
+    for _ in range(engine_health.UNHEALTHY_AFTER):
+        serve._maybe_probe_engines(state)
+    assert state.load()["unhealthy_models"] == ["qwen3:0.6b"]
+
+    state.apply(  # the reload re-points the same advertised name at a healthy engine
+        serve._Snapshot.build(
+            routes={"qwen3:0.6b": alive}, upstream={}, models=["qwen3:0.6b"], capabilities={},
+            meta={}, pricing={}, max_concurrency=1,
+        ),
+        [],
+    )
+
+    assert "unhealthy_models" not in state.load()

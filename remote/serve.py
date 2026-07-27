@@ -24,7 +24,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from remote import api_keys, control_plane, credentials, probe, relay, codex_auth, codex_oauth
+from remote import api_keys, control_plane, credentials, engine_health, probe, relay, codex_auth, codex_oauth
 from shared.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
@@ -1113,6 +1113,10 @@ class _ServeState:
         self.media_models: list[str] = []
         self.media_signature: tuple[bool, tuple[str, ...], int, int] = _media_signature({})
         self._reload_register_fails = 0  # consecutive post-swap re-register failures (bounded retry, C5)
+        # Local-engine reachability, folded into the heartbeat's `load` (ADR 0019). Keyed by engine
+        # URL, not model, so a hot-reload that re-points a model can't carry a stale verdict onto a
+        # different engine. Empty = nothing withheld, which is also what every failure path leaves.
+        self._sweep = engine_health.SweepResult(health=engine_health.EngineHealth())
         self.stop = threading.Event()
         self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
         self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
@@ -1214,9 +1218,35 @@ class _ServeState:
         with self._lock:
             return self._access_token
 
+    def last_sweep(self) -> engine_health.SweepResult:
+        """The last probe round (ADR 0019) — its verdict, what it could not reach, and why.
+
+        One value rather than three fields: the next round needs all of it (the verdict to fold
+        into, the unchecked set to owe a probe to, and the errors already reported so a permanent
+        one is not re-logged every 30s), and binding it once keeps those three consistent."""
+        with self._lock:
+            return self._sweep
+
+    def health(self) -> engine_health.EngineHealth:
+        """This box's current local-engine reachability verdict."""
+        return self.last_sweep().health
+
+    def apply_sweep(self, result: engine_health.SweepResult) -> None:
+        """Swap in a freshly-probed round. One atomic rebind, like ``apply`` — the probing itself
+        happens with the lock RELEASED, so a slow engine never blocks ``load()`` or ``token()``."""
+        with self._lock:
+            self._sweep = result
+
     def load(self) -> dict[str, Any]:
         with self._lock:
             load = {"active_tasks": self._inflight}
+            # Bound to the SAME snapshot the health verdict is keyed against, inside one lock hold, so
+            # a concurrent reload swap can't pair one union's routes with another's verdict.
+            withheld = engine_health.unhealthy_models(self._snapshot.routes, self._sweep.health)
+        # Emitted only when non-empty: absent is the wire's "nothing withheld", so a healthy box's
+        # payload stays byte-identical to a pre-ADR-0019 build (ADR 0019, the polarity corollary).
+        if withheld:
+            load[engine_health.UNHEALTHY_LOAD_KEY] = withheld
         # VRAM/GPU load for the grid page (per-provider VRAM roll-up). Probed OUTSIDE the lock — it
         # shells out to nvidia-smi / system_profiler (up to a few seconds); absent a GPU it returns {}.
         from shared.system import gpu, host
@@ -2046,6 +2076,42 @@ def _maybe_refresh_codex(state: _ServeState) -> None:
         _warn(f"codex proactive refresh failed unexpectedly (engine unaffected): {exc!r}")
 
 
+def _maybe_probe_engines(state: _ServeState) -> None:
+    """One local-engine reachability round, folded into the next heartbeat's load (ADR 0019).
+
+    Runs AFTER the heartbeat rather than before it, so a slow engine delays the *verdict* by one
+    tick instead of delaying the heartbeat itself: a late heartbeat costs the node its 120s TTL and
+    unlists everything it serves, a late verdict costs one more tick of a stale advertisement.
+
+    NEVER raises, for the same reason as `_maybe_refresh_codex`: `_heartbeat_loop` runs under
+    `_supervise`, which stops the WHOLE engine on any escaping exception — so a bug in an advisory
+    health probe must not take a working provider offline. `SystemExit` included (the house
+    clean-error idiom / daemon-thread hazard). On any fault the previous verdict stands, and the
+    safe direction of a missing verdict is "withhold nothing".
+    """
+    try:
+        snap = state.snapshot()  # bind once — route + kind must come from the SAME union
+        urls = engine_health.probe_urls(snap.routes, snap.api_kind_by_url)
+        previous = state.last_sweep()
+        # Whatever last round could not check goes first, so a fixed route order can never starve
+        # the same engine every tick and freeze its verdict (an unrestorable withdrawal).
+        ordered = engine_health.prioritize(urls, previous.unchecked)
+        result = engine_health.sweep(ordered, previous.health, should_stop=state.stop.is_set)
+        state.apply_sweep(result)
+        for line in engine_health.transitions(previous.health, result.health, snap.routes):
+            _warn(line)
+        if result.skipped:  # a partial sweep must never read as a clean one
+            _warn(f"engine health probe ran out of time; not checked: {', '.join(result.skipped)}")
+        # Errors on the CROSSING only, like `transitions`: a malformed URL never fixes itself and is
+        # re-probed first every round, so a per-tick line would bury the withdrawals that matter.
+        already = {url for url, _exc in previous.errors}
+        for url, exc in result.errors:
+            if url not in already:
+                _warn(f"engine health probe could not check {url}: {exc}")
+    except (Exception, SystemExit) as exc:
+        _warn(f"engine health probe failed unexpectedly (engine unaffected): {exc!r}")
+
+
 def _heartbeat_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
         try:
@@ -2063,6 +2129,11 @@ def _heartbeat_loop(state: _ServeState) -> None:
         # On EVERY surviving tick — including a failed relay call (the relay being unreachable
         # says nothing about the vendor), so an idle grid behind a flaky relay still rotates.
         _maybe_refresh_codex(state)
+        # Likewise every tick, and likewise unconditional: this loop IS the health probe's rate
+        # limit (one round per engine per HEARTBEAT_INTERVAL), so there is no second interval to
+        # keep in sync — and an idle grid, where no job failure will ever expose a dead engine, is
+        # exactly the case this exists for (ADR 0019).
+        _maybe_probe_engines(state)
         state.stop.wait(relay.HEARTBEAT_INTERVAL)
 
 
@@ -2161,6 +2232,12 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
                 f"abandoning ({', '.join(stragglers)}); their consumers may see no terminal response.",
                 file=sys.stderr,
             )
+        if heartbeat.is_alive():
+            # The heartbeat is joined BEFORE the reload thread against the same deadline, so a
+            # heartbeat that overruns is also what ate the reload thread's turn below. Name it, or
+            # an operator reading the next line has no way to know what consumed the budget.
+            print(f"\nHeartbeat thread still running after {_DRAIN_TIMEOUT}s drain — it held the "
+                  f"shared teardown budget; anything joined after it got less of one.", file=sys.stderr)
         if reload_thread is not None and reload_thread.is_alive():
             # It didn't finish within the drain budget, so its re-register (if any) may still land after the
             # caller's unregister; the relay then TTL-prunes the resurrected node. Surface it, don't hide it.
