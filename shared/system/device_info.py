@@ -133,6 +133,7 @@ def collect_device_info() -> dict:
         # Memory bandwidth is the decode bottleneck; null when the chip/GPU isn't recognised, so the
         # ranker falls back to a coarse per-backend default rather than a confidently-wrong number.
         "mem_bandwidth_gbps": bandwidth.estimate(device_class, chip, gpus),
+        "compute_gflops": bandwidth.estimate_compute_gflops(device_class, gpus, host.physical_cores()),
         "detected": budget.detected,
         # ── Full inventory ──
         "machine": {
