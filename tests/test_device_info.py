@@ -1,14 +1,14 @@
 """Tests for `collect_device_info()`.
 
-The device-info object is reported to a remote service, so its shape is a wire
-contract: these tests pin the field names/types and the consistency invariant
-between device_class, backend and each GPU's backend, so a rename or a mismatched
-backend is caught here rather than at the far end. Values are machine-dependent —
-we assert types and relationships, not exact numbers.
+The device-info object is a stable, serializable description of the machine, so its
+shape is a contract: these tests pin the field names/types and the consistency
+invariant between device_class, backend and each GPU's backend, so a rename or a
+mismatched backend is caught here. Values are machine-dependent — we assert types
+and relationships, not exact numbers.
 """
 from __future__ import annotations
 
-from shared.system import apple, device, device_info, gpu
+from shared.system import apple, bandwidth, device, device_info, gpu
 from shared.system.device import Budget
 
 
@@ -160,9 +160,15 @@ def test_apple_silicon_fields(monkeypatch):
 
 
 def test_apple_silicon_compute_gflops_scales_with_core_count(monkeypatch):
+    # Read the per-core figure from the table rather than repeating it: the rate is
+    # per generation and gets revised, and a copy here would silently go stale.
+    per_core = bandwidth._APPLE_GFLOPS_PER_CORE["m3"]        # _force_apple pins an M3 Max
     _force_apple(monkeypatch, cores=40)
-    info = device_info.collect_device_info()
-    assert info["compute_gflops"] == 40 * 400.0
+    assert device_info.collect_device_info()["compute_gflops"] == 40 * per_core
+    # Same chip, half the GPU cores -> half the compute. That proportionality is the
+    # whole point of counting cores instead of using one number per backend.
+    _force_apple(monkeypatch, cores=20)
+    assert device_info.collect_device_info()["compute_gflops"] == 20 * per_core
 
 
 def test_cpu_only_device_reports_compute_gflops_from_physical_cores():
