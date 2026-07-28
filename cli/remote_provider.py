@@ -38,7 +38,7 @@ if TYPE_CHECKING:  # runtime imports of remote.* stay lazy (see the module docst
 # clobber each other. The run record is therefore a singleton keyed by this constant — one file
 # engines_dir(<network_id>)/remote.json — and repeated joins are additive (ADR 0010). `--name` no longer
 # keys the record (it can't mint a second identity); it is the grid-page display name (record["meta_name"]).
-_REMOTE_IDENTITY = "remote"
+_REMOTE_IDENTITY = run_records.REMOTE_IDENTITY
 
 # One-shot vendor model-listing call at `join --api` (key validation + whitelist intersection).
 _VENDOR_LIST_TIMEOUT = 15.0
@@ -1187,15 +1187,86 @@ def _await_remote_engine_start(proc: subprocess.Popen, grace: float = 3.0) -> st
     return "starting" if proc.poll() is None else "died"
 
 
+def _select_for_leave(name: str | None) -> dict[str, object]:
+    """The grid ``grid leave`` acts on — falling back to the run tree when the credentials are gone.
+
+    A credential bundle **always wins**. That ordering is the safety property, not a preference: the
+    rescue bundle below carries no ``access_token``, so resolving one for a grid we *are* signed into
+    would silently skip the backstop deregister and leave the node registered as a provider.
+
+    The fallback needs an **explicit id** and never a bare/active-grid resolution. ``~/.grid/run/engines``
+    accumulates a directory per grid this box has ever joined — 20 of them on the machine that reported
+    this bug — and picking one of those by "the sole grid" heuristic would reap whichever the operator
+    happened to have fewest of. Naming it is the consent.
+
+    Everything else keeps today's errors, with one addition: when nothing resolves and this box *is*
+    still running serve children, the error names them, because the operator who most needs this path
+    is the one who does not yet know it exists.
+    """
+    from remote import credentials
+
+    from . import remote_grid
+
+    if name:
+        bundle = remote_grid._by_name(name)
+        if bundle is not None:
+            return bundle
+        if remote_grid._valid_network_id(name) and paths.engines_dir(name).is_dir():
+            # Known to the run tree, unknown to the credential store: signed out, or a grid an
+            # authoritative `grid sync`/`grid login` overwrite dropped while its child kept serving.
+            return {"network_id": name, "name": name}
+    if not credentials.load_credentials().get("session_token"):
+        raise SystemExit(_signed_out_leave_message())
+    return remote_grid._select(name)
+
+
+def _signed_out_leave_message() -> str:
+    """"You're not signed in", plus the grids this box can still be made to stop serving.
+
+    Free to compute — record liveness only, never a process-table read — because it runs on an error
+    path that must stay cheap, and because a record-less orphan cannot be named as a suggestion
+    anyway: the operator would have nothing to type it against but the directory listing.
+    """
+    from . import signout
+
+    serving = [
+        nid for nid in run_records.known_grid_ids()
+        if signout._recorded_live_pids(run_records.read_records(nid))
+    ]
+    base = "You're not signed in. Run `grid login` to sign in."
+    if not serving:
+        return base
+    listed = ", ".join(serving)
+    return (
+        f"{base} This box is still serving {listed} — `grid leave <grid-id>` stops one without "
+        "signing in (the grid drops its models after the node TTL, ~120s)."
+    )
+
+
 def cmd_remote_leave(args: argparse.Namespace) -> int:
     from remote import credentials
 
     from . import remote_grid
 
-    session = credentials.require_session()
-    rec = remote_grid._select(getattr(args, "grid", None))
+    rec = _select_for_leave(getattr(args, "grid", None))
     network_id = remote_grid._network_id(rec)
     label = rec.get("name") or network_id
+    if not rec.get("access_token") and getattr(args, "engine", None) and not getattr(args, "all", False):
+        # A `--engine` shrink keeps the identity serving: it respawns (or hot-reloads) the child with
+        # the reduced union, and that child has to register with a token. The rescue path has none, so
+        # the shrink would stop a working engine and start one that dies on its first relay call. The
+        # whole-identity teardown is the only thing this path can honestly do, so say so rather than
+        # half-doing the other.
+        raise SystemExit(
+            f"Can't drop a single engine from {label} while signed out: re-advertising the rest needs "
+            f"this grid's token. Run `grid leave {network_id}` to stop the whole identity, or "
+            "`grid login` first to shrink it."
+        )
+    # Soft, not `require_session()`: leave is the repair verb, and the state it most needs to repair
+    # is the one where the credentials are gone (ADR 0023). The session is only ever used to resolve a
+    # relay URL no record carried; without one that resolve fails and the backstop degrades, which is
+    # exactly the right answer for a grid we hold no token for anyway.
+    session = str(credentials.load_credentials().get("session_token") or "")
 
     with file_lock(run_records.record_path(network_id, _REMOTE_IDENTITY)):
         records = run_records.read_records(network_id)
@@ -1237,7 +1308,7 @@ def _full_leave_survivor_exit(survivors: list[int], label: str, sent: bool) -> N
     ``taskkill /T`` already takes the whole tree), so a negative entry can never reach the Windows
     remedy below.
     """
-    named = ", ".join(_describe_survivor(value) for value in survivors)
+    named = ", ".join(run_records.describe_target(value) for value in survivors)
     outcome = (
         f"deregistered {label} from the relay, but could not stop serve child(ren): {named}"
         if sent
@@ -1257,14 +1328,6 @@ def _full_leave_survivor_exit(survivors: list[int], label: str, sent: bool) -> N
         f"grid leave: {outcome}. A retried `grid leave` will target them again; investigate before "
         f"re-joining (e.g. `{remedy}`)."
     )
-
-
-def _describe_survivor(value: int) -> str:
-    """One surviving target, named for what it actually is. A **negative** value means a process
-    group — the ``kill(1)`` convention, and how ``_full_leave_reap`` carries ``Teardown.is_group``
-    through a plain list of ints. Mirrors ``run_records.describe_survivor``, which the local leave
-    uses on the ``Teardown`` directly (it has one per engine and never needs to flatten them)."""
-    return f"process group {-value}" if value < 0 else f"pid {value}"
 
 
 def _recorded_pids(records: dict[str, dict[str, object]]) -> set[int]:
@@ -1365,6 +1428,23 @@ def _full_leave_reap(
     return _ReapResult(record_survivors + list(swept.survivors), swept.scanned, unverified)
 
 
+def _full_leave_execute(
+    rec: dict[str, object], session: str, network_id: str, label: str,
+    records: dict[str, dict[str, object]],
+) -> tuple[_ReapResult, bool]:
+    """Do the full-identity teardown and report what happened, raising nothing.
+
+    Split out of ``_full_leave_teardown`` for the one caller that must not exit on the first bad
+    grid: ``grid logout`` tears down every grid this box serves before it deletes the credentials
+    that address them, so a survivor on grid A may not abort grid B's teardown — and the decision
+    of what to do about it is the sign-out's, not leave's (ADR 0023). Leave keeps its own answer by
+    wrapping this; the order (reap, THEN backstop) is the contract and lives here so both share it.
+    """
+    reaped = _full_leave_reap(network_id, label, records)
+    sent = _full_leave_backstop(rec, records, session, network_id, label)
+    return reaped, sent
+
+
 def _full_leave_teardown(
     rec: dict[str, object], session: str, network_id: str, label: str,
     records: dict[str, dict[str, object]],
@@ -1374,8 +1454,7 @@ def _full_leave_teardown(
     deregister, raising loud (via ``_full_leave_survivor_exit``) if a child survived even SIGKILL.
     Returns ``(sent, scanned)`` so the caller prints its own success line — the wording differs
     between a bare leave and a last-engine drop."""
-    reaped = _full_leave_reap(network_id, label, records)
-    sent = _full_leave_backstop(rec, records, session, network_id, label)
+    reaped, sent = _full_leave_execute(rec, session, network_id, label, records)
     if reaped.survivors:  # a live child survived SIGKILL — its record was kept; fail loud, never "Left"
         _full_leave_survivor_exit(reaped.survivors, label, sent)
     if reaped.unverified and not reaped.scanned:  # both nets failed at once — this leave checked nothing
@@ -1461,6 +1540,14 @@ def _full_leave_backstop(
     from remote import credentials, relay
 
     access_token = str(rec.get("access_token") or "")
+    if not access_token:
+        # No bundle for this grid at all — a signed-out rescue leave, or a grid an earlier
+        # sync/login overwrite dropped. Deliberately NOT the "refresh your token" wording below:
+        # there is no token to refresh, and telling a signed-out operator to `grid login` implies
+        # the reap they just performed did not count. The reap is real; only the deregister is not.
+        return _backstop_degrade(
+            f"Couldn't deregister {label} from the relay: no stored credentials for this grid."
+        )
     node_id = credentials.node_id_from_token(access_token)
     if not node_id:
         return _backstop_degrade(

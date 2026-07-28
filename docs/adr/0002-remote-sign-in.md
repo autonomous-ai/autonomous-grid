@@ -1,6 +1,10 @@
 # ADR 0002 — Remote sign-in (`grid login` / `grid logout`)
 
-Status: accepted (2026-06-27); amended 2026-06-29 — added Decision 11 (`grid sync`, issue 10)
+Status: accepted (2026-06-27); amended 2026-06-29 — added Decision 11 (`grid sync`, issue 10);
+amended 2026-07-28 — D7's "logout deletes `credentials.toml`" and D11's authoritative overwrite are
+both qualified by [ADR 0023](./0023-signing-out-with-live-serve-children.md): logout now stops this
+box's serve children **before** the delete (and keeps the store when it cannot), and sync warns about
+the ones its overwrite stranded
 
 ## Context
 
@@ -63,7 +67,15 @@ Hard invariant: local mode stays local-only, unauthenticated, stateless — unch
    device flow and overwrites the store (User Story 20). The per-network `refresh_token` is
    persisted for the later provider runtime, but no automatic token refresh ships in this slice
    (YAGNI). `grid logout` deletes `credentials.toml` and clears `active.remote`; it keeps
-   `device.toml` and does not change the mode; it is idempotent.
+   `device.toml` and does not change the mode; it is idempotent. **Amended 2026-07-28
+   ([ADR 0023](./0023-signing-out-with-live-serve-children.md)):** the delete is no longer the *whole*
+   verb, nor unconditional. Logout first tears down any serve child this box is running — while it
+   still holds the token that makes the deregister authoritative — and when it cannot confirm one
+   stopped for a grid it holds a token for, it keeps **both** the store and the active pointer and
+   exits non-zero (`--force` overrides the refusal, never the attempt). Re-login is amended the same
+   way: its wholesale overwrite of `[[networks]]` now warns about any grid it strands. Logout stays
+   idempotent, still keeps `device.toml`/`api_keys.toml`, and on a box serving nothing it is exactly
+   the local, offline-safe delete described above.
 
 8. **Config: keep grid-src's env vars + defaults, evaluated at call time.** Only two values are
    env-read — `GRID_CONTROL_PLANE_URL` (default `https://api-grid.autonomous.ai`) and
@@ -96,7 +108,13 @@ Hard invariant: local mode stays local-only, unauthenticated, stateless — unch
     login`" — distinct from the *relay access-token* 401 on the consume path (ADR 0005), so it is a
     new message, not a reuse; a previously non-empty list returned empty is cleared but **warns on
     stderr** first (a transient backend hiccup must not silently wipe every credential); any other
-    control-plane error propagates unchanged. Surface: `sync` joins `REMOTE_ONLY` (now `{"login",
+    control-plane error propagates unchanged. (**Amended 2026-07-28,
+    [ADR 0023](./0023-signing-out-with-live-serve-children.md):** the overwrite stays authoritative, but
+    a grid dropping out of it takes its per-grid token with it while its serve child keeps polling on the
+    copy it holds in memory — so sync now also warns, per stranded grid, naming the pid and the
+    `grid leave <id>` that reaches it without credentials. It deliberately does **not** tear the child
+    down: a control-plane answer is not an operator's intent to stop serving, and a transient one would
+    destroy working capacity.) Surface: `sync` joins `REMOTE_ONLY` (now `{"login",
     "logout", "sync"}`), gated with guidance in local; `--json` carries grid names/types only, never a
     token. Code: a standalone `cmd_sync` in `cli/auth.py` (no `cmd_login` refactor, no `--api-url`
     flag — `api_url` resolves from stored credentials). (This ADR-local "Decision 11" is

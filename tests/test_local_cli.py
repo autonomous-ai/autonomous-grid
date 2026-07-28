@@ -3878,6 +3878,60 @@ def test_try_file_lock_does_not_disguise_a_broken_lock_as_contention(monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# known_grid_ids — the index that outlives a logout (grid-leave issue 13)
+# ---------------------------------------------------------------------------
+
+def test_known_grid_ids_lists_a_grid_whose_record_file_is_gone(monkeypatch, tmp_path):
+    """The directory, not the record file, is what says "this box joined that grid".
+
+    `read_records` answers `{}` for two states that must not be confused: a grid never joined, and a
+    grid whose record was unlinked out from under a **live** child — the orphan class the argv sweep
+    exists for (issue 05 found 9 such record-less directories on the reporter's Mac). A sign-out that
+    scoped itself by record files would report a clean teardown on exactly that box.
+    """
+    from shared import paths, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+    run_records.write_record("n2", "remote", {"engine_id": "remote", "grid_id": "n2", "pid": 0})
+    run_records.record_path("n2", "remote").unlink()  # record gone, directory stays
+
+    assert run_records.read_records("n2") == {}  # the state the old scope would have skipped
+    assert run_records.known_grid_ids() == ("n1", "n2")
+    assert paths.engines_dir("n2").is_dir()
+
+
+def test_known_grid_ids_is_empty_on_a_box_that_never_joined(monkeypatch, tmp_path):
+    """No run tree at all — the cheap path a never-joined box must keep (no scan, no network)."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    assert run_records.known_grid_ids() == ()
+
+
+def test_known_grid_ids_reports_an_unreadable_tree_instead_of_calling_it_empty(monkeypatch, tmp_path, capsys):
+    """A never-joined box and an unreadable run tree both yield no ids, and every caller treats "no
+    ids" as "nothing to stop". This is the one primitive in the feature with no `scanned` flag to carry
+    the difference, so it must at least break the silence — otherwise a permissions change on
+    `~/.grid/run/engines` makes `grid logout` report a clean sign-out over anything running.
+
+    `FileNotFoundError` stays silent: that is the ordinary never-joined case, not a fault.
+    """
+    from shared import paths, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    root = paths.run_dir() / "engines"
+    root.mkdir(parents=True)
+
+    def denied(_self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+    assert run_records.known_grid_ids() == ()
+    assert "couldn't list" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
 # discard_own_record — the exiting child's record cleanup (grid-leave issue 05)
 # ---------------------------------------------------------------------------
 
@@ -4547,6 +4601,62 @@ def test_sweep_orphans_never_targets_its_own_pid(monkeypatch):
     monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
                         lambda pid: pytest.fail(f"must never terminate own pid {pid}"))
     assert orphan_sweep.sweep_orphans("n1") == orphan_sweep.SweepResult((), (), ())
+
+
+# --- detect-only pass (grid-leave issue 13) ------------------------------------------------------
+# `grid logout` has to decide WHICH grids to tear down before it touches any of them, and a
+# record-less orphan is only visible in the process table. `find_orphans` answers that question for
+# every grid at once and signals nothing.
+
+def test_find_orphans_maps_children_per_network_in_one_table_read(monkeypatch):
+    """One process-table read answers for every grid, and nothing is signalled.
+
+    A per-grid loop would be correct but slow where it hurts most: the module's own docstring puts a
+    cold PowerShell + WMI enumeration in the seconds, so N grids would be N cold starts on the exact
+    box (Windows) that already has the least patience for a sign-out.
+    """
+    from remote import orphan_sweep
+
+    reads = []
+    rows = "\n".join((
+        "  4242 /bin/grid __remote-engine n1 remote",
+        "  4243 /bin/grid __remote-engine n2 remote",
+        "  4244 /bin/grid __remote-engine n1 remote",
+        "  4245 /bin/grid chat hello",
+    ))
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: reads.append(1) or rows)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
+                        lambda pid: pytest.fail(f"detection must never signal (pid {pid})"))
+
+    found, scanned = orphan_sweep.find_orphans(["n1", "n2", "n3"])
+
+    assert scanned is True
+    assert found == {"n1": (4242, 4244), "n2": (4243,)}  # n3 has none — absent, not empty
+    assert len(reads) == 1
+
+
+def test_find_orphans_reports_an_unreadable_table_as_not_scanned(monkeypatch):
+    """"Couldn't check" must never arrive as "checked, clean". An empty dict alone is exactly what a
+    healthy box returns, so the caller would sign out reporting a teardown it never performed."""
+    from remote import orphan_sweep
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
+    assert orphan_sweep.find_orphans(["n1"]) == ({}, False)
+
+
+def test_find_orphans_never_reports_its_own_pid(monkeypatch):
+    """The caller's own process carries the marker in exactly one case that matters — a developer
+    running the suite from a checkout — and a detector that named it would send `grid logout` to
+    terminate itself. Excluded here, as in `sweep_orphans`, rather than at every call site."""
+    import os as _os
+
+    from remote import orphan_sweep
+
+    mypid = _os.getpid()
+    rows = f"  {mypid} /bin/grid __remote-engine n1 remote\n  4242 /bin/grid __remote-engine n1 remote"
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: rows)
+    assert orphan_sweep.find_orphans(["n1"], exclude_pids={4242}) == ({}, True)
 
 
 # --- Windows parity (grid-leave issue 06) --------------------------------------------------------
@@ -8126,6 +8236,138 @@ def test_remote_leave_no_records_sweep_reaps_orphan(monkeypatch, tmp_path, capsy
     assert killed == [7777]                               # the record-less orphan reaped by argv
     assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...and the backstop still deregisters
     assert "Reaped 1 orphaned serve child" in capsys.readouterr().out
+
+
+# --- signed-out rescue leave (grid-leave issue 13) -----------------------------------------------
+# `grid leave` used to gate on `require_session()`, so once the credential store was gone the run
+# records on disk were correct, live, and no longer actionable. An explicit grid id now reaches them.
+
+def test_remote_leave_reaps_a_live_child_while_signed_out(monkeypatch, tmp_path, capsys):
+    """The dead end issue 05's audit named: logout (or a sync that dropped the grid) removes the only
+    handle able to stop a live serve child, and every remote verb then answers "You're not signed in"
+    over records that are still correct.
+
+    Named explicitly, leave reaps it with no credentials at all. There is no token, so no deregister
+    is attempted and the grid drops the models at the node TTL — stated, not implied.
+    """
+    from shared import run_records, state as shared_state
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    shared_state.set_mode("remote")  # signed out, but still a remote-mode box
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": 4242, "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    _mock_relay(monkeypatch, lambda r: pytest.fail("signed out — there is no token to send"))
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.main(["leave", "n1"]) == 0
+
+    assert killed == [4242]
+    assert not run_records.record_path("n1", "remote").exists()  # confirmed dead ⇒ record unlinked
+    captured = capsys.readouterr()
+    assert "Left n1." in captured.out
+    assert "no stored credentials" in captured.err
+    assert "TTL" in captured.err
+
+
+def test_remote_leave_by_id_still_uses_the_stored_bundle(monkeypatch, tmp_path):
+    """The rescue path must never win over a credential bundle. Naming the grid by its **id** — the
+    form the rescue path takes — resolves to the stored bundle when there is one, so the backstop
+    deregister still fires. A rescue bundle carries no token, so getting this wrong would silently
+    skip the deregister and leave the node registered as a provider: a regression wearing a fix."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    puts = _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.main(["leave", "n1"]) == 0  # `n1` is the network id, `team` the name
+    assert puts == [("/nodes/node-jwt", "consumer", [])]
+
+
+def test_remote_leave_signed_out_refuses_a_partial_shrink(monkeypatch, tmp_path):
+    """A `--engine` shrink respawns the identity with the reduced union — and a respawned child needs a
+    token to register. Signed out there is none, so the shrink would stop a working engine and start one
+    that dies on its first call. The full teardown is the only thing this path can honestly do."""
+    from shared import run_records, state as shared_state
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    shared_state.set_mode("remote")
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": 4242, "signaling_url": "https://relay.example",
+        "engines": [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"]},
+                    {"endpoint_url": "http://h:8000/v1", "models": ["mistral"]}],
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: pytest.fail("a refused shrink must not stop anything"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave", "n1", "--engine", "http://h:11434/v1"])
+
+    assert "signed out" in str(exc.value).lower()
+    assert "grid leave n1" in str(exc.value)  # the whole-identity form that does work
+    assert "grid login" in str(exc.value)     # ...or the way to get the shrink back
+
+
+def test_remote_leave_signed_out_names_what_this_box_is_still_serving(monkeypatch, tmp_path):
+    """The operator who needs the rescue path is the one who does not know it exists: they ran
+    `grid logout`, then `grid leave`, and got a bare "You're not signed in". The refusal now names
+    the grids this box is still serving and the exact form that stops one."""
+    from shared import run_records, state as shared_state
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    shared_state.set_mode("remote")
+    run_records.write_record("grid-abc123", "remote", {
+        "engine_id": "remote", "grid_id": "grid-abc123", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave"])
+
+    assert "not signed in" in str(exc.value).lower()
+    assert "grid-abc123" in str(exc.value)      # names what is running
+    assert "grid leave <grid-id>" in str(exc.value)
+
+
+def test_remote_leave_signed_out_stays_terse_when_nothing_is_serving(monkeypatch, tmp_path):
+    """...and says nothing extra when there is nothing to name — a stale record from a child that
+    died months ago is not something to offer as a suggestion."""
+    from shared import run_records, state as shared_state
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    shared_state.set_mode("remote")
+    run_records.write_record("grid-abc123", "remote",
+                             {"engine_id": "remote", "grid_id": "grid-abc123", "pid": 9999})
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave"])
+
+    assert str(exc.value) == "You're not signed in. Run `grid login` to sign in."
+
+
+def test_remote_leave_signed_out_refuses_an_unknown_grid(monkeypatch, tmp_path):
+    """An id with no run-record directory is not a rescue target — there is nothing on this box to
+    reap, and inventing a bundle for it would send a leave at a grid we know nothing about."""
+    from shared import state as shared_state
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    shared_state.set_mode("remote")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave", "never-joined"])
+    assert "not signed in" in str(exc.value).lower()
 
 
 def test_remote_leave_sweep_survivor_fails_loud_after_backstop(monkeypatch, tmp_path):
@@ -15471,6 +15713,119 @@ def test_bring_up_engines_rejects_multi_without_endpoints(monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
+# cli/signout — which grids is this box still serving? (grid-leave issue 13)
+# ---------------------------------------------------------------------------
+# The detection every credential-clearing flow shares: `grid logout` (to tear down before it deletes
+# the token that addresses the child), `grid sync` and `grid login` (to warn about what their
+# authoritative overwrite just stranded).
+
+def _seed_run_record(monkeypatch, tmp_path, grid_id: str, *, pid: int = 4242, keep_file: bool = True):
+    """A remote identity record for ``grid_id``. ``keep_file=False`` unlinks it, leaving the directory
+    — the record-less-orphan fingerprint issue 05 found on the reporter's machine."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record(grid_id, "remote", {
+        "engine_id": "remote", "grid_id": grid_id, "pid": pid, "signaling_url": "https://relay.example",
+    })
+    if not keep_file:
+        run_records.record_path(grid_id, "remote").unlink()
+
+
+def _table(*rows: str):
+    """Patch the ONE process-table seam with canned `pid ppid command` rows."""
+    return "\n".join(rows)
+
+
+def test_live_identities_finds_an_orphan_whose_record_file_is_gone(monkeypatch, tmp_path):
+    """The case a record-file-scoped detector reports as clean: the directory is there, the record is
+    not, and a live serve child is still heartbeating as a provider. Only the process table sees it."""
+    from cli import signout
+    from remote import orphan_sweep
+
+    _seed_run_record(monkeypatch, tmp_path, "n1", keep_file=False)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: _table("  4242 /bin/grid __remote-engine n1 remote"))
+
+    scan = signout.live_identities(["n1"])
+
+    assert scan.by_grid == {"n1": (4242,)}
+    assert scan.scanned is True
+
+
+def test_live_identities_vouches_from_the_record_without_reading_the_table(monkeypatch, tmp_path):
+    """A record that names a running child answers for free. Reading the process table anyway would
+    put a `ps` fork — a cold PowerShell start on Windows — on the ordinary sign-out path."""
+    from cli import signout
+    from remote import orphan_sweep
+    from shared import run_records
+
+    _seed_run_record(monkeypatch, tmp_path, "n1", pid=4242)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: pytest.fail("a vouching record must not cost a process-table read"))
+
+    assert signout.live_identities(["n1"]) == signout.LiveScan({"n1": (4242,)}, True)
+
+
+def test_live_identities_does_not_count_a_stale_record_as_serving(monkeypatch, tmp_path):
+    """A record left behind by a dead child is not evidence this box is serving. Counting it would
+    make every sign-out try to tear down grids that stopped serving months ago."""
+    from cli import signout
+    from remote import orphan_sweep
+    from shared import run_records
+
+    _seed_run_record(monkeypatch, tmp_path, "n1", pid=9999)  # stale: nothing is running as 9999
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: _table("  4245 /bin/grid chat"))
+
+    assert signout.live_identities(["n1"]) == signout.LiveScan({}, True)
+
+
+def test_live_identities_never_scans_when_there_is_nothing_to_ask_about(monkeypatch, tmp_path):
+    """A box that never joined anything must sign out with no scan and no network call at all."""
+    from cli import signout
+    from remote import orphan_sweep
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: pytest.fail("nothing joined — nothing to scan for"))
+
+    assert signout.live_identities([]) == signout.LiveScan({}, True)
+
+
+def test_live_identities_ignores_a_local_mode_engine_record(monkeypatch, tmp_path):
+    """`~/.grid/run/engines` is shared by both modes. A local grid's engine has no `signaling_url` — it
+    is pushed to, not polling a relay — and a remote sign-out must never count it as something it is
+    responsible for stopping."""
+    from cli import signout
+    from remote import orphan_sweep
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("ag-home-1e25f45e", "llama.cpp", {
+        "engine_id": "llama.cpp", "grid_id": "ag-home-1e25f45e", "pid": 4242,
+        "endpoint_url": "http://192.168.1.10:8081/v1", "models": ["llama3"],
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    # It falls through to the sweep, which is argv-matched and so structurally blind to local engines.
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: _table("  4242 llama-server -m x"))
+
+    assert signout.live_identities(["ag-home-1e25f45e"]) == signout.LiveScan({}, True)
+
+
+def test_live_identities_reports_an_unreadable_table_as_unscanned(monkeypatch, tmp_path):
+    """The caller must be able to tell "checked, nothing serving" from "couldn't check"."""
+    from cli import signout
+    from remote import orphan_sweep
+
+    _seed_run_record(monkeypatch, tmp_path, "n1", keep_file=False)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
+
+    assert signout.live_identities(["n1"]) == signout.LiveScan({}, False)
+
+
+# ---------------------------------------------------------------------------
 # grid login / grid logout (cli/auth.py + dispatch gate)
 # ---------------------------------------------------------------------------
 
@@ -15504,6 +15859,60 @@ def _device_flow(monkeypatch, *, poll_statuses, networks, started=None):
 
 
 _APPROVED = {"status": "approved", "session_token": "SESS-secret", "user": {"email": "a@b.com"}}
+
+
+def test_login_warns_when_a_second_account_strands_a_live_serve_child(monkeypatch, tmp_path, capsys):
+    """The third door to the same dead end. `grid login` replaces `[[networks]]` wholesale, so signing
+    in as a second account — routine on a shared dev box — drops every prior grid's bundle while its
+    serve child keeps heartbeating on the token it holds in memory.
+
+    Login does not tear down (nothing about signing in says "stop serving"), and the overwrite still
+    happens; it names what it stranded and the verb that still reaches it with no bundle at all.
+    """
+    from remote import credentials
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({
+        "session_token": "old", "api_url": "https://api.example",
+        "networks": [{"network_id": "net-old", "name": "first-account-grid", "access_token": "AT"}],
+    })
+    run_records.write_record("net-old", "remote", {
+        "engine_id": "remote", "grid_id": "net-old", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _device_flow(monkeypatch, poll_statuses=[_APPROVED],
+                 networks=[{"network_id": "net-new", "name": "second-account-grid"}])
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--no-browser"])) == 0
+
+    stored = credentials.load_credentials()
+    assert [n["network_id"] for n in stored["networks"]] == ["net-new"]  # still authoritative
+    err = capsys.readouterr().err
+    assert "first-account-grid" in err
+    assert "grid leave net-old" in err
+
+
+def test_login_says_nothing_about_grids_it_did_not_strand(monkeypatch, tmp_path, capsys):
+    """Re-signing in to the same account keeps every grid, so nothing was stranded and nothing is
+    said — a warning on every ordinary `grid login` would train the operator to ignore it."""
+    from remote import credentials
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({
+        "session_token": "old", "api_url": "https://api.example",
+        "networks": [{"network_id": "net-a", "name": "team", "access_token": "AT"}],
+    })
+    run_records.write_record("net-a", "remote",
+                             {"engine_id": "remote", "grid_id": "net-a", "pid": 4242})
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _device_flow(monkeypatch, poll_statuses=[_APPROVED],
+                 networks=[{"network_id": "net-a", "name": "team"}])
+
+    assert cli.cmd_login(cli.build_parser().parse_args(["login", "--no-browser"])) == 0
+    assert "grid leave" not in capsys.readouterr().err
 
 
 def test_parser_accepts_login_and_logout():
@@ -15703,13 +16112,389 @@ def test_logout_leaves_the_codex_seat_intact(monkeypatch, tmp_path, capsys):
     assert api_keys.load_codex_bundle() == _bundle()
 
 
+def test_logout_stops_a_live_serve_child_before_clearing_credentials(monkeypatch, tmp_path, capsys):
+    """The reported bug: logout deleted the token and left the child polling on the copy it loaded at
+    spawn (TTL ≈ 1 year), so the box kept advertising models as a provider — and `grid leave`, the one
+    verb that could stop it, then answered "You're not signed in".
+
+    Teardown runs FIRST, while the token that makes the deregister authoritative still exists.
+    """
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    puts = _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    assert killed == [4242]                                 # the child was stopped...
+    assert puts == [("/nodes/node-jwt", "consumer", [])]    # ...and the grid told, before the wipe
+    assert not paths.credentials_file().exists()
+    assert "team" in capsys.readouterr().out                # the sign-out says what it stopped
+
+
+def _seed_unstoppable_child(monkeypatch, tmp_path, *, pid: int = 9999):
+    """A signed-in grid whose serve child survives even SIGKILL, discoverable only in the process
+    table (the record's pid is the join write-race's 0). Returns the captured relay PUTs."""
+    from remote import orphan_sweep
+
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    _disable_orphan_sweep(monkeypatch)  # guards the per-platform readers; the seam is re-patched below
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: f"  {pid} /bin/grid __remote-engine n1 remote")
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (pid,), ()))
+    return _capture_relay_puts(monkeypatch)
+
+
+def test_logout_keeps_credentials_when_it_cannot_stop_the_child(monkeypatch, tmp_path):
+    """The tokens are the only handle that can deregister that child authoritatively, so a sign-out
+    that could not stop it must not delete them — the same rule `grid leave` follows when it keeps a
+    survivor's record. The active pointer stays too: cleared, over live credentials, it is a half-state
+    no command reports.
+    """
+    puts = _seed_unstoppable_child(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout"]))
+
+    assert "9999" in str(exc.value)          # names what is still running
+    assert "team" in str(exc.value)          # ...and on which grid
+    assert "--force" in str(exc.value)       # ...and the way out
+    assert paths.credentials_file().exists()          # the handle survived
+    assert state.get_active("remote") == "team"       # ...and so did the pointer to it
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # the backstop still fired: the model dropped
+
+
+def test_logout_force_signs_out_over_a_survivor_but_still_tries_first(monkeypatch, tmp_path, capsys):
+    """`--force` is the escape hatch for a child this box genuinely cannot stop (another user's
+    process, a wedged container). It overrides the *refusal*, never the *attempt*: the teardown and the
+    deregister still run, so forcing costs the operator nothing except the retained handle — and the
+    remedy stays reachable, because `grid leave <id>` now works with no credentials at all."""
+    puts = _seed_unstoppable_child(monkeypatch, tmp_path)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--force"])) == 0
+
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # it still tried, and the model still dropped
+    assert not paths.credentials_file().exists()
+    assert state.get_active("remote") is None
+    err = capsys.readouterr().err
+    assert "9999" in err          # forcing does not make the survivor silent
+    assert "grid leave" in err    # ...and still names the way to reap it
+
+
+def test_logout_reaps_a_grid_whose_bundle_an_earlier_overwrite_dropped(monkeypatch, tmp_path, capsys):
+    """A grid `grid sync`/`grid login` already dropped from the list still has a live child on this
+    box. Scoping the sign-out by the credential list would walk straight past it — the box would keep
+    serving a grid the CLI no longer believes it belongs to. Scoped by run-record directories instead.
+
+    There is no token, so nothing can address the relay: the child is reaped and that grid drops it at
+    the node TTL. Saying so is the point — a bare "Signed out." would imply the model had gone.
+    """
+    from shared import run_records
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": _jwt({"node_id": "j"})}],
+                 active="team")
+    run_records.write_record("dropped-grid", "remote", {
+        "engine_id": "remote", "grid_id": "dropped-grid", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _mock_relay(monkeypatch, lambda r: pytest.fail("no token for that grid — nothing may be sent"))
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    assert killed == [4242]
+    assert not paths.credentials_file().exists()
+    captured = capsys.readouterr()
+    assert "dropped-grid" in captured.out
+    assert "TTL" in captured.out                        # what the grid is falling back on
+    assert "no stored credentials" in captured.err      # ...and why, without a misleading `grid login`
+
+
+def test_logout_only_touches_the_grid_that_is_actually_serving(monkeypatch, tmp_path):
+    """Signing out of an account with several grids must not deregister the ones this box never served
+    — that would drop capacity another machine is providing under the same identity."""
+    from shared import run_records
+
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n1", "name": "team", "access_token": _jwt({"node_id": "node-live"})},
+        {"network_id": "n2", "name": "other", "access_token": _jwt({"node_id": "node-idle"})},
+    ], active="team")
+    for grid_id, pid in (("n1", 4242), ("n2", 9999)):
+        run_records.write_record(grid_id, "remote", {
+            "engine_id": "remote", "grid_id": grid_id, "pid": pid,
+            "signaling_url": "https://relay.example",
+        })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)  # only n1's child runs
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    puts = _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    assert killed == [4242]
+    assert puts == [("/nodes/node-live", "consumer", [])]  # `other` was never touched
+
+
+def test_logout_still_signs_out_when_the_relay_rejects_the_deregister(monkeypatch, tmp_path, capsys):
+    """An expired per-grid token must not trap the operator on this box. The child is dead either
+    way, so the grid drops its models at the node TTL and the sign-out completes with a caveat —
+    never a traceback, and never a refusal to sign out over something signing out cannot fix."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _capture_relay_puts(monkeypatch, status=401)
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert not paths.credentials_file().exists()
+    err = capsys.readouterr().err
+    assert "token expired" in err
+    assert "TTL" in err  # what the grid falls back on
+
+
+def test_logout_blocks_when_a_teardown_raises_instead_of_answering(monkeypatch, tmp_path, capsys):
+    """A teardown that blows up has established nothing, which is not the same as "nothing to stop".
+
+    The sign-out swallows the exception on purpose — one grid must not abandon the others half-done —
+    but swallowing it into a clean exit is the failure mode. It is recorded as *unverified*, which for
+    a grid whose token is still stored keeps the credentials and fails loud, and the reason is named
+    rather than inferred from an empty survivor list.
+    """
+    from shared import run_records
+
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(cli.remote_provider, "_full_leave_execute",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("taskkill vanished")))
+    _disable_orphan_sweep(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout"]))
+
+    assert "couldn't verify" in str(exc.value)
+    assert "team" in str(exc.value)
+    assert paths.credentials_file().exists()          # the handle was kept
+    assert "taskkill vanished" in capsys.readouterr().err  # ...and the real reason is not swallowed
+
+
+def test_logout_names_an_unbundled_survivor_even_when_another_grid_blocks(monkeypatch, tmp_path, capsys):
+    """Two grids fail in the same sign-out: one bundled (refuses) and one not (would only warn).
+
+    Raising first would hide the unbundled one entirely — the operator clears the block, retries, and
+    meets a second failure nobody mentioned. The blocked grid is deliberately NOT in the warning: its
+    credentials are being kept, so "signing out removed the credentials" would be a lie about it; the
+    refusal names it instead.
+    """
+    from remote import orphan_sweep
+    from shared import run_records
+
+    puts = _seed_unstoppable_child(monkeypatch, tmp_path)  # bundled grid `n1`/team, survivor 9999
+    run_records.write_record("dropped-grid", "remote", {
+        "engine_id": "remote", "grid_id": "dropped-grid", "pid": 7777,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(run_records, "terminate_pid", lambda pid: False)  # neither can be stopped
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (9999,), ())
+                        if network_id == "n1" else orphan_sweep.SweepResult((), (), ()))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_logout(cli.build_parser().parse_args(["logout"]))
+
+    assert "team" in str(exc.value)                 # the blocked grid is named by the refusal...
+    assert "dropped-grid" not in str(exc.value)     # ...and only that one
+    err = capsys.readouterr().err
+    assert "dropped-grid" in err   # the unbundled one is named too, on this attempt
+    assert "team" not in err       # ...and the kept-credentials grid is not told it lost them
+    assert paths.credentials_file().exists()
+    assert puts  # the bundled grid was still deregistered before the refusal
+
+
+def test_logout_says_so_when_it_could_not_check_for_an_orphan(monkeypatch, tmp_path, capsys):
+    """"Couldn't check" must not arrive as "checked, clean" — the rule this whole feature family
+    exists for, applied to the one place a sign-out can lose it.
+
+    A grid whose record file was unlinked out from under a live child is visible ONLY in the process
+    table. If that table can't be read, the sign-out has established nothing about that grid — and it
+    is about to delete the credentials. Skipping it silently is how `grid logout` would report a clean
+    exit over a child still heartbeating as a provider.
+
+    It does not refuse: on a box with several stale record directories an unreadable `ps` would make
+    signing out impossible. It qualifies, and names a remedy that works *after* the credentials are
+    gone — which is only true because `grid leave <grid-id>` now runs signed out.
+
+    And it still **deregisters** while it holds the token. The sweep is a diagnostic; the backstop is
+    the mechanism of record — that is why `grid leave` sends it unconditionally — and it needs no
+    process table. Skipping it would leave the grid advertising this box's models over a child the
+    sign-out could not even look for. The flip is idempotent and resurrection-proof, so sending it for
+    a grid that turns out not to be serving costs nothing.
+    """
+    from remote import orphan_sweep
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}],
+                 active="team")
+    _seed_run_record(monkeypatch, tmp_path, "n1", keep_file=False)  # record-less orphan fingerprint
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)  # ps unreadable
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    captured = capsys.readouterr()
+    assert not paths.credentials_file().exists()          # signing out still works...
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...the model dropped even flying blind...
+    combined = captured.out + captured.err
+    assert "process table" in combined                    # ...and it says what it could not check
+    assert "grid leave" in combined                       # ...and the remedy that survives the wipe
+
+
+def test_logout_cannot_deregister_an_unbundled_grid_it_could_not_check(monkeypatch, tmp_path, capsys):
+    """The same blind branch for a grid whose bundle an earlier overwrite dropped: there is no token, so
+    there is nothing to send and the node TTL is the only fallback. Saying which of the two happened is
+    the point — "couldn't check" and "couldn't tell the grid" are different failures."""
+    from remote import orphan_sweep
+    from shared import run_records
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": _jwt({"node_id": "j"})}],
+                 active="team")
+    run_records.record_path("dropped-grid", "remote").parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
+    _mock_relay(monkeypatch, lambda r: pytest.fail("no token for that grid — nothing may be sent"))
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    err = capsys.readouterr().err
+    assert "dropped-grid" in err
+    assert "TTL" in err
+
+
+def test_logout_never_touches_a_local_mode_engine(monkeypatch, tmp_path):
+    """`~/.grid/run/engines` is shared by both modes — a local grid's engines live in a directory beside
+    a remote grid's. Signing out of a remote account must not stop an engine serving a LOCAL grid: that
+    grid has no account behind it, `grid logout` says nothing about it, and killing it would take down a
+    working endpoint the operator never mentioned.
+
+    The discriminator is `signaling_url` — the relay a remote child polls. A local record has no such
+    field (`cli/provider.py`), because a local engine is pushed to, not polling.
+    """
+    from shared import run_records
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": _jwt({"node_id": "j"})}],
+                 active="team")
+    run_records.write_record("ag-home-1e25f45e", "llama.cpp", {  # a live LOCAL engine
+        "engine_id": "llama.cpp", "grid_id": "ag-home-1e25f45e", "pid": 4242,
+        "endpoint_url": "http://192.168.1.10:8081/v1", "models": ["llama3"],
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: pytest.fail(f"signing out of remote killed a local engine (pid {pid})"))
+    _mock_relay(monkeypatch, lambda r: pytest.fail("a local engine has no relay to deregister from"))
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert run_records.record_path("ag-home-1e25f45e", "llama.cpp").exists()  # untouched
+
+
+def test_logout_force_is_wired_and_defaults_off():
+    parser = cli.build_parser()
+    assert parser.parse_args(["logout"]).force is False
+    assert parser.parse_args(["logout", "--force"]).force is True
+
+
+def test_logout_with_nothing_serving_makes_no_network_call(monkeypatch, tmp_path, capsys):
+    """Signing out of a box that serves nothing must stay what it always was: purely local. A logout
+    that phoned the relay or the control plane per grid would fail on a laptop that is offline —
+    exactly where an operator reaches for `grid logout`."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": _jwt({"node_id": "j"})}],
+                 active="team")
+    _mock_relay(monkeypatch, lambda r: pytest.fail(f"nothing is serving — no relay call ({r.url})"))
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: pytest.fail(f"nothing to terminate (pid {pid})"))
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert not paths.credentials_file().exists()
+    assert capsys.readouterr().out.strip() == "Signed out."  # no teardown noise
+
+
+def test_logout_leaves_a_stale_record_alone(monkeypatch, tmp_path, capsys):
+    """A record whose child died months ago is not something to tear down. Acting on it would make
+    every sign-out resolve relay URLs and PUT deregisters for grids that stopped serving long ago."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=9999, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: False)  # stale
+    _mock_relay(monkeypatch, lambda r: pytest.fail("a dead record must not trigger a deregister"))
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert not paths.credentials_file().exists()
+
+
 def test_logout_json(monkeypatch, tmp_path, capsys):
+    """`stopped` joined the payload when logout started tearing down serve children (issue 13): a
+    script that signs a box out needs to know whether a workload was stopped on the way. It is present
+    and empty on a box with nothing serving — a stable shape beats a conditional key."""
     from remote import credentials
 
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     credentials.save_credentials({"session_token": "S"})
     assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
-    assert json.loads(capsys.readouterr().out) == {"signed_out": True}
+    assert json.loads(capsys.readouterr().out) == {"signed_out": True, "stopped": []}
+
+
+def test_logout_json_names_each_grid_it_stopped(monkeypatch, tmp_path, capsys):
+    """...and carries one entry per grid actually stopped, saying whether the grid was told. No token
+    reaches the payload — the same rule every other `--json` path on this surface follows."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "signed_out": True, "stopped": [{"grid": "team", "deregistered": True}],
+    }
+    assert "node-jwt" not in captured.out  # the node id is not a secret, but the token it came from is
+    assert "AT" not in json.dumps(json.loads(captured.out))
 
 
 # ---------------------------------------------------------------------------
@@ -15970,6 +16755,108 @@ def test_sync_empty_list_clears_warns_and_keeps_active(monkeypatch, tmp_path, ca
     assert "cleared locally" in err  # stderr-unique token (stdout also says "0 grids")
     # Q1: active is never written, even when the list is wiped
     assert state.get_active("remote") == "net-a"
+
+
+def test_sync_warns_when_its_overwrite_strands_a_live_serve_child(monkeypatch, tmp_path, capsys):
+    """A grid dropping off `grid sync` reaches the same state as a logout for that grid: the token that
+    could deregister it is gone while its serve child keeps polling on the copy it holds in memory.
+
+    Sync does NOT tear down — a control-plane answer is not an operator's intent to stop serving, and a
+    transient one returning fewer grids would destroy working capacity. It stays authoritative and
+    says what it just stranded, naming a command that works with no credentials at all.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([_sync_bundle("net-a"), _sync_bundle("net-b")])
+    run_records.write_record("net-b", "remote", {
+        "engine_id": "remote", "grid_id": "net-b", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a")])  # net-b dropped
+
+    assert _run_sync() == 0
+
+    from remote import credentials
+    assert [n["network_id"] for n in credentials.load_credentials()["networks"]] == ["net-a"]
+    err = capsys.readouterr().err
+    assert "net-b" in err
+    assert "4242" in err                      # which process, so it can be checked
+    assert "grid leave net-b" in err          # ...and the verb that still reaches it
+
+
+def test_sync_says_so_when_it_cannot_check_a_dropped_grid(monkeypatch, tmp_path, capsys):
+    """Sync's warning is the ONLY place a stranded child can be reported — by the time it runs, the
+    overwrite has already taken the token. So "the process table was unreadable" must not come out as
+    "nothing was stranded": a record-less orphan is visible nowhere else."""
+    from remote import orphan_sweep
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([_sync_bundle("net-a"), _sync_bundle("net-b")])
+    run_records.write_record("net-b", "remote", {  # directory kept, record removed below
+        "engine_id": "remote", "grid_id": "net-b", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    run_records.record_path("net-b", "remote").unlink()
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
+    _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a")])  # net-b dropped
+
+    assert _run_sync() == 0
+    err = capsys.readouterr().err
+    assert "net-b" in err
+    assert "process table" in err
+    assert "grid leave net-b" in err
+
+
+def test_sync_says_nothing_when_a_dropped_grid_was_not_being_served(monkeypatch, tmp_path, capsys):
+    """No false alarms: losing access to a grid this box never served is routine."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([_sync_bundle("net-a"), _sync_bundle("net-b")])
+    _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a")])
+
+    assert _run_sync() == 0
+    assert "grid leave" not in capsys.readouterr().err
+
+
+def test_sync_treats_a_renamed_grid_as_the_same_grid(monkeypatch, tmp_path, capsys):
+    """The drop is computed on `network_id`, never on the display name — a grid renamed on the website
+    would otherwise read as one grid vanishing and another appearing, and warn about a child that was
+    never stranded."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([_sync_bundle("net-a", name="old-name")])
+    run_records.write_record("net-a", "remote", {  # a live child, so only the id diff can silence this
+        "engine_id": "remote", "grid_id": "net-a", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a", name="new-name")])
+
+    assert _run_sync() == 0
+    assert "grid leave" not in capsys.readouterr().err
+
+
+def test_sync_json_keeps_stdout_clean_while_warning_about_a_stranded_child(monkeypatch, tmp_path, capsys):
+    """The warning is a human line on stderr; `--json` stdout stays parseable, as it already does for
+    the 0-grids wipe warning beside it."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([_sync_bundle("net-b")])
+    run_records.write_record("net-b", "remote", {
+        "engine_id": "remote", "grid_id": "net-b", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: pid == 4242)
+    _sync_patch_fetch(monkeypatch, [])
+
+    assert _run_sync(["sync", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"synced": True, "grids": []}
+    assert "grid leave net-b" in captured.err
 
 
 def test_sync_concurrent_logout_does_not_strand_partial_file(monkeypatch, tmp_path):

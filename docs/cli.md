@@ -123,7 +123,7 @@ Notes:
 
 ```
 grid login [--no-browser] [--json]    # sign in to remote mode (device-code flow)
-grid logout [--json]                  # clear stored remote credentials
+grid logout [--force] [--json]        # stop serving, then clear stored remote credentials
 grid sync [--json]                    # refresh your remote grids without signing in again
 ```
 
@@ -131,12 +131,28 @@ grid sync [--json]                    # refresh your remote grids without signin
 flow — it opens a browser, or with `--no-browser` prints the URL and code to enter on another
 device (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
 **not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
-`grid use <name>` (or name one per command). `grid logout` clears the stored credentials.
+`grid use <name>` (or name one per command).
+
+`grid logout` **stops serving, then clears the stored credentials** — in that order, because a serve
+child holds its access token in memory from the moment it starts (that token lasts about a year), so
+deleting the file never stopped it: the box kept advertising models as a provider, and `grid leave`
+answered "You're not signed in" over records that were still correct. So logout tears down whatever
+this box is serving first, deregistering each grid while it still has the token to do so, and reports
+what it stopped. If it cannot confirm a child stopped on a grid whose token you still have, it **keeps
+your credentials** and exits non-zero naming the pid — they are the only handle a retried `grid leave`
+has. `--force` signs out anyway (it still tries first, and still tells you what survived). On a box
+that is serving nothing, logout is what it always was: local, offline, instant. `device.toml` and
+`api_keys.toml` are untouched either way.
+
 `grid sync` re-fetches your grids and tokens using your saved sign-in (no browser), so a grid
 created on the website or one you were just added to appears after `grid sync` — it never changes
-your active grid, and an expired session tells you to run `grid login`. In `local` mode these
+your active grid, and an expired session tells you to run `grid login`. If its refresh (or a
+`grid login` as a different account) drops a grid this box is still serving, it says so, naming the
+process and the `grid leave <grid-id>` that stops it — neither command kills an engine on your behalf,
+because a control-plane answer is not a decision to stop serving. In `local` mode these
 commands exit with guidance to switch — sign-in is a remote concept. See
-[ADR 0002](./adr/0002-remote-sign-in.md).
+[ADR 0002](./adr/0002-remote-sign-in.md) and
+[ADR 0023](./adr/0023-signing-out-with-live-serve-children.md).
 
 ## Grid Lifecycle
 
@@ -215,7 +231,10 @@ a served model, or a URL fragment such as `:8000`.
 In remote mode the same verb serves your models on a remote grid: it brings the engine up the same
 way, then runs a detached loop that registers the engine's capabilities with the hosted relay,
 long-polls it for work, forwards each claimed job to the local engine, and heartbeats — `grid
-leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`). `grid
+leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`) — with one
+deliberate exception: `grid leave <grid-id>` also works **signed out**, so a serve child left running by
+an earlier sign-out can still be reaped. It stops the process but cannot tell the grid (there is no
+token), so the models drop at the node TTL (~120s) and it says so. `grid
 join --all` serves several detected engines under **one** identity: it advertises the union of their
 models and routes each job to the engine that serves the requested model (first-detected wins when
 two engines share a model name).

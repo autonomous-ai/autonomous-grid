@@ -353,6 +353,12 @@ def _add_auth(sub) -> None:
     login.set_defaults(handler=cmd_login)
 
     logout = sub.add_parser("logout", help="Sign out of remote mode")
+    logout.add_argument(
+        "--force",
+        action="store_true",
+        help="Sign out even if a serve child on this box could not be stopped (it is still stopped "
+             "first; `grid leave <grid-id>` reaps a survivor afterwards).",
+    )
     logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     logout.set_defaults(handler=cmd_logout)
 

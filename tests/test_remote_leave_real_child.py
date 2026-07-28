@@ -649,6 +649,80 @@ def test_real_child_leave_kills_the_child_and_deregisters(live_engine, capsys, r
         assert f"No engines were tracked for {_GRID_NAME}; deregistered it from the relay" in out
 
 
+def test_real_child_logout_stops_it_before_deleting_the_credentials(live_engine, capsys):
+    """`grid logout` is authoritative too (grid-leave issue 13, ADR 0023).
+
+    The reported failure needed a real child to be visible at all: signing out deleted
+    ``credentials.toml`` while the detached child kept polling on the token it had loaded into memory
+    at spawn — an access token with a one-year TTL — so the box went on advertising models as a
+    provider, and every repair verb answered "You're not signed in" over records that were still
+    correct. Mocked, the deleted file and the live process never meet.
+
+    Same symptom triple as leave, plus the ordering that makes it work: the teardown ran while the
+    token still existed, which is the only moment the deregister could have been sent at all.
+    """
+    engine = live_engine("logout")
+    relay_state = engine.relay.relay_state
+    child_pid = engine.proc.pid
+    assert paths.credentials_file().exists()  # precondition: this is the file logout is about to take
+
+    capsys.readouterr()  # drop the bring-up noise
+    assert cli.main(["logout"]) == 0
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, f"the fake relay raised in a handler thread:\n{captured.err}"
+
+    assert _wait_until(lambda: not run_records.pid_alive(child_pid)), (
+        f"the serve child (pid {child_pid}) survived `grid logout` — it keeps heartbeating on the "
+        f"token it already holds (relay role is {relay_state.role()!r}, listed="
+        f"{relay_state.overview_live()}). Child log:\n{_log_tail(engine.network_id)}"
+    )
+    assert not relay_state.overview_live(), (
+        f"the node is still listed (role={relay_state.role()!r}) — the box advertises models it no "
+        "longer serves, to an account that has signed out"
+    )
+    # The deregister that can only be the CLI's: it arrived after the child was already dead, so the
+    # child's own parting unregister cannot account for it. This is what proves the teardown ran
+    # BEFORE `clear_credentials` — with the store gone there is no token left to have sent it.
+    assert relay_state.backstop_put_paths() == [f"/nodes/{engine.node_id}"], (
+        "no consumer PUT arrived after the child was dead, so logout never sent the backstop "
+        f"deregister. Consumer PUTs seen: {relay_state.consumer_put_paths()}"
+    )
+    assert not paths.credentials_file().exists()  # ...and the sign-out itself still happened
+    assert f"Stopped serving {_GRID_NAME}." in captured.out
+    assert "Signed out." in captured.out
+
+
+def test_real_child_rescue_leave_works_with_the_credentials_deleted(live_engine, capsys):
+    """The dead end closed from the other side: a child that is *already* stranded gets reaped.
+
+    This is the state every machine in the field is in today — an operator signed out on a build that
+    did not tear down, and the live child is now addressed by nothing. Naming the grid id explicitly,
+    `grid leave` reaps it with no credential store on disk at all. It cannot deregister (there is no
+    token), so the grid drops the models at the node TTL — and the test proves the CLI sent nothing
+    rather than merely that the node ended up flipped, since the dying child's own unregister flips it.
+    """
+    engine = live_engine("rescue")
+    relay_state = engine.relay.relay_state
+    child_pid = engine.proc.pid
+
+    assert credentials.clear_credentials() is True  # the state a pre-fix `grid logout` left behind
+    capsys.readouterr()
+    assert cli.main(["leave", engine.network_id]) == 0
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, f"the fake relay raised in a handler thread:\n{captured.err}"
+
+    assert _wait_until(lambda: not run_records.pid_alive(child_pid)), (
+        f"the stranded serve child (pid {child_pid}) survived a signed-out `grid leave` — there is no "
+        f"other verb that can reach it. Child log:\n{_log_tail(engine.network_id)}"
+    )
+    assert relay_state.backstop_put_paths() == [], (
+        "a consumer PUT arrived after the child was dead, so the CLI sent a deregister it had no "
+        "token for — the rescue path must degrade to the node TTL, not fabricate a request"
+    )
+    assert f"Left {engine.network_id}." in captured.out
+    assert "no stored credentials" in captured.err  # ...and says why the grid was not told
+
+
 def test_real_child_leave_converges_over_a_real_zombie(live_engine, capsys):
     """`grid leave` finishes over a **real** corpse (`.scratch/grid-leave/` issue 08, residual (c)).
 

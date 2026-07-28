@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from typing import NamedTuple
 
 from shared import run_records
@@ -419,6 +420,37 @@ def _has_exited(pid: int) -> bool:
             return True
         time.sleep(_SETTLE_INTERVAL_SECONDS)
     return run_records.stopped_running(pid)
+
+
+def find_orphans(
+    network_ids: Iterable[str], *, exclude_pids: set[int] | frozenset[int] = frozenset()
+) -> tuple[dict[str, tuple[int, ...]], bool]:
+    """Live serve children per network id, from ONE process-table read. Nothing is signalled.
+
+    The detect-only half of the sweep, for a caller that must decide *which* grids to act on before
+    it acts on any of them (``grid logout``, and the sync/login warnings). ``sweep_orphans`` cannot
+    answer that: it terminates what it finds.
+
+    One read for all ids rather than a call per grid, because the cost is per *read*, not per match:
+    a cold ``powershell.exe`` + ``Win32_Process`` enumeration is seconds on Windows (see
+    ``_WIN_PROCESS_TIMEOUT_SECONDS``), so a per-grid loop would tax a sign-out in proportion to how
+    many grids the box has ever joined. The matcher itself is pure and cheap.
+
+    Returns ``(found, scanned)``. A grid with no live child is **absent** from ``found`` rather than
+    mapped to an empty tuple, so a caller can write ``if nid in found``. ``scanned`` is False when the
+    table couldn't be read — the same "couldn't check ≠ checked, clean" contract as
+    ``SweepResult.scanned``, and the reason this returns a flag instead of an empty dict.
+    """
+    output = _process_table_output()
+    if output is None:
+        return {}, False  # couldn't read the table — couldn't check
+    excluded = frozenset(exclude_pids) | {os.getpid()}
+    found: dict[str, tuple[int, ...]] = {}
+    for network_id in network_ids:
+        matched = _match_orphan_pids(output, network_id, exclude_pids=excluded)
+        if matched:
+            found[network_id] = tuple(matched)
+    return found, True
 
 
 def sweep_orphans(

@@ -38,6 +38,12 @@ _IS_WINDOWS = sys.platform == "win32"
 # `__engine`/`__server` dispatch keys).
 REMOTE_ENGINE_MARKER = "__remote-engine"
 
+# The engine id of the remote singleton — one record per grid, `engines_dir(<network_id>)/remote.json`,
+# and the file every `grid join`/`grid leave`/sign-out serializes its union changes on. It lives here,
+# beside the marker above, for the same reason: three modules name it (`cli/remote_provider`, the
+# sign-out teardown, the leave backstop's record lookup) and a second literal is a second thing to drift.
+REMOTE_IDENTITY = "remote"
+
 
 # How long ``stop_engine`` waits for a SIGTERM'd child to exit before SIGKILLing its group.
 # SIGTERM → SIGKILL escalation budget for a detached engine child. 25 = the serve loop's worker
@@ -91,6 +97,36 @@ def read_records(grid_id: str) -> dict[str, dict[str, Any]]:
         if data.get("engine_id"):
             records[data["engine_id"]] = data
     return records
+
+
+def known_grid_ids() -> tuple[str, ...]:
+    """Every grid id with a run-record **directory** on this box, sorted.
+
+    The only index of what this machine has joined that survives a ``grid logout``: the remote grid
+    list lives solely in ``credentials.toml``, which logout deletes. Scoped to directories rather
+    than records on purpose — ``read_records`` answers ``{}`` both for a grid never joined and for one
+    whose record was unlinked out from under a **live** child, and only the directory tells them
+    apart (grid-leave issue 05 found 9 record-less directories, each still holding the child's log).
+
+    A name that is not a directory is skipped rather than raising: this runs inside a sign-out that
+    must not fail over a stray file someone dropped in the run tree.
+
+    A missing tree is the ordinary never-joined case and answers ``()`` silently. Any **other**
+    ``OSError`` answers ``()`` too — a sign-out must not die of a permissions change — but says so on
+    stderr first, because every caller reads "no ids" as "nothing to stop". This is the one primitive in
+    this feature with no ``scanned`` flag to carry the difference (``SweepResult.scanned``,
+    ``find_orphans``, ``LiveScan.scanned`` all have one), so the note is what stops an unreadable tree
+    from being reported as a clean box.
+    """
+    root = paths.run_dir() / "engines"
+    try:
+        return tuple(sorted(entry.name for entry in root.iterdir() if entry.is_dir()))
+    except FileNotFoundError:
+        return ()  # never joined anything — the ordinary case, and not a fault
+    except OSError as exc:
+        print(f"Note: couldn't list {root} ({exc}); this box's joined grids can't be enumerated.",
+              file=sys.stderr)
+        return ()
 
 
 def read_record(grid_id: str, engine_id: str) -> dict[str, Any] | None:
@@ -634,7 +670,19 @@ def describe_survivor(outcome: Teardown) -> str:
     ``kill -9 <group leader>``, and the group leader is precisely the process that is already gone:
     the command they are given does nothing and the engine keeps serving.
     """
-    return f"process group {outcome.survivor}" if outcome.is_group else f"pid {outcome.survivor}"
+    return describe_target(-outcome.survivor if outcome.is_group else outcome.survivor)
+
+
+def describe_target(value: int) -> str:
+    """One signalling target named for what it is, from the sign-convention the callers already use: a
+    **negative** value is a process *group* (``kill(1)``'s own convention), a positive one a pid.
+
+    The flattened form exists because the remote full leave and the sign-out both carry survivors as a
+    plain ``list[int]`` — several targets, each possibly a group — where ``Teardown``'s two fields would
+    need a parallel list to survive. One implementation for both shapes: ``describe_survivor`` above is
+    this function with the sign applied, so a wording change cannot land in one message and not the other.
+    """
+    return f"process group {-value}" if value < 0 else f"pid {value}"
 
 
 def terminate_recorded(record: dict[str, Any]) -> Teardown:
