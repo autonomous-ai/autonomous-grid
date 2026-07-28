@@ -178,5 +178,57 @@ def test_sweep_orphans_leaves_another_grids_child_alone():
         result = orphan_sweep.sweep_orphans(_network_id("someone-else"))
 
         assert result.scanned is True
-        assert result == orphan_sweep.SweepResult((), (), ())
+        # Field by field, not a whole-tuple comparison against a default-constructed result: on a
+        # real box `unreadable` is a live measurement of what WMI would not show us (see below), so
+        # equality here would assert that number is zero — which it never is, on any Windows.
+        assert result.reaped == () and result.survivors == () and result.foreign == ()
         assert run_records.pid_alive(proc.pid) is True
+
+
+def test_the_enumerator_emits_a_sentinel_for_a_process_it_cannot_read():
+    """Windows hands an unelevated caller a **null** command line for any process it cannot open, and
+    the enumerator used to drop those rows before anything saw them — so the sweep was blind to
+    another user's serve child while still reporting `scanned=True`, and `grid leave` printed an
+    unqualified success over it (grid-leave issue 15/B).
+
+    Every Windows has processes that are opaque to everyone (pid 0, pid 4, Registry, Memory
+    Compression, Secure System, anything protected), so at least one sentinel must come back here. A
+    zero would not mean "we can see everything" — it would mean the sentinel branch is dead and the
+    count that qualifies the success line is permanently 0, which is the silent failure this whole
+    issue is about. That is why it is asserted rather than merely measured."""
+    output = orphan_sweep._win_process_output()
+    assert output is not None, "the process table could not be read at all"
+
+    sentinels = [
+        line for line in output.splitlines()
+        if line.split(None, 2)[2:] == [orphan_sweep._WIN_UNREADABLE_MARKER]
+    ]
+    assert sentinels, f"no unreadable process was reported at all: {output[:400]!r}"
+    # ...and they are inert: a sentinel carries no marker, so it can never become a kill.
+    assert orphan_sweep._match_orphan_pids("\n".join(sentinels), _network_id("x"), exclude_pids=set()) == []
+
+
+def test_the_unreadable_row_count_stays_under_the_qualifier_floor():
+    """The floor's empirical pin — the one number in this feature that only a real Windows box can
+    supply, which is why issue 15/B could not be closed until this job existed.
+
+    `_WIN_UNREADABLE_FLOOR` has to sit above what is unreadable to *everyone* and below what a caller
+    who cannot see another user's processes would find. This runner is an administrator, so what it
+    measures IS that lower baseline. If the assertion fails, the message carries the measured number
+    and the fix is that one constant — not the predicate.
+
+    What this proves is one-directional: the floor is not too LOW, so no Windows leave is footnoted
+    for a table it could in fact see. That it is not too HIGH is `test_sweep_result_is_only_partial_
+    above_the_floor`'s job, because no CI runner can produce a genuinely half-hidden table on demand.
+    """
+    output = orphan_sweep._win_process_output()
+    assert output is not None, "the process table could not be read at all"
+
+    unreadable = orphan_sweep._count_unreadable(output)
+    assert unreadable >= 1, "the sentinel branch produced nothing — the count can never qualify anything"
+    assert unreadable <= orphan_sweep._WIN_UNREADABLE_FLOOR, (
+        f"an administrator could not read {unreadable} rows, at or above the "
+        f"_WIN_UNREADABLE_FLOOR of {orphan_sweep._WIN_UNREADABLE_FLOOR} — every Windows `grid leave` "
+        "would now print a partial-scan caveat. Raise the floor to clear this baseline."
+    )
+    assert orphan_sweep.sweep_orphans(_network_id("floor")).partial is False

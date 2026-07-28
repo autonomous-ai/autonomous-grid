@@ -53,6 +53,32 @@ _SWEEP_UNSCANNED_NOTE = (
     "drop after the node TTL (~120s)."
 )
 
+# Appended when the sweep found a live process carrying THIS grid's marker and could not stop it —
+# another user's, so not ours to kill (grid-leave issue 15/C). Not a failure: killing another
+# operator's legitimate node would be wrong, so leave still exits 0. But not a clean success either,
+# and the case that makes it matter is mundane rather than adversarial — a `sudo grid join` followed
+# by an unprivileged `grid leave` over a shared GRID_HOME is the SAME node_id, so the backstop flips
+# the node to consumer and the root-owned child's next heartbeat re-registers it as a provider. The
+# operator was told the box serves nothing at the moment it resumes serving.
+#
+# Deliberately NOT sharing `_SWEEP_UNSCANNED_NOTE`'s wording, and not merely for readability:
+# `tests/test_remote_leave_real_child.py` asserts that string's *absence* as proof the sweep really
+# read the table, so reusing it here would turn that guard into a tripwire.
+_SWEEP_FOREIGN_NOTE = (
+    " Couldn't stop a serve process for this grid owned by another user (named above); it keeps this "
+    "box serving until an elevated `grid leave` stops it, or its owner does."
+)
+
+# Appended when the sweep ran but was only shown part of the process table — Windows only, where WMI
+# returns a null command line for every process the caller cannot open (grid-leave issue 15/B). The
+# sweep succeeded; it simply could not have found a serve child owned by anyone else. Distinct from
+# `_SWEEP_UNSCANNED_NOTE`, which means no rows were read at all: different evidence, different remedy.
+_SWEEP_PARTIAL_NOTE = (
+    " Couldn't see all of the process table (most command lines were hidden from this account), so a "
+    "stray serve process may remain; an elevated `grid leave` can see them, and any that remain drop "
+    "after the node TTL (~120s)."
+)
+
 
 def _reject_local_only_flags(args: argparse.Namespace) -> None:
     """local-only `grid join` flags have no meaning in remote mode (DECISIONS D8): a remote engine
@@ -1275,8 +1301,8 @@ def cmd_remote_leave(args: argparse.Namespace) -> int:
         # was already dead, or its own unregister was rejected. A bare leave with no records still sweeps
         # + backstops: an idempotent repair for a historical orphan whose record was deleted out from
         # under a live child.
-        sent, scanned = _full_leave_teardown(rec, session, network_id, label, records)
-        _full_leave_report(label, bool(records), sent, scanned)
+        sent, reaped = _full_leave_teardown(rec, session, network_id, label, records)
+        _full_leave_report(label, bool(records), sent, reaped)
         return 0
 
 
@@ -1344,6 +1370,8 @@ class _ReapResult(NamedTuple):
     survivors: list[int]   # negative entries name a process GROUP (see `_full_leave_survivor_exit`)
     scanned: bool          # False ⇒ the argv sweep could not read the process table
     unverified: list[int]  # record pids neither stopped as ours nor proven clean
+    foreign: tuple[int, ...] = ()  # live children of THIS grid we were not permitted to stop
+    partial: bool = False  # the sweep ran but was shown only part of the process table (Windows)
 
 
 def _full_leave_reap(
@@ -1351,19 +1379,22 @@ def _full_leave_reap(
 ) -> _ReapResult:
     """The reap half of a full leave: SIGTERM→SIGKILL the recorded child(ren), then argv-sweep the
     process table for any live serve child a stale/missing record could never reach (the reproduced
-    orphan bug) plus a record-less orphan. Prints the reaped/foreign notes. Returns
-    ``(surviving_pids, scanned)``: the survivors are recorded children wedged past SIGKILL PLUS swept
-    orphans that survived — disjoint by construction (the sweep excludes the recorded pids, so a
-    wedged recorded child is never re-terminated); ``scanned`` is False when the sweep could not read
-    the process table, so the caller qualifies its success line instead of claiming a
-    teardown it never verified. The backstop + report stay in the caller (so ``cmd_remote_leave``
-    stays small).
+    orphan bug) plus a record-less orphan. Prints the reaped/foreign notes; the backstop + report stay
+    in the caller (so ``cmd_remote_leave`` stays small).
 
-    ``unverified`` names the records the teardown could neither stop **as ours** nor prove clean — a
-    pid recycled onto an unrelated process, or long reaped with no session group left to vouch for it.
-    Alone that is routine and harmless, because the argv sweep is the other net; together with
-    ``scanned=False`` it means this leave checked **nothing**, which must not read as success
-    (grid-leave issue 08).
+    Every field of the ``_ReapResult`` is something the caller must not print a clean success over:
+
+    * ``survivors`` — recorded children wedged past SIGKILL PLUS swept orphans that survived, disjoint
+      by construction (the sweep excludes the recorded pids, so a wedged recorded child is never
+      re-terminated). Fatal: leave exits non-zero naming them.
+    * ``scanned`` — False when the sweep could not read the process table at all.
+    * ``unverified`` — records the teardown could neither stop **as ours** nor prove clean: a pid
+      recycled onto an unrelated process, or long reaped with no session group left to vouch for it.
+      Alone that is routine and harmless, because the argv sweep is the other net; together with
+      ``scanned=False`` it means this leave checked **nothing** (grid-leave issue 08).
+    * ``foreign`` — live children of this grid we were not permitted to stop, and ``partial`` — the
+      table was read but mostly hidden from this account (grid-leave issue 15). Neither is fatal;
+      both qualify the success line via ``_sweep_caveats``.
     """
     from remote import orphan_sweep  # argv sweep (lazy: remote.* imports stay in-handler)
     from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
@@ -1411,7 +1442,8 @@ def _full_leave_reap(
             "left it alone.",
             file=sys.stderr,
         )
-    return _ReapResult(record_survivors + list(swept.survivors), swept.scanned, unverified)
+    return _ReapResult(record_survivors + list(swept.survivors), swept.scanned, unverified,
+                       foreign=swept.foreign, partial=swept.partial)
 
 
 def _full_leave_execute(
@@ -1434,18 +1466,19 @@ def _full_leave_execute(
 def _full_leave_teardown(
     rec: dict[str, object], session: str, network_id: str, label: str,
     records: dict[str, dict[str, object]],
-) -> tuple[bool, bool]:
+) -> tuple[bool, _ReapResult]:
     """The authoritative full-identity teardown shared by a bare / ``--all`` leave and a
     ``--engine <last>`` drop: reap (record kills + argv sweep) then the UNCONDITIONAL backstop
     deregister, raising loud (via ``_full_leave_survivor_exit``) if a child survived even SIGKILL.
-    Returns ``(sent, scanned)`` so the caller prints its own success line — the wording differs
-    between a bare leave and a last-engine drop."""
+    Returns ``(sent, reaped)`` so the caller prints its own success line — the wording differs
+    between a bare leave and a last-engine drop, but every caveat on it comes from ``_sweep_caveats``
+    over this same result, so the two can't drift."""
     reaped, sent = _full_leave_execute(rec, session, network_id, label, records)
     if reaped.survivors:  # a live child survived SIGKILL — its record was kept; fail loud, never "Left"
         _full_leave_survivor_exit(reaped.survivors, label, sent)
     if reaped.unverified and not reaped.scanned:  # both nets failed at once — this leave checked nothing
         _full_leave_unchecked_exit(reaped.unverified, label, sent)
-    return sent, reaped.scanned
+    return sent, reaped
 
 
 def _full_leave_unchecked_exit(unverified: list[int], label: str, sent: bool) -> None:
@@ -1478,21 +1511,46 @@ def _full_leave_unchecked_exit(unverified: list[int], label: str, sent: bool) ->
     )
 
 
-def _full_leave_report(label: str, had_records: bool, sent: bool, scanned: bool) -> None:
-    """Print the honest outcome of a full leave with no surviving child. ``scanned`` False means the
-    argv sweep couldn't read the process table — the backstop still dropped the model, but a
-    stray child may persist, so the success line is qualified rather than an unconditional "Left"
+def _sweep_caveats(reaped: _ReapResult) -> str:
+    """Everything a full-leave success line must not leave unsaid, as one suffix.
+
+    The success line itself is worded per caller (a bare leave vs a last-engine drop), but what
+    qualifies it never is — so it lives here rather than being inlined at each site, which is how the
+    two drifted before: one carried the unscanned caveat and the other re-derived it.
+
+    "Couldn't read the table at all" **returns early** rather than accumulating: with no rows there
+    was nothing to match and nothing to count, so the other two are empty by construction and would
+    only add a second, quieter version of the same admission.
+    """
+    if not reaped.scanned:
+        return _SWEEP_UNSCANNED_NOTE
+    partial = _SWEEP_PARTIAL_NOTE if reaped.partial else ""
+    return partial + (_SWEEP_FOREIGN_NOTE if reaped.foreign else "")
+
+
+def _full_leave_report(label: str, had_records: bool, sent: bool, reaped: _ReapResult) -> None:
+    """Print the honest outcome of a full leave with no surviving child, qualified by whatever the
+    sweep could not establish — it did not read the process table, or it found a live child of this
+    grid it was not permitted to stop. The backstop dropped the model in every one of those cases, so
+    none of them is a failure; each is a reason the success line must not be unconditional
     (silent-failure review: "couldn't check" must not read as "verified clean")."""
-    unscanned = "" if scanned else _SWEEP_UNSCANNED_NOTE
+    caveats = _sweep_caveats(reaped)
     if had_records:
-        print(f"Left {label}.{unscanned}")
+        print(f"Left {label}.{caveats}")
     elif sent:
-        print(f"No engines were tracked for {label}; deregistered it from the relay to be safe.{unscanned}")
+        print(f"No engines were tracked for {label}; deregistered it from the relay to be safe.{caveats}")
     else:
         # No local records AND the safety deregister didn't land. Do NOT print the old "No engines
         # joined" dead-end — it reads as "nothing to do" and contradicts the stderr caveat
         # `_full_leave_backstop` just printed; acknowledge the attempted repair honestly.
-        print(f"No engines were tracked for {label}; the safety deregister didn't land (see above).")
+        #
+        # This branch carries the caveats too, and it is the branch that needs them most: it has the
+        # least assurance behind it, and it is the ONLY place a partial scan is ever surfaced — a
+        # `foreign` match at least prints its own per-pid note from the reap whichever branch follows.
+        print(
+            f"No engines were tracked for {label}; the safety deregister didn't land "
+            f"(see above).{caveats}"
+        )
 
 
 def _backstop_degrade(reason: str) -> bool:
@@ -1629,9 +1687,8 @@ def _leave_one_engine(
         # Dropping the last engine is a full identity teardown, so it is authoritative like a bare /
         # `--all` leave: reap (record kills + argv sweep) then the UNCONDITIONAL backstop, so a stale-pid
         # orphan can't survive here and the node can't stay registered as a provider (issue 02 / A).
-        _sent, scanned = _full_leave_teardown(rec, session, network_id, label, records)
-        note = "" if scanned else _SWEEP_UNSCANNED_NOTE
-        print(f"Left {label} (removed the last engine).{note}")
+        _sent, reaped = _full_leave_teardown(rec, session, network_id, label, records)
+        print(f"Left {label} (removed the last engine).{_sweep_caveats(reaped)}")
         return 0
 
     # Rebuild the singleton from the identity's own record, minus the dropped engine, and respawn it.

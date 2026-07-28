@@ -188,6 +188,9 @@ def cmd_logout(args: argparse.Namespace) -> int:
     # by the refusal instead, and only join this list when `--force` really does walk away from them.
     _warn_unreaped([o for o in outcomes if not o.ok and not o.bundled] + (blocked if forcing else []))
     _warn_unscanned(result.unscanned)
+    # Every outcome, not only the failed ones: a grid can be torn down perfectly and still have a
+    # sibling child this account may not touch, which is precisely the case that used to go unsaid.
+    _warn_unstoppable(outcomes)
     if blocked and not forcing:
         raise SystemExit(_signout_blocked_message(blocked))
     existed = credentials.clear_credentials()
@@ -256,12 +259,57 @@ def _warn_unscanned(unscanned: tuple[signout.UncheckedGrid, ...]) -> None:
             if grid.deregistered
             else "nothing could tell that grid, so anything left drops after the node TTL (~120s)"
         )
+        # Two ways to have no evidence, and they do not share a remedy. An unreadable table clears on
+        # its own once processes are listable; a table read but mostly hidden will look exactly the
+        # same on every retry from this account, so the only useful instruction is to elevate.
+        blind, remedy = (
+            ("couldn't see all of the process table (most command lines were hidden from this "
+             "account)", "From an elevated shell")
+            if grid.partial
+            else ("couldn't read the process table", "Once processes are listable")
+        )
         print(
-            f"Warning: couldn't read the process table, so an untracked serve child could not be ruled "
-            f"out for {grid.label} — {told}. Once processes are listable, "
-            f"`grid leave {grid.network_id}` reaps one; it needs no sign-in.",
+            f"Warning: {blind}, so an untracked serve child could not be ruled out for "
+            f"{grid.label} — {told}. {remedy}, `grid leave {grid.network_id}` reaps one; "
+            "it needs no sign-in.",
             file=sys.stderr,
         )
+
+
+def _warn_unstoppable(outcomes: list[signout.SignoutOutcome]) -> None:
+    """Name what the teardown found and was **not permitted** to finish — a serve child of that grid
+    owned by another user, or a process table it was shown only part of (grid-leave issue 15).
+
+    The concrete shape is mundane, not adversarial: `sudo grid join` followed by an unprivileged
+    `grid logout` over a shared `GRID_HOME` is the SAME node_id, so the backstop flips the node to
+    consumer and the root-owned child's next heartbeat re-registers it as a provider — while the
+    credentials that could address it again have just gone.
+
+    A warning and never a refusal, for the same two reasons `_warn_unscanned` is: another operator's
+    node is not ours to kill, and a box that hosts one would otherwise be unable to sign out at all.
+    Neither condition reaches `ok`, so neither can block.
+
+    Worded so it stays true whichever way the sign-out went — a blocked grid keeps its credentials,
+    so "signing out removed them" (which `_warn_unreaped` may say) would be false here. `grid leave
+    <grid-id>` is the remedy because it needs no sign-in and therefore still works after the store is
+    deleted; elevated, because that is the thing this run lacked.
+    """
+    for outcome in outcomes:
+        if outcome.foreign:
+            pids = ", ".join(str(pid) for pid in outcome.foreign)
+            print(
+                f"Warning: {outcome.label} still has a serve process on this box owned by another "
+                f"user (pid {pids}), which signing out could not stop. Run "
+                f"`grid leave {outcome.network_id}` from an elevated shell to stop it.",
+                file=sys.stderr,
+            )
+        if outcome.partial:
+            print(
+                f"Warning: couldn't see all of the process table, so a serve child for "
+                f"{outcome.label} owned by another user could not be ruled out. Run "
+                f"`grid leave {outcome.network_id}` from an elevated shell to be sure.",
+                file=sys.stderr,
+            )
 
 
 def _report_logout(existed: bool, outcomes: list[signout.SignoutOutcome], *, as_json: bool) -> int:

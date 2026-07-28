@@ -25,7 +25,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from shared import jsonio, paths, process_identity
+from shared import jsonio, paths, process_identity, win_paths
 from shared.filelock import file_lock, try_file_lock
 from shared.models import api_catalog
 
@@ -319,8 +319,12 @@ def kill_group(pid: int) -> None:
         # No process groups or SIGKILL on Windows. `taskkill /T` tears down the whole child tree
         # (the uv launcher shim → the real interpreter that holds the callback port), which is what
         # `killpg` achieves on POSIX. `/F` forces; a dead pid just yields a non-zero exit we ignore.
+        #
+        # By ABSOLUTE path: `CreateProcess` searches the current directory too, and a teardown runs
+        # wherever the operator is standing, so a bare name lets a planted `taskkill.exe` run as us
+        # (grid-leave issue 15, Notes). Every Windows caller of this function is in that blast radius.
         subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            [win_paths.system32_tool("taskkill.exe"), "/F", "/T", "/PID", str(pid)],
             capture_output=True,
             check=False,
         )

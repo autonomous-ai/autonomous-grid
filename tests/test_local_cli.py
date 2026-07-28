@@ -4629,6 +4629,28 @@ def test_win_pid_alive_only_calls_a_pid_dead_when_windows_says_it_does_not_exist
     assert run_records.pid_alive(4242) is expected_alive
 
 
+def test_kill_group_invokes_taskkill_by_absolute_path(monkeypatch):
+    """`CreateProcess` resolves a bare executable name through a search order that includes the
+    **current directory**, and `grid leave` runs wherever the operator happens to be — so a `taskkill`
+    planted there is executed as us, with whatever privilege we hold. Exactly the hazard the sweep's
+    enumerator already closed for `powershell.exe`; `kill_group` was the last Windows tool the CLI
+    still invoked by name, and every Windows teardown goes through it (grid-leave issue 15, Notes).
+
+    The path is asked of the kernel rather than read from `%SystemRoot%`, which is attacker-writable
+    and survives UAC elevation — see `shared/win_paths.py`."""
+    from shared import run_records, win_paths
+
+    seen: dict[str, object] = {}
+    # `_IS_WINDOWS` is snapshotted at import, so flipping `sys.platform` cannot reach this branch.
+    monkeypatch.setattr(run_records, "_IS_WINDOWS", True)
+    monkeypatch.setattr(win_paths, "system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)  # nothing to actually kill
+    monkeypatch.setattr(run_records.subprocess, "run", lambda argv, **k: seen.update(argv=argv))
+
+    run_records.kill_group(4242)
+    assert seen["argv"] == [r"C:\Windows\System32\taskkill.exe", "/F", "/T", "/PID", "4242"]
+
+
 def test_stop_engine_does_not_raise_on_an_unreadable_pid(monkeypatch, tmp_path):
     """`stop_engine` reads the pid tolerantly, not with `int(...)`. It runs inside a full leave ahead
     of the relay deregister that is the mechanism of record, so a hand-edited or corrupt `pid` field
@@ -5072,10 +5094,10 @@ def test_find_orphans_maps_children_per_network_in_one_table_read(monkeypatch):
     monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
                         lambda pid: pytest.fail(f"detection must never signal (pid {pid})"))
 
-    found, scanned = orphan_sweep.find_orphans(["n1", "n2", "n3"])
+    scan = orphan_sweep.find_orphans(["n1", "n2", "n3"])
 
-    assert scanned is True
-    assert found == {"n1": (4242, 4244), "n2": (4243,)}  # n3 has none — absent, not empty
+    assert scan.scanned is True and scan.partial is False
+    assert scan.found == {"n1": (4242, 4244), "n2": (4243,)}  # n3 has none — absent, not empty
     assert len(reads) == 1
 
 
@@ -5085,7 +5107,8 @@ def test_find_orphans_reports_an_unreadable_table_as_not_scanned(monkeypatch):
     from remote import orphan_sweep
 
     monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
-    assert orphan_sweep.find_orphans(["n1"]) == ({}, False)
+    scan = orphan_sweep.find_orphans(["n1"])
+    assert scan.found == {} and scan.scanned is False
 
 
 def test_find_orphans_never_reports_its_own_pid(monkeypatch):
@@ -5099,7 +5122,8 @@ def test_find_orphans_never_reports_its_own_pid(monkeypatch):
     mypid = _os.getpid()
     rows = f"  {mypid} /bin/grid __remote-engine n1 remote\n  4242 /bin/grid __remote-engine n1 remote"
     monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: rows)
-    assert orphan_sweep.find_orphans(["n1"], exclude_pids={4242}) == ({}, True)
+    scan = orphan_sweep.find_orphans(["n1"], exclude_pids={4242})
+    assert scan.found == {} and scan.scanned is True
 
 
 # --- Windows parity (grid-leave issue 06) --------------------------------------------------------
@@ -5322,7 +5346,7 @@ def test_win_process_output_invocation_never_carries_a_grid_id(monkeypatch):
     import base64
 
     from remote import orphan_sweep
-    from shared import run_records
+    from shared import run_records, win_paths
 
     seen: dict[str, object] = {}
 
@@ -5336,7 +5360,7 @@ def test_win_process_output_invocation_never_carries_a_grid_id(monkeypatch):
         return _Proc()
 
     monkeypatch.setenv("SystemRoot", r"C:\Windows")
-    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(win_paths, "system_directory", lambda: r"C:\Windows")
     monkeypatch.setattr(orphan_sweep.subprocess, "run", capture)
     assert orphan_sweep._win_process_output() is not None
 
@@ -5352,7 +5376,7 @@ def test_win_process_output_invocation_never_carries_a_grid_id(monkeypatch):
     assert kwargs["creationflags"] == getattr(orphan_sweep.subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def test_win_powershell_path_never_consults_the_environment(monkeypatch):
+def test_windows_tool_paths_never_consult_the_environment(monkeypatch):
     """`SystemRoot` decides which binary would run, and it is attacker-writable and survives UAC
     elevation — so the path is built from what the kernel reports, not from the environment.
 
@@ -5361,18 +5385,26 @@ def test_win_powershell_path_never_consults_the_environment(monkeypatch):
     drive (`subst`/`net use` bind a UNC share to a letter unprivileged), U+017F (which Unicode
     case-folding matches to `s`, and standard users can create folders at the root of `C:`), and a
     trailing newline (`$` matches before it, and the control character then makes the path unopenable
-    — silently switching the sweep off rather than falling back)."""
-    from remote import orphan_sweep
+    — silently switching the sweep off rather than falling back).
 
-    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    Both tools the CLI shells out to on Windows are asserted here, because they now share one
+    kernel-backed root (`shared/win_paths.py`) and a regression would reach `grid leave`'s enumerator
+    and every Windows teardown's `taskkill` together."""
+    from remote import orphan_sweep
+    from shared import run_records, win_paths
+
+    monkeypatch.setattr(win_paths, "system_directory", lambda: r"C:\Windows")
     expected = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
     for hostile in [r"W:\Windows", "C:\\Window\u017f", "C:\\Windows\n", r"\\evil-host\share", ""]:
         monkeypatch.setenv("SystemRoot", hostile)
         assert orphan_sweep._win_powershell_path() == expected, hostile
+        assert win_paths.system32_tool("taskkill.exe") == r"C:\Windows\System32\taskkill.exe", hostile
 
     # A non-default Windows directory is still honoured — it just has to come from the kernel.
-    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: "D:\\WINNT\\")
+    monkeypatch.setattr(win_paths, "system_directory", lambda: "D:\\WINNT\\")
     assert orphan_sweep._win_powershell_path() == r"D:\WINNT\System32\WindowsPowerShell\v1.0\powershell.exe"
+    assert win_paths.system32_tool("taskkill.exe") == r"D:\WINNT\System32\taskkill.exe"
+    assert run_records.win_paths is win_paths, "the teardown must resolve through the same seam"
 
 
 def test_orphan_sweep_matcher_ignores_a_bystander_that_merely_mentions_the_marker():
@@ -5456,17 +5488,109 @@ def test_win_process_list_script_filters_non_ascii_per_row_not_across_rows():
     assert "-join" not in orphan_sweep._WIN_PROCESS_LIST_SCRIPT
 
 
+def test_count_unreadable_counts_only_whole_sentinel_rows():
+    """The Windows enumerator emits a sentinel instead of DROPPING a process whose command line WMI
+    hides (grid-leave issue 15/B). Dropping them is what let a scan that saw 1% of the table still
+    report `scanned=True` and print an unqualified "Left …"; counting them is what lets leave say so.
+
+    The command field must equal the sentinel WHOLE. Matched as a substring, any process whose real
+    command line happens to mention the token would inflate the count — and the count is the only
+    thing deciding whether the success line gets qualified."""
+    from remote import orphan_sweep
+
+    marker = orphan_sweep._WIN_UNREADABLE_MARKER
+    rows = "\n".join([
+        f"   0    0 {marker}",                                                  # System Idle — opaque to anyone
+        f"   4    0 {marker}",                                                  # System — likewise
+        r"1234 1200 C:\Python312\python.exe -m cli __remote-engine n1 remote",  # readable → not counted
+        f"1235 1200 C:\\g\\grid.exe --note {marker}",                           # merely MENTIONS it → not counted
+        "",                                                                     # blank → skipped
+        "not-a-pid 1 whatever",                                                 # unparseable → skipped
+    ])
+    assert orphan_sweep._count_unreadable(rows) == 2
+
+
+def test_win_process_list_script_emits_a_sentinel_rather_than_dropping_an_unreadable_process():
+    """The enumerator must not filter a null command line out of its own output. `Where-Object
+    { $_.CommandLine }` did exactly that, so a process the caller could not open never reached the
+    matcher AND never reached the count — a scan that saw a fraction of the table was reported as a
+    clean one (grid-leave issue 15/B).
+
+    Asserted against the constant's text because the only place the real command runs is the
+    `test-windows` job; a mocked `subprocess.run` supplies canned rows and can never catch a
+    regression in the script itself. Same reason as the sibling ASCII-fold assertion above."""
+    from remote import orphan_sweep
+
+    script = orphan_sweep._WIN_PROCESS_LIST_SCRIPT
+    assert f"'{orphan_sweep._WIN_UNREADABLE_MARKER}'" in script
+    assert "Where-Object" not in script, "a filtered-out process is a blind spot the count cannot see"
+
+
+def test_sentinel_rows_are_inert_to_the_matcher_but_still_map_a_parent():
+    """The property that makes emitting sentinels safe rather than merely useful: one is only ever
+    COUNTED, never acted on. It carries no `__remote-engine` marker, so nothing can be signalled
+    because of it — a row for a process we were not allowed to read can never become a kill.
+
+    It does still parse as a `pid ppid` pair, and that only ever adds knowledge: `_tree_roots` and
+    `launcher_ancestors` follow a parent link exclusively when the parent is itself an argv match,
+    which a sentinel never is. Asserted rather than assumed, because "the new rows are harmless" is
+    the whole safety argument for un-filtering the enumerator."""
+    from remote import orphan_sweep
+
+    marker = orphan_sweep._WIN_UNREADABLE_MARKER
+    rows = f"1234 1200 {marker}\n1200 4 {marker}"
+    assert orphan_sweep._match_orphan_pids(rows, "n1", exclude_pids=set()) == []
+    assert orphan_sweep._ppid_by_pid(rows) == {1234: 1200, 1200: 4}
+
+
+def test_sweep_orphans_reports_how_much_of_the_table_it_could_not_read(monkeypatch):
+    """The sweep carries its blind spot back to the caller alongside what it reaped. Without this the
+    only two answers were "read the table" and "couldn't read the table", and a Windows scan that saw
+    a sliver of it was indistinguishable from a complete one (grid-leave issue 15/B)."""
+    from remote import orphan_sweep
+
+    marker = orphan_sweep._WIN_UNREADABLE_MARKER
+    rows = "\n".join(
+        [f"{pid} 4 {marker}" for pid in (100, 101, 102)]
+        + ["  777  1 /bin/grid __remote-engine n1 remote"]
+    )
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: rows)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: True)
+
+    result = orphan_sweep.sweep_orphans("n1")
+    assert result.reaped == (777,)   # the readable half still works exactly as before
+    assert result.unreadable == 3
+
+
+def test_sweep_result_is_only_partial_above_the_floor():
+    """Where "I saw the box" stops and "I saw what I was permitted to" begins.
+
+    `unreadable > 0` is the wrong line and the reason this needs a floor at all: pid 0, pid 4,
+    Registry, Memory Compression, Secure System and every protected process are opaque to an
+    administrator too, so qualifying on any hidden row would footnote every Windows leave and the
+    caveat would stop carrying information. The CI job pins that the floor is not too LOW against a
+    real table; this pins the predicate around it in both directions."""
+    from remote import orphan_sweep
+
+    floor = orphan_sweep._WIN_UNREADABLE_FLOOR
+    assert orphan_sweep.SweepResult((), (), (), unreadable=floor).partial is False
+    assert orphan_sweep.SweepResult((), (), (), unreadable=floor + 1).partial is True
+    # A POSIX scan counts nothing (`ps` prints every argv), so it can never report itself partial.
+    assert orphan_sweep.SweepResult((), (), ()).partial is False
+
+
 def test_win_process_output_treats_a_nonzero_exit_as_couldnt_scan(monkeypatch, capsys):
     """`$ErrorActionPreference='Stop'` + try/catch turns a WMI failure into exit 1; that must read as
     "couldn't check", never as a clean empty scan."""
     from remote import orphan_sweep
+    from shared import win_paths
 
     class _Proc:
         returncode = 1
         stdout = ""
         stderr = "Get-CimInstance : Access is denied.\nAt line:1 char:1"
 
-    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(win_paths, "system_directory", lambda: r"C:\Windows")
     monkeypatch.setattr(orphan_sweep.subprocess, "run", lambda *a, **k: _Proc())
     assert orphan_sweep._win_process_output() is None
     err = capsys.readouterr().err.lower()
@@ -5483,13 +5607,14 @@ def test_win_process_output_treats_empty_output_as_couldnt_scan(monkeypatch, cap
     unqualified "Left …" having verified nothing. A live Windows box always has at least our own
     powershell.exe with a readable command line, so zero rows is evidence of failure."""
     from remote import orphan_sweep
+    from shared import win_paths
 
     class _Proc:
         returncode = 0
         stdout = "﻿Execution policy banner\n"  # non-blank, but not one parseable process row
         stderr = ""
 
-    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(win_paths, "system_directory", lambda: r"C:\Windows")
     monkeypatch.setattr(orphan_sweep.subprocess, "run", lambda *a, **k: _Proc())
     assert orphan_sweep._win_process_output() is None
     assert "no processes" in capsys.readouterr().err.lower()
@@ -5499,11 +5624,12 @@ def test_win_process_output_degrades_when_powershell_is_missing(monkeypatch, cap
     """Same degradation contract as a missing `ps`: a note on stderr and `None`, never a traceback —
     the record-pid kills and the relay backstop have already run."""
     from remote import orphan_sweep
+    from shared import win_paths
 
     def boom(*a, **k):
         raise FileNotFoundError("powershell.exe")
 
-    monkeypatch.setattr(orphan_sweep, "_win_system_directory", lambda: r"C:\Windows")
+    monkeypatch.setattr(win_paths, "system_directory", lambda: r"C:\Windows")
     monkeypatch.setattr(orphan_sweep.sys, "platform", "win32")
     monkeypatch.setattr(orphan_sweep.subprocess, "run", boom)
     result = orphan_sweep.sweep_orphans("n1")
@@ -8717,6 +8843,37 @@ def test_remote_leave_reaps_a_live_child_while_signed_out(monkeypatch, tmp_path,
     assert "TTL" in captured.err
 
 
+def test_remote_leave_qualifies_even_when_the_backstop_could_not_land(monkeypatch, tmp_path, capsys):
+    """The full-leave report's third branch — no records **and** no deregister — is the one with the
+    least assurance behind it, and it used to compute its caveats and print them nowhere.
+
+    It matters most for a partial Windows scan, because that branch is the *only* place `partial` is
+    ever surfaced: a `foreign` match at least prints its own per-pid stderr note from the reap,
+    whichever branch follows. Reached here through the signed-out rescue path, which has no token to
+    send the backstop with — an operator whose box is half-invisible AND whose grid cannot be told is
+    exactly who must not be handed a clean line."""
+    from remote import orphan_sweep
+    from shared import state as shared_state
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    shared_state.set_mode("remote")
+    run_records_dir = tmp_path / "run" / "engines" / "n1"
+    run_records_dir.mkdir(parents=True)  # a record DIRECTORY with no record: the orphan fingerprint
+    _mock_relay(monkeypatch, lambda r: pytest.fail("signed out — there is no token to send"))
+    _disable_orphan_sweep(monkeypatch)
+    monkeypatch.setattr(
+        orphan_sweep, "sweep_orphans",
+        lambda network_id, **k: orphan_sweep.SweepResult(
+            (), (), (), unreadable=orphan_sweep._WIN_UNREADABLE_FLOOR + 1
+        ),
+    )
+
+    assert cli.main(["leave", "n1"]) == 0
+    out = capsys.readouterr().out
+    assert "No engines were tracked" in out and "didn't land" in out
+    assert "process table" in out.lower() and "elevated" in out.lower()
+
+
 def test_remote_leave_by_id_still_uses_the_stored_bundle(monkeypatch, tmp_path):
     """The rescue path must never win over a credential bundle. Naming the grid by its **id** — the
     form the rescue path takes — resolves to the stored bundle when there is one, so the backstop
@@ -8987,8 +9144,16 @@ def test_full_leave_survivor_message_names_a_process_group_as_a_group(monkeypatc
 
 
 def test_remote_leave_sweep_reports_foreign_process(monkeypatch, tmp_path, capsys):
-    """A matched process owned by another user is reported (stderr note) but never fails the leave —
-    it isn't ours to reap, so exit 0 and 'Left' stand."""
+    """A matched process owned by another user never *fails* the leave — it isn't ours to reap, and
+    killing another user's legitimate node would be wrong — so exit 0 stands. What no longer stands is
+    an **unqualified** success line (grid-leave issue 15/C, overturning issue 02's wording).
+
+    `foreign` does not mean "someone else's unrelated process". It means: a live process carrying
+    *this grid's* exact marker and network id, which we could not stop. The common real shape is a
+    `sudo grid join` followed by an unprivileged `grid leave` over a shared `GRID_HOME` — the same
+    node_id, so the backstop flips the node to consumer and the root-owned child's next heartbeat
+    re-registers it as a provider. Printing a clean "Left team." there tells the operator the box
+    serves nothing at the exact moment it is about to start serving again."""
     _seed_remote_identity(
         monkeypatch, tmp_path,
         [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
@@ -9001,12 +9166,53 @@ def test_remote_leave_sweep_reports_foreign_process(monkeypatch, tmp_path, capsy
     from remote import orphan_sweep
     monkeypatch.setattr(orphan_sweep, "sweep_orphans",
                         lambda network_id, **k: orphan_sweep.SweepResult((), (), (1234,)))
-    _capture_relay_puts(monkeypatch)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0                      # never fatal — it is not ours to kill
+    captured = capsys.readouterr()
+    assert "1234" in captured.err and "another user" in captured.err
+    assert "Left team" in captured.out
+    # ...but the success line carries the caveat, and names the elevation that would let a retry win.
+    assert "couldn't stop" in captured.out.lower() and "elevated" in captured.out.lower()
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # the backstop still ran, as it always does
+
+
+def test_remote_leave_qualifies_success_when_most_of_the_process_table_was_hidden(
+    monkeypatch, tmp_path, capsys
+):
+    """The Windows half of the same honesty gap (grid-leave issue 15/B). WMI hands an unelevated
+    caller a **null** command line for every process it cannot open, so a sweep can finish cleanly —
+    `scanned` True, nothing raised, no survivors — having actually seen a sliver of the box. There
+    was no way to tell that from a complete scan, so `grid leave` printed "Left team." over another
+    user's live serve child.
+
+    Exit stays 0 and the backstop still runs, so the model does drop. What changes is that the
+    success line stops claiming the box was verified, and points at the elevation that would verify
+    it. Distinct from the unreadable-table caveat: that scan produced nothing, this one produced an
+    answer about a fraction of the table."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+    monkeypatch.setattr(
+        orphan_sweep, "sweep_orphans",
+        lambda network_id, **k: orphan_sweep.SweepResult(
+            (), (), (), unreadable=orphan_sweep._WIN_UNREADABLE_FLOOR + 1
+        ),
+    )
+    puts = _capture_relay_puts(monkeypatch)
 
     assert cli.main(["leave"]) == 0
-    captured = capsys.readouterr()
-    assert "Left team" in captured.out
-    assert "1234" in captured.err and "another user" in captured.err
+    out = capsys.readouterr().out
+    assert "Left team" in out
+    assert "process table" in out.lower() and "elevated" in out.lower()
+    # NOT the unreadable-table wording: a partial scan is a different failure with a different remedy,
+    # and `tests/test_remote_leave_real_child.py` reads that string's absence as proof the sweep ran.
+    assert cli.remote_provider._SWEEP_UNSCANNED_NOTE not in out
+    assert puts == [("/nodes/node-jwt", "consumer", [])]
 
 
 def test_remote_leave_ps_failure_qualifies_success(monkeypatch, tmp_path, capsys):
@@ -9286,6 +9492,27 @@ def test_remote_leave_engine_last_tears_down(monkeypatch, tmp_path, capsys):
     assert cli.provider._read_records("n1") == {}  # last engine removed → whole identity torn down
     assert "last engine" in capsys.readouterr().out.lower()
     assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...and the backstop deregistered the node
+
+
+def test_remote_leave_engine_last_carries_the_same_sweep_caveats(monkeypatch, tmp_path, capsys):
+    """Dropping the last engine IS a full teardown, so it must not be honest on different terms from a
+    bare leave. This path words its own success line and used to re-derive its caveat from `scanned`
+    alone — so a `foreign` match, once it started qualifying a bare leave, would have silently kept
+    printing a clean line here. One shared `_sweep_caveats` over the same result is what stops the two
+    drifting; this is the test that would catch them drifting again."""
+    _seed_remote_identity(monkeypatch, tmp_path,
+                          [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+                          pid=0, access_token=_jwt({"node_id": "node-jwt"}))
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (), (1234,)))
+    _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave", "--engine", "http://h:11434/v1"]) == 0
+    out = capsys.readouterr().out
+    assert "last engine" in out.lower()
+    assert "couldn't stop" in out.lower() and "elevated" in out.lower()
 
 
 def test_remote_leave_engine_last_stale_pid_sweeps_and_backstops(monkeypatch, tmp_path):
@@ -16586,6 +16813,60 @@ def test_logout_stops_a_live_serve_child_before_clearing_credentials(monkeypatch
     assert "team" in capsys.readouterr().out                # the sign-out says what it stopped
 
 
+def test_logout_warns_about_a_serve_child_it_was_not_permitted_to_stop(monkeypatch, tmp_path, capsys):
+    """Sign-out inherits `grid leave`'s answer to a `foreign` match, because it inherits the teardown
+    (grid-leave issue 15/C). The shape that makes this real is a `sudo grid join` followed by an
+    unprivileged `grid logout` over a shared GRID_HOME: same node_id, so the backstop flips the node
+    to consumer and the root-owned child's next heartbeat re-registers it as a provider — and logout
+    has just deleted the only credentials that could address it again.
+
+    It must NOT block. Killing another user's legitimate node would be wrong, and a box where one
+    lives could then never sign out at all — the same reason `_warn_unscanned` is a warning rather
+    than a refusal. So: exit 0, credentials cleared, and the operator told which grid and how to
+    finish the job."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (), (1234,)))
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    assert not paths.credentials_file().exists()             # never a refusal
+    err = capsys.readouterr().err
+    assert "1234" in err and "another user" in err           # the per-pid note the teardown prints...
+    assert "team" in err and "grid leave n1" in err           # ...plus a remedy naming the grid
+
+
+def test_logout_json_is_unchanged_by_a_foreign_child(monkeypatch, tmp_path, capsys):
+    """The warning is a human-path caveat only. `--json` is a machine contract with exactly two keys,
+    and a consumer that gained a third would have to be taught it — for a condition it cannot act on
+    (the remedy is an elevated shell). Kept deliberately, not by omission."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+    from remote import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "sweep_orphans",
+                        lambda network_id, **k: orphan_sweep.SweepResult((), (), (1234,)))
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_out": True, "stopped": [{"grid": "team", "deregistered": True}],
+    }
+
+
 def _seed_unstoppable_child(monkeypatch, tmp_path, *, pid: int = 9999):
     """A signed-in grid whose serve child survives even SIGKILL, discoverable only in the process
     table (the record's pid is the join write-race's 0). Returns the captured relay PUTs."""
@@ -16822,6 +17103,45 @@ def test_logout_says_so_when_it_could_not_check_for_an_orphan(monkeypatch, tmp_p
     combined = captured.out + captured.err
     assert "process table" in combined                    # ...and it says what it could not check
     assert "grid leave" in combined                       # ...and the remedy that survives the wipe
+
+
+def test_logout_says_so_when_it_could_only_see_part_of_the_process_table(monkeypatch, tmp_path, capsys):
+    """The record-less half of grid-leave issue 15/B, and the one the caveat above cannot reach.
+
+    Sign-out decides which grids even need a teardown from a **detect-only** scan (`find_orphans`), and
+    a grid with no live record and no sweep hit is skipped entirely — correct when the scan saw the
+    box. On Windows it may not have: an unreadable process yields an inert sentinel carrying no marker,
+    so the single live child of a record-less grid is neither found NOR reported, `scanned` stays True,
+    and the sign-out walks past having established nothing while deleting the credentials.
+
+    Exactly the branch beside it, one degree subtler — "couldn't read the table" versus "read the part
+    of the table I was allowed to" — so it gets the same answer: never a refusal, always a named
+    remedy, and the backstop still sent while the token exists. The remedy differs, because what this
+    run lacked was elevation rather than a working `ps`."""
+    from remote import orphan_sweep
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}],
+                 active="team")
+    _seed_run_record(monkeypatch, tmp_path, "n1", keep_file=False)  # record-less orphan fingerprint
+    # A table that parses and matches nothing, most of which we were not permitted to read: the exact
+    # shape an unelevated WMI enumeration returns, and indistinguishable from a clean box before this.
+    hidden = "\n".join(
+        f"{pid} 4 {orphan_sweep._WIN_UNREADABLE_MARKER}"
+        for pid in range(100, 100 + orphan_sweep._WIN_UNREADABLE_FLOOR + 1)
+    )
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: hidden)
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+    captured = capsys.readouterr()
+    assert not paths.credentials_file().exists()          # never a refusal
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # ...the model dropped anyway...
+    combined = captured.out + captured.err
+    assert "process table" in combined and "elevated" in combined
+    assert "grid leave n1" in combined                    # ...and the remedy that survives the wipe
 
 
 def test_logout_cannot_deregister_an_unbundled_grid_it_could_not_check(monkeypatch, tmp_path, capsys):
@@ -17255,6 +17575,38 @@ def test_sync_says_so_when_it_cannot_check_a_dropped_grid(monkeypatch, tmp_path,
     assert "net-b" in err
     assert "process table" in err
     assert "grid leave net-b" in err
+
+
+def test_sync_says_so_when_it_could_only_see_part_of_the_process_table(monkeypatch, tmp_path, capsys):
+    """The same warning under the Windows version of "no evidence" (grid-leave issue 15/B). A read
+    that *worked* is not a read that saw the box: a process whose command line WMI hid yields a
+    sentinel row with no marker, so the one child of a dropped, record-less grid can never be matched
+    however healthy the enumeration looked.
+
+    The remedy differs from the unreadable-table branch and that is the point of branching: `ps` coming
+    back is something to wait for, whereas an unelevated account will get this identical result on
+    every retry, so the only useful instruction is to elevate."""
+    from remote import orphan_sweep
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _sync_seed([_sync_bundle("net-a"), _sync_bundle("net-b")])
+    run_records.write_record("net-b", "remote", {  # directory kept, record removed below
+        "engine_id": "remote", "grid_id": "net-b", "pid": 4242,
+        "signaling_url": "https://relay.example",
+    })
+    run_records.record_path("net-b", "remote").unlink()
+    hidden = "\n".join(
+        f"{pid} 4 {orphan_sweep._WIN_UNREADABLE_MARKER}"
+        for pid in range(100, 100 + orphan_sweep._WIN_UNREADABLE_FLOOR + 1)
+    )
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: hidden)
+    _sync_patch_fetch(monkeypatch, [_sync_bundle("net-a")])  # net-b dropped
+
+    assert _run_sync() == 0
+    err = capsys.readouterr().err
+    assert "net-b" in err and "grid leave net-b" in err
+    assert "hidden" in err and "elevated" in err
 
 
 def test_sync_says_nothing_when_a_dropped_grid_was_not_being_served(monkeypatch, tmp_path, capsys):

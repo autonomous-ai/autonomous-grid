@@ -26,11 +26,15 @@ class LiveScan(NamedTuple):
 
     ``scanned`` is separate from an empty ``by_grid`` for the reason it always is in this feature: a
     box with nothing running and a box whose process table we could not read look identical, and only
-    one of them may be reported as clean.
+    one of them may be reported as clean. ``partial`` is the same distinction one degree finer, and it
+    exists because a hidden process is *matchless* rather than merely unreported: on Windows an
+    unreadable command line yields a sentinel row carrying no marker, so a live child behind one can
+    never reach ``by_grid`` no matter how well the read itself went.
     """
 
     by_grid: dict[str, tuple[int, ...]]  # grid id -> pids of its live serve child(ren)
     scanned: bool                        # False ⇒ the process table couldn't be read
+    partial: bool = False                # True ⇒ read, but most command lines were hidden from us
 
 
 def _is_remote_child(record: dict[str, Any]) -> bool:
@@ -92,9 +96,9 @@ def live_identities(network_ids: Iterable[str]) -> LiveScan:
         else:
             unvouched.append(network_id)
     if not unvouched:
-        return LiveScan(by_grid, True)
-    found, scanned = orphan_sweep.find_orphans(unvouched)
-    return LiveScan({**by_grid, **found}, scanned)
+        return LiveScan(by_grid, True)  # every grid vouched for by a record: nothing was hidden from us
+    scan = orphan_sweep.find_orphans(unvouched)
+    return LiveScan({**by_grid, **scan.found}, scan.scanned, scan.partial)
 
 
 def warn_stranded(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> None:
@@ -132,13 +136,20 @@ def warn_stranded(previous: list[dict[str, Any]], current: list[dict[str, Any]])
     # was stranded" — a record-less orphan is visible nowhere else. Named per grid here, unlike the
     # sign-out's aggregate note, because a drop list is short and each entry is separately actionable.
     for network_id, net in dropped.items():
-        if scan.scanned or network_id in scan.by_grid:
+        if (scan.scanned and not scan.partial) or network_id in scan.by_grid:
             continue
         label = str(net.get("name") or network_id)
+        # A table read but mostly hidden gets its own clause: the remedy is elevation, not waiting for
+        # `ps` to come back, and telling the operator to retry an identical command would strand them.
+        blind = (
+            "most command lines were hidden from this account, so it couldn't be checked whether this "
+            "box is still serving it — an elevated shell can see them"
+            if scan.partial
+            else "the process table couldn't be read to check whether this box is still serving it"
+        )
         print(
-            f"Warning: {label} is no longer in your grid list, and the process table couldn't be read "
-            f"to check whether this box is still serving it. Run `grid leave {network_id}` to make sure "
-            "(it needs no sign-in).",
+            f"Warning: {label} is no longer in your grid list, and {blind}. "
+            f"Run `grid leave {network_id}` to make sure (it needs no sign-in).",
             file=sys.stderr,
         )
 
@@ -159,6 +170,11 @@ class SignoutOutcome(NamedTuple):
     sent: bool                   # the relay accepted the backstop deregister
     survivors: tuple[int, ...]   # live children we could not stop (negative ⇒ a process group)
     unchecked: bool              # neither the record nor the process table could verify anything
+    # Deliberately outside `ok`: both mean "this teardown was not permitted to finish", never "it
+    # failed". Folding either into `ok` would make a sign-out *refuse* over another user's node —
+    # which is not ours to kill, and would leave a box hosting one unable to sign out at all.
+    foreign: tuple[int, ...] = ()  # live children of that grid owned by another user
+    partial: bool = False          # only part of the process table was visible (Windows)
 
 
 class UncheckedGrid(NamedTuple):
@@ -166,7 +182,9 @@ class UncheckedGrid(NamedTuple):
 
     label: str
     network_id: str
-    deregistered: bool  # the backstop landed, so the grid stops listing this box regardless
+    deregistered: bool     # the backstop landed, so the grid stops listing this box regardless
+    partial: bool = False  # the table was read but mostly hidden, rather than unreadable outright —
+    #                        two different failures with two different remedies, so the warning branches
 
 
 class SignoutResult(NamedTuple):
@@ -227,7 +245,12 @@ def stop_serving(networks: list[dict[str, Any]], *, session: str) -> SignoutResu
                 # actually ran: a record-less orphan lives exclusively in the process table, so an
                 # unreadable table makes this branch "no evidence" rather than "no child". Skipping it
                 # silently is how a sign-out reports clean over a live provider — carry it back named.
-                if not scan.scanned:
+                #
+                # `partial` counts as "no evidence" for the same reason and by a sharper mechanism: a
+                # process we could not read has no argv to match, so it cannot reach `by_grid` at all
+                # (grid-leave issue 15/B). A read that worked is not the same as a read that saw the
+                # box, and only the second one licenses walking past a grid.
+                if not scan.scanned or scan.partial:
                     # ...and still deregister while the token exists. The sweep is a diagnostic; the
                     # backstop is the mechanism of record (which is why `grid leave` sends it
                     # unconditionally) and it needs no process table. Withholding it here would leave the
@@ -237,7 +260,7 @@ def stop_serving(networks: list[dict[str, Any]], *, session: str) -> SignoutResu
                     sent = bool(bundles.get(network_id)) and remote_provider._full_leave_backstop(
                         rec, records, session, network_id, label
                     )
-                    unscanned.append(UncheckedGrid(label, network_id, sent))
+                    unscanned.append(UncheckedGrid(label, network_id, sent, partial=scan.partial))
                 continue
             outcomes.append(
                 _teardown_one(rec, session, network_id, label, records, bundled=network_id in bundles)
@@ -270,4 +293,6 @@ def _teardown_one(
         sent=sent,
         survivors=tuple(reaped.survivors),
         unchecked=unchecked,
+        foreign=reaped.foreign,
+        partial=reaped.partial,
     )

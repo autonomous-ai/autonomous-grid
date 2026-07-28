@@ -5,19 +5,28 @@ The bug this closes: full leave kills by the run record's pid alone, so a stale/
 strands a live ``<cli> __remote-engine <network_id> …`` child that heartbeats as a provider forever.
 This enumerates the process table and terminates every child whose argv carries the exact
 ``__remote-engine <network_id>`` marker+token — the safety net beside the record-pid kills, and the
-only thing that reaps a record-less orphan (a bare ``grid leave``). Matching is by exact argv tokens,
-so grid B's child (different network id), unrelated commands (no marker), and the leave process
-itself (own pid, via ``exclude_pids``) are never touched; a match owned by another user surfaces as
-EPERM at terminate time and is reported, not fatal.
+only thing that reaps a record-less orphan (a bare ``grid leave``). Matching is by exact argv tokens
+*and their count* (the marker must be followed by exactly the two positionals ``cli/_main.py``
+parses), so grid B's child (different network id), unrelated commands (no marker), a bystander that
+merely mentions the marker (a ``pgrep``/``watch``/wrapper — one token after it), and the leave process
+itself (own pid, via ``exclude_pids``) are never touched.
+
+There is deliberately **no owner check** (ADR 0024): unelevated POSIX already declines for free — a
+match owned by another user raises EPERM at terminate time and lands in ``foreign``, reported and
+never signalled — while an *elevated* sweep is authoritative on purpose and kills every match for this
+grid regardless of owner. ``foreign`` is not benign, though: it means a live child of THIS grid we
+could not stop, so the caller qualifies its success line rather than exiting non-zero.
 
 Both platforms are covered (grid-leave follow-up F2 closed the Windows gap): POSIX reads ``ps``,
 Windows asks WMI through PowerShell, and both normalise to the same ``pid ppid command`` rows so ONE
-matcher serves both. Two Windows behaviours differ from POSIX and are deliberate: a process owned by
-another user is **invisible** rather than EPERM (WMI hands an unelevated caller a null command line,
-which the enumeration script skips), so such a child is never reaped *and never reported* — the relay
-backstop is what still drops the model; and `run_records.terminate_pid` has no grace loop there, so a
-Windows teardown is a single forced tree kill. See ``remote/CONTEXT.md`` ("What ``grid leave``
-guarantees") for the operator-facing contract.
+matcher serves both. Two Windows behaviours differ from POSIX and are deliberate. A process the caller
+cannot open has a **null command line** from WMI, so it cannot be matched — but it is emitted as an
+inert ``_WIN_UNREADABLE_MARKER`` row rather than dropped, so the size of that blind spot is *counted*
+and reported (``unreadable`` / ``partial``); dropping them is what let a scan of a fraction of the
+table report itself clean. And ``run_records.terminate_pid`` has no grace loop there, so a Windows
+teardown is a single forced tree kill, and a visible-but-unkillable cross-user match becomes a
+``survivor`` rather than ``foreign``. See ``remote/CONTEXT.md`` ("What ``grid leave`` guarantees") for
+the operator-facing contract.
 """
 from __future__ import annotations
 
@@ -29,7 +38,33 @@ import time
 from collections.abc import Iterable
 from typing import NamedTuple
 
-from shared import run_records
+from shared import run_records, win_paths
+
+
+# How many unreadable rows (see ``_WIN_UNREADABLE_MARKER``) a scan may contain and still be treated
+# as having seen the box. Windows-only in practice: ``ps`` prints every process's argv.
+#
+# It is a floor rather than zero because some processes are opaque to *everyone* — pid 0, pid 4,
+# Registry, Memory Compression, Secure System, and anything running as a protected process (Defender)
+# hand back a null command line to an administrator too. Qualifying on `> 0` would therefore footnote
+# every Windows leave ever run, and a caveat that is always printed is one nobody reads.
+#
+# The number is pinned empirically, not guessed twice: the ``test-windows`` CI job runs on a
+# `windows-latest` runner *as an administrator* — i.e. against exactly the "unreadable even to an
+# admin" baseline this floor has to clear — and asserts the real count stays under it, failing with
+# the measured value. What that proves is one-directional (the floor is not too LOW, so no false
+# qualification); that it is not too HIGH is covered by the hermetic boundary test instead.
+_WIN_UNREADABLE_FLOOR = 24
+
+
+def _is_partial_scan(unreadable: int) -> bool:
+    """Whether enough of the process table was hidden that a scan cannot vouch for the box.
+
+    One predicate, so the two result types below can never disagree about where "I saw the box" stops
+    and "I saw what I was permitted to" begins — and so the floor itself stays inside this module. No
+    caller should have to know the number, and none does.
+    """
+    return unreadable > _WIN_UNREADABLE_FLOOR
 
 
 class SweepResult(NamedTuple):
@@ -41,6 +76,18 @@ class SweepResult(NamedTuple):
     scanned: bool = True        # False ⇒ the process table couldn't be read. "Couldn't check" ≠
     #                             "checked, clean", so the caller must qualify its success line
     #                             rather than claim a teardown it never verified (silent-failure review).
+    unreadable: int = 0         # rows the enumerator was not allowed to read a command line for. A
+    #                             scan can succeed and still be partial, which `scanned` alone cannot
+    #                             say — see `partial` below. Always 0 on POSIX.
+
+    @property
+    def partial(self) -> bool:
+        """Whether this scan saw enough of the box to vouch for it — see ``_is_partial_scan``.
+
+        A *property* rather than a field so whole-tuple equality keeps working in the tests that use
+        it, and so it can never be constructed inconsistently with ``unreadable``.
+        """
+        return _is_partial_scan(self.unreadable)
 
 
 # ``ps`` wall-clock budget; a hung ``ps`` must not wedge ``grid leave`` (its record kills + backstop
@@ -71,6 +118,19 @@ _SETTLE_INTERVAL_SECONDS = 0.05
 # fails loud instead of hanging.
 _SWEEP_DEADLINE_SECONDS = 60
 
+# What the Windows enumerator writes in the command-line column for a process it was not allowed to
+# read. WMI hands an unelevated caller a **null** command line for any process it cannot open, and
+# those rows used to be dropped before they ever reached the matcher — so the sweep was structurally
+# blind to another user's (or an elevated) serve child while ``scanned`` stayed True and ``grid
+# leave`` printed an unqualified success (grid-leave issue 15/B).
+#
+# A sentinel row is inert to every consumer by construction: it holds no ``__remote-engine`` marker,
+# so ``_match_orphan_pids`` can never match it and nothing is ever signalled because of one. It is a
+# single token containing no ``_``, so it cannot even accidentally form the marker triple. What it
+# adds is a row the sweep can COUNT — the difference between "checked, clean" and "checked what I was
+# permitted to see".
+_WIN_UNREADABLE_MARKER = "<unreadable>"
+
 # The Windows process table as ``pid ppid <command line>`` rows — the shape ``ps -o pid=,ppid=,command=``
 # prints, so ``_match_orphan_pids`` serves both platforms unchanged.
 #
@@ -99,14 +159,21 @@ _SWEEP_DEADLINE_SECONDS = 60
 #     console/ANSI code page — PowerShell writes the OEM page while Python's text mode decodes the
 #     ANSI one.
 #   * The script is a CONSTANT: the network id is never interpolated into it (all matching happens in
-#     Python), so this helper's own row can never carry the marker it is hunting for.
+#     Python), so this helper's own row can never carry the marker it is hunting for. The sentinel
+#     literal below is written inline for the same reason, and `_count_unreadable`'s test asserts the
+#     two spellings have not drifted.
+#   * A null ``CommandLine`` becomes ``_WIN_UNREADABLE_MARKER``, never a dropped row. Filtering with
+#     ``Where-Object { $_.CommandLine }`` hid every process the caller could not open from the matcher
+#     *and* from the count, which is what let a scan of a fraction of the table report itself clean.
 _WIN_PROCESS_LIST_SCRIPT = (
     "$ErrorActionPreference = 'Stop'; "
     "try { "
     "Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CommandLine | "
-    "Where-Object { $_.CommandLine } | "
-    "ForEach-Object { [Console]::Out.WriteLine('{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, "
-    "(($_.CommandLine -replace '[^\\x20-\\x7E]', '?') -replace '\\s+', ' ')) }; "
+    "ForEach-Object { "
+    "$line = if ($_.CommandLine) { "
+    "(($_.CommandLine -replace '[^\\x20-\\x7E]', '?') -replace '\\s+', ' ') } "
+    "else { '<unreadable>' }; "
+    "[Console]::Out.WriteLine('{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $line) }; "
     "exit 0 } catch { exit 1 }"
 )
 
@@ -152,6 +219,22 @@ def _match_orphan_pids(
         if len(tokens) == marker + 3 and tokens[marker + 1] == network_id:
             matched.append(pid)
     return matched
+
+
+def _count_unreadable(table_output: str) -> int:
+    """How many rows the enumerator could not read a command line for — the size of this scan's blind
+    spot. Always ``0`` on POSIX, where ``ps`` prints every process's argv.
+
+    The command field must equal ``_WIN_UNREADABLE_MARKER`` **whole**. A substring test would let any
+    process whose real command line merely mentions the token inflate the count, and the count is the
+    only thing deciding whether ``grid leave`` qualifies its success line.
+    """
+    unreadable = 0
+    for line in table_output.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdecimal() and parts[2] == _WIN_UNREADABLE_MARKER:
+            unreadable += 1
+    return unreadable
 
 
 def _ppid_by_pid(output: str) -> dict[int, int]:
@@ -240,42 +323,16 @@ def _first_line(stderr: str | None) -> str:
     return f" ({line[0][:200]})" if line else ""
 
 
-def _win_system_directory() -> str:
-    """The real Windows directory, asked of the kernel rather than read from the environment.
-
-    ``%SystemRoot%`` is attacker-writable and survives UAC elevation, so anything derived from it can
-    select the binary we execute. Validating the string cannot save it: matching
-    ``[A-Za-z]:\\(Windows|WINNT)`` case-insensitively still admits ``W:\\Windows`` (``subst`` and
-    ``net use`` map a UNC share to a drive letter unprivileged), ``C:\\Window\u017f`` (``re.IGNORECASE``
-    on a ``str`` pattern Unicode-case-folds U+017F to ``s``, and a standard user can create folders at
-    the root of ``C:``), and ``C:\\Windows\\n`` (``$`` matches before a trailing newline; the control
-    character then makes the path unopenable, which silently switches the sweep off). All three were
-    measured. ``GetSystemWindowsDirectoryW`` reads none of that — it is the system directory the
-    kernel knows, which is also the documented way to locate system files on a Terminal Server.
-
-    A separate function so the composition above it stays unit-testable off Windows; the real call is
-    exercised by the ``test-windows`` CI job.
-    """
-    import ctypes
-
-    buffer = ctypes.create_unicode_buffer(260)
-    written = ctypes.windll.kernel32.GetSystemWindowsDirectoryW(buffer, len(buffer))
-    return buffer.value if written else r"C:\Windows"
-
-
 def _win_powershell_path() -> str:
     """Windows PowerShell 5.1 by absolute path — it ships in every supported Windows, unlike ``pwsh``.
 
-    Absolute, because ``CreateProcess`` resolves a bare name through a search order that includes the
+    Absolute because ``CreateProcess`` resolves a bare name through a search order that includes the
     **current directory**, and ``grid leave`` runs wherever the operator happens to be: a binary
-    planted there would be executed as us. Built by hand rather than through ``os.path.join`` so the
-    string is identical on every platform, which is what lets this branch be unit-tested on the Linux
-    CI. (``run_records.kill_group`` still invokes ``taskkill`` by name; widening that has every
-    Windows caller in its blast radius and is tracked separately.)
+    planted there would be executed as us. The kernel-backed directory it is built on lives in
+    ``shared.win_paths`` — shared with ``run_records.kill_group``'s ``taskkill``, which had the same
+    hazard, because ``shared/`` may not import ``remote/``.
     """
-    return "\\".join(
-        (_win_system_directory().rstrip("\\"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    )
+    return win_paths.system32_tool("WindowsPowerShell\\v1.0\\powershell.exe")
 
 
 def _win_process_output() -> str | None:
@@ -293,6 +350,12 @@ def _win_process_output() -> str | None:
     reports a non-terminating error on stderr and still exits 0 with nothing on stdout, so under the
     ``ps`` contract a stopped Winmgmt service would read as "checked, clean". The check is for a real
     row rather than merely non-blank text, so a stray banner or a BOM cannot satisfy it either.
+
+    All three answer one question — *did the enumeration run at all*. They say nothing about how much
+    of the table it was allowed to see, and no version of this guard could: since the sentinel change
+    every process yields a row, so a caller who can open almost nothing still gets a full-looking
+    table. That second question is answered by counting sentinels (``_count_unreadable`` /
+    ``SweepResult.partial``), not here.
     """
     encoded = base64.b64encode(_WIN_PROCESS_LIST_SCRIPT.encode("utf-16-le")).decode("ascii")
     try:
@@ -422,9 +485,30 @@ def _has_exited(pid: int) -> bool:
     return run_records.stopped_running(pid)
 
 
+class ScanResult(NamedTuple):
+    """The outcome of one detect-only ``find_orphans`` pass. A NamedTuple for the same reason
+    ``SweepResult`` is: ``scanned`` and ``partial`` are both booleans meaning nearly-opposite things
+    ("I read the table" / "I read only part of it"), and a transposed positional unpack would be
+    invisible to a type checker."""
+
+    found: dict[str, tuple[int, ...]]  # grid id -> live serve-child pids; ABSENT when there are none
+    scanned: bool = True               # False ⇒ the process table couldn't be read at all
+    unreadable: int = 0                # rows we were not permitted to read a command line for
+
+    @property
+    def partial(self) -> bool:
+        """Whether this scan saw enough of the box to vouch for it — see ``_is_partial_scan``.
+
+        Load-bearing here in a way it is not for a sweep: an unreadable process yields a sentinel row
+        carrying no marker, so a serve child hiding behind one can never appear in ``found``. Without
+        this flag, "no hit" from a mostly-hidden table is indistinguishable from "nothing is serving".
+        """
+        return _is_partial_scan(self.unreadable)
+
+
 def find_orphans(
     network_ids: Iterable[str], *, exclude_pids: set[int] | frozenset[int] = frozenset()
-) -> tuple[dict[str, tuple[int, ...]], bool]:
+) -> ScanResult:
     """Live serve children per network id, from ONE process-table read. Nothing is signalled.
 
     The detect-only half of the sweep, for a caller that must decide *which* grids to act on before
@@ -436,21 +520,24 @@ def find_orphans(
     ``_WIN_PROCESS_TIMEOUT_SECONDS``), so a per-grid loop would tax a sign-out in proportion to how
     many grids the box has ever joined. The matcher itself is pure and cheap.
 
-    Returns ``(found, scanned)``. A grid with no live child is **absent** from ``found`` rather than
-    mapped to an empty tuple, so a caller can write ``if nid in found``. ``scanned`` is False when the
-    table couldn't be read — the same "couldn't check ≠ checked, clean" contract as
-    ``SweepResult.scanned``, and the reason this returns a flag instead of an empty dict.
+    A grid with no live child is **absent** from ``found`` rather than mapped to an empty tuple, so a
+    caller can write ``if nid in found``. ``scanned`` is False when the table couldn't be read at all —
+    the same "couldn't check ≠ checked, clean" contract as ``SweepResult.scanned``, and the reason this
+    returns a flag instead of an empty dict. ``partial`` is the narrower version of the same warning
+    and matters *more* here than it does to a sweep: a sweep at least terminates what it can see,
+    whereas this answers "does this grid need tearing down at all", and a caller that reads a bare
+    empty ``found`` off a mostly-hidden table walks past the one grid that did.
     """
     output = _process_table_output()
     if output is None:
-        return {}, False  # couldn't read the table — couldn't check
+        return ScanResult({}, scanned=False)  # couldn't read the table — couldn't check
     excluded = frozenset(exclude_pids) | {os.getpid()}
     found: dict[str, tuple[int, ...]] = {}
     for network_id in network_ids:
         matched = _match_orphan_pids(output, network_id, exclude_pids=excluded)
         if matched:
             found[network_id] = tuple(matched)
-    return found, True
+    return ScanResult(found, unreadable=_count_unreadable(output))
 
 
 def sweep_orphans(
@@ -474,6 +561,7 @@ def sweep_orphans(
     excluded = frozenset(exclude_pids) | {os.getpid()}
     matched = _match_orphan_pids(output, network_id, exclude_pids=excluded)
     targets, descendants = _tree_roots(matched, _ppid_by_pid(output))
+    unreadable = _count_unreadable(output)
     reaped: list[int] = []
     survivors: list[int] = []
     foreign: list[int] = []
@@ -512,7 +600,7 @@ def sweep_orphans(
             survivors.extend(
                 pid for pid in targets[index:] + descendants if not run_records.stopped_running(pid)
             )
-            return SweepResult(tuple(reaped), tuple(survivors), tuple(foreign))
+            return SweepResult(tuple(reaped), tuple(survivors), tuple(foreign), unreadable=unreadable)
         terminate(pid)
     # Terminating a root was *supposed* to take its descendants with it. "Supposed to" is not
     # evidence, and on POSIX it is usually not even true: ``terminate_pid`` reaches ``killpg`` only
@@ -525,4 +613,4 @@ def sweep_orphans(
             break
         if not _has_exited(pid):
             terminate(pid)
-    return SweepResult(tuple(reaped), tuple(survivors), tuple(foreign))
+    return SweepResult(tuple(reaped), tuple(survivors), tuple(foreign), unreadable=unreadable)
