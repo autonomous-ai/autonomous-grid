@@ -582,7 +582,10 @@ def codex_capability_entry(
         "endpoints": codex_endpoints,
         "input_modalities": ["text", "image"] if features["vision"] else ["text"],
         "output_modalities": ["text"],
-        "context_window": int(entry.context_window),
+        # Probe-derived now (issue 10a): an unknown window (the `0` sentinel a caps-absent probe row
+        # carries) is OMITTED, never a fabricated number — the `capability_entry` conditional-key
+        # idiom, so the master/Advisor treats absence as "unknown" rather than trusting a guess.
+        **({"context_window": int(entry.context_window)} if entry.context_window else {}),
         **({"vendor_rank": vendor_rank} if vendor_rank is not None else {}),
         # A routing trait folded in beside the honest capabilities — NOT added to `codex_features`,
         # which also feeds `grid catalog --api codex --json` and must stay capability-only.

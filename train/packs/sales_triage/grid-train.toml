@@ -1,0 +1,31 @@
+# sales-triage pack — grid train run configuration.
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[rollout]
+base_url = "http://127.0.0.1:8000/v1"  # a vLLM engine on your grid
+api_key_env = "GRID_TRAIN_API_KEY"
+max_tokens = 60                         # PRIORITY + NEXT lines; anything longer is rambling
+temperature = 1.0
+timeout_seconds = 120
+
+[data]
+prompts_jsonl = "prompts.jsonl"         # from: python prepare_data.py --input <your export>
+
+[rewards]
+python_file = "rewards.py"              # verifiable label match + parseable-shape reward
+
+[trainer]
+group_size = 8
+steps = 120
+learning_rate = 1e-5
+per_device_batch = 4
+gradient_accumulation = 2
+lora_rank = 16
+lora_alpha = 32
+save_every_steps = 20
+
+[deploy]
+# nodes = ["http://127.0.0.1:8000/v1"]
+# adapter_name = "lead-triage-v1"

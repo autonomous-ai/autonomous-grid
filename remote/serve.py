@@ -305,6 +305,13 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # with no stored seat dies HERE naming the fix (still inside the try, so the record is
         # reaped like any died-before-registering engine), never as N per-job 401s.
         _prime_codex_seat(state, record)
+        # Restore the last persisted quota so /grid/overview shows it immediately on respawn — and so a
+        # hand-edited remote.json can inject a simulated snapshot for debugging. A response/seed refreshes it.
+        # Ahead of the register loop below (which may block for several backoffs): the restore reads the
+        # record this process already holds, so it must not wait on the relay to become reachable.
+        if record.get("codex_rate_limits"):
+            state.set_codex_quota(record["codex_rate_limits"])
+
         def _note_register_error(message: str | None) -> None:
             # Bounded and body-only: `RelayError` carries the response text, never the bearer.
             #
@@ -342,6 +349,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             _note_register_error(str(exc) or repr(exc))
             raise
         registered = True
+        _seed_codex_quota(state, record)  # best-effort: populate quota for /grid/overview before jobs
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
         print("Send SIGTERM (grid leave) to unregister.")
         # Make the engine reload-ready (install the SIGHUP handler + start the reload daemon) while SIGHUP
@@ -442,7 +450,7 @@ def _bring_up_engines(
             try:
                 caps = _probe_spec_caps(
                     llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
-                    plan_type=spec.get("plan_type"), deadline=deadline,
+                    model_caps=spec.get("model_caps"), deadline=deadline,
                 )
             except bringup.ProbeBudgetExceeded as exc:
                 # Startup's policy: keep whatever was probed and give the rest the same fail-closed
@@ -610,6 +618,49 @@ def _prime_codex_seat(state: _ServeState, record: dict[str, Any]) -> None:
         state.codex_seat.prime_from_store()
 
 
+def _seed_codex_quota(state: _ServeState, record: dict[str, Any]) -> None:
+    """Seed the seat's quota right after registration, so /grid/overview shows it BEFORE any consumer
+    traffic (the "one minimal request after join" idea). One tiny streamed request whose x-codex-*
+    headers carry the quota; the stream is closed the moment the headers are read, so it spends ~no
+    output. Best-effort: a non-codex record is a no-op, and any failure (offline, CF-403, dead seat)
+    is swallowed — a telemetry seed must never break serve start; the first real job seeds it anyway."""
+    import httpx
+
+    spec = next(
+        (s for s in record.get("engines") or [] if s.get("api_kind") == api_catalog.CODEX_KIND), None
+    )
+    if spec is None:
+        return
+    base_url = (spec.get("endpoint_url") or "").rstrip("/")
+    model = next(
+        (_api_upstream_name(api_catalog.CODEX_KIND, m) for m in spec.get("models") or []), None
+    )
+    if not base_url or not model:
+        return
+    try:
+        bundle = state.codex_seat.bundle()
+    except Exception:  # noqa: BLE001 — unsigned/unreadable seat: nothing to seed, not an error here
+        return
+    body = {
+        "model": model,
+        "instructions": "ping",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True,
+        "store": False,
+    }
+    try:
+        timeout = httpx.Timeout(connect=10, read=15, write=30, pool=10)
+        with httpx.Client(timeout=timeout) as client:
+            with client.stream(
+                "POST", f"{base_url}/responses", json=body, headers=_codex_headers(bundle),
+            ) as resp:
+                # Headers are here as soon as the response starts; harvest and let the `with` close the
+                # stream without draining the body — the seed stays ~free.
+                _capture_codex_quota(state, resp.headers)
+    except Exception as exc:  # noqa: BLE001 — seed is optional telemetry, never fatal to serve start
+        _warn(f"codex quota seed skipped ({exc})")
+
+
 def _api_kinds_by_url(record: dict[str, Any]) -> dict[str, str]:
     """{vendor base URL: service kind} for every API spec in the record — the endpoint-gating map.
 
@@ -720,19 +771,62 @@ def _adapt_output_token_param(body: dict[str, Any], api_kind: str | None, endpoi
     return adapted
 
 
-def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None = None) -> dict[str, Any]:
-    """An API engine's caps envelope from the static whitelist — API engines are never live-probed
-    or benchmarked (ADR 0012); the vendor sees no traffic until a real job forwards. A model missing
-    from the whitelist (catalog edited between join and respawn) degrades like a failed probe: an
-    all-False entry, never a crash.
+def _codex_entry_from_caps(advertised_model: str, caps: dict[str, Any]) -> api_catalog.ApiModelEntry:
+    """Rebuild the ``ApiModelEntry`` ``codex_capability_entry`` consumes from the caps the join
+    persisted in the run record (issue 10a). ``vendor_name`` is the real slug (unread on the codex
+    envelope path, but faithful rather than a placeholder); json/structured are always False — a
+    Responses passthrough can't claim chat-dialect features. ``context_window`` falls back to the
+    ``0`` unknown sentinel (→ omitted from the envelope) when absent/non-numeric, never fabricated."""
+    ctx = caps.get("context_window")
+    return api_catalog.ApiModelEntry(
+        vendor_name=advertised_model.partition(":")[2] or advertised_model,
+        context_window=ctx if isinstance(ctx, int) and not isinstance(ctx, bool) else 0,
+        supports_tools=bool(caps.get("tools")),
+        supports_vision=bool(caps.get("vision")),
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+    )
 
-    ``plan_type`` (codex only) is the seat's stored subscription tier — the row ``vendor_rank`` is
-    read from (issue 03). ``None`` degrades to the minimal row via ``codex_vendor_rank``; it is
-    ignored for every other kind."""
+
+def _codex_caps_entry(advertised_model: str, caps: dict[str, Any] | None) -> dict[str, Any]:
+    """One codex model's capability envelope, from the caps the join PERSISTED in the run record
+    (issue 10a). ``caps`` absent — a record written before the live-probe catalog, or a caps map that
+    dropped this model — degrades to the responses-only fail-closed entry (no capability claims), with
+    a warn: the same posture as a model gone from a static whitelist, so an absent entry is never a
+    silent no-caps advertisement. ``vendor_rank`` rides only when it is a real int."""
+    if not caps:
+        _warn(
+            f"{advertised_model!r} has no probe-derived caps in the run record "
+            "(it predates the live-probe catalog, or its caps were dropped) — advertising it "
+            "responses-only with no capability claims; re-run `grid join --api codex` to refresh"
+        )
+        return probe.codex_capability_entry(None)
+    rank = caps.get("vendor_rank")
+    return probe.codex_capability_entry(
+        _codex_entry_from_caps(advertised_model, caps),
+        vendor_rank=rank if isinstance(rank, int) and not isinstance(rank, bool) else None,
+    )
+
+
+def _static_api_caps(
+    api_kind: str, advertised: list[str], model_caps: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """An API engine's caps envelope. Most kinds take it from the static whitelist — API engines are
+    never live-probed or benchmarked (ADR 0012); the vendor sees no traffic until a real job forwards
+    — and a model missing from the whitelist (catalog edited between join and respawn) degrades like a
+    failed probe: an all-False entry, never a crash.
+
+    The codex kind is the exception (issue 10a): its served set + per-model caps come from the seat's
+    live probe, PERSISTED at join in ``model_caps`` (advertised name → context_window/vision/tools/
+    vendor_rank), because no static table exists to look them up from. A codex model advertised but
+    absent from ``model_caps`` — a record written before those caps existed, or a caps map that lost a
+    model — degrades to the responses-only fail-closed entry, with a warn. ``model_caps`` is ignored
+    for every other kind."""
     no_features = dict.fromkeys(
         ("vision", "tools", "parallel_tool_calls", "json_object", "json_schema"), False
     )
     caps_models: dict[str, Any] = {}
+    caps_by_model = model_caps or {}  # codex only: the per-model caps the join persisted in the record
     # Which relay endpoint(s) this kind serves comes from its catalog row (issue 03) — NOT a hardcoded
     # chat-only list. This is the wire contract grid-src's per-model `provider_supports` filter reads,
     # so a kind that serves `responses` (openai) must advertise it here or nothing routes. A kind gone
@@ -746,6 +840,16 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
     # False for free. Gated per-MODEL on `entry is not None` at the call below (a stale model fails closed).
     kind_can_cap = api_catalog.kind_honours_output_cap(api_kind)
     for advertised_model in advertised:
+        if api_kind == api_catalog.CODEX_KIND:
+            # Issue 10a: the codex served set + caps come from the seat's live probe, PERSISTED per
+            # model in the run record (`model_caps`) — there is no static table to look them up from,
+            # so this reads the record, not `find_advertised`. The honest responses-only envelope
+            # (endpoints ["responses"], no chat-dialect flags, no output cap) is built from those caps;
+            # a model absent from them fail-closes with a warn (the stale-catalog posture).
+            caps_models[advertised_model] = _codex_caps_entry(
+                advertised_model, caps_by_model.get(advertised_model)
+            )
+            continue
         entry = api_catalog.find_advertised(api_kind, advertised_model)
         if entry is None:
             # A local data-integrity condition, not a transient probe failure — leave a trace, or
@@ -754,23 +858,6 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
                 f"{advertised_model!r} is no longer in the {api_kind} whitelist "
                 "(catalog changed since join) — advertising it with no capabilities"
             )
-        if api_kind == api_catalog.CODEX_KIND:
-            # The honest responses-only entry (issue 05): endpoints ["responses"], no chat-dialect
-            # flags, no output cap — a codex envelope must never look like a chat model's. plus the
-            # join-time vendor_rank (issue 03): the model's position in the seat's tier row, or None
-            # when it isn't in that row (guard so the entry=None degrade never dereferences it).
-            rank = api_catalog.codex_vendor_rank(plan_type, entry.vendor_name) if entry else None
-            if entry is not None and rank is None:
-                # Resolves in the flat whitelist union but has no slot in THIS seat's tier row: the
-                # tier table was edited between join and respawn (drift), the same class as the
-                # entry-is-None warn above. Advertise it, just without a rank — but leave a trail, or
-                # an absent rank looks identical to "this seat simply doesn't rank this model".
-                _warn(
-                    f"{advertised_model!r} has no rank in this codex seat's tier row "
-                    "(catalog changed since join) — advertising it without a capability rank"
-                )
-            caps_models[advertised_model] = probe.codex_capability_entry(entry, vendor_rank=rank)
-            continue
         probed = api_catalog.probed_features(entry) if entry else no_features
         ctx = entry.context_window if entry else None
         # Media API engines (e.g. Doggi) advertise media endpoints — their jobs run through
@@ -796,7 +883,8 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
 
 def _probe_spec_caps(
     llm_url: str, advertised: list[str], upstream: list[str], ctx_size: Any,
-    api_kind: str | None = None, plan_type: str | None = None, deadline: float | None = None,
+    api_kind: str | None = None, model_caps: dict[str, dict[str, Any]] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Probe EVERY model a spec serves into one caps envelope — keyed by the advertised name, probed by
     the upstream name (Ollama/vLLM only know that). Shared by startup (`_bring_up_engines`) and the
@@ -805,10 +893,11 @@ def _probe_spec_caps(
     sequential probes at join/reload (one-time; N is small). A failed probe returns an all-False entry for
     that one model (`probe.capabilities` never raises), so one bad model can't sink the node; ``{}`` only
     when the spec serves no models. An API spec (``api_kind``) takes its caps from the static whitelist
-    instead — no probe ever targets the vendor — via the same seam so startup and reload can't drift.
+    instead — no probe ever targets the vendor — via the same seam so startup and reload can't drift;
+    the codex kind additionally passes ``model_caps`` (its live-probe caps persisted in the record).
     """
     if api_kind:
-        return _static_api_caps(api_kind, advertised, plan_type=plan_type)
+        return _static_api_caps(api_kind, advertised, model_caps=model_caps)
     if not advertised:
         return {}  # no models → nothing to advertise; skip the route probe's network round-trip (loop was a no-op)
     # `deadline` bounds this whole fan-out, not each call in it (ADR 0022) — the API branch above is
@@ -957,7 +1046,18 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
             label = "comfyui"
         else:
             label = "llama.cpp"
-    return {"name": record.get("meta_name") or engine_id, "engine": label}
+    meta = {"name": record.get("meta_name") or engine_id, "engine": label}
+    # The seat tier of an API engine (codex: free/plus/pro/…), surfaced on the grid page next to the
+    # engine kind. A public label, never a secret — distinct from the token/account_id we never emit.
+    # Union identities can gather several engines; take the first spec that carries one (only API
+    # engines like codex do — hardware specs never set plan_type), so a codex+hardware union still
+    # shows the codex tier. None (no such engine, or vendor said nothing) omits the key entirely.
+    plan_type = next(
+        (e.get("plan_type") for e in (record.get("engines") or []) if e.get("plan_type")), None
+    )
+    if plan_type:
+        meta["plan_type"] = plan_type
+    return meta
 
 
 def _pricing(record: dict[str, Any]) -> dict[str, float]:
@@ -1195,9 +1295,10 @@ class _ServeState:
         node_id: str,
         network_id: str,
         # Which run record this process owns. Remote keeps one identity per grid, so it is always
-        # `_REMOTE_IDENTITY` in production — but the record-writing bookkeeping below (the reload
-        # error, and issue 10's service truth) needs it by name, and only the entrypoint knows it.
-        engine_id: str = "remote",
+        # `run_records.REMOTE_IDENTITY` in production — but the record-writing bookkeeping below (the
+        # reload error, issue 10's service truth, and the codex quota snapshot) needs it by name, and
+        # only the entrypoint knows it.
+        engine_id: str = run_records.REMOTE_IDENTITY,
         llm_url: str,
         access_token: str,
         refresh_token: str | None,
@@ -1216,6 +1317,8 @@ class _ServeState:
         self.signaling_url = signaling_url
         self.node_id = node_id
         self.network_id = network_id
+        # The record this process writes onto (`network_id` is the record dir's grid_id): both the
+        # service-truth bookkeeping (issue 10) and the codex quota snapshot persist through it.
         self.engine_id = engine_id
         self.llm_url = llm_url.rstrip("/")
         # `bearer_by_url` and `api_kind_by_url` are resolved from the key store / record and live on the
@@ -1272,6 +1375,25 @@ class _ServeState:
         # rotation must not rebuild routing. Unconditional; primed only when the record has a
         # codex spec (startup + reload), unprimed otherwise and inert.
         self.codex_seat = _CodexSeatHolder(stop=self.stop)
+        # Latest codex seat rate-limit snapshot (parsed from a served response's x-codex-* headers, or
+        # the start-up seed), guarded by _lock. Rides the heartbeat load so /grid/overview shows it
+        # per-node. None until the first codex response/seed; a non-codex engine leaves it None.
+        self._codex_quota: dict[str, Any] | None = None
+
+    def set_codex_quota(self, quota: dict[str, Any]) -> None:
+        """Record the seat's latest rate-limit snapshot; the next heartbeat carries it to the relay.
+        Short section under _lock (no calls out), then persist OUTSIDE the lock."""
+        with self._lock:
+            self._codex_quota = quota
+        # Persist to the engine's run record (remote.json) so the snapshot survives a respawn and can
+        # be inspected — or hand-edited to simulate a tier/usage — for debugging. Best-effort and off
+        # the lock: a telemetry write must never fail a served job. `network_id` IS the record's
+        # grid_id, and `update_record` is a documented no-op once the record is gone — so a child
+        # whose record was already reaped needs no guard of its own here.
+        try:
+            run_records.update_record(self.network_id, self.engine_id, codex_rate_limits=quota)
+        except Exception as exc:  # noqa: BLE001 — persistence is optional, never fatal
+            _warn(f"could not persist codex quota to the run record ({exc})")
 
     @property
     def models(self) -> list[str]:
@@ -1386,6 +1508,7 @@ class _ServeState:
             # Bound to the SAME snapshot the health verdict is keyed against, inside one lock hold, so
             # a concurrent reload swap can't pair one union's routes with another's verdict.
             withheld = engine_health.unhealthy_models(self._snapshot.routes, self._sweep.health)
+            codex_quota = self._codex_quota
         # Emitted only when non-empty: absent is the wire's "nothing withheld", so a healthy box's
         # payload stays byte-identical to a pre-ADR-0019 build (ADR 0019, the polarity corollary).
         if withheld:
@@ -1397,6 +1520,10 @@ class _ServeState:
         load.update(gpu.load_snapshot())
         # OS/arch so the grid knows what a node runs: linux / macos-arm64 / macos-x86_64 / windows / other.
         load["platform"] = host.platform_kind()
+        # Codex seat quota (when this engine serves a seat) — surfaced per-node on /grid/overview. The
+        # value only changes on a served response / the join seed; the heartbeat just re-ships the last.
+        if codex_quota:
+            load["codex_rate_limits"] = codex_quota
         return load
 
     def enter_inference(self) -> None:
@@ -1598,7 +1725,7 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             # (`_probe_spec_caps` is the shared site, so startup and reload can't drift — ADR 0009 C2).
             caps = (
                 _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind,
-                                 plan_type=spec.get("plan_type"), deadline=deadline)
+                                 model_caps=spec.get("model_caps"), deadline=deadline)
                 if models else {}
             )
             reassembled.append((url, advertised, upstream, caps))
@@ -1968,6 +2095,90 @@ def _codex_headers(bundle: codex_oauth.CodexBundle) -> dict[str, str]:
     }
 
 
+def _codex_window(group: dict[str, str], face: str) -> dict[str, Any] | None:
+    """One rate-limit face (``primary``/``secondary``) parsed from a flat ``suffix -> value`` map of
+    a codex header group. Returns None when the face carries no numeric field (a free seat's
+    ``secondary`` is all-empty), so the shape never advertises a window the vendor didn't report."""
+    def _num(suffix: str) -> int | None:
+        try:
+            return int(group[f"{face}-{suffix}"])
+        except (KeyError, ValueError, TypeError):
+            return None
+    used = _num("used-percent")
+    win = _num("window-minutes")
+    reset_at = _num("reset-at")
+    reset_after = _num("reset-after-seconds")
+    if used is None and win is None and reset_at is None and reset_after is None:
+        return None
+    return {
+        "used_percent": used,
+        "remaining_percent": (100 - used) if used is not None else None,
+        "window_minutes": win,  # 43200=30d (free), 10080=7d (weekly, paid) — read it, never assume
+        "reset_at": reset_at,
+        "reset_after_seconds": reset_after,
+    }
+
+
+def _parse_codex_quota(headers: Any) -> dict[str, Any] | None:
+    """The seat's rate-limit snapshot, parsed from a vendor response's ``x-codex-*`` headers.
+
+    The subscription backend reports quota ONLY on response headers (never the body); the official
+    Codex client reads this same set. Free seats carry a single ``primary`` window + ``credits``;
+    paid tiers add per-model sub-limits under a dynamic prefix (``x-codex-bengalfox-*`` etc.), so we
+    group every non-main header by its leading name rather than cherry-picking a fixed list. Returns
+    None when no ``x-codex-*`` header is present, so a non-codex or header-less response never clobbers
+    a good snapshot. The raw headers ride along under ``headers`` so nothing is lost to the parse."""
+    raw = {k.lower(): v for k, v in headers.items() if k.lower().startswith("x-codex-")}
+    if not raw:
+        return None
+    fields = {k[len("x-codex-"):]: v for k, v in raw.items()}
+    _MAIN = ("primary-", "secondary-", "plan-type", "active-limit", "credits-")
+    main: dict[str, str] = {}
+    subs: dict[str, dict[str, str]] = {}
+    for key, val in fields.items():
+        if key.startswith(_MAIN):
+            main[key] = val
+        else:  # a named sub-limit, e.g. "bengalfox-primary-used-percent" -> name "bengalfox"
+            name, _, suffix = key.partition("-")
+            subs.setdefault(name, {})[suffix] = val
+
+    def _truthy(val: str | None) -> bool | None:
+        return None if val is None else str(val).strip().lower() in ("true", "1", "yes")
+
+    return {
+        "plan_type": main.get("plan-type"),
+        "active_limit": main.get("active-limit"),
+        "primary": _codex_window(main, "primary"),
+        "secondary": _codex_window(main, "secondary"),
+        "credits": {
+            "balance": main.get("credits-balance") or None,
+            "has_credits": _truthy(main.get("credits-has-credits")),
+            "unlimited": _truthy(main.get("credits-unlimited")),
+        },
+        "sublimits": {
+            name: {
+                "limit_name": grp.get("limit-name"),
+                "primary": _codex_window(grp, "primary"),
+                "secondary": _codex_window(grp, "secondary"),
+            }
+            for name, grp in subs.items()
+        },
+        "headers": raw,
+    }
+
+
+def _capture_codex_quota(state: "_ServeState", headers: Any) -> None:
+    """Stash the seat's quota snapshot from a response's headers onto the serve state, so the next
+    heartbeat carries it to the relay (surfaced per-node on /grid/overview). Best-effort: a telemetry
+    read must never fail a served job, and a header-less response leaves the last snapshot intact."""
+    try:
+        quota = _parse_codex_quota(headers)
+    except Exception:  # noqa: BLE001 — telemetry must not break the forward path
+        return
+    if quota:
+        state.set_codex_quota(quota)
+
+
 def _warn_codex_upstream(status: int, headers: Any) -> None:
     """The operator's serve-time taxonomy for a codex upstream failure (ADR 0015 D-f): the two
     403s demand OPPOSITE actions, so they must not share wording — Cloudflare-challenge means
@@ -2011,6 +2222,7 @@ class _UpstreamFailure:
 def _forward_responses_stream(
     state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float,
     target_url: str, headers: dict[str, str],
+    on_headers: Callable[[Any], None] | None = None,
 ) -> _UpstreamFailure | None:
     """Forward one responses job and stream the reply back as whole event blocks.
 
@@ -2042,6 +2254,10 @@ def _forward_responses_stream(
         with client.stream(
             "POST", f"{target_url}/{endpoint}", json=body, headers=headers,
         ) as resp:
+            # Quota/rate-limit headers ride EVERY response and arrive before the body — read them here
+            # (engine-agnostic hook; the codex path uses it to harvest x-codex-*), whatever the status.
+            if on_headers is not None:
+                on_headers(resp.headers)
             if resp.status_code == 200:
                 _submit_response(
                     state, txn, stream=True,
@@ -2096,6 +2312,9 @@ def _forward_codex(
         failure = _forward_responses_stream(
             state, txn, endpoint, body, read_timeout, target_url,
             headers=_codex_headers(bundle),
+            # Harvest the seat's quota off this response's x-codex-* headers, so the next heartbeat
+            # carries it to /grid/overview. Best-effort inside — never fails the served job.
+            on_headers=lambda h: _capture_codex_quota(state, h),
         )
         if failure is None:
             return  # submitted — the shared path already gave the job its terminal signal

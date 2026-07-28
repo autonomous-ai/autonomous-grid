@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 500" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1700" height="500" fill="#fff"/>
+  <rect x="100" y="119" width="175" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="188" y="161" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Your apps</text>
+  <text x="188" y="218" text-anchor="middle" fill="#2b2b29" font-size="24">OpenClaw · Hermes</text>
+  <text x="188" y="246" text-anchor="middle" fill="#2b2b29" font-size="24">your own code</text>
+  <rect x="1010" y="119" width="271" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1146" y="161" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">The orchestrator</text>
+  <path d="M287 134 L996 134" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="643" y="112" text-anchor="middle" fill="#2b2b29" font-size="24">one OpenAI-compatible endpoint</text>
+  <path d="M996 170 L287 170" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="643" y="210" text-anchor="middle" fill="#2b2b29" font-size="24">the answer</text>
+  <rect x="123" y="369" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="258" y="411" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>
+  <rect x="419" y="369" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="554" y="411" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac Studio</text>
+  <rect x="715" y="369" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="850" y="411" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
+  <rect x="1011" y="369" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1146" y="411" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
+  <rect x="1307" y="369" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1442" y="411" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 5090</text>
+  <path d="M1082 197 L1082 355" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1210 355 L1210 197" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1050" y="262" text-anchor="end" fill="#2b2b29" font-size="24">whichever computer</text>
+  <text x="1050" y="290" text-anchor="end" fill="#2b2b29" font-size="24">serves that model</text>
+</svg>

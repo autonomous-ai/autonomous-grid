@@ -26,6 +26,17 @@ from shared.system import arch
 HERMES_PACKAGE = "hermes-agent"
 HERMES_PYTHON = "3.13"
 
+# What we actually hand uv. The `acp` extra pulls `agent-client-protocol`, which Hermes's Agent
+# Client Protocol adapter imports — and ACP is the only channel the Grid app talks to the agent
+# through. Installed without it, `hermes` lands on the machine looking healthy while `hermes acp`
+# dies on startup ("ACP dependencies not installed"), so every chat turn fails on what reads to
+# the user as a successful install.
+HERMES_REQUIREMENT = f"{HERMES_PACKAGE}[acp]"
+
+# `hermes acp --check` verifies the adapter's imports and exits; it is a local import check, so a
+# machine that needs longer than this is wedged, not slow.
+ACP_CHECK_TIMEOUT_SECONDS = 30
+
 UV_RELEASE = "0.11.28"
 
 
@@ -124,6 +135,28 @@ def is_installed() -> bool:
     return hermes_bin().is_file()
 
 
+def acp_ready() -> bool:
+    """Whether the installed Hermes can actually serve ACP — the mode the Grid app drives it in.
+
+    A binary on disk is not the same thing as a working agent: an install made before we asked for
+    the `[acp]` extra leaves `hermes` runnable and `hermes acp` dead. Hermes answers that question
+    itself with `acp --check`, so we ask it rather than guessing from the venv's contents.
+    """
+    hermes = hermes_bin()
+    if not hermes.is_file():
+        return False
+    try:
+        result = subprocess.run(
+            [str(hermes), "acp", "--check"],
+            capture_output=True,
+            timeout=ACP_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def ensure_uv() -> Path:
     """The pinned `uv`, downloading it on first use. Idempotent."""
     target = uv_bin()
@@ -158,14 +191,16 @@ def install_hermes() -> Path:
         "UV_TOOL_DIR": str(paths.tools_dir()),
         "UV_PYTHON_INSTALL_DIR": str(paths.python_dir()),
     }
-    print(f"Installing {HERMES_PACKAGE} (this downloads a private Python; it can take a minute) ...")
+    print(
+        f"Installing {HERMES_REQUIREMENT} (this downloads a private Python; it can take a minute) ..."
+    )
     result = subprocess.run(
-        [str(uv), "tool", "install", "--force", "--python", HERMES_PYTHON, HERMES_PACKAGE],
+        [str(uv), "tool", "install", "--force", "--python", HERMES_PYTHON, HERMES_REQUIREMENT],
         env=env,
         check=False,
     )
     if result.returncode != 0:
-        raise SystemExit(f"uv could not install {HERMES_PACKAGE} (exit {result.returncode}).")
+        raise SystemExit(f"uv could not install {HERMES_REQUIREMENT} (exit {result.returncode}).")
 
     target = hermes_bin()
     if not target.is_file():

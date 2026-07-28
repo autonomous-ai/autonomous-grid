@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid"
-version = "0.3.3"
+version = "0.3.6"
 description = "Grid: one private OpenAI-compatible endpoint for the AI engines you already run."
 requires-python = ">=3.11"
 dependencies = [
@@ -22,6 +22,30 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # tests/test_train_adapters.py builds synthetic tensors — no torch, no mlx, no download — so it
+    # is cheap enough to always run, and it covers the peft <-> MLX key mapping and transpose a
+    # mixed fleet depends on being exact. Declared rather than skipped: a machine that happened to
+    # have numpy ran these, CI did not, and the whole gap hid in that difference.
+    "numpy>=1.26",
+    "safetensors>=0.4",
+]
+# The RL training plane (`grid train`) — the torch trainer wants a CUDA box; Apple Silicon runs
+# the same GRPO loop on MLX (`--backend mlx`). The rest of the CLI never needs
+# these. TRL is pinned to the 1.x line because the rollout_func hook it relies on is experimental
+# (ADR 0019); bump deliberately, with `grid train doctor` as the compatibility check.
+train = [
+    "trl>=1.9,<2",
+    "peft>=0.14",
+    "transformers>=4.56",
+    "datasets>=3.0",
+    "torch>=2.6",
+    "verifiers>=0.2",
+    # Apple Silicon only, by marker. `grid train serve` turns a Mac into a rollout node and
+    # `grid train sft --backend mlx` trains on one, and both import mlx_lm — but nothing declared
+    # it, so `pip install 'grid[train]'` (what `grid train doctor` tells you to run) produced an
+    # install where serve fails at import with "needs an Apple Silicon Mac". The marker keeps it
+    # off Linux and CUDA boxes, where it neither installs nor is wanted.
+    "mlx-lm>=0.28; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
@@ -29,11 +53,13 @@ grid = "cli:main"
 agrid = "cli:main"
 
 [tool.setuptools.packages.find]
-include = ["cli*", "shared*", "local*", "remote*", "doggi*"]
+include = ["cli*", "shared*", "local*", "remote*", "doggi*", "train*"]
 
 [tool.setuptools.package-data]
 "shared.engine" = ["*.txt"]
 "shared.media" = ["workflows/*.json"]
+# Task-pack templates ship whole: config, data-prep, rewards, sample data, PACK.md.
+"train.packs" = ["*/PACK.md", "*/*.toml", "*/*.jsonl", "*/*.py"]
 
 [tool.ruff]
 target-version = "py311"

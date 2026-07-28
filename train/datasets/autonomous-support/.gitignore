@@ -1,0 +1,7 @@
+# Everything here is generated. `make_tickets.py` is seeded, so the corpus
+# reproduces byte-identically and there is nothing to gain from committing it.
+#
+# This also matters for safety rather than tidiness: with *.jsonl ignored, a real
+# customer export dropped into this folder to try a run cannot be committed by
+# accident. Putting it in git would need a deliberate `git add -f`.
+*.jsonl

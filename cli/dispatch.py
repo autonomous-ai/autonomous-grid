@@ -20,13 +20,13 @@ from shared import state
 
 from . import remote_grid, remote_overview, remote_provider, remote_request
 
-
 # Commands that behave identically in both modes: local engine/model setup, plus the
 # mode/selection commands and the bare overview (which branch on the mode internally).
 # ``None`` is the bare `grid` invocation (no subcommand).
 AGNOSTIC = frozenset({
     None,
     "version",
+    "device-info",
     "catalog",
     "pull",
     "rm",
@@ -36,6 +36,9 @@ AGNOSTIC = frozenset({
     "agent",
     "mode",
     "use",
+    # `train` talks to whatever rollout endpoint its config names (a local proxy or a hosted
+    # relay URL work identically), so it is deliberately mode-blind like `engine`/`agent`.
+    "train",
 })
 
 # Mode-gated commands: real local behaviour today; a clear stub in remote mode until later slices

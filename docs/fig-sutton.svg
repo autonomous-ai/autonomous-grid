@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 790 340" shape-rendering="geometricPrecision"
+     font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="t" markerWidth="16" markerHeight="16" refX="9" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#000"/>
+    </marker>
+    <marker id="n" markerWidth="13" markerHeight="13" refX="8" refY="4.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0 0 L9 4.5 L0 9 Z" fill="#000"/>
+    </marker>
+  </defs>
+  <style>
+    .box  { fill:#fff; stroke:#000; stroke-width:3 }
+    .thick{ fill:none; stroke:#000; stroke-width:5 }
+    .thin { fill:none; stroke:#000; stroke-width:2 }
+    .nm   { font-size:30px; fill:#000 }
+    .wd   { font-size:21px; fill:#000 }
+    .mt   { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:23px; fill:#000 }
+    .ms   { font-family:Georgia,'Times New Roman',serif; font-style:italic; font-size:18px; fill:#000 }
+  </style>
+  <rect width="790" height="340" fill="#fff"/>
+
+  <rect x="330" y="20" width="170" height="66" rx="14" class="box"/>
+  <text x="415" y="63" text-anchor="middle" class="nm">Agent</text>
+
+  <rect x="360" y="222" width="250" height="66" rx="14" class="box"/>
+  <text x="485" y="265" text-anchor="middle" class="nm">Environment</text>
+
+  <!-- action: out of the agent, round the right, back into the environment -->
+  <path d="M500 53 H712 V255 H632" class="thick" marker-end="url(#t)"/>
+  <text x="722" y="146" class="wd">action</text>
+  <text x="726" y="180" class="mt">A</text><text x="742" y="187" class="ms">t</text>
+
+  <!-- the time-step boundary: what comes back arrives one step later -->
+  <path d="M250 192 V312" stroke="#000" stroke-width="2" stroke-dasharray="6 6"/>
+  <path d="M360 210 H262" class="thin" marker-end="url(#n)"/>
+  <text x="268" y="202" class="mt">R</text><text x="286" y="209" class="ms">t+1</text>
+  <path d="M360 252 H262" class="thin" marker-end="url(#n)"/>
+  <text x="268" y="244" class="mt">S</text><text x="284" y="251" class="ms">t+1</text>
+
+  <!-- state: the outer path back up into the agent -->
+  <path d="M250 312 H50 V40 H318" class="thick" marker-end="url(#t)"/>
+  <text x="62" y="150" class="wd">state</text>
+  <text x="64" y="186" class="mt">S</text><text x="80" y="193" class="ms">t</text>
+
+  <!-- reward: the inner path, thin, the way the book draws it -->
+  <path d="M250 252 H140 V70 H318" class="thin" marker-end="url(#n)"/>
+  <text x="152" y="150" class="wd">reward</text>
+  <text x="154" y="186" class="mt">R</text><text x="172" y="193" class="ms">t</text>
+</svg>

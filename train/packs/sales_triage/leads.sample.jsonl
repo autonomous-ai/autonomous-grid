@@ -1,0 +1,12 @@
+{"lead": "Hi, we're a 40-person architecture firm redoing our studio. Looking at 30+ SmartDesk Pros and chairs. Need a quote this week — budget approved.", "context": "web form, company domain, replied to follow-up in 2h", "outcome": "closed-won"}
+{"lead": "Do you ship the WorkPod to Canada? What's the electrical requirement?", "context": "email, personal address", "outcome": "qualified"}
+{"lead": "CONGRATULATIONS! Your website has been selected for our SEO partnership program...", "context": "web form", "outcome": "spam"}
+{"lead": "I'm comparing standing desks for my home office, probably buying next quarter. What's the difference between SmartDesk 5 and Pro?", "context": "chat widget", "outcome": "no-response"}
+{"lead": "We piloted 5 ErgoChairs last year. Facilities wants 60 more across two floors plus the posture dashboard for our wellness program. Who do I talk to about NET-60 and a rollout schedule?", "context": "email from facilities director, existing customer", "outcome": "demo-booked"}
+{"lead": "Your desk broke and support hasn't answered in 3 days. This is a complaint, not a sales inquiry.", "context": "sales form (misrouted)", "outcome": "disqualified"}
+{"lead": "Hotel chain here — evaluating WorkPods as garden meeting rooms for 12 properties. We'd need custom branding. What's your commercial program?", "context": "linkedin outreach reply, enterprise domain", "outcome": "meeting-held"}
+{"lead": "Price for one ErgoChair Ultra in gray?", "context": "chat widget", "outcome": "no-response"}
+{"lead": "We're a 200-seat call center, worn out chairs, RFP closing Friday. Can you bid? Attached spec sheet.", "context": "email with attachment, procurement", "outcome": "closed-lost"}
+{"lead": "My company gives a $500 wellness stipend. Can I use it on a SmartDesk? Do you invoice individuals?", "context": "email", "outcome": "qualified"}
+{"lead": "Buy cheap followers for your instagram page, best prices...", "context": "web form", "outcome": "spam"}
+{"lead": "I run a 6-person startup, we just raised. Want to order 6 desk+chair bundles today if you can deliver in Austin by end of month.", "context": "chat widget, business email", "outcome": "closed-won"}

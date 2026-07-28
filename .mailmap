@@ -1,0 +1,13 @@
+# Canonical identities.
+#
+# git log, shortlog, blame and `git log --author` all read this file, so an old
+# handle displays as the current one everywhere without rewriting history. The
+# alternative — rebasing to change author fields — would give 284 of main's 299
+# commits new SHAs, orphan 29 remote branches and break every existing clone,
+# to fix something that is presentation.
+#
+# Format: Canonical Name <canonical@email>  Old Name <old@email>
+
+Dee <dee@autonomous.ai>  brody <brody@autonomous.ai>
+Dee <dee@autonomous.ai>  Dee <brody@autonomous.ai>
+Dee <dee@autonomous.ai>  dee <dee@autonomous.ai>

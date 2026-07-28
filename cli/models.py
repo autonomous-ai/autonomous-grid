@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # runtime imports stay lazy inside the handlers
+    from remote.codex_oauth import CodexBundle
+    from remote.codex_probe import CodexModel
     from shared.models import api_catalog
 
 
@@ -113,65 +117,237 @@ def _catalog_api(args: argparse.Namespace) -> int:
     return 0
 
 
-def _catalog_codex(kind: str, whitelist: api_catalog.ApiWhitelist, as_json: bool) -> int:
-    """The codex catalog: the per-tier table, offline (ADR 0012 D-a — no credential, no network).
+@dataclass(frozen=True)
+class _CodexPlanBlock:
+    """The signed-in seat's current-plan slice for `grid catalog --api codex` (issue 10b), with the
+    provenance needed to render + mark it. Invariant, guaranteed by construction in
+    ``_codex_current_plan``: a fresh probe → ``live=True, fetched_at=None, warning=None``; a cache
+    fallback → ``live=False`` with ``fetched_at`` and ``warning`` set; no data at all (offline+no
+    cache, rejected+no cache, or no seat) → ``models=None`` + ``warning``. ``models=()`` (NOT ``None``)
+    is a real, empty seat. Folding these five into one type keeps the two renderers at three params and
+    makes the invariant type-checkable rather than doc-only."""
 
-    Only verified tiers are printed; every other tier — unknown, unrecognized, or simply not yet
-    verified — advertises the minimal set at join time (ADR 0015 D-f), and the fallback rule is
-    stated rather than left for the operator to discover at join.
+    plan_type: str | None
+    models: tuple[CodexModel, ...] | None
+    live: bool
+    fetched_at: float | None
+    warning: str | None
+
+
+def _catalog_codex(kind: str, whitelist: api_catalog.ApiWhitelist, as_json: bool) -> int:
+    """The seat-aware codex catalog (issue 10b): the current plan's REAL entitlement from a free
+    `GET /models` when signed in + online (cached for offline), plus the illustrative cross-plan
+    reference of what every plan can serve. No `--live` flag — one automatic path. It NEVER dies on a
+    probe failure: offline / a rejected seat / no seat all fall back to the cache then the static
+    reference, always with a warning (issue 10b Q2). This is the documented departure from ADR 0012
+    D-a's "no network" posture for the codex kind — one free GET, spending nothing.
     """
+    from remote import api_keys
+
+    bundle = api_keys.load_codex_bundle()
+    block = _codex_current_plan(bundle, whitelist)
+    if as_json:
+        return _catalog_codex_json(kind, whitelist, block)
+    return _catalog_codex_human(kind, whitelist, block)
+
+
+def _codex_current_plan(
+    bundle: CodexBundle | None, whitelist: api_catalog.ApiWhitelist
+) -> _CodexPlanBlock:
+    """Resolve the current-plan block, NEVER raising (issue 10b Q2). A fresh probe also (re)writes the
+    cache, scoped to this seat's account fingerprint; on any probe failure it falls back to that
+    seat's cache (if present) then to the static reference, each with a warning.
+    """
+    from remote import codex_models_cache, codex_probe
     from shared.models import api_catalog
 
-    if as_json:
-        # Explicit keys — the stable machine-readable contract (ADR 0012). Per-tier kinds speak
-        # `tiers`, not the flat `models`; no chat-dialect keys (a Responses passthrough cannot
-        # honestly claim them either way); `supports_parallel_tool_calls` comes from the same
-        # `codex_features` derivation the capability envelope uses, so the two cannot disagree.
-        print(json.dumps({
-            "kind": kind,
-            "last_verified": whitelist.last_verified,
-            "endpoints": list(whitelist.endpoints),
-            "minimal_tier": api_catalog.CODEX_MINIMAL_TIER,
-            "tiers": {
-                tier: [
-                    {
-                        "advertised": api_catalog.advertised_name(kind, entry),
-                        "vendor_name": entry.vendor_name,
-                        "context_window": entry.context_window,
-                        "supports_tools": entry.supports_tools,
-                        "supports_vision": entry.supports_vision,
-                        "supports_parallel_tool_calls": api_catalog.codex_features(entry)["parallel_tool_calls"],
-                        "notes": entry.notes,
-                    }
-                    for entry in entries
-                ]
-                for tier, entries in api_catalog.CODEX_TIER_MODELS.items()
-            },
-        }, indent=2))
-        return 0
+    plan_type = bundle.plan_type if bundle is not None else None
+    if bundle is None:
+        return _CodexPlanBlock(
+            plan_type=None, models=None, live=False, fetched_at=None,
+            warning=(
+                "Not signed in to a codex seat — showing illustrative data. Run "
+                "`grid join --api codex` to sign in and confirm your real entitlement."
+            ),
+        )
+
+    client_version = api_catalog.CODEX_CLIENT_VERSION
+    try:
+        live = codex_probe.probe_seat(
+            bundle, base_url=whitelist.base_url, client_version=client_version,
+        )
+    except codex_probe.SeatRejected as rejected:
+        warning = (
+            f"Your codex seat was rejected (HTTP {rejected.status_code}) — re-run "
+            "`grid join --api codex` to sign in again. Showing your last cached set + the "
+            "illustrative reference."
+        )
+    except SystemExit:
+        # `probe_seat` raises SystemExit for offline / 429 / 5xx / contract-drift — its documented
+        # terminal-error TAXONOMY (every `raise SystemExit` in remote/codex_probe.py is one of those
+        # classes). The catalog is read-only and MUST render something (Q2), so we catch that taxonomy,
+        # DISCARD the join-oriented message, and fall back with a generic warning — ALWAYS a visible
+        # warning, never a silent swallow. NOTE: this catch is by-TYPE; if a future change adds a
+        # `raise SystemExit` to probe_seat's call graph for an UNRELATED reason (e.g. a bug-guard), it
+        # would be mislabeled "couldn't reach your seat" — re-check this catch against that taxonomy.
+        warning = (
+            "Couldn't reach your codex seat — showing cached/illustrative data; sign in online to "
+            "confirm your entitlement."
+        )
+    else:
+        codex_models_cache.write_cache(
+            live, client_version=client_version, account_id=bundle.account_id,
+        )
+        return _CodexPlanBlock(plan_type=plan_type, models=live, live=True, fetched_at=None, warning=None)
+
+    cached = codex_models_cache.read_cache(
+        client_version=client_version, account_id=bundle.account_id,
+    )
+    if cached is not None:
+        return _CodexPlanBlock(
+            plan_type=plan_type, models=cached.models, live=False,
+            fetched_at=cached.fetched_at, warning=warning,
+        )
+    return _CodexPlanBlock(
+        plan_type=plan_type, models=None, live=False, fetched_at=None, warning=warning,
+    )
+
+
+def _entry_from_codex_model(model: CodexModel) -> api_catalog.ApiModelEntry:
+    """Adapt a probe/cache ``CodexModel`` to an ``ApiModelEntry`` so live/cached rows reuse
+    ``format_api_entry``. Lives here, not in shared/, which must not import remote/'s ``CodexModel``.
+    Codex is a Responses passthrough, so json/structured are always False (the envelope omits them
+    elsewhere); an unknown ``context_window`` (0) renders `—`."""
+    from shared.models import api_catalog
+
+    return api_catalog.ApiModelEntry(
+        vendor_name=model.slug,
+        context_window=model.context_window,
+        supports_tools=model.supports_tools,
+        supports_vision=model.supports_vision,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+    )
+
+
+def _codex_plan_heading(plan_type: str | None, suffix: str) -> str:
+    label = f" ({plan_type})" if plan_type else ""
+    return f"Your current plan{label} — {suffix}:"
+
+
+def _catalog_codex_human(
+    kind: str, whitelist: api_catalog.ApiWhitelist, block: _CodexPlanBlock
+) -> int:
+    import time
+
+    from shared.models import api_catalog
+
+    if block.warning:
+        # Warnings go to STDERR so `grid catalog --api codex 2>/dev/null` yields a clean listing (every
+        # sibling warning in this feature — write_cache's note, the probe recovery notice — is already
+        # stderr). `--json` carries the warning as a field, so it is unaffected by this split.
+        print(f"⚠ {block.warning}\n", file=sys.stderr)
+
+    if block.models is not None:
+        if block.live:
+            print(_codex_plan_heading(block.plan_type, "live, from your seat"))
+        else:
+            when = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(block.fetched_at))
+                if block.fetched_at else ""
+            )
+            print(_codex_plan_heading(block.plan_type, f"cached {when}".rstrip()))
+        if block.models:
+            for model in block.models:
+                print(api_catalog.format_api_entry(
+                    kind, _entry_from_codex_model(model), whitelist.endpoints,
+                ))
+        else:
+            print("  (your seat currently serves no models)")
+        print()
 
     print(
-        f"Models a `grid join --api {kind}` would serve, by subscription tier "
-        f"(verified {whitelist.last_verified}):"
+        f"All codex plans (illustrative — pricing docs {api_catalog.CODEX_REFERENCE_LAST_VERIFIED}, "
+        f"{api_catalog.CODEX_PRICING_DOCS_URL} — verify against a paid seat):"
     )
-    for tier, entries in api_catalog.CODEX_TIER_MODELS.items():
-        print()
-        print(f"{tier}:")
-        for entry in entries:
-            print(api_catalog.format_api_entry(kind, entry, whitelist.endpoints))
+    _print_codex_reference(kind, whitelist)
     print()
     print(
-        "Tiers not listed are unverified in this release — a seat on one advertises the "
-        f"`{api_catalog.CODEX_MINIMAL_TIER}` set, as does a seat whose tier its token doesn't say."
+        f"{kind} models serve the vendor's `responses` endpoint — point an external Codex app at "
+        "your grid; `grid chat` cannot call them."
     )
     print(
-        f"No sign-in needed to view. {kind} models serve the vendor's `responses` endpoint — "
-        "point an external Codex app at your grid; `grid chat` cannot call them."
+        f"Requests to {kind}:* models leave the grid for the vendor and spend the seat's own monthly "
+        "allowance."
     )
-    print(
-        f"Requests to {kind}:* models leave the grid for the vendor and spend the seat's own "
-        "monthly allowance."
-    )
+    return 0
+
+
+def _print_codex_reference(kind: str, whitelist: api_catalog.ApiWhitelist) -> None:
+    """The cross-plan reference in delta style: the free set under `free / go`, then each higher plan's
+    ADDITIONS over the previous one, then the note that Business/Enterprise/Edu match Plus."""
+    from shared.models import api_catalog
+
+    shown: set[str] = set()
+    for plan, entries in api_catalog.CODEX_TIER_MODELS.items():
+        additions = [entry for entry in entries if entry.vendor_name not in shown]
+        suffix = "" if not shown else " (added over the previous plan)"
+        print(f"\n{plan}:{suffix}")
+        for entry in additions:
+            print(api_catalog.format_api_entry(kind, entry, whitelist.endpoints))
+        shown.update(entry.vendor_name for entry in entries)
+    print("\nBusiness / Enterprise / Edu serve the same set as Plus.")
+
+
+def _codex_json_row(kind: str, entry: api_catalog.ApiModelEntry, live: bool) -> dict[str, object]:
+    """One `--json` row. `context_window` is null when unknown (the `0` sentinel) — uniformly, for
+    both the live `current_plan` rows and the illustrative `tiers` rows — never a fabricated 0.
+
+    Deliberately leaner than the pre-10b codex row: `supports_parallel_tool_calls` is dropped (it was
+    fully derived — always == supports_tools for codex, remote/probe.codex_features) and so is `notes`
+    (illustrative-caveat prose now carried by the row's `live` flag + the envelope's source_url /
+    last_verified). Don't reintroduce them: the caps ENVELOPE hand-duplicated with grid-src is a
+    separate surface and stays unchanged."""
+    from shared.models import api_catalog
+
+    return {
+        "advertised": api_catalog.advertised_name(kind, entry),
+        "vendor_name": entry.vendor_name,
+        "context_window": entry.context_window if entry.context_window > 0 else None,
+        "supports_tools": entry.supports_tools,
+        "supports_vision": entry.supports_vision,
+        "live": live,
+    }
+
+
+def _catalog_codex_json(
+    kind: str, whitelist: api_catalog.ApiWhitelist, block: _CodexPlanBlock
+) -> int:
+    from shared.models import api_catalog
+
+    current_plan = None
+    if block.models is not None:
+        current_plan = {
+            "plan_type": block.plan_type,
+            "live": block.live,
+            "fetched_at": block.fetched_at,
+            "models": [
+                _codex_json_row(kind, _entry_from_codex_model(m), block.live) for m in block.models
+            ],
+        }
+    tiers = {
+        plan: [_codex_json_row(kind, entry, False) for entry in entries]
+        for plan, entries in api_catalog.CODEX_TIER_MODELS.items()
+    }
+    print(json.dumps({
+        "kind": kind,
+        "source_url": api_catalog.CODEX_PRICING_DOCS_URL,
+        "last_verified": api_catalog.CODEX_REFERENCE_LAST_VERIFIED,
+        "endpoints": list(whitelist.endpoints),
+        "warning": block.warning,
+        "current_plan": current_plan,
+        "tiers": tiers,
+    }, indent=2))
     return 0
 
 

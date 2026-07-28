@@ -9,6 +9,7 @@ import argparse
 
 from local import runtime
 from shared._version import __version__
+
 from ._constants import (
     VALID_I2V_ASPECT_RATIOS,
     VALID_I2V_DURATIONS,
@@ -16,9 +17,7 @@ from ._constants import (
 )
 from .agent import cmd_agent_install, cmd_agent_status
 from .auth import cmd_login, cmd_logout, cmd_sync
-from .remote_grid import cmd_remote_members
-from .remote_price import cmd_remote_price
-from .remote_router import AdvisorsAction, MAX_ADVISORS, cmd_remote_router, parse_advisor_token
+from .device import cmd_device_info
 from .engine import (
     cmd_engine_install,
     cmd_engine_list,
@@ -38,6 +37,14 @@ from .grid import (
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
+from .remote_grid import cmd_remote_members
+from .remote_price import cmd_remote_price
+from .remote_router import (
+    MAX_ADVISORS,
+    AdvisorsAction,
+    cmd_remote_router,
+    parse_advisor_token,
+)
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 
@@ -71,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_price(sub)
     _add_router(sub)
     _add_engine_setup(sub)
+    _add_train(sub)
 
     return parser
 
@@ -234,6 +242,13 @@ def _add_engines(sub) -> None:
 
 
 def _add_models(sub) -> None:
+    device_info = sub.add_parser(
+        "device-info",
+        help="This machine's hardware profile (CPU, memory, disk, GPU)",
+    )
+    device_info.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    device_info.set_defaults(handler=cmd_device_info)
+
     catalog = sub.add_parser("catalog", help="Models Grid can pull")
     catalog.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     catalog.add_argument(
@@ -590,3 +605,211 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Remote only: let your own engine serve this request.",
     )
+def _add_train(sub) -> None:
+    from .train import (
+        cmd_train_autopilot,
+        cmd_train_collect,
+        cmd_train_convert,
+        cmd_train_deploy,
+        cmd_train_doctor,
+        cmd_train_eval,
+        cmd_train_init,
+        cmd_train_nightly,
+        cmd_train_outcomes,
+        cmd_train_packs,
+        cmd_train_pull,
+        cmd_train_run,
+        cmd_train_schedule,
+        cmd_train_serve,
+        cmd_train_sft,
+        cmd_train_ui,
+        cmd_train_web,
+        cmd_train_where,
+    )
+
+    train = sub.add_parser("train", help="RL fine-tuning served by your grid (ADR 0019)")
+    train_sub = train.add_subparsers(dest="subcommand", required=True)
+
+    init = train_sub.add_parser("init", help="Write a starter grid-train.toml (or install a pack)")
+    init.add_argument("--config", default=None, help="Path to write (default: ./grid-train.toml)")
+    init.add_argument("--force", action="store_true", help="Overwrite an existing file.")
+    init.add_argument(
+        "--pack",
+        default=None,
+        help="Install a task pack instead (see `grid train packs`), e.g. support-replies.",
+    )
+    init.add_argument("--dest", default=None, help="Directory for --pack (default: ./<pack>/)")
+    init.set_defaults(handler=cmd_train_init)
+
+    packs = train_sub.add_parser("packs", help="List bundled task packs for business data")
+    packs.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    packs.set_defaults(handler=cmd_train_packs)
+
+    ui = train_sub.add_parser("ui", help="Local dashboard: runs, reward/eval curves (read-only)")
+    ui.add_argument("--port", type=int, default=8321)
+    ui.set_defaults(handler=cmd_train_ui)
+
+    web = train_sub.add_parser(
+        "web", help="Open the point-and-click interface (for non-engineers)"
+    )
+    web.add_argument("--port", type=int, default=8322)
+    web.add_argument("--host", default="127.0.0.1",
+                     help="0.0.0.0 to let colleagues on your network use it — it then prints a "
+                          "link with a code in it, and only that link works.")
+    web.set_defaults(handler=cmd_train_web)
+
+    serve = train_sub.add_parser(
+        "serve", help="Run this Mac as a rollout node (MLX; serves the training contract)"
+    )
+    serve.add_argument("--model", default="mlx-community/SmolLM2-135M-Instruct")
+    serve.add_argument("--adapter-path", default=None, help="LoRA adapter dir (mlx_lm format)")
+    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--port", type=int, default=8080)
+    serve.set_defaults(handler=cmd_train_serve)
+
+    convert = train_sub.add_parser(
+        "convert-adapter", help="Convert a LoRA adapter between torch/peft and MLX formats"
+    )
+    convert.add_argument("source", help="Adapter directory to read")
+    convert.add_argument("dest", help="Directory to write")
+    convert.add_argument("--to", choices=("mlx", "peft"), default=None,
+                         help="Target format (default: the one the source is not)")
+    convert.set_defaults(handler=cmd_train_convert)
+
+    doctor = train_sub.add_parser(
+        "doctor", help="Readiness check: deps, rollout endpoint, data/rewards"
+    )
+    doctor.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    doctor.set_defaults(handler=cmd_train_doctor)
+
+    run = train_sub.add_parser("run", help="Run the training climb (GRPO)")
+    run.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    # Same flag the imitation stage has taken all along. Its absence here is what left Apple
+    # Silicon able to do stage one and not stage two, with a working MLX GRPO loop in the tree.
+    run.add_argument("--backend", choices=("auto", "mlx", "torch"), default="auto",
+                     help="auto picks MLX on Apple Silicon, torch elsewhere.")
+    run.add_argument("--steps", type=int, default=None, help="Override [trainer].steps.")
+    run.set_defaults(handler=cmd_train_run)
+
+    collect = train_sub.add_parser(
+        "collect", help="Learn from the work the grid already does (off until you turn it on)"
+    )
+    collect.add_argument("--on", action="store_true", help="Start keeping served requests.")
+    collect.add_argument("--off", action="store_true", help="Stop keeping them.")
+    collect.add_argument("--teacher", action="append", default=[],
+                         help="A model whose answers count as teaching examples (repeatable).")
+    collect.add_argument("--retain-days", type=int, default=0, help="How long to keep them.")
+    collect.add_argument("--sample", type=float, default=None,
+                         help="Fraction of requests to keep (1.0 = all).")
+    collect.add_argument("--no-redact", action="store_true",
+                         help="Store text as-is instead of scrubbing emails/phones/cards.")
+    collect.add_argument("--prune", action="store_true", help="Delete files past the window now.")
+    collect.add_argument("--days", type=int, default=30, help="Window to summarise.")
+    collect.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    collect.set_defaults(handler=cmd_train_collect)
+
+    auto = train_sub.add_parser(
+        "autopilot", help="Improve a model from captured work, unattended (see `schedule`)"
+    )
+    auto.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    auto.add_argument("--days", type=int, default=30, help="How far back to draw examples from.")
+    auto.add_argument("--min-examples", type=int, default=120,
+                      help="Refuse to train on less than this.")
+    auto.add_argument("--stage", choices=("auto", "sft", "rl"), default="auto",
+                      help="auto = imitate the corrections (needs no rollout engine).")
+    auto.add_argument("--no-deploy", action="store_true",
+                      help="Prove it but don't serve it. (It is still loaded under a checking "
+                           "name — that is the only way to score it.)")
+    auto.add_argument("--ignore-host", action="store_true",
+                      help="Run even on battery or while the machine is in use.")
+    auto.add_argument("--history", action="store_true", help="Show recent cycles instead.")
+    auto.set_defaults(handler=cmd_train_autopilot)
+
+    sft = train_sub.add_parser(
+        "sft", help="Stage one: learn from the replies your team already wrote (works on a Mac)"
+    )
+    sft.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    sft.add_argument("--backend", choices=("auto", "mlx", "torch"), default="auto",
+                     help="auto picks MLX on Apple Silicon, torch elsewhere.")
+    sft.add_argument("--iters", type=int, default=None, help="Training iterations (MLX path).")
+    sft.add_argument("--run-dir", default=None,
+                     help="Where to write adapter/log/run.json (default: a timestamped folder).")
+    sft.set_defaults(handler=cmd_train_sft)
+
+    nightly = train_sub.add_parser(
+        "nightly", help="One unattended cycle: train, prove it, ship it only if it won"
+    )
+    nightly.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    nightly.add_argument("--no-deploy", action="store_true",
+                         help="Train and prove it, but don't serve it even on a pass. (It is "
+                              "still loaded under a checking name so it can be scored.)")
+    nightly.add_argument("--ignore-host", action="store_true",
+                         help="Train even on battery or while the machine is in use.")
+    nightly.add_argument("--history", action="store_true", help="Show recent nights instead.")
+    nightly.set_defaults(handler=cmd_train_nightly)
+
+    pull = train_sub.add_parser(
+        "pull", help="Pull examples straight from Zendesk or HubSpot into a local file"
+    )
+    pull.add_argument("source", choices=("zendesk", "hubspot"))
+    pull.add_argument("--out", default=None, help="Where to write (default: <source>-export.jsonl)")
+    pull.add_argument("--subdomain", default=None, help="Zendesk: the bit before .zendesk.com")
+    pull.add_argument("--email", default=None, help="Zendesk: the account email for the API token")
+    pull.add_argument("--max-rows", type=int, default=5000, help="Stop after this many rows.")
+    pull.add_argument("--status", default="solved",
+                      help="Zendesk: which tickets to take (default solved).")
+    pull.set_defaults(handler=cmd_train_pull)
+
+    outcomes = train_sub.add_parser(
+        "outcomes", help="Ask the helpdesk what actually happened, and record it as feedback"
+    )
+    outcomes.add_argument("source", choices=("zendesk",))
+    outcomes.add_argument("--subdomain", default=None, help="Zendesk: the bit before .zendesk.com")
+    outcomes.add_argument("--email", default=None, help="Zendesk: the account email for the token")
+    outcomes.add_argument("--days", type=int, default=7,
+                          help="How far back to look for answers to judge.")
+    outcomes.add_argument("--dry-run", action="store_true",
+                          help="Say what it would record, and record nothing.")
+    outcomes.set_defaults(handler=cmd_train_outcomes)
+
+    schedule = train_sub.add_parser(
+        "schedule", help="Run the nightly cycle automatically (launchd on macOS, systemd on Linux)"
+    )
+    schedule.add_argument("action", nargs="?", choices=("status", "on", "off"), default="status",
+                          help="status (default), on = install it, off = remove it.")
+    schedule.add_argument("--at", default="23:00", help="Time of day to run, HH:MM (default 23:00).")
+    schedule.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    schedule.add_argument("--name", default=None,
+                          help="Label, if this machine schedules more than one model.")
+    schedule.set_defaults(handler=cmd_train_schedule)
+
+    where = train_sub.add_parser("where", help="Which grids training can use (LAN and hosted)")
+    where.set_defaults(handler=cmd_train_where)
+
+    ev = train_sub.add_parser(
+        "eval", help="Score a trained model against the one you serve, on held-out work"
+    )
+    ev.add_argument("--run", required=True, help="Run directory under ~/.grid/artifacts/train/")
+    ev.add_argument("--candidate", required=True,
+                    help="The name customers use for this model (what the winner will serve as)")
+    ev.add_argument("--adapter", default=None,
+                    help="The trained adapter to check (default: <run>/adapter). It is loaded "
+                         "under a checking name AFTER the incumbent is scored, so the comparison "
+                         "is between two different models rather than one model twice.")
+    ev.add_argument("--base", default=None, help="Incumbent model name (default: the config's model)")
+    ev.add_argument("--config", default=None, help="Run config (default: ./grid-train.toml)")
+    ev.set_defaults(handler=cmd_train_eval)
+
+    deploy = train_sub.add_parser("deploy", help="Hot-load a trained adapter onto serving nodes")
+    deploy.add_argument(
+        "--gate",
+        action="store_true",
+        help="Refuse to deploy unless it beats the model you already serve on held-out work.",
+    )
+    deploy.add_argument("--run", default=None, help="Run directory for --gate (default: the adapter's parent)")
+    deploy.add_argument("--adapter", required=True, help="Adapter directory (contains adapter_config.json)")
+    deploy.add_argument("--node", action="append", help="Serving node /v1 root (repeatable).")
+    deploy.add_argument("--name", default=None, help="Adapter name to serve under.")
+    deploy.add_argument("--config", default=None, help="Fill nodes/name from a run config.")
+    deploy.set_defaults(handler=cmd_train_deploy)

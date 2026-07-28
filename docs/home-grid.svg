@@ -1,185 +1,81 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 726" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1660 824" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <radialGradient id="bgGrad" cx="0.5" cy="0.32" r="0.9">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#eceff4"/>
-    </radialGradient>
-    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
-      <circle cx="2" cy="2" r="1.4" fill="#d7dce4"/>
-    </pattern>
-    <linearGradient id="engineGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5fb0e6"/>
-      <stop offset="1" stop-color="#3a8cc8"/>
-    </linearGradient>
-    <linearGradient id="appGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#8b8ff2"/>
-      <stop offset="1" stop-color="#6366f1"/>
-    </linearGradient>
-    <linearGradient id="gridGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#34d399"/>
-      <stop offset="1" stop-color="#0ea371"/>
-    </linearGradient>
-    <linearGradient id="lineEG" x1="0" y1="1" x2="0" y2="0">
-      <stop offset="0" stop-color="#3f95d4"/>
-      <stop offset="1" stop-color="#10b981"/>
-    </linearGradient>
-    <linearGradient id="lineGA" x1="0" y1="1" x2="0" y2="0">
-      <stop offset="0" stop-color="#10b981"/>
-      <stop offset="1" stop-color="#6366f1"/>
-    </linearGradient>
-    <marker id="arrGreen" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#10b981"/>
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
-    <marker id="arrIndigo" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M0,0 L8,3 L0,6 Z" fill="#6366f1"/>
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
-    <filter id="sh" x="-40%" y="-50%" width="180%" height="200%">
-      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#1e293b" flood-opacity="0.20"/>
-    </filter>
-    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
-      <feGaussianBlur stdDeviation="26"/>
-    </filter>
-    <symbol id="mac-studio" viewBox="0 0 28 24">
-      <rect x="3" y="3" width="22" height="18" rx="2.5" fill="#eef6fc"/>
-      <line x1="3" y1="7.5" x2="25" y2="7.5" stroke="#3a8cc8" stroke-width="1.1"/>
-      <circle cx="14" cy="14.5" r="3.4" fill="none" stroke="#3a8cc8" stroke-width="1.3"/>
-      <circle cx="14" cy="14.5" r="0.9" fill="#3a8cc8"/>
-    </symbol>
-    <symbol id="mac-mini" viewBox="0 0 28 14">
-      <rect x="2" y="3" width="24" height="8" rx="2.5" fill="#eef6fc"/>
-      <circle cx="21" cy="7" r="1.1" fill="#3a8cc8"/>
-    </symbol>
-    <symbol id="macbook" viewBox="0 0 30 22">
-      <rect x="6" y="2.5" width="18" height="12" rx="1.2" fill="#eef6fc"/>
-      <rect x="7.5" y="4" width="15" height="9" rx="0.6" fill="#3a8cc8" opacity="0.35"/>
-      <rect x="13" y="2.5" width="4" height="1.4" rx="0.7" fill="#3a8cc8"/>
-      <path d="M2.5 19.5 L27.5 19.5 L25 14.5 L5 14.5 Z" fill="#eef6fc"/>
-      <rect x="12.5" y="15.6" width="5" height="1" rx="0.5" fill="#3a8cc8"/>
-    </symbol>
-    <symbol id="gpu-card" viewBox="0 0 32 18">
-      <rect x="0.5" y="2" width="2.5" height="14" rx="0.5" fill="#eef6fc"/>
-      <rect x="3" y="3.5" width="27" height="11" rx="1.6" fill="#eef6fc"/>
-      <circle cx="11" cy="9" r="3.6" fill="none" stroke="#3a8cc8" stroke-width="1.2"/>
-      <circle cx="11" cy="9" r="0.9" fill="#3a8cc8"/>
-      <circle cx="22" cy="9" r="3.6" fill="none" stroke="#3a8cc8" stroke-width="1.2"/>
-      <circle cx="22" cy="9" r="0.9" fill="#3a8cc8"/>
-    </symbol>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
   </defs>
-
-  <rect width="1100" height="726" fill="url(#bgGrad)"/>
-  <rect width="1100" height="726" fill="url(#dots)"/>
-
-  <!-- top label -->
-  <text x="550" y="50" text-anchor="middle" fill="#8a96a8" font-size="12" letter-spacing="2.5" font-weight="700">APPS</text>
-
-  <!-- faint grid fabric between machines -->
-  <g stroke="#9aa6b6" stroke-width="1.5" opacity="0.22" fill="none">
-    <line x1="150" y1="474" x2="390" y2="512"/>
-    <line x1="390" y1="512" x2="340" y2="619"/>
-    <line x1="390" y1="512" x2="610" y2="457"/>
-    <line x1="610" y1="457" x2="650" y2="589"/>
-    <line x1="610" y1="457" x2="890" y2="512"/>
-    <line x1="650" y1="589" x2="890" y2="512"/>
-  </g>
-
-  <!-- power lines: machines -> grid -->
-  <g stroke-width="2.6" opacity="0.9" fill="none">
-    <path d="M150 430 C150 362, 200 362, 200 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
-    <path d="M390 468 C390 381, 360 381, 360 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
-    <path d="M340 575 C340 435, 300 435, 300 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
-    <path d="M610 413 C610 354, 560 354, 560 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
-    <path d="M650 545 C650 420, 640 420, 640 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
-    <path d="M890 468 C890 381, 820 381, 820 295" stroke="url(#lineEG)" marker-end="url(#arrGreen)"/>
-  </g>
-  <!-- power lines: grid -> apps -->
-  <g stroke-width="2.6" opacity="0.9" fill="none">
-    <path d="M280 205 C308 172, 308 172, 280 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
-    <path d="M550 205 C578 172, 578 172, 550 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
-    <path d="M820 205 C848 172, 848 172, 820 126" stroke="url(#lineGA)" marker-end="url(#arrIndigo)"/>
-  </g>
-
-  <!-- ===== MIDDLE: the grid ===== -->
-  <ellipse cx="550" cy="250" rx="430" ry="70" fill="#10b981" opacity="0.20" filter="url(#glow)"/>
-  <g filter="url(#sh)"><rect x="110" y="205" width="880" height="88" rx="20" fill="url(#gridGrad)"/></g>
-  <rect x="118" y="211" width="864" height="30" rx="15" fill="#ffffff" opacity="0.10"/>
-  <text x="550" y="247" text-anchor="middle" fill="#ffffff" font-size="25" font-weight="800">Your Home Grid</text>
-  <text x="550" y="276" text-anchor="middle" fill="#f3fff9" font-size="18.5">Unifies and orchestrates all your compute resources</text>
-
-  <!-- ===== TOP: apps ===== -->
-  <g text-anchor="middle">
-    <g filter="url(#sh)"><rect x="180" y="66" width="200" height="58" rx="15" fill="url(#appGrad)"/></g>
-    <rect x="186" y="71" width="188" height="20" rx="10" fill="#ffffff" opacity="0.10"/>
-    <text x="280" y="101" fill="#ffffff" font-size="17" font-weight="700">OpenClaw</text>
-    <g filter="url(#sh)"><rect x="450" y="66" width="200" height="58" rx="15" fill="url(#appGrad)"/></g>
-    <rect x="456" y="71" width="188" height="20" rx="10" fill="#ffffff" opacity="0.10"/>
-    <text x="550" y="101" fill="#ffffff" font-size="17" font-weight="700">Hermes</text>
-    <g filter="url(#sh)"><rect x="720" y="66" width="200" height="58" rx="15" fill="url(#appGrad)"/></g>
-    <rect x="726" y="71" width="188" height="20" rx="10" fill="#ffffff" opacity="0.10"/>
-    <text x="820" y="101" fill="#ffffff" font-size="17" font-weight="700">Your Own App</text>
-  </g>
-
-  <!-- ===== BOTTOM: inference engines (scattered) ===== -->
-  <g>
-    <!-- Main Desktop -->
-    <g filter="url(#sh)"><rect x="60" y="430" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
-    <rect x="66" y="435" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="78" y="456" fill="#ffffff" font-size="14.5" font-weight="700">Main Desktop</text>
-    <text x="78" y="477"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  MLX</tspan></text>
-    <text x="78" y="493"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  Mac Studio</tspan></text>
-    <text x="78" y="509"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  512 GB</tspan></text>
-
-    <!-- Home Server -->
-    <g filter="url(#sh)"><rect x="300" y="468" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
-    <rect x="306" y="473" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="318" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Home Server</text>
-    <text x="318" y="515"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  Ollama</tspan></text>
-    <text x="318" y="531"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  Mac mini</tspan></text>
-    <text x="318" y="547"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  64 GB</tspan></text>
-
-    <!-- Basement Rig -->
-    <g filter="url(#sh)"><rect x="250" y="575" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
-    <rect x="256" y="580" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="268" y="601" fill="#ffffff" font-size="14.5" font-weight="700">Basement Rig</text>
-    <text x="268" y="622"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  vLLM</tspan></text>
-    <text x="268" y="638"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  RTX 3090</tspan></text>
-    <text x="268" y="654"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  24 GB</tspan></text>
-
-    <!-- Laptop -->
-    <g filter="url(#sh)"><rect x="520" y="413" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
-    <rect x="526" y="418" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="538" y="439" fill="#ffffff" font-size="14.5" font-weight="700">Laptop</text>
-    <text x="538" y="460"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  LM Studio</tspan></text>
-    <text x="538" y="476"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  MacBook Pro</tspan></text>
-    <text x="538" y="492"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  36 GB</tspan></text>
-
-    <!-- Gaming PC -->
-    <g filter="url(#sh)"><rect x="560" y="545" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
-    <rect x="566" y="550" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="578" y="571" fill="#ffffff" font-size="14.5" font-weight="700">Gaming PC</text>
-    <text x="578" y="592"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  llama.cpp</tspan></text>
-    <text x="578" y="608"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  RTX 4090</tspan></text>
-    <text x="578" y="624"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  24 GB</tspan></text>
-
-    <!-- Render Box -->
-    <g filter="url(#sh)"><rect x="800" y="468" width="180" height="88" rx="15" fill="url(#engineGrad)"/></g>
-    <rect x="806" y="473" width="168" height="22" rx="11" fill="#ffffff" opacity="0.10"/>
-    <text x="818" y="494" fill="#ffffff" font-size="14.5" font-weight="700">Render Box</text>
-    <text x="818" y="515"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">FRAMEWORK</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  ComfyUI</tspan></text>
-    <text x="818" y="531"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">HARDWARE</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  RTX 5090</tspan></text>
-    <text x="818" y="547"><tspan fill="#bcd9ef" font-size="9.5" letter-spacing="0.6">VRAM</tspan><tspan fill="#ffffff" font-weight="700" font-size="12">  32 GB</tspan></text>
-  </g>
-
-  <!-- device icons (top-right of each card) -->
-  <g opacity="0.95">
-    <use href="#mac-studio" x="208" y="438" width="24" height="22"/>
-    <use href="#mac-mini" x="444" y="481" width="28" height="14"/>
-    <use href="#gpu-card" x="392" y="583" width="30" height="17"/>
-    <use href="#macbook" x="664" y="420" width="28" height="21"/>
-    <use href="#gpu-card" x="702" y="553" width="30" height="17"/>
-    <use href="#gpu-card" x="942" y="476" width="30" height="17"/>
-  </g>
-
-  <!-- bottom label -->
-  <text x="550" y="700" text-anchor="middle" fill="#5b6b85" font-size="13.5" letter-spacing="2.5" font-weight="700">INFERENCE ENGINES</text>
-  <text x="550" y="719" text-anchor="middle" fill="#5b6b85" font-size="14">Your machines, wired into your home grid</text>
+  <rect width="1660" height="824" fill="#fff"/>
+  <rect x="288" y="63" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="402" y="105" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Grid Desktop</text>
+  <rect x="573" y="63" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="688" y="105" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">OpenClaw</text>
+  <rect x="858" y="63" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="972" y="105" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Hermes</text>
+  <rect x="1143" y="63" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1258" y="105" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Your own app</text>
+  <rect x="100" y="252" width="1460" height="240" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="154" y="326" fill="#5d579d" font-size="38" font-weight="700">Your grid</text>
+  <text x="154" y="378" fill="#2b2b29" font-size="24">5 nodes · 5 models</text>
+  <text x="154" y="412" fill="#2b2b29" font-size="24">424 GB GPU memory</text>
+  <rect x="480" y="290" width="493" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="727" y="385" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Inference</text>
+  <rect x="1013" y="290" width="493" height="164" fill="#fff" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1260" y="368" text-anchor="middle" fill="#5d579d" font-size="35" font-weight="700">Training</text>
+  <text x="1260" y="412" text-anchor="middle" fill="#a1a099" font-size="24">experimental</text>
+  <path d="M402 240 L402 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M688 240 L688 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M972 240 L972 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1258 240 L1258 143" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="103" y="616" width="270" height="148" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="238" y="660" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>
+  <text x="238" y="700" text-anchor="middle" fill="#2b2b29" font-size="24">MLX · 64 GB</text>
+  <text x="238" y="732" text-anchor="middle" fill="#2b2b29" font-size="24">Qwen3-30B-A3B</text>
+  <rect x="399" y="616" width="270" height="148" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="534" y="660" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac Studio</text>
+  <text x="534" y="700" text-anchor="middle" fill="#2b2b29" font-size="24">MLX · 256 GB</text>
+  <text x="534" y="732" text-anchor="middle" fill="#2b2b29" font-size="24">MiniMax-M2</text>
+  <rect x="695" y="616" width="270" height="148" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="830" y="660" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
+  <text x="830" y="700" text-anchor="middle" fill="#2b2b29" font-size="24">Ollama · 24 GB</text>
+  <text x="830" y="732" text-anchor="middle" fill="#2b2b29" font-size="24">Gemma 3 12B</text>
+  <rect x="991" y="616" width="270" height="148" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1126" y="660" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
+  <text x="1126" y="700" text-anchor="middle" fill="#2b2b29" font-size="24">vLLM · 48 GB</text>
+  <text x="1126" y="732" text-anchor="middle" fill="#2b2b29" font-size="24">Qwen3-32B</text>
+  <rect x="1287" y="616" width="270" height="148" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1422" y="660" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 5090</text>
+  <text x="1422" y="700" text-anchor="middle" fill="#2b2b29" font-size="24">vLLM · 32 GB</text>
+  <text x="1422" y="732" text-anchor="middle" fill="#2b2b29" font-size="24">Gemma 3 27B</text>
+  <path d="M238 604 L238 506" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M534 604 L534 506" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M830 604 L830 506" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1126 604 L1126 506" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1422 604 L1422 506" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
 </svg>

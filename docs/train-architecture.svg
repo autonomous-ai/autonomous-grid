@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 880" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1700" height="880" fill="#fff"/>
+  <rect x="100" y="217" width="184" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="192" y="259" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Your tasks</text>
+  <rect x="434" y="217" width="193" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="530" y="259" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">The trainer</text>
+  <path d="M296 250 L420 250" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="1057" y="217" width="166" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1140" y="259" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">The gate</text>
+  <path d="M639 250 L1043 250" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="842" y="224" text-anchor="middle" fill="#2b2b29" font-size="24">an adapter</text>
+  <rect x="1413" y="107" width="132" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1479" y="149" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Served</text>
+  <rect x="1413" y="327" width="132" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1479" y="369" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">Binned</text>
+  <path d="M1235 236 C1295 236, 1339 140, 1399 140" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1235 264 C1295 264, 1339 360, 1399 360" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="1285" y="122" text-anchor="middle" fill="#2b2b29" font-size="24">better</text>
+  <text x="1293" y="412" text-anchor="middle" fill="#2b2b29" font-size="24">not better</text>
+  <rect x="395" y="437" width="271" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="530" y="479" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">The orchestrator</text>
+  <rect x="123" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="258" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">MacBook Pro</text>
+  <rect x="419" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="554" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac Studio</text>
+  <rect x="715" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="850" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Mac mini</text>
+  <rect x="1011" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1146" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 6000</text>
+  <rect x="1307" y="687" width="270" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1442" y="729" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">RTX 5090</text>
+  <path d="M466 295 L466 423" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="434" y="352" text-anchor="end" fill="#2b2b29" font-size="24">a task,</text>
+  <text x="434" y="380" text-anchor="end" fill="#2b2b29" font-size="24">several attempts</text>
+  <path d="M594 423 L594 295" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="626" y="340" text-anchor="start" fill="#2b2b29" font-size="24">the attempts, and</text>
+  <text x="626" y="368" text-anchor="start" fill="#2b2b29" font-size="24">the token ids they sampled</text>
+  <path d="M410 515 L258 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M470 515 L554 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M530 515 L850 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M590 515 L1146 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M650 515 L1442 673" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="1600" y="809" text-anchor="end" fill="#2b2b29" font-size="24">placed on whichever machine is free</text>
+</svg>

@@ -14,6 +14,9 @@ kind      an engine's type (ollama, vllm, mlx, llama.cpp, comfyui) — filter au
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
 mode      which world the CLI targets: `local` (default) or `remote`
+pack      a bundled starting point for training on business data (`grid train packs`)
+adapter   the small add-on layer a training run produces (LoRA) — what moves between machines
+gate      the check that refuses to serve a trained model unless it beat the one you serve
 ```
 
 Do not use `provider`, `consumer`, or `signaling` in CLI output or first-run docs — with one
@@ -40,6 +43,7 @@ grid                                  # overview: mode, active grid, endpoint, e
 grid --help                           # concise help with common examples first
 grid <command> --help
 grid version
+grid --version                        # same output as `grid version`
 grid [--local | --remote] <command>      # override the active mode for one command
 ```
 
@@ -78,8 +82,8 @@ In `remote` mode bare `grid` shows the mode and your active remote grid, then th
 mode: remote
 active grid: research
 
-Manage your remote grids with `grid up` / `ls` / `info`, serve models with `grid join`,
-and use them with `grid chat -m <model> "…"`.
+Sign in with `grid login`, then manage your remote grids with `grid up`/`ls`/`info`, serve models
+with `grid join`, and use them with `grid chat -m <model> "…"`.
 ```
 
 (Signed in but no grid selected yet, it prints `active grid: (none)` — run `grid ls` then
@@ -95,7 +99,7 @@ grids** with the same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`)
 use them (`grid members`).
 
 ```
-grid mode                             # print the current mode
+grid mode [--json]                    # print the current mode
 grid mode local | remote                 # switch and persist the mode
 grid use [name] [--json]              # show or set the active grid for the current mode
 grid use --none                       # clear the active grid for the current mode
@@ -105,19 +109,23 @@ grid [--local | --remote] <command>      # override the mode for a single comman
 The mode is persisted in `~/.grid/state.json` (default `local`); each mode remembers its own
 active grid. Which mode a command runs in is resolved as `--local`/`--remote` (one command) > the
 persisted mode > `local`. `grid use <name>` sets the persistent default grid, so `grid chat` /
-`grid info` / `grid models` target it without naming it — an explicit `[grid]` positional still
-wins, and a stale selection (its grid was removed) is ignored.
+`grid info` / `grid models` target it without naming it — naming a grid explicitly still wins (the
+`[grid]` positional on `info`/`models`/`engines`, `--grid` on `chat`/`image`/`edit`/`video`), and a
+stale selection (its grid was removed) is ignored.
 
 In `remote` mode the grid lifecycle (`up`/`down`/`ls`/`info`), live reads (`engines`/`models`),
 sign-in (`login`/`logout`), serving (`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`), and
 membership admin (`grid members`) all work. `grid members` is remote-only — in `local` mode it exits with guidance to switch. The shared
-local commands (`catalog`, `pull`, `rm`, `engine …`) work in either mode. A machine with no state
+local commands (`catalog`, `pull`, `rm`/`remove`, `ctx`, `device-info`, `engine …`, `agent …`,
+`train …`) work in either mode. A machine with no state
 file behaves exactly as a `local`-only install.
 
 Notes:
 - `--json` goes after the subcommand (`grid info --json`); bare `grid --json` prints the
   overview as JSON, including a `mode` key.
 - `--local`/`--remote` may appear anywhere on the line, but are not listed in per-command `--help`.
+- `grid mode` is the exception to that override: it reads and writes the *persisted* mode, so
+  `grid --remote mode` still prints the persisted one.
 
 ## Sign in
 
@@ -128,12 +136,13 @@ grid sync [--json]                    # refresh your remote grids without signin
 ```
 
 **Remote-only.** `grid login` signs you in to autonomous's hosted relay with a device-code
-flow — it opens a browser, or with `--no-browser` prints the URL and code to enter on another
-device (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
+flow — it prints the sign-in URL and code, and opens a browser at that URL unless you pass
+`--no-browser` (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
 **not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
 `grid use <name>` (or name one per command).
 
-`grid logout` **stops serving, then clears the stored credentials** — in that order, because a serve
+`grid logout` **stops serving, then clears the stored credentials and the remote mode's active
+grid** — in that order, because a serve
 child holds its access token in memory from the moment it starts (that token lasts about a year), so
 deleting the file never stopped it: the box kept advertising models as a provider, and `grid leave`
 answered "You're not signed in" over records that were still correct. So logout tears down whatever
@@ -157,10 +166,10 @@ commands exit with guidance to switch — sign-in is a remote concept. See
 ## Grid Lifecycle
 
 ```
-grid up [name] [--type <t>]           # create/start a grid by name or id (--type: remote grid type on create)
+grid up [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
 grid down [name]                      # stop a grid; the grid/config persists
-grid ls [--json]                      # list saved grids (name, id, where, url)
-grid info [grid] [--json]             # endpoint, key, engines, live models
+grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
+grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
 ```
 
@@ -171,6 +180,10 @@ grid=home
 grid_url=http://192.168.1.25:8090
 ```
 
+`--port` (default 8090) and `--host` (default 0.0.0.0) are the port and interface the local grid
+server binds; `--advertise-host` overrides the host published in `grid_url` (otherwise the detected
+LAN IP). Those three are local-only, and `--type` is remote-only (the grid type, set on create).
+
 No separate `create` or `start` in the main surface — `up` is the single lifecycle verb, so
 first use feels like one operation rather than infrastructure management. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
@@ -178,9 +191,11 @@ which grid is *active*; it is a selection pointer, not a lifecycle step — see 
 In `remote` mode these same verbs act on hosted **remote grids**: `grid up <name>` create-or-starts
 one — `--type` is `permissioned-public` (default) or `permissioned-providers`, set on create, and
 creating needs an explicit name (no auto-`home`). `grid down` stops it (the grid persists),
-`grid ls` lists the grids your sign-in fetched (local — no network call), and `grid info` shows a
-grid's `status` and `grid_url`. `grid info --env` prints the grid's relay base URL plus your access
-token so any OpenAI SDK can call it (the relay address is read live from the grid, so it must be up).
+`grid ls` lists the grids your sign-in fetched (local — no network call, `* ` marking the active
+one, columns name/id/type), and `grid info` prints `grid`, `type`, `status` and `grid_url` — the
+same four keys under `--json`. `status` comes from the creator-only live status, so a member who
+did not create the grid sees it blank. `grid info --env` prints your access token plus
+`OPENAI_BASE_URL` as the grid's relay base + `/relay/v1`, so any OpenAI SDK can call it.
 See [ADR 0003](./adr/0003-remote-grid-lifecycle.md).
 
 ## Engines
@@ -191,7 +206,7 @@ grid join [grid] --all                                # join every detected engi
 grid join [grid] --at <url> -m <model>... [--name <id>]
 grid join [grid] --serve <model> [--name <id>]
 grid join [grid] --media [--bundle <bundle>]... [--name <id>]
-grid join [grid] --api <kind> [-m <model>...]         # remote only: join a third-party API engine (openai, codex)
+grid join [grid] --api <kind> [-m <model>...]         # join a third-party API engine (openai, codex, doggi)
 grid leave [grid] [--engine <sel>] [--all]            # <sel>: engine id, endpoint URL, served model, or :port fragment
 grid engine ls [grid] [--json]                        # live engines joined to a grid (legacy alias: grid engines)
 ```
@@ -224,7 +239,8 @@ Join them:
 
 Engine IDs are local names shown by `grid engine ls`, `grid info`, and `grid models --verbose`.
 `grid leave --engine <sel>` takes an exact engine id, or — tried in that order — an endpoint URL,
-a served model, or a URL fragment such as `:8000`.
+an engine label (the engine kind, e.g. `openai` or `codex`), a served model, or a URL fragment such
+as `:8000`. Each step must resolve to exactly one engine, or it errors listing the candidates.
 
 ### `grid join` in remote mode
 
@@ -258,11 +274,12 @@ relay forwards `media/*` jobs to the media server on loopback; the SSE (progress
 files) streams back exactly as in local mode.
 
 `grid join --api <kind> [-m <model>...]` joins an **API engine** — a third-party LLM API service
-served through your own vendor credential ([ADR 0012](./adr/0012-api-engines.md)). Two kinds exist:
-`openai` (a metered API key) and `codex` (a ChatGPT/Codex subscription seat — see below). The key is
-resolved in order: the `OPENAI_API_KEY` env var, else the machine-local key store, else a hidden
-interactive prompt (there is deliberately no `--api-key` flag; non-interactive with no key anywhere
-is a clear error). It is validated at join time against the vendor's model listing — an invalid key
+served through your own vendor credential ([ADR 0012](./adr/0012-api-engines.md)). Three kinds exist:
+`openai` (a metered API key) and `codex` (a ChatGPT/Codex subscription seat — see below), both text
+engines, and `doggi` (a media gateway: pass its URL with `--at`, key from `DOGGI_API_KEY`). The key is
+resolved in order: the `--api-key` flag (accepted, with a warning that a key on the command line
+lands in your shell history), else the `OPENAI_API_KEY` env var, else the machine-local key store,
+else a hidden interactive prompt; non-interactive with no key anywhere is a clear error. It is validated at join time against the vendor's model listing — an invalid key
 is a terminal error and nothing is spawned or stored. A validated key is saved to
 `~/.grid/api_keys.toml` (`0o600`, keyed by service kind): later joins and the detached serve
 process read it from there, and `grid logout` leaves it intact (it belongs to your vendor account,
@@ -276,15 +293,17 @@ whitelist models are reported; an empty intersection errors). `-m` narrows to wh
 is skipped with a note, and a name outside the whitelist errors listing the valid names. The serve
 loop registers the models with their **static** whitelist capabilities — the vendor is never probed
 or benchmarked — and forwards each `chat/completions` job to the vendor with your key, rewriting
-the advertised `openai:<name>` to the vendor's `<name>`; SSE streams pass through unchanged. An API
-engine serves `chat/completions` **only** — a legacy `completions` job gets a structured "not
-served" error and is never forwarded. A vendor error (401/429/5xx) surfaces as that job's error
+the advertised `openai:<name>` to the vendor's `<name>`; SSE streams pass through unchanged. An API engine serves exactly its
+kind's endpoints — `openai` serves `chat/completions` and `responses`, `codex` serves `responses`
+only. Anything else, including a legacy `completions` job, gets a structured "not served" error
+naming what the engine does serve, and is never forwarded. A vendor error (401/429/5xx) surfaces as that job's error
 with the upstream status, never touching your grid sign-in and never unregistering the engine; an
 auth/quota failure (401/403/429) additionally warns in the engine's log so a revoked key or
 exhausted quota is visible to you, not just to consumers. **Requests to `openai:*` models leave the
 grid for the vendor**, under your key and your own OpenAI account's terms. `--api` is mutually
-exclusive with `--at`/`--serve`/`--advertise-as`/`--media`/`--bundle` in one invocation — join
-other engines with a separate (additive) `grid join`.
+exclusive with `--serve`/`--advertise-as`/`--media`/`--bundle` in one invocation — join other engines
+with a separate (additive) `grid join`. `--at` is *not* excluded: it overrides the vendor's base URL,
+and a kind that ships none (the `doggi` media gateway) requires it.
 
 **A subscription as an API engine (`--api codex`).** `grid join --api codex` joins a ChatGPT/Codex
 **subscription seat** instead of a metered key: the CLI runs the vendor's OAuth sign-in itself
@@ -294,9 +313,8 @@ redirect on a headless box) and stores the rotating token bundle in the same `ap
 free probe** — the vendor's own model listing — proving in a single round-trip that the seat is
 live, that this machine's egress IP isn't blocked (Cloudflare typically challenges datacenter/VPS
 addresses; such a join is refused naming the cause), and which models the seat actually has. The
-advertised set is the seat's **tier's verified list ∩ the seat's live set** (`grid catalog --api
-codex` prints the per-tier table; an unknown or unverified tier advertises the minimal `free` set,
-with a warning when the token names no tier at all). A re-join that changes nothing performs
+advertised set is the seat's **live probe set** — the probe is the source of truth for both the
+models and their capabilities, and the plan name is a display label only. A re-join that changes nothing performs
 **zero vendor calls**; a fresh sign-in restarts a live engine (credential rotation, like a rotated
 key); a stored seat the vendor now rejects gets one inline fresh sign-in on an interactive run.
 `codex:*` models serve the vendor's **`responses` endpoint only** — point an external Codex app at
@@ -377,23 +395,32 @@ The `grid join` flag set is the union of both modes, gated by mode:
 - **Both modes:** `--at` / `--serve` / `-m,--model` / `--kind <kind>` (alias `--engine`) / `--name`
   / `--all`, `--advertise-as` (or inline `-m real=pub`), `--endpoint-port` (alias `--llama-port`),
   the llama tuning flags (`--ctx-size --n-predict --parallel --flash-attn --temp --reasoning-budget`),
-  and the media flags `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
+  `--heartbeat-interval` (seconds between heartbeats, default 15), `--api-key <key>` (overrides the
+  env var and the key store, and warns that it is visible in shell history), and the media flags
+  `--media` / `--bundle <bundle>` / `--comfyui-port` / `--media-port`.
 - **local-only:** `--advertise-host` (a remote engine polls the relay outbound — there is no inbound
   endpoint to advertise).
-- **Remote-only:** `--api <kind>` (join a third-party API engine; `-m` optionally narrows the
-  whitelist, omitted = every whitelisted model the key can see), `--no-browser` (the codex OAuth
+- **Remote-only:** `--api <kind>` for a **text** kind (`openai`, `codex`) — a text API engine is
+  served by the relay's poll loop, which local mode has no equivalent of; the **media** kind
+  (`doggi`) also joins in `local` mode, where it bridges to the vendor gateway exactly where ComfyUI
+  would sit. `-m` optionally narrows the whitelist (omitted = every whitelisted model the key can
+  see), `--no-browser` (the codex OAuth
   sign-in's paste flow for headless boxes; inert elsewhere, with a note), and `--max-concurrency`
   (how many requests this engine serves at once; the provider runs one poll worker per slot —
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
-  them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default), and
-  `--respawn` (stop the engine already serving this grid and start a fresh one — see below).
+  them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default).
+  Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
+  extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
+  the engine already serving this grid and start a fresh one — see below).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
   `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.
   Set your authoritative per-model price with `grid price set` (see [Price](#price)) instead.
 
-A flag used in the wrong mode fails with a clear message. (`--advertise-as` is single-engine only and
-is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
+A flag used in the wrong mode fails with a clear message. (`--advertise-as` is single-engine only: a
+join whose merged union holds more than one engine — or an append onto an identity already serving —
+is rejected, and the aliases must be re-passed in one command after `grid leave`. Locally, an alias
+count that does not match the `-m` count fails the join.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
 [ADR 0007](./adr/0007-remote-multi-engine-routing.md), and
 [ADR 0008](./adr/0008-remote-media-serve.md).
 
@@ -402,10 +429,15 @@ is rejected with `--all`.) See [ADR 0004](./adr/0004-remote-provider-serve.md),
 ```
 grid models [grid] [--verbose] [--json] # live models the grid can run now
 grid catalog [--json]                   # models Grid can pull
-grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (openai, codex)
+grid catalog --api <kind> [--json]      # API-engine whitelist for a service kind (openai, codex, doggi)
 grid pull <model>                       # pull a model for the default text engine
 grid rm <model> [--yes]                 # remove a pulled model
+grid ctx <model> [--json]               # a model's max context length, read from its GGUF metadata
+grid device-info [--json]               # this machine's chip, cores, memory, disk and GPU
 ```
+
+`grid ctx` takes a filename under `~/.grid/models/` or a path to a `.gguf`; `grid device-info`
+prints one flat inventory of the machine you are on. Both are mode-agnostic and need no grid.
 
 `grid models` answers the orchestration question: what can this grid run right now?
 
@@ -434,34 +466,37 @@ comfyui:image_generation  media-mac    http://192.168.1.30:8190
 ```
 
 In `remote` mode `grid models` and `grid engines` read the grid's live overview from its public
-relay endpoint (no token needed, so they work even before `grid sync`). The output is the same
-shape, but `--verbose` shows the **node** serving each model instead of a local `WHERE` URL —
-remote engines sit behind the relay, not at an address you call directly.
+relay endpoint (no per-grid token needed, so they work even before `grid sync`). `--verbose` prints
+`MODEL ENGINE NODE` — the **node** serving each model instead of a local `WHERE` URL, since remote
+engines sit behind the relay, not at an address you call directly. A grid with auto-routing enabled
+also lists the reserved model `auto` (see [Router](#router)).
 
 `grid catalog --api <kind>` answers the discovery question for **API engines**: which models
 would a `grid join --api <kind>` serve? It prints a curated, static whitelist with each model's
-capabilities and context window — no key needed, no network call (the same posture as the
-"Grid can pull" catalog). The table carries the date it was last verified against the vendor's
+capabilities and context window — no key needed and no network call, the same posture as the
+"Grid can pull" catalog. (`--api codex` is the one exception: with a seat signed in it makes one
+free model listing to show that seat's real entitlement — see below.) The table carries the date it was last verified against the vendor's
 documentation, and an unknown kind is a clear error listing the supported kinds. Models are
 advertised under namespaced names (`openai:gpt-5.5`), so it is visible in every model list that
 requests to them leave the grid for the vendor. `--json` emits the same table machine-readable.
 
 ```text
 Models a `grid join --api openai` would serve (verified 2026-07-08):
-  openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured
-  openai:gpt-5.4           1,050,000 ctx   tools, vision, json, structured
-  openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured
-  openai:gpt-5.4-nano        400,000 ctx   tools, vision, json, structured
+  openai:gpt-5.5           1,050,000 ctx   tools, vision, json, structured, responses
+  openai:gpt-5.4           1,050,000 ctx   tools, vision, json, structured, responses
+  openai:gpt-5.4-mini        400,000 ctx   tools, vision, json, structured, responses
+  openai:gpt-5.4-nano        400,000 ctx   tools, vision, json, structured, responses
 
 No key needed to view. Requests to openai:* models leave the grid for the vendor.
 ```
 
-For the `codex` kind the whitelist is keyed by **subscription tier** (a seat's model set depends
-on its plan), so `grid catalog --api codex` prints per tier — only live-verified tiers are listed,
-and every other tier advertises the minimal `free` set at join time. Codex rows claim no
-chat-dialect capabilities (no json/structured column): these models serve the vendor's
-`responses` endpoint, for external Codex apps, never `grid chat`. `--json` for codex accordingly
-speaks `tiers` (plus `endpoints` and `minimal_tier`) instead of the flat `models` list.
+For the `codex` kind a seat's model set depends on its plan, so `grid catalog --api codex` prints
+two blocks: **your current plan** — with a seat signed in it makes one free model listing to read
+that seat's real entitlement — and the per-tier table for reference. Codex rows claim no
+chat-dialect capabilities (no json/structured column): these models serve the vendor's `responses`
+endpoint, for external Codex apps, never `grid chat`. `--json` for codex speaks `current_plan` and
+`tiers` (alongside `kind`, `source_url`, `last_verified`, `endpoints` and `warning`) instead of the
+flat `models` list.
 
 See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
 the `openai:*` namespacing, and the key-store lifecycle.
@@ -469,27 +504,26 @@ the `openai:*` namespacing, and the key-store lifecycle.
 ## Use
 
 ```
-grid chat -m <model> "<message>" [--json] [--target-provider <id>] [--allow-self-provider]
-grid image "<prompt>" [-o <dir>] [--target-provider <id>] [--allow-self-provider]
-grid edit "<prompt>" -i <img>... [-o <dir>] [--target-provider <id>] [--allow-self-provider]
-grid video "<prompt>" -i <img> [-o <dir>] [--target-provider <id>] [--allow-self-provider]
+grid chat  -m <model> "<message>" [--json] [--grid <g>] [--timeout <s>]
+grid image -m <model> "<prompt>" [-o <dir>] [--width 720] [--height 720] [--steps 4]
+grid edit  -m <model> "<prompt>" -i <img>... [-o <dir>] [--steps 4]
+grid video -m <model> "<prompt>" -i <img> [-o <dir>] [--duration 5s|8s] [--aspect-ratio <r>]
+
+# all four also take: [--grid <g>] [--timeout <s>] [--target-provider <id>] [--allow-self-provider]
 ```
+
+`-m/--model` is required on all four. `image` sizes with `--width`/`--height` (720×720) and
+`--steps` (4); `edit` takes `--steps` and up to three `-i/--image` values; `video` takes
+`--duration` (`5s` or `8s`) and `--aspect-ratio`. `--grid` runs against a grid other than the
+active one, and `--timeout` is in seconds — 600 for `chat`, 1800 for the three media verbs, which
+wait on a streamed result.
 
 These are smoke tests and useful daily commands. The same verbs work in both modes: in `local`
 they go through the local grid proxy, in `remote` through the grid's relay with your access token.
 `--target-provider` (pin the request to a specific engine) and `--allow-self-provider` (let your
-own engine serve it) are **remote-only** — using them in `local` mode is a clear error. Their errors
-should name the missing model, the selected grid, and the next diagnostic command:
-
-```text
-No live model named `qwen36-27b-mtp` on grid `home`.
-
-See live models:
-  grid models
-
-Check engines:
-  grid engines
-```
+own engine serve it) are **remote-only** — in `local` mode they exit 1 before any network call,
+naming the flag and the way out. An error from these verbs should name the missing model, the
+selected grid, and the next diagnostic command (`grid models`, then `grid engines`).
 
 **`-m auto`** lets the grid pick the model, when its owner has enabled auto-routing (`grid router`).
 `grid chat -m auto "…"` sends the reserved name `auto`; the reply comes back from whichever capable
@@ -501,6 +535,162 @@ model the grid ranked and had free, and the `X-Grid-Routed-Model` response heade
 Codex apps; `grid chat -m codex:…` is refused client-side, before any network call, with the
 guidance to point a Codex-compatible app at the grid instead
 ([Pointing a Codex app at your grid](#pointing-a-codex-app-at-your-grid-using-codex-models)).
+
+## Training
+
+```
+grid train doctor [--config <path>] [--json]      # what this computer can do right now
+grid train where                                  # which grids training can use (LAN and hosted)
+grid train init [--pack <name>] [--dest <dir>] [--config <path>] [--force]
+grid train packs [--json]                         # bundled task packs for business data
+
+grid train sft [--backend auto|mlx|torch] [--iters <n>] [--run-dir <dir>] [--config <path>]
+grid train run [--config <path>]                  # the feedback loop (GRPO via TRL)
+grid train eval --run <dir> --candidate <name> [--adapter <dir>] [--base <name>] [--config <path>]
+grid train deploy --adapter <dir> [--gate] [--run <dir>] [--node <url>]... [--name <n>] [--config <path>]
+
+grid train collect [--on | --off] [--teacher <model>]... [--sample <f>] [--retain-days <n>]
+                   [--no-redact] [--prune] [--days <n>] [--json]
+grid train autopilot [--stage auto|sft|rl] [--min-examples <n>] [--days <n>]
+                     [--no-deploy] [--ignore-host] [--history] [--config <path>]
+grid train nightly [--no-deploy] [--ignore-host] [--history] [--config <path>]
+grid train outcomes zendesk --subdomain <s> --email <e> [--days 7] [--dry-run]
+grid train schedule [status|on|off] [--at HH:MM] [--name <label>] [--config <path>]
+
+grid train serve [--model <id>] [--adapter-path <dir>] [--host <h>] [--port <p>]
+grid train convert-adapter <source> <dest> [--to mlx|peft]
+grid train pull zendesk|hubspot [--out <file>] [--subdomain <s>] [--email <e>]
+                                [--max-rows <n>] [--status <s>]
+grid train ui [--port 8321]                       # read-only dashboard of runs and curves
+grid train web [--port 8322] [--host 127.0.0.1]   # the point-and-click interface
+```
+
+Training is the other half of owning your machines: the grid already runs inference on them, and
+these verbs make it **train small models on your own data, on the same machines, and serve the
+result only if it is better**. Nothing is uploaded anywhere — training is local in every topology
+([topologies](./topologies.md) covers why inference can be hybrid and training is not).
+
+**Start with `grid train doctor`.** It answers for two rungs separately, because they need
+different things:
+
+```text
+What this computer can do now
+  ok learn from answers your team already wrote (`grid train sft`)  ·  MLX on this Mac's own chip
+  NO learn from feedback (`grid train run`)  ·  needs an engine that serves the training contract
+                                                — `grid train serve` on a Mac, or vLLM
+Ready for stage one. `grid train sft` works on this computer right now.
+```
+
+(The first line reads `torch on this machine` off Apple Silicon.) It exits 0 when either rung is
+ready, so a machine that can do stage one is not reported as a failure.
+
+- **`grid train sft`** is imitation: it learns from the answers your team already wrote and needs
+  nothing but the machine in front of you. `--backend auto` picks MLX on Apple Silicon and torch
+  elsewhere.
+- **`grid train run`** is the feedback loop (GRPO through TRL). It needs an engine that returns the
+  **token ids it sampled and their logprobs** — the *rollout contract*. vLLM returns them natively;
+  `grid train serve` makes an Apple-Silicon Mac serve the same contract, which is why an all-Mac
+  office needs no CUDA and no vLLM. A chat-only API yields zero trainable samples, and `doctor`
+  says so before a night is wasted.
+
+### The gate
+
+`grid train eval` and `grid train deploy --gate` are the same check: score the model you serve
+today and the trained candidate over held-out work with the same graders training used, greedy
+both sides, per grader. A candidate that gains less than **0.01** overall, or loses more than
+**0.02** on any single grader, is refused — "tidier but less correct" does not ship.
+
+The candidate is judged as **weights**, not as a name: the incumbent is scored first, then the
+adapter is loaded under a checking name (`<name>-candidate`), then scored. Asking an engine for the
+candidate's serving name would score whatever weights it already holds. Afterwards the check puts
+back what the node was serving — always, whatever the verdict — so a check is an observation, and
+the winner is deployed once, afterwards. Each run writes `eval-card.{json,html}`: the per-grader
+table plus the same work answered by both models.
+
+### The loop that runs itself
+
+```bash
+grid train collect --on            # keep the work the grid does — local files, redacted, pruned
+grid train autopilot               # one unattended cycle over what has accumulated
+grid train schedule on --at 23:00  # and have this computer run it every night
+```
+
+`collect` is **off until you turn it on**. What it keeps is stored under `~/.grid/capture`, scrubbed
+of emails, phone numbers and card numbers unless you pass `--no-redact`, sampled with `--sample`,
+and pruned on `--retain-days`. `grid train collect` with no flags prints what has accumulated.
+
+An example earns its place from a signal, never from the model's own confidence: a human
+**correction** (weight 1.0) outranks a **stronger model's** answer (`--teacher <model>`, 0.8), which
+outranks **sent as-is** (0.6); a **rejected** answer is kept for the record and never imitated; and
+**a model's own unjudged output is never trained on**, which is the rule that stops a model
+agreeing with itself into drift. Apps report the human's verdict by quoting back the
+`X-Grid-Request-Id` header they got with the answer to `POST /v1/feedback`.
+
+`grid train outcomes` closes the loop without asking anyone to click anything. The helpdesk
+already holds the reply that was actually sent and whether the ticket stayed solved, so this reads
+it back and writes the same three verdicts a person would: sent as we wrote it (weaker), rewritten
+by a person (their text becomes the truth), or never sent — never imitated. It joins an answer to a
+record only when it can prove they are the same piece of work: an app can send
+`X-Grid-Ref: zendesk:12345` with the request, and failing that the reference is read out of the
+prompt — but only when exactly one candidate id is there, because a wrong join teaches the model
+somebody else's answer. **A person's verdict is never overwritten by this.**
+
+`autopilot` is one cycle: check the machine is free, build tonight's dataset from captured work,
+refuse below `--min-examples` (120 by default — waiting is the correct outcome, not a failure),
+train, prove it, and serve it only if it won. `--history` prints the past cycles instead. `nightly`
+is the same shape for a dataset someone prepared rather than one captured.
+
+`schedule on` installs a real per-user job — a **LaunchAgent** on macOS, a **`systemd --user`
+timer** on Linux — after smoke-testing that the command can start at all; `off` deletes what it
+wrote. It refuses to take over a job another folder owns (use `--name` to run several models on one
+machine), and where there is no per-user scheduler it prints the cron line instead of pretending it
+installed one. Output goes to `autopilot.log` beside the model.
+
+**Training waits for the machine to be free** — mains power and an idle keyboard, checked in code.
+`--ignore-host` overrides it for a run you are watching.
+
+### For people who do not use a terminal
+
+`grid train web` is the same engine with none of the vocabulary: pick the job, upload an export,
+tick what a good answer looks like in plain language (it generates real Python graders), pick
+machines, watch the curve, and see a before/after card whose "start using this" button only exists
+if the model won. It writes an ordinary `grid-train.toml` and launches an ordinary `grid train`
+subprocess, so the two surfaces cannot drift into separate products.
+
+It binds to loopback by default. `--host 0.0.0.0` shares it with colleagues and prints a link with
+a code in it — that page shows real customer data and can start jobs on the machine, so on a shared
+network only that link works (`GRID_TRAIN_WEB_TOKEN` pins the code across restarts).
+
+`grid train ui` is the read-only dashboard: every run, its reward and held-out-eval curves.
+
+### Data to start from
+
+`grid train packs` lists bundled starting points for business data — `support-replies` and
+`sales-triage` — and `grid train init --pack support-replies` installs one (config, a prepare
+script, graders, and sample rows) into `./<pack>/`. `grid train init` on its own writes a starter
+`grid-train.toml`. The browser flow offers four jobs, including sorting work into your own
+categories and anything else your team answers in writing.
+
+`grid train pull zendesk|hubspot` fetches the examples instead of asking someone to export them.
+The token comes from `ZENDESK_API_TOKEN` / `HUBSPOT_ACCESS_TOKEN`, is never written to disk and
+never appears in a URL or an error; what lands on disk is raw rows, which go through exactly the
+same preparation and the same refusals as an uploaded file.
+
+### Where it runs
+
+`grid train where` prints the grids training can use in **both modes** — a LAN grid found on this
+network, and a hosted one you are signed in to — with the honest asymmetry: through the relay the
+trainer **cannot push weights back** to NAT'd nodes, so relay training keeps its serving machines
+reachable or accepts slower off-policy learning. `grid train convert-adapter` moves a LoRA adapter
+between the torch/peft and MLX layouts, so a trainer on one backend can feed nodes on the other.
+
+Runs land in `~/.grid/artifacts/train/`; browser workspaces in `~/.grid/train-workspaces/<slug>/`,
+each holding the upload verbatim, the generated `rewards.py`, the `grid-train.toml`, and the run.
+
+See [ADR 0019](./adr/0019-rl-training-plane.md) for the decisions and the honest limits,
+[start-on-a-mac](./start-on-a-mac.md) for the twenty-minute path from nothing to a trained model,
+[two-node-training](./two-node-training.md) for the smallest real fleet, and
+[`train/README.md`](../train/README.md) for what reinforcement learning is doing here at all.
 
 ## Members
 
@@ -530,8 +720,8 @@ grid price show [--grid <grid>] [--json]
 uses to bill and to pick the cheapest engine (it replaces the deprecated advertise-only
 `grid join --pricing-input/--pricing-output`). Rates are **USD per 1,000,000 tokens**; `--cache`
 defaults to 0. `--type` defaults to `chat`; `image`/`video` aren't priced yet (the command rejects
-them). `[grid]`/`--grid` follows the usual selection (active grid when omitted) and the call uses the
-grid's per-grid access token.
+them). `--grid` follows the usual selection (active grid when omitted) and the call uses the grid's
+per-grid access token.
 
 `set` can also record optional model **metadata** on the same relay endpoint — `--name` (display
 name), `--maker` (vendor), `--status` (e.g. `available`), and `--context-length` (max tokens). Each is
@@ -626,14 +816,30 @@ fixed-priority-chain decisions.
 ## Engine Setup
 
 ```
-grid engine install llama.cpp          # default text engine
-grid engine install comfyui            # default media engine
-grid engine pull <bundle>              # ComfyUI media bundle: image_generation, image_editing, i2v
-grid engine ls [grid] [--json]         # live engines joined to a grid (same view as grid engines)
+grid engine install llama.cpp [--from-source] [--target-sm <sm_XX>]   # default text engine
+grid engine install comfyui                    # default media engine
+grid engine pull <bundle>                      # ComfyUI media bundle: image_generation, image_editing, i2v
+grid engine status [--port 8188]               # ComfyUI: installed, its venv, output dir, bundles, running?
+grid engine start [--port 8188] [--detach]     # start ComfyUI (blocks unless --detach)
+grid engine stop                               # stop it
+grid engine ls [grid] [--json]                 # live engines joined to a grid (same view as grid engines)
 ```
 
 Grid has no inference engine of its own. These commands install open-source default
 engines so a bare machine can join a grid without Ollama, LM Studio, or vLLM.
+`--from-source` builds llama.cpp locally (Metal on macOS, CUDA on Linux NVIDIA) instead of
+downloading a release, and `--target-sm` pins the CUDA architecture for that build. The
+`status`/`start`/`stop` trio operates the built-in ComfyUI media engine.
+
+## Agent Setup
+
+```
+grid agent install hermes | codex [--force]   # install an agent CLI (no Homebrew, no admin rights)
+grid agent status                             # whether each is installed, and where
+```
+
+Mode-agnostic and grid-independent: these install the agent CLIs a machine may want alongside a
+grid, into Grid's own prefix, and report where they landed.
 
 ## Aliases
 
@@ -705,4 +911,11 @@ grid engine install llama.cpp
 grid pull qwen36-35b-a3b-mtp
 grid join --serve qwen36-35b-a3b-mtp
 grid chat -m qwen36-35b-a3b-mtp "hello"
+```
+
+And to teach a model of your own on the same machines:
+
+```bash
+grid train doctor                     # what this computer can do now
+grid train web                        # or: grid train init --pack support-replies
 ```
