@@ -106,15 +106,15 @@ def collect_device_info() -> dict:
         hinfo = None
 
     # chip + model: Apple exposes both; on NVIDIA/CPU model is null and brand is
-    # the CPU brand string.
+    # the CPU brand string (passed as `chip` so bandwidth._cpu_bandwidth can read it).
     if backend == "metal":
         model, chip = apple.describe_chip()
         model = model or None
         cpu_brand = chip or host.cpu_brand()
     else:
-        chip = ""
+        chip = host.cpu_brand()
         model = None
-        cpu_brand = host.cpu_brand()
+        cpu_brand = chip
 
     if backend == "metal":
         gpus = [_apple_gpu_entry(chip)]
@@ -133,6 +133,7 @@ def collect_device_info() -> dict:
         # Memory bandwidth is the decode bottleneck; null when the chip/GPU isn't recognised, so the
         # ranker falls back to a coarse per-backend default rather than a confidently-wrong number.
         "mem_bandwidth_gbps": bandwidth.estimate(device_class, chip, gpus),
+        "compute_gflops": bandwidth.estimate_compute_gflops(device_class, gpus, host.physical_cores(), chip),
         "detected": budget.detected,
         # ── Full inventory ──
         "machine": {

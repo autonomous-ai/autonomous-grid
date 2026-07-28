@@ -366,6 +366,22 @@ def test_info_env_prints_openai_compat_without_real_secret(monkeypatch, tmp_path
     assert 'OPENAI_API_KEY="local-grid"' in out
 
 
+def test_device_info_command_emits_the_contract(capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["device-info", "--json"])
+    assert args.handler is cli.cmd_device_info
+
+    assert cli.cmd_device_info(args) == 0
+    info = json.loads(capsys.readouterr().out)
+
+    # The full inventory shape: the decision fields plus the raw hardware blocks.
+    # Shape only; values are whatever this machine happens to be.
+    for key in ("device_class", "backend", "usable_bytes", "mem_bandwidth_gbps", "compute_gflops", "machine", "cpu", "memory", "disk", "gpus"):
+        assert key in info
+    assert isinstance(info["usable_bytes"], int)
+    assert info["cpu"]["physical_cores"] <= info["cpu"]["logical_threads"]
+
+
 def test_cli_accepts_engine_and_model_commands():
     parser = cli.build_parser()
 
