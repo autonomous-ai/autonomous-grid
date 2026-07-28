@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
 
@@ -165,7 +166,19 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # The read-merge-write is serialized so two concurrent joins can't lost-update the union (ADR 0010).
     with file_lock(run_records.record_path(network_id, engine_id)):
         live = _live_records(network_id)  # normally just the singleton; also legacy `engine-<uuid>` on upgrade
-        merged_specs, changed = _merge_engines(_engine_union(live), specs)
+        # What this join INHERITS, which is not the same question as what is running. A re-join is
+        # additive, so it carries the identity's last known configuration forward even when nothing is
+        # live — otherwise `grid join --at <second-engine>` onto a crashed (or zombie'd) identity would
+        # silently re-serve only the second engine and drop the one already joined. `live` alone still
+        # decides the no-op gate and hot-reload-vs-respawn below; `base` decides only what is carried.
+        # Union, media, bundles and concurrency inherit TOGETHER, and the alias guard reads `base` too:
+        # aliases are positionally keyed to a record's models and are NOT carried by the spec merge, so
+        # inheriting an aliased union would drop its aliases. It is refused with the existing
+        # leave-then-rejoin instruction instead. (`meta_name` is not inherited by either path — it comes
+        # from `--name` or the hostname.) Same shape as `_leave_one_engine`'s
+        # `survivors or list(records.values())` (ADR 0010).
+        base = live or list(run_records.read_records(network_id).values())
+        merged_specs, changed = _merge_engines(_engine_union(base), specs)
         # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
         # key store and swap the bearer in place (issue 05), but rotation deliberately RESPAWNS so the
         # operator has certainty the new key is live — never a no-op, never SIGHUP. Kept at the call sites
@@ -173,9 +186,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         rotated_live = key_rotated and any(
             spec.get("api_kind") == args.api for spec in _engine_union(live)
         )
-        base_media = any(bool(rec.get("media")) for rec in live)
+        base_media = any(bool(rec.get("media")) for rec in base)
         media = base_media or media
-        base_bundles = list(dict.fromkeys(b for rec in live for b in (rec.get("media_bundles") or [])))
+        base_bundles = list(dict.fromkeys(b for rec in base for b in (rec.get("media_bundles") or [])))
         bundles = list(dict.fromkeys(base_bundles + list(getattr(args, "bundles", []) or [])))
         # An idempotent re-join (no new engine/model, and no display-name/media/bundle change) is a no-op,
         # so it doesn't needlessly restart a live identity. A change in ANY of those does respawn to apply
@@ -195,7 +208,7 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 0
-        _reject_unserveable_union(merged_specs, args, live)
+        _reject_unserveable_union(merged_specs, args, base)
         _warn_shadowed_models(merged_specs)  # the serve loop logs this too; show it on the operator's terminal
 
         record = _build_record(
@@ -207,8 +220,8 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # doesn't re-pass --max-concurrency must NOT reset it to the default 1 — that would silently
         # collapse an 8-worker engine to one on the next respawn (it's harmless to over-carry: the value is
         # advertised, and the reload pins the advertised capacity to the actual live pool anyway).
-        if getattr(args, "max_concurrency", None) is None and live:
-            record["max_concurrency"] = _identity_field(live, "max_concurrency")
+        if getattr(args, "max_concurrency", None) is None and base:
+            record["max_concurrency"] = _identity_field(base, "max_concurrency")
         # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place — an appended
         # API engine reloads too now that its bearer is re-read from the key store (issue 05). Fall back to
         # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, a
@@ -675,10 +688,17 @@ def _list_vendor_models(kind: str, base_url: str, key: str) -> set[str]:
 def _live_records(network_id: str) -> list[dict[str, object]]:
     """Every remote run record for this grid whose detached process is still alive. Normally that's just
     the singleton ``remote.json``; on upgrade it also catches legacy ``engine-<uuid>`` records so the join
-    can adopt their engines and stop their processes (they share the token node_id)."""
+    can adopt their engines and stop their processes (they share the token node_id).
+
+    "Alive" is ``record_alive``, not a bare ``pid_alive`` (grid-leave issue 08): a **zombie** pid and a
+    **recycled** pid both answered "alive" to the old check, and the idempotent re-join gate above
+    turned that into "Already serving …; nothing to append." over an engine that had been dead for
+    hours — reported at exit 0, with `grid models` empty. A record that names no running serve child of
+    ours is dead, so the join respawns.
+    """
     return [
         rec for rec in run_records.read_records(network_id).values()
-        if run_records.pid_alive(run_records.recorded_pid(rec) or 0)
+        if run_records.record_alive(rec)
     ]
 
 
@@ -832,12 +852,28 @@ def _hot_reload_identity(
     between the liveness check and the signal (``os.kill`` raises ``ProcessLookupError``); the residual
     PID-reuse TOCTOU (same window, pid recycled to an unrelated process) is shared with
     ``run_records.terminate_pid`` and not fully fixable without pidfd.
+
+    **The verdict check below is load-bearing — do not remove it as redundant** (grid-leave issue 08).
+    It is not a second opinion on ``_live_records``: ``_leave_one_engine`` reaches here through
+    ``survivors or list(records.values())``, which deliberately re-admits exactly the records that
+    filter rejected, so a shrink over a dead identity arrives with a **zombie** in hand. Signals to a
+    corpse *succeed* — they are discarded, not refused — so ``_signal_reload`` would return cleanly and
+    the CLI would print "hot-reloaded — no in-flight requests dropped" over a process dead for hours.
+    A recycled pid is worse still: SIGHUP's default disposition is **terminate**, so signalling one
+    kills an unrelated process the operator owns. Only ``LIVE_OURS`` — and ``LIVE_UNVERIFIED``, which is
+    every record written before tokens existed and must keep behaving exactly as it did — may be
+    signalled.
     """
-    pid = int(live[0].get("pid") or 0)
-    if pid <= 0:  # defensive: a live singleton always has a real pid, and os.kill(0) hits our own group
+    singleton = live[0]
+    pid = run_records.recorded_pid(singleton) or 0
+    if pid <= 0 or not run_records.record_alive(singleton):
         _respawn_identity(network_id, record, live)
         return False
+    # Carry the identity forward: it is the SAME process, so its token and process group are unchanged,
+    # and dropping them here would leave the reloaded record unverifiable until the next respawn.
     record["pid"] = pid
+    record["pid_start_time"] = singleton.get("pid_start_time")
+    record["pgid"] = singleton.get("pgid")
     run_records.write_record(network_id, _REMOTE_IDENTITY, record)
     try:
         _signal_reload(pid)
@@ -856,26 +892,41 @@ def _respawn_identity(
     Aborts (SystemExit) BEFORE spawning if any prior can't be confirmed stopped — a second live child on
     the same token-pinned node_id would clobber it (the original bug). Raises if the fresh process dies
     during start-up: the grid is left not serving either way, so the operator must know.
+
+    Each prior goes through ``terminate_recorded``, which checks identity, rather than ``terminate_pid``
+    on the bare recorded pid (grid-leave issue 08). The check has to live here rather than in the
+    callers: ``_leave_one_engine`` reaches this function through ``survivors or
+    list(records.values())``, which re-admits records ``_live_records`` deliberately rejected. With a
+    bare pid, a shrink over a stale record SIGTERMed a **recycled** pid and then SIGKILLed its whole
+    process group — an unrelated process tree the operator owns — burned the full 25s grace on it, and
+    then aborted with "Could not stop the engine(s) …" (measured). It also reaches the serve child a
+    stopped launcher shim left behind, through the record's stamped process group.
     """
     engine_id = _REMOTE_IDENTITY
     undead: list[str] = []
     for prior in priors:
-        if not run_records.terminate_pid(int(prior.get("pid") or 0)):
-            undead.append(str(prior.get("pid")))
+        outcome = run_records.terminate_recorded(prior)
+        if outcome.survivor:
+            undead.append(run_records.describe_survivor(outcome))
             continue
         prior_id = str(prior.get("engine_id") or "")
         if prior_id and prior_id != engine_id:  # drop a legacy record's file so only the singleton remains
             run_records.record_path(network_id, prior_id).unlink(missing_ok=True)
     if undead:
         raise SystemExit(
-            f"Could not stop the engine(s) already serving this grid (pid(s) {', '.join(undead)}); they may "
+            f"Could not stop the engine(s) already serving this grid ({', '.join(undead)}); they may "
             "still be registered on the relay. Investigate before re-joining — starting another would clobber them."
         )
 
-    record["pid"] = 0
+    record.update(run_records.identity_stamp(0))  # clear pid AND its identity — never a stale token
     run_records.write_record(network_id, engine_id, record)
     proc = _spawn_remote_engine(network_id, engine_id)
-    record["pid"] = proc.pid
+    # Stamp the identity, not just the pid: this is the ONLY stamp a `grid leave` racing this join
+    # can see, because the child's own self-stamp has not run yet (POSIX `flock` gives the lock to
+    # whoever asks, in no order). With it, that leave can verify the pid it is about to signal and —
+    # when `proc.pid` turns out to be a launcher shim that exits without its child — reach the real
+    # serve process through the stamped process group (grid-leave issue 08, residual (b)).
+    record.update(run_records.identity_stamp(proc.pid))
     run_records.write_record(network_id, engine_id, record)
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
@@ -1087,24 +1138,43 @@ def _full_leave_survivor_exit(survivors: list[int], label: str, sent: bool) -> N
     message stays honest on two axes: it never claims "record kept" (false for a record-less swept
     orphan), and it asserts the relay deregister only when it actually landed (``sent``) — else it
     would contradict the "didn't land" caveat ``_full_leave_backstop`` already printed to stderr.
+
+    A **negative** entry names a process *group* rather than a pid — the ``kill(1)`` convention, and
+    the form the teardown reports when the recorded pid was a launcher shim whose session group
+    outlived it (grid-leave issue 08). Rendering one as a "pid" would hand the operator
+    ``kill -9 <group leader>``, and the group leader is exactly the process that is already gone.
+    Groups are POSIX-only (``process_identity.group_alive`` is ``False`` on Windows, where
+    ``taskkill /T`` already takes the whole tree), so a negative entry can never reach the Windows
+    remedy below.
     """
-    pids = ", ".join(map(str, survivors))
+    named = ", ".join(_describe_survivor(value) for value in survivors)
     outcome = (
-        f"deregistered {label} from the relay, but could not stop serve child(ren) pid(s) {pids}"
+        f"deregistered {label} from the relay, but could not stop serve child(ren): {named}"
         if sent
-        else f"could not stop serve child(ren) pid(s) {pids} (and the relay deregister didn't land — "
+        else f"could not stop serve child(ren): {named} (and the relay deregister didn't land — "
         "see above)"
     )
     # The remedy has to be a command the operator can actually run. `kill -9` was safe while the argv
     # sweep was POSIX-only; the sweep reaches Windows now, so this line does too — and that is the last
     # place to print a command that doesn't exist on the machine reading it.
+    first = survivors[0]
     remedy = (
-        f"taskkill /F /PID {survivors[0]}" if sys.platform == "win32" else f"kill -9 {survivors[0]}"
+        f"taskkill /F /PID {first}" if sys.platform == "win32"
+        else f"kill -9 -{-first}" if first < 0
+        else f"kill -9 {first}"
     )
     raise SystemExit(
         f"grid leave: {outcome}. A retried `grid leave` will target them again; investigate before "
         f"re-joining (e.g. `{remedy}`)."
     )
+
+
+def _describe_survivor(value: int) -> str:
+    """One surviving target, named for what it actually is. A **negative** value means a process
+    group — the ``kill(1)`` convention, and how ``_full_leave_reap`` carries ``Teardown.is_group``
+    through a plain list of ints. Mirrors ``run_records.describe_survivor``, which the local leave
+    uses on the ``Teardown`` directly (it has one per engine and never needs to flatten them)."""
+    return f"process group {-value}" if value < 0 else f"pid {value}"
 
 
 def _recorded_pids(records: dict[str, dict[str, object]]) -> set[int]:
@@ -1126,9 +1196,20 @@ def _recorded_pids(records: dict[str, dict[str, object]]) -> set[int]:
     return pids
 
 
+class _ReapResult(NamedTuple):
+    """What one full-leave reap established. Named rather than a bare tuple because ``survivors`` and
+    ``unverified`` are both ``list[int]`` and mean opposite things — one is "still running and we
+    failed to stop it", the other "we could not tell" — so a transposition at the call site would be
+    invisible to a type checker. Same lesson as ``run_records.Teardown`` one level down."""
+
+    survivors: list[int]   # negative entries name a process GROUP (see `_full_leave_survivor_exit`)
+    scanned: bool          # False ⇒ the argv sweep could not read the process table
+    unverified: list[int]  # record pids neither stopped as ours nor proven clean
+
+
 def _full_leave_reap(
     network_id: str, label: str, records: dict[str, dict[str, object]]
-) -> tuple[list[int], bool]:
+) -> _ReapResult:
     """The reap half of a full leave: SIGTERM→SIGKILL the recorded child(ren), then argv-sweep the
     process table for any live serve child a stale/missing record could never reach (the reproduced
     orphan bug) plus a record-less orphan. Prints the reaped/foreign notes. Returns
@@ -1138,6 +1219,12 @@ def _full_leave_reap(
     the process table, so the caller qualifies its success line instead of claiming a
     teardown it never verified. The backstop + report stay in the caller (so ``cmd_remote_leave``
     stays small).
+
+    ``unverified`` names the records the teardown could neither stop **as ours** nor prove clean — a
+    pid recycled onto an unrelated process, or long reaped with no session group left to vouch for it.
+    Alone that is routine and harmless, because the argv sweep is the other net; together with
+    ``scanned=False`` it means this leave checked **nothing**, which must not read as success
+    (grid-leave issue 08).
     """
     from remote import orphan_sweep  # argv sweep (lazy: remote.* imports stay in-handler)
     from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
@@ -1155,10 +1242,15 @@ def _full_leave_reap(
         print(f"Note: couldn't identify launcher processes ({exc}).", file=sys.stderr)
         shim_pids = frozenset()
     record_survivors: list[int] = []
+    unverified: list[int] = []
     for engine_id, record in records.items():
-        survivor = provider._stop_engine(network_id, engine_id, record)
-        if survivor:  # survived even SIGKILL — its record was kept; the caller fails loud, never "Left"
-            record_survivors.append(survivor)
+        outcome = provider._stop_engine(network_id, engine_id, record)
+        if outcome.survivor:  # survived even SIGKILL — its record was kept; the caller fails loud, never "Left"
+            # Negated for a process group, so the failure message can name it as one and print a
+            # remedy that works — see `_full_leave_survivor_exit`.
+            record_survivors.append(-outcome.survivor if outcome.is_group else outcome.survivor)
+        elif not outcome.verified:
+            unverified.append(run_records.recorded_pid(record) or 0)
     # The sweep is a best-effort diagnostic; the backstop deregister that follows it is the mechanism
     # of record. Anything unforeseen here — `taskkill` missing from a stripped Windows image, a parse
     # the enumerators didn't anticipate — must degrade to an honest "couldn't check", never propagate
@@ -1180,7 +1272,7 @@ def _full_leave_reap(
             "left it alone.",
             file=sys.stderr,
         )
-    return record_survivors + list(swept.survivors), swept.scanned
+    return _ReapResult(record_survivors + list(swept.survivors), swept.scanned, unverified)
 
 
 def _full_leave_teardown(
@@ -1192,11 +1284,43 @@ def _full_leave_teardown(
     deregister, raising loud (via ``_full_leave_survivor_exit``) if a child survived even SIGKILL.
     Returns ``(sent, scanned)`` so the caller prints its own success line — the wording differs
     between a bare leave and a last-engine drop."""
-    survivors, scanned = _full_leave_reap(network_id, label, records)
+    reaped = _full_leave_reap(network_id, label, records)
     sent = _full_leave_backstop(rec, records, session, network_id, label)
-    if survivors:  # a live child survived SIGKILL — its record was kept; fail loud, never "Left"
-        _full_leave_survivor_exit(survivors, label, sent)
-    return sent, scanned
+    if reaped.survivors:  # a live child survived SIGKILL — its record was kept; fail loud, never "Left"
+        _full_leave_survivor_exit(reaped.survivors, label, sent)
+    if reaped.unverified and not reaped.scanned:  # both nets failed at once — this leave checked nothing
+        _full_leave_unchecked_exit(reaped.unverified, label, sent)
+    return sent, reaped.scanned
+
+
+def _full_leave_unchecked_exit(unverified: list[int], label: str, sent: bool) -> None:
+    """Fail a leave that could neither confirm its recorded child stopped nor scan for a stray one.
+
+    Two independent nets normally catch a stranded serve child: the run record (stop it by identity)
+    and the argv sweep (find it in the process table). Each failing alone is fine and silent — that is
+    what the other is for. Both failing at once is the reported bug: leave printed ``Left <grid>.``
+    with a footnote and exited **0** having stopped nothing and confirmed nothing, so the operator had
+    no signal to act on while a live orphan kept heartbeating as a provider (grid-leave issue 08,
+    residual (b)).
+
+    The record is **not** kept here, unlike the survivor case. There is no live process it is a handle
+    to — that is the whole point — and an unverifiable record stays unverifiable forever, so keeping it
+    would recreate exactly the never-converging retry loop this issue exists to end. A retry runs the
+    bare idempotent-repair path (sweep + backstop) instead, which succeeds as soon as the process table
+    is readable again.
+    """
+    pids = ", ".join(str(pid) for pid in unverified if pid) or "the recorded child"
+    deregistered = (
+        f"deregistered {label} from the relay, but"
+        if sent
+        else f"could not deregister {label} from the relay (see above), and"
+    )
+    raise SystemExit(
+        f"grid leave: {deregistered} could not confirm the serve child for record pid(s) {pids} was "
+        "stopped, and could not read the process table to look for a stray one — so nothing about this "
+        "box was verified. Retry `grid leave` once processes are listable "
+        f"({'tasklist' if sys.platform == 'win32' else 'ps'} is the check)."
+    )
 
 
 def _full_leave_report(label: str, had_records: bool, sent: bool, scanned: bool) -> None:
@@ -1321,7 +1445,11 @@ def _leave_one_engine(
     leave; otherwise the singleton is respawned serving the reduced union (no backstop — still a
     provider). Operates on the live record(s), adopting any legacy sibling.
     """
-    survivors = [rec for rec in records.values() if run_records.pid_alive(run_records.recorded_pid(rec) or 0)]
+    # `record_alive`, not a bare `pid_alive`: a zombie or a recycled pid is not a serving child
+    # (grid-leave issue 08). The `or list(records.values())` fallback then re-admits exactly those
+    # records so the union can still be rebuilt — which is why `_hot_reload_identity` and
+    # `_respawn_identity` check identity again themselves before signalling anything.
+    survivors = [rec for rec in records.values() if run_records.record_alive(rec)]
     survivors = survivors or list(records.values())
     union = _engine_union(survivors)
     to_drop = _drop_spec(union, args.engine, label)

@@ -64,6 +64,40 @@ def _marked_child(network_id: str):
         proc.wait(timeout=30)  # reap our handle so the pid can't be misread as live
 
 
+def test_process_identity_reads_a_real_windows_process():
+    """The Windows `ctypes` half of the identity probe, against the real kernel (grid-leave issue 08).
+
+    Everything else that covers `shared/process_identity`'s Windows branch runs on Linux/macOS against
+    a hand-written `_FakeKernel32`, which by construction cannot catch a wrong `wintypes` field name,
+    a bad bit-shift, a `restype` truncation, or a handle leak. This is the only place the real
+    `OpenProcess`/`GetProcessTimes`/`CloseHandle` sequence executes — and the identity token it
+    produces is what decides whether `grid leave` may signal a process, so "it compiles" is not enough.
+
+    Uses the live marked child this file already spawns rather than the pytest process itself: a
+    parent reading its own creation time exercises none of the open-a-foreign-process path.
+    """
+    from shared import process_identity
+
+    with _marked_child(_network_id("identity")) as proc:
+        token = process_identity.process_start_time(proc.pid)
+        assert token, "no creation time for a process we are looking straight at"
+        assert token == process_identity.process_start_time(proc.pid), "the token is not stable"
+        # Windows has no POSIX-style zombie, so this must be False for a live process AND cost
+        # nothing — `record_verdict` calls it on every record.
+        assert process_identity.is_zombie(proc.pid) is False
+        # A pid the kernel has no process for yields no token — never a placeholder, which is the
+        # rule the whole upgrade path rests on.
+        assert process_identity.process_start_time(process_identity.PID_MAX) is None
+        # Windows has no process groups here, so the group backstop is inert by construction.
+        assert process_identity.process_group_of(proc.pid) is None
+        assert process_identity.group_alive(proc.pid) is False
+
+    # Repeated across a killed-and-reaped pid: proves the handle is released each time rather than
+    # leaking one per probe (this runs inside `terminate_pid`'s wait loop in production).
+    for _ in range(50):
+        process_identity.process_start_time(proc.pid)
+
+
 def test_win_process_output_returns_many_parseable_rows():
     """The raw enumerator, before any matching. Two things are asserted that only a real run can show:
     the output parses as `<pid> <ppid> <command line>` rows, and there are MANY of them.

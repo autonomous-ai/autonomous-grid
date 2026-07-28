@@ -57,8 +57,8 @@ import pytest
 
 import cli
 from local import runtime
-from remote import credentials
-from shared import paths, run_records, state
+from remote import credentials, orphan_sweep
+from shared import paths, process_identity, run_records, state
 
 # The sweep half of the old skip reason is gone — grid-leave issue 06 gave the argv sweep Windows
 # parity, and `tests/test_windows_orphan_sweep.py` proves it against the real process table. What
@@ -409,15 +409,31 @@ def spawned():
         relay.server_close()
 
 
+# A **real** launcher shim: it re-execs the CLI as a child and waits for it, exactly like the Nuitka
+# `--onefile` bootstrap on the Linux build and the uv/pip trampoline on Windows. `start_new_session`
+# is applied to the shim, so the shim is the session/group leader and the real serve child is a
+# *member* of its group — which is the whole reason `proc.pid` can name something that is not the
+# engine, and why the run record stamps a `pgid` beside the pid.
+_LAUNCHER_SHIM = (
+    "import subprocess, sys; "
+    "sys.exit(subprocess.run([sys.executable, '-m', 'cli'] + sys.argv[1:]).returncode)"
+)
+
+
 @pytest.fixture
 def live_engine(monkeypatch, tmp_path, spawned):
     """Seed a remote-mode ``GRID_HOME``, start the relay double, spawn the **real** detached serve
     child, and block until the relay sees it as a live provider. Yields a factory (the per-regime
-    network id has to be unique); ``spawned`` guarantees teardown of whatever it started."""
+    network id has to be unique); ``spawned`` guarantees teardown of whatever it started.
+
+    ``reap=False`` skips the reaper thread so a killed child becomes a **real zombie** — the opposite
+    of what every other regime here wants, and the point of the zombie regime. ``shim=True`` spawns
+    through a real launcher process, so the recorded pid is not the serve child's.
+    """
     relays = spawned.relays
     procs = spawned.children
 
-    def start(tag: str) -> _LiveEngine:
+    def start(tag: str, *, reap: bool = True, shim: bool = False) -> _LiveEngine:
         # A unique network id per regime, because the argv sweep under test is the REAL one: it
         # enumerates the whole host process table. A unique id guarantees this test can never match
         # — and kill — a `grid join` child the developer is actually running, nor a leftover from a
@@ -433,7 +449,8 @@ def live_engine(monkeypatch, tmp_path, spawned):
         # Under pytest ``sys.argv[0]`` is `.../bin/pytest` — an executable file — so the real
         # ``runtime._cli_subprocess_command()`` would spawn `pytest __remote-engine ...`. Everything
         # else about the spawn stays real: the argv the sweep matches, the detached session, the log.
-        monkeypatch.setattr(runtime, "cli_command", lambda: [sys.executable, "-m", "cli"])
+        command = [sys.executable, "-c", _LAUNCHER_SHIM] if shim else [sys.executable, "-m", "cli"]
+        monkeypatch.setattr(runtime, "cli_command", lambda: command)
         proc = cli.remote_provider._spawn_remote_engine(network_id, _ENGINE_ID)
         procs.append(proc)  # ditto — before the waits below, which can fail
         relay.relay_state.child_pid = proc.pid  # lets each PUT record whether the child was still alive
@@ -441,7 +458,8 @@ def live_engine(monkeypatch, tmp_path, spawned):
         # zombie, ``os.kill(pid, 0)`` keeps succeeding, and ``run_records.pid_alive`` would report a
         # dead child as alive — which would make leave's terminator burn its whole 25s grace and
         # then declare a phantom survivor. Measured during diagnosis.
-        threading.Thread(target=proc.wait, daemon=True).start()
+        if reap:
+            threading.Thread(target=proc.wait, daemon=True).start()
 
         _wait_until(lambda: relay.relay_state.overview_live() or proc.poll() is not None)
         assert relay.relay_state.overview_live(), (
@@ -582,6 +600,123 @@ def test_real_child_leave_kills_the_child_and_deregisters(live_engine, capsys, r
     else:  # orphan
         assert reaped_line in out
         assert f"No engines were tracked for {_GRID_NAME}; deregistered it from the relay" in out
+
+
+def test_real_child_leave_converges_over_a_real_zombie(live_engine, capsys):
+    """`grid leave` finishes over a **real** corpse (`.scratch/grid-leave/` issue 08, residual (c)).
+
+    Reproduced in the field on a Docker host whose PID 1 is `tail -f /dev/null` and therefore never
+    reaps: every serve-child death leaves a permanent `Z (zombie)` entry, and `os.kill(pid, 0)` calls
+    one alive. Leave's terminator then SIGTERMed the corpse, waited out the full 25s stop grace,
+    SIGKILLed it, still read it as alive, and reported a survivor — so on this branch the
+    honest-teardown gate kept the record and failed **every retry, forever**. The argv sweep cannot
+    rescue it either: a zombie's command line is empty, so it matches nothing.
+
+    Built with a real zombie rather than a fake: the fixture's reaper thread is disabled, so this test
+    process stays the child's unreaping parent — the same relationship a container PID 1 has to it.
+    """
+    engine = live_engine("zombie", reap=False)
+    child_pid = engine.proc.pid
+
+    os.kill(child_pid, signal.SIGKILL)
+    assert _wait_until(lambda: process_identity.is_zombie(child_pid)), (
+        f"pid {child_pid} never became a zombie (state via ps: "
+        f"{process_identity.process_facts(child_pid)}), so this regime is void"
+    )
+    assert run_records.pid_alive(child_pid), "a zombie must still answer os.kill(pid, 0) — that IS the bug"
+
+    capsys.readouterr()
+    started = time.monotonic()
+    assert cli.main(["leave"]) == 0, "leave failed over a corpse — the never-converging retry loop"
+    elapsed = time.monotonic() - started
+
+    assert f"Left {_GRID_NAME}." in capsys.readouterr().out
+    assert not engine.record_path.exists(), "the record was kept, so every retry would fail the same way"
+    assert elapsed < 15.0, (
+        f"took {elapsed:.1f}s: the teardown burned its stop grace signalling a process that had "
+        "already exited"
+    )
+
+
+def _serve_children_in_group(pgid: int, network_id: str) -> list[int]:
+    """Pids in process group ``pgid`` whose argv is a serve child of ``network_id``, asked of the
+    host's own ``ps``. This is the TEST's tool for naming the process it must assert about; the code
+    under test is separately denied any process table at all.
+
+    Matched by argv rather than by "everything in the group", because the group also holds short-lived
+    helpers — the one-shot ``ps`` the identity stamp runs, for one — and a test that waited for those
+    to die would be asserting about the wrong processes.
+    """
+    out = subprocess.run(
+        ["ps", "-A", "-ww", "-o", "pid=,pgid=,command="],
+        capture_output=True, text=True, errors="replace",
+    ).stdout
+    matched = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3 or not parts[0].isdecimal() or not parts[1].isdecimal():
+            continue
+        tokens = parts[2].split()
+        if int(parts[1]) != pgid or run_records.REMOTE_ENGINE_MARKER not in tokens:
+            continue
+        if tokens[tokens.index(run_records.REMOTE_ENGINE_MARKER) + 1] == network_id:
+            matched.append(int(parts[0]))
+    return matched
+
+
+def test_real_child_group_backstop_reaps_the_engine_when_ps_is_unreadable(
+    live_engine, monkeypatch, capsys
+):
+    """Criterion 6: a real serve child reaped with **no readable process table at all**.
+
+    The regime is residual (b). A `grid leave` can win the record `file_lock` before a just-spawned
+    child runs its pid self-stamp — POSIX `flock` hands the lock to whoever asks, in no order — so the
+    record still holds what the *spawner* wrote. With a launcher shim in play (the Nuitka `--onefile`
+    bootstrap, the uv trampoline) that pid is the **shim's**, and stopping it leaves the real engine
+    running. Until now the only thing that could reach that engine was the argv sweep, so a leave whose
+    `ps` was simultaneously unavailable printed a qualified success over a live orphan and no retry
+    could ever find it.
+
+    The stamped process group closes it: a group id is not recycled while the group has members, so it
+    still names our own descendants after the shim is gone. Here the sweep is switched off entirely, so
+    nothing but the group can do the work.
+    """
+    engine = live_engine("groupreap", shim=True)
+    shim_pid = engine.proc.pid
+    others = [
+        pid for pid in _serve_children_in_group(shim_pid, engine.network_id) if pid != shim_pid
+    ]
+    assert len(others) == 1, (
+        f"expected exactly one serve child under launcher shim {shim_pid}, got {others} — the regime "
+        "depends on the recorded pid NOT being the engine"
+    )
+    child_pid = others[0]
+
+    # Roll the record back to what the spawner wrote, i.e. the state a leave racing the join sees
+    # before the child's self-stamp lands. The child has really started and really self-stamped; this
+    # restores the earlier record rather than faking one that never existed.
+    run_records.update_record(
+        engine.network_id, _ENGINE_ID, **run_records.identity_stamp(shim_pid)
+    )
+    assert run_records.read_record(engine.network_id, _ENGINE_ID)["pid"] == shim_pid != child_pid
+    # Deny the code under test any process table, so only the stamped process group can reach the
+    # engine. Both the seam and its POSIX implementation, so a refactor that stops routing through the
+    # seam fails here rather than quietly passing on the host's real `ps`.
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
+    monkeypatch.setattr(orphan_sweep, "_posix_ps_output", lambda: None)
+
+    capsys.readouterr()
+    assert cli.main(["leave"]) == 0
+
+    # The success line is still qualified, and correctly so: the group proves nothing *this identity*
+    # spawned is left, but a stray from some older lineage would have a different group and only the
+    # sweep could have found it. What matters is that leave stopped the engine and exited 0.
+    assert _SWEEP_UNSCANNED_NOTE in capsys.readouterr().out
+    assert _wait_until(lambda: not run_records.pid_alive(child_pid)), (
+        f"the real serve child (pid {child_pid}) survived `grid leave` — the recorded pid was its "
+        f"launcher shim ({shim_pid}) and no process table was available to find it"
+    )
+    assert not engine.record_path.exists()
 
 
 @pytest.mark.parametrize("owner", ["itself", "newer-child"])

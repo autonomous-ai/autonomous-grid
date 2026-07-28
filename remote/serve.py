@@ -132,7 +132,7 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
     reload bookkeeping's never-raise contract)."""
     try:
         with file_lock(run_records.record_path(grid_id, engine_id)):
-            run_records.update_record(grid_id, engine_id, pid=os.getpid())
+            run_records.update_record(grid_id, engine_id, **run_records.identity_stamp(os.getpid()))
     except (Exception, SystemExit) as exc:  # never let a disk hiccup stop the engine serving
         _warn(f"could not stamp live pid into the run record for {engine_id}@{grid_id}: {exc}")
 

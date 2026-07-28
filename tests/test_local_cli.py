@@ -2983,8 +2983,12 @@ def test_join_at_writes_record_and_spawns_detached(monkeypatch, tmp_path):
 
     class FakePopen:
         def __init__(self, cmd, **kwargs):
-            spawned["cmd"] = cmd
-            spawned["kwargs"] = kwargs
+            # Only the engine spawn — patching `subprocess.Popen` catches every subprocess the CLI
+            # runs, and the identity stamp shells out to `ps` right after this one (grid-leave issue
+            # 08). See `_mock_remote_spawn` for the same reasoning on the remote side.
+            if "__engine" in cmd:
+                spawned["cmd"] = cmd
+                spawned["kwargs"] = kwargs
             self.pid = 4321
 
     monkeypatch.setattr(cli.provider.subprocess, "Popen", FakePopen)
@@ -4088,8 +4092,10 @@ def test_stop_engine_keeps_record_when_child_survives_sigkill(monkeypatch, tmp_p
     record_file.parent.mkdir(parents=True, exist_ok=True)
     record_file.write_text("{}")
 
-    survivor = run_records.stop_engine("n1", "remote", {"pid": 4242})
-    assert survivor == 4242      # names the surviving pid instead of lying "gone"
+    outcome = run_records.stop_engine("n1", "remote", {"pid": 4242})
+    assert outcome.survivor == 4242  # names the surviving pid instead of lying "gone"
+    assert outcome.is_group is False  # a pid, so the operator's remedy is `kill -9 <pid>`
+    assert outcome.verified is True   # we found it, signalled it, and watched it refuse to die
     assert record_file.exists()  # record kept so a retried `grid leave` still has a handle
 
 
@@ -4138,7 +4144,12 @@ def test_stop_engine_does_not_raise_on_an_unreadable_pid(monkeypatch, tmp_path):
     record_file.parent.mkdir(parents=True, exist_ok=True)
     record_file.write_text("{}")
 
-    assert run_records.stop_engine("n1", "remote", {"pid": "not-a-number"}) == 0
+    outcome = run_records.stop_engine("n1", "remote", {"pid": "not-a-number"})
+    assert outcome.survivor == 0
+    # ...but nothing was *proven*: an unreadable pid names no child we could stop, and this record
+    # carries no `pgid` for the group probe to clear it with. A leave that also could not read the
+    # process table has therefore checked nothing, and must not report success.
+    assert outcome.verified is False
     assert not record_file.exists()
 
 
@@ -4153,8 +4164,259 @@ def test_stop_engine_unlinks_record_when_confirmed_gone(monkeypatch, tmp_path):
     record_file.parent.mkdir(parents=True, exist_ok=True)
     record_file.write_text("{}")
 
-    assert run_records.stop_engine("n1", "remote", {"pid": 4242}) == 0  # confirmed gone
+    assert run_records.stop_engine("n1", "remote", {"pid": 4242}).survivor == 0  # confirmed gone
     assert not record_file.exists()  # record unlinked on confirmed death
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [0,          # the join write-race's placeholder — and `killpg(0, sig)` is the CALLER's own group
+     -1, -4242,  # not a group id; on `os.kill` a negative number already means "a group"
+     2**31, 2**63,  # out of range: `os.killpg` raises OverflowError, which no caller catches
+     None, True, False, "4242", 4242.0, [], {}],  # hand-edited / corrupt / wrong type
+)
+def test_recorded_pgid_refuses_everything_that_cannot_name_a_process_group(stored):
+    """The record boundary of the group backstop, and the highest-consequence guard in this feature.
+
+    `grid leave` may signal a whole process **group** to reach a serve child whose launcher shim has
+    exited (`.scratch/grid-leave/` issue 08, residual (b)). `os.killpg(0, SIGKILL)` addresses **the
+    caller's own group**, so a record carrying `pgid: 0` — produced by exactly the write race that
+    leaves `pid: 0` behind — would make leave SIGKILL itself *and the operator's shell job*. This
+    mirrors `recorded_pid`'s discipline: what we cannot prove names a real target is `None`, and
+    `None` never reaches a signal call.
+    """
+    from shared import run_records
+
+    assert run_records.recorded_pgid({"pgid": stored}) is None
+
+
+def test_recorded_pgid_reads_a_real_group_id():
+    from shared import run_records
+
+    assert run_records.recorded_pgid({"pgid": 4242}) == 4242
+    assert run_records.recorded_pgid({}) is None  # absent — an older build's record
+
+
+@pytest.mark.parametrize(
+    ("case", "exists", "facts", "record", "verdict", "alive"),
+    [
+        # The engine we spawned, still running: pid exists and its start time matches what was
+        # stamped beside it. The only verdict that may be signalled.
+        ("ours", True, ("S", "t1"), {"pid": 4242, "pid_start_time": "t1"}, "live-ours", True),
+        # Same pid number, different process: the recycled-pid case. NOT alive (this record does not
+        # name our engine any more) and — decided in `terminate_recorded` — never signalled.
+        ("recycled", True, ("S", "t9"), {"pid": 4242, "pid_start_time": "t1"}, "not-ours", False),
+        # A record written by an older build carries no token. Unverifiable is exactly today's
+        # behaviour, never a new failure: upgrade must not break a live identity.
+        ("no token", True, ("S", "t1"), {"pid": 4242}, "live-unverified", True),
+        # We could not read the process at all (another user's, `ps` unavailable) but it exists.
+        # Unreadable is neither a match nor a mismatch.
+        ("unreadable", True, None, {"pid": 4242, "pid_start_time": "t1"}, "live-unverified", True),
+        # The field-confirmed regime: a corpse nobody reaped. Not alive, so the join gate respawns
+        # instead of printing "Already serving …".
+        ("zombie", True, ("Z", "t1"), {"pid": 4242, "pid_start_time": "t1"}, "zombie", False),
+        ("zombie, no token", True, ("Z", "t1"), {"pid": 4242}, "zombie", False),
+        # A corpse belonging to somebody else: the pid was recycled and its new owner then died
+        # unreaped. "Zombie" would grant it OUR provenance, which is what unlocks signalling the
+        # `pgid` stamped beside it — a group id that, our own process being long gone, may since have
+        # been reused by an unrelated session. Every other state checks the token; this one must too.
+        ("zombie, recycled", True, ("Z", "t9"), {"pid": 4242, "pid_start_time": "t1"}, "not-ours", False),
+        ("gone", False, None, {"pid": 4242, "pid_start_time": "t1"}, "dead", False),
+        ("never stamped", False, None, {"pid": 0}, "dead", False),
+        ("corrupt pid", False, None, {"pid": "nope"}, "dead", False),
+    ],
+)
+def test_record_verdict_says_what_a_records_pid_actually_names(
+    monkeypatch, case, exists, facts, record, verdict, alive
+):
+    """What a run record's ``pid`` field is worth, in one place (`.scratch/grid-leave/` issue 08).
+
+    Every seam that used to ask ``pid_alive(record["pid"])`` was asking the wrong question twice
+    over: a zombie answered "alive", and a recycled pid answered "alive" about somebody else's
+    process. ``pid_alive`` itself is deliberately unchanged — it is the seam this suite fakes to
+    fabricate liveness, and the orphan sweep's exclusions depend on its "does this pid exist"
+    meaning.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: exists)
+    monkeypatch.setattr(
+        process_identity, "process_facts",
+        lambda pid: process_identity.ProcessFacts(*facts) if facts else None,
+    )
+
+    assert run_records.record_verdict(record) == verdict, case
+    assert run_records.record_alive(record) is alive, case
+
+
+def _no_signals(monkeypatch, run_records):
+    """Record every real signal `run_records` sends, and deliver none of them. Signal 0 is not a
+    signal — it is how `pid_alive` asks whether a pid exists — so it is not counted."""
+    sent: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        run_records.os, "kill",
+        lambda pid, sig: sent.append((pid, sig)) if sig else None,
+    )
+    monkeypatch.setattr(run_records, "kill_group", lambda pid: sent.append((pid, "group")))
+    return sent
+
+
+def test_terminate_recorded_never_signals_a_recycled_pid(monkeypatch):
+    """Criterion 4. A record whose pid was recycled onto an unrelated process names an **innocent
+    bystander**, and `grid leave` escalates SIGTERM → SIGKILL of a process *group*. Killing a
+    stranger's process tree because our record went stale is strictly worse than not reaping — the
+    argv sweep is what reaches a real untracked orphan, and it matches by argv rather than by pid.
+
+    The record is treated as stale-dead, but the outcome is **unverified**: we did not stop anything
+    of ours and we cannot prove nothing of ours is running.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        process_identity, "process_facts",
+        lambda pid: process_identity.ProcessFacts("S", "some-other-process"),
+    )
+    sent = _no_signals(monkeypatch, run_records)
+
+    outcome = run_records.terminate_recorded({"pid": 4242, "pid_start_time": "what-we-stamped"})
+
+    assert sent == [], "a recycled pid was signalled — that is somebody else's process"
+    assert outcome.survivor == 0  # nothing of OURS is known to be running
+    assert outcome.verified is False  # ...but we cannot prove that, and leave must say so
+
+
+def test_terminate_recorded_never_signals_the_group_of_a_corpse_that_is_not_ours(monkeypatch):
+    """A recycled pid that is now a **corpse** must not launder provenance onto the stamped `pgid`.
+
+    The group backstop signals a process group it cannot authenticate directly — `killpg(pgid, 0)`
+    proves a group exists, not that it is ours — so it relies entirely on the recorded *pid* having
+    been verified. Classifying any zombie as "ours" without checking its token hands that trust to a
+    stranger's corpse, and the group id stamped beside it is stale by definition: our own process is
+    long gone, and group ids are reused once empty. The result would be SIGTERM then SIGKILL of an
+    unrelated process group the operator owns.
+
+    It must also read as **unverified**, or the leave that did this reports "Left …" having confirmed
+    nothing.
+    """
+    from shared import process_identity, run_records
+
+    # A corpse whose start time is not the one we stamped, reaped during the settle so the group
+    # probe is reached at all.
+    seen = {"probes": 0}
+
+    def _alive(pid):
+        seen["probes"] += 1
+        return seen["probes"] <= 1  # a zombie on the first look, reaped by the time we settle
+
+    monkeypatch.setattr(run_records, "pid_alive", _alive)
+    monkeypatch.setattr(
+        process_identity, "process_facts",
+        lambda p: process_identity.ProcessFacts("Z", "someone-elses-corpse"),
+    )
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: True)
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)
+    sent = _no_signals(monkeypatch, run_records)
+    monkeypatch.setattr(run_records.os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+
+    outcome = run_records.terminate_recorded(
+        {"pid": 4242, "pid_start_time": "what-we-stamped", "pgid": 4242}
+    )
+
+    assert sent == [], "signalled a process group on the authority of a stranger's corpse"
+    assert outcome.verified is False, "reported a proven teardown having confirmed nothing"
+
+
+def test_terminate_recorded_reaps_the_process_group_the_recorded_pid_left_behind(monkeypatch):
+    """Residual (b): the reap that needs no process table.
+
+    A `grid leave` can win the record `file_lock` before a just-spawned child runs its pid
+    self-stamp (POSIX `flock` has no FIFO ordering), so the record holds the **launcher shim**'s pid
+    — the Nuitka `--onefile` bootstrap, the uv trampoline — while the real serve process is a member
+    of that shim's session group. Stopping the shim then leaves the engine running, and until now the
+    only thing that could reach it was the argv sweep, which needs a readable `ps`.
+
+    A process group id is not recycled while the group has members, so the stamped `pgid` still names
+    our own descendants. This is what makes the reap true rather than merely likely.
+    """
+    import signal
+
+    from shared import process_identity, run_records
+
+    state = {"pid": True, "group": True}
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: state["pid"])
+    monkeypatch.setattr(
+        process_identity, "process_facts",
+        lambda pid: process_identity.ProcessFacts("S", "stamped") if state["pid"] else None,
+    )
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: state["group"])
+    signalled = []
+
+    def _kill(pid, sig):
+        signalled.append(("kill", pid, sig))
+        state["pid"] = False  # the shim takes the SIGTERM and exits, orphaning the real child
+
+    def _killpg(pgid, sig):
+        signalled.append(("killpg", pgid, sig))
+        state["group"] = False
+
+    monkeypatch.setattr(run_records.os, "kill", _kill)
+    monkeypatch.setattr(run_records.os, "killpg", _killpg)
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)
+
+    outcome = run_records.terminate_recorded(
+        {"pid": 4242, "pid_start_time": "stamped", "pgid": 4242}
+    )
+
+    assert ("killpg", 4242, signal.SIGTERM) in signalled, (
+        "the recorded pid was stopped but its process group was left running — the real serve child "
+        "survives `grid leave` whenever the recorded pid was a launcher shim"
+    )
+    assert outcome.survivor == 0
+    assert outcome.verified is True
+
+
+def test_terminate_recorded_treats_an_empty_process_group_as_proof_of_a_clean_teardown(monkeypatch):
+    """The read-only half of the backstop, and why it is worth stamping `pgid` even when nothing
+    needs killing: an empty group is **positive evidence** that nothing we spawned is left.
+
+    Without it, a stale-dead recorded pid tells us only that *that* pid is gone — so a leave whose
+    `ps` was also unreadable has genuinely checked nothing and has to say so. With it, the same leave
+    is provably clean and reports success honestly.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)  # stale-dead recorded pid
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: False)
+    sent = _no_signals(monkeypatch, run_records)
+
+    outcome = run_records.terminate_recorded({"pid": 4242, "pgid": 4242})
+
+    assert sent == []
+    assert outcome.verified is True, "an empty session group proves the teardown, with no `ps` needed"
+
+
+def test_terminate_recorded_will_not_signal_a_group_it_cannot_prove_is_ours(monkeypatch):
+    """The deliberate limit on the backstop, stated so it is not mistaken for an oversight.
+
+    Once the recorded pid has been reaped, nothing can verify the group id beside it:
+    `killpg(pgid, 0)` proves a group *exists*, not that it is ours, and a group id IS reusable once
+    its last member exits. A record days old could therefore name a stranger's session. So the group
+    is probed but never signalled here — the argv sweep, which matches by argv content, is what
+    reaches a real orphan — and the outcome is **unverified**, which makes leave loud if the sweep
+    could not run either.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)  # reaped long ago
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: True)
+    sent = _no_signals(monkeypatch, run_records)
+
+    outcome = run_records.terminate_recorded({"pid": 4242, "pgid": 4242})
+
+    assert sent == []
+    assert outcome.survivor == 0
+    assert outcome.verified is False
 
 
 def test_pid_alive_treats_permission_error_as_alive(monkeypatch):
@@ -4911,8 +5173,17 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
     os.kill mock also keeps a stray SIGHUP from ever hitting a real process with the test pid."""
     spawned = {"signals": []}
 
+    from shared import run_records
+
     def fake_popen(cmd, **kw):
-        spawned["cmd"] = cmd
+        # Capture the spawn this helper says it captures, not merely the last one. Patching
+        # `subprocess.Popen` patches the module attribute, so EVERY subprocess the CLI runs lands
+        # here — including the one-shot `ps` the identity stamp uses to read the child's kernel start
+        # time (grid-leave issue 08). Last-wins made `spawned["cmd"]` that `ps` argv. Keying on the
+        # marker also keeps the failure honest: a join that stopped spawning the engine leaves
+        # `spawned["cmd"]` absent, and the assertions raise KeyError rather than passing.
+        if run_records.REMOTE_ENGINE_MARKER in cmd:
+            spawned["cmd"] = cmd
         return type("P", (), {"pid": pid})()
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
@@ -7034,6 +7305,317 @@ def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=Fal
     })
 
 
+def _seed_live_identity_record(*, pid, engines, grid_id="n1"):
+    """The singleton remote identity's run record, for a grid already seeded by
+    `_seed_running_remote_grid` (which mocks the control-plane status the join path resolves)."""
+    from shared import run_records
+
+    run_records.write_record(grid_id, "remote", {
+        "engine_id": "remote", "grid_id": grid_id, "pid": pid, "media": False,
+        "reload_signal": "sighup",
+        "signaling_url": "https://relay.example", "meta_name": "mybox",
+        "engines": engines,
+        "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
+        "endpoint_url": engines[0]["endpoint_url"] if len(engines) == 1 else None,
+    })
+
+
+def _zombie_record_pid(monkeypatch, pid=4242):
+    """Make the seeded record's pid read as a **zombie**: present in the process table, but a corpse.
+
+    Faked at the two seams rather than with a real corpse so the whole join path stays hermetic —
+    `tests/test_process_identity.py` and `tests/test_remote_leave_real_child.py` carry the real
+    zombies. `pid_alive` keeps saying "alive", which is the lie under test.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: p == pid)
+    monkeypatch.setattr(
+        process_identity, "process_facts",
+        lambda p: process_identity.ProcessFacts("Z", "t1") if p == pid else None,
+    )
+
+
+def test_remote_join_respawns_over_a_zombie_instead_of_claiming_it_is_already_serving(
+    monkeypatch, tmp_path, capsys
+):
+    """The field-confirmed lie, closed (`.scratch/grid-leave/` PRD, field confirmation #2).
+
+    In a container whose PID 1 never reaps, every serve-child death leaves a `Z (zombie)` entry, and
+    `os.kill(pid, 0)` reports one as alive. So the idempotent re-join gate counted the record live and
+    printed **"Already serving …; nothing to append."** at exit 0 — while nothing polled the relay and
+    `grid models` stayed empty. The operator's own diagnosis was "join says already joined, grid shows
+    nothing", with no way forward but `pkill`.
+
+    A zombie serves nothing, so the record is dead and the join must respawn.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ])
+    _zombie_record_pid(monkeypatch)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    # The SAME engine, model and display name the record already carries: nothing to append, nothing
+    # to rename — exactly the idempotent re-join the no-op gate is for.
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Already serving" not in out, (
+        "the join no-op gate believed a corpse: it reports success while the box serves nothing, "
+        "which is the exact transcript the container incident produced"
+    )
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"], "no engine was respawned"
+
+
+def test_remote_join_onto_a_dead_identity_keeps_the_engines_it_was_already_serving(
+    monkeypatch, tmp_path
+):
+    """A regression the zombie fix would otherwise introduce, in the very scenario it was filed for.
+
+    The join merges its new engine into the union of the **live** records. Once a zombie stops
+    counting as live that union is empty, so an operator in the field-confirmed container running
+    `grid join --at <second-engine>` would silently re-serve *only* the second engine and drop the one
+    already joined — a quieter failure than the "Already serving" lie it replaced.
+
+    So a re-join inherits the identity's last known configuration when nothing is live; liveness only
+    decides whether it can be hot-reloaded or must be respawned. Union, media, bundles, display name
+    and concurrency are inherited **together** — inheriting the union alone would respawn an engine
+    under a different identity than the one it was serving under, which is worse than not inheriting.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ])
+    _zombie_record_pid(monkeypatch)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "qwen", "--name", "mybox"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert sorted(record["models"]) == ["llama3", "qwen"], (
+        "the engine the box was already serving was dropped by a join that only meant to add one"
+    )
+    assert record["meta_name"] == "mybox"
+
+
+def test_remote_leave_shrink_never_reports_a_hot_reload_it_signalled_into_a_corpse(
+    monkeypatch, tmp_path, capsys
+):
+    """The verdict check inside `_hot_reload_identity` is **load-bearing** — this test is what says so.
+
+    `_leave_one_engine` falls back to `survivors or list(records.values())` so a shrink can still
+    rebuild the union when nothing is live. Once the survivor filter stops counting zombies, that
+    fallback hands the shrink the zombie record itself — and `os.kill(<zombie>, SIGHUP)` **succeeds**
+    (a signal to a corpse is discarded, not refused). So `_signal_reload` returns cleanly and the CLI
+    prints "hot-reloaded — no in-flight requests dropped" over a process that has been dead for hours,
+    while the engine set on the grid never changes.
+
+    Nothing upstream of the signal can prevent this: by construction the fallback re-admits exactly the
+    records the filter rejected. A later "redundant, `_live_records` already filtered it" cleanup of
+    that check would reintroduce the bug, and this test is the tripwire.
+    """
+    import signal
+
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["qwen"], "engine_label": "vllm"},
+    ])
+    _zombie_record_pid(monkeypatch)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["leave", "--engine", "http://h:8000/v1"]) == 0
+
+    out = capsys.readouterr().out
+    assert (4242, signal.SIGHUP) not in spawned["signals"], (
+        "SIGHUP was delivered to a zombie — the reload it claims to have triggered cannot happen"
+    )
+    assert "hot-reloaded" not in out, f"false zero-drop success over a corpse: {out!r}"
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"], "the shrink respawned nothing"
+
+
+def test_remote_join_never_signals_a_pid_that_was_recycled_onto_another_process(
+    monkeypatch, tmp_path
+):
+    """Criterion 4, end to end and on the path that would do the damage.
+
+    A run record outlives its child. On a busy box the pid it names gets reused, and every signal the
+    join/leave path sends is aimed by that number alone: `_signal_reload` sends SIGHUP, whose default
+    disposition is **terminate**, and `_respawn_identity` escalates SIGTERM → SIGKILL of the target's
+    whole process **group**. So a stale record could make `grid join` kill an unrelated process tree the
+    operator owns — the CLI's own record-keeping turned into a weapon.
+
+    The stamped start time makes that detectable: same pid number, different process. Both the
+    hot-reload and the respawn path must decline, leaving the record stale-dead and any real orphan to
+    the argv sweep, which matches by argv content rather than by pid.
+    """
+    from shared import process_identity, run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ])
+    run_records.update_record("n1", "remote", pid_start_time="when-our-child-started", pgid=4242)
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: True)
+    monkeypatch.setattr(  # pid 4242 is alive, but it is not the process we stamped
+        process_identity, "process_facts",
+        lambda p: process_identity.ProcessFacts("S", "an-unrelated-process"),
+    )
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: False)
+    spawned = _mock_remote_spawn(monkeypatch)
+    killed = []
+    monkeypatch.setattr(run_records, "kill_group", lambda p: killed.append(("group", p)))
+    monkeypatch.setattr(run_records.os, "kill", lambda p, sig: killed.append(("kill", p, sig)))
+
+    assert cli.main(["join", "--at", "http://h:8000/v1", "-m", "qwen", "--name", "mybox"]) == 0
+
+    assert spawned["signals"] == [], "a bystander was SIGHUPed — SIGHUP's default action is terminate"
+    assert killed == [], f"a bystander was signalled by the respawn teardown: {killed}"
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]  # ...and the engine still respawned
+
+
+def test_remote_leave_shrink_never_signals_a_pid_that_was_recycled_onto_another_process(
+    monkeypatch, tmp_path
+):
+    """The same rule on the path that can still reach the signal.
+
+    `grid join` is safe because `_live_records` drops a recycled record before `_respawn_identity`
+    ever sees it. The shrink is not: `_leave_one_engine` falls back to
+    `survivors or list(records.values())` so it can rebuild a union when nothing is live, which hands
+    the respawn the very record the filter rejected. `_respawn_identity` then terminates each prior by
+    its bare recorded pid — SIGTERM, then SIGKILL of that pid's whole process **group**.
+
+    So the teardown has to check identity itself rather than trust its caller's filtering.
+    """
+    import signal
+
+    from shared import process_identity, run_records
+
+    _seed_remote_identity(monkeypatch, tmp_path, [
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h:8000/v1", "models": ["qwen"], "engine_label": "vllm"},
+    ])
+    run_records.update_record("n1", "remote", pid_start_time="when-our-child-started", pgid=4242)
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: True)
+    monkeypatch.setattr(
+        process_identity, "process_facts",
+        lambda p: process_identity.ProcessFacts("S", "an-unrelated-process"),
+    )
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: False)
+    spawned = _mock_remote_spawn(monkeypatch)
+    killed = []
+    monkeypatch.setattr(run_records, "kill_group", lambda p: killed.append(("group", p)))
+    monkeypatch.setattr(run_records.os, "kill", lambda p, sig: killed.append(("kill", p, sig)))
+
+    assert cli.main(["leave", "--engine", "http://h:8000/v1"]) == 0
+
+    assert (4242, signal.SIGHUP) not in spawned["signals"]
+    assert killed == [], f"the shrink's respawn signalled a bystander by stale record pid: {killed}"
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+
+
+def test_remote_leave_that_verified_nothing_and_scanned_nothing_does_not_claim_success(
+    monkeypatch, tmp_path, capsys
+):
+    """Criterion 7 — the fail direction when `grid leave` has, in fact, checked nothing.
+
+    Two independent nets catch a stranded serve child: the record (kill it by identity) and the argv
+    sweep (find it in the process table). The reported failure mode is both failing at once — a record
+    whose pid can no longer be tied to our engine, at the same moment `ps` is unreadable — where leave
+    printed `"Left team."` with a footnote and exited **0**. It had confirmed nothing and stopped
+    nothing, and the operator had no signal to retry on; a live orphan then kept heartbeating.
+
+    The backstop still fires first (the model drops from the grid either way), then leave fails loud so
+    a retry happens.
+    """
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    from remote import orphan_sweep
+    from shared import run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: False)  # a stale-dead recorded pid...
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)  # ...and `ps` is down
+    puts = _capture_relay_puts(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave"])
+
+    message = str(exc.value)
+    assert "retry" in message.lower(), f"the operator needs to know to run it again: {message!r}"
+    assert puts == [("/nodes/node-jwt", "consumer", [])], "the backstop must still have deregistered"
+
+
+def test_remote_leave_over_a_permanent_zombie_with_no_scan_does_not_claim_success(
+    monkeypatch, tmp_path
+):
+    """The container regime, where the corpse is permanent and the group can never be read.
+
+    A zombie occupies its own process group, so `group_alive` cannot tell "only our corpse is in
+    there" from "our corpse and a live `llama-server`". The teardown therefore declines to read the
+    group at all — and in the very container this feature was built for, PID 1 never reaps, so that
+    is not a delay but the *permanent* outcome for any record whose child died on its own.
+
+    Claiming a proven teardown there would be this feature's own failure mode: `grid leave` printing
+    "Left …" while a live engine child keeps running, with the argv sweep — which matches only the
+    `__remote-engine` marker, never a bare `llama-server` — structurally unable to see it. So the
+    record counts as unverified, and a leave whose sweep ALSO could not scan fails loud.
+    """
+    from remote import orphan_sweep
+    from shared import process_identity, run_records
+
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    run_records.update_record("n1", "remote", pid_start_time="t1", pgid=4242)
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: True)  # the corpse is never reaped
+    monkeypatch.setattr(
+        process_identity, "process_facts", lambda p: process_identity.ProcessFacts("Z", "t1"),
+    )
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)  # ...and `ps` is down
+    puts = _capture_relay_puts(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["leave"])
+
+    assert "retry" in str(exc.value).lower()
+    assert puts == [("/nodes/node-jwt", "consumer", [])]  # the model still dropped from the grid
+
+
+def test_remote_leave_reports_success_when_the_process_group_proves_the_teardown(
+    monkeypatch, tmp_path, capsys
+):
+    """The other half of criterion 7, and why the group is probed even when nothing needs killing.
+
+    Same regime — a stale-dead recorded pid and an unreadable process table — except the record carries
+    a `pgid` and that session group is **empty**. That is positive proof nothing this box spawned is
+    still running, obtained without a process table, so the same leave is honestly a success rather
+    than an honest failure. Without it, every stale-dead record plus a `ps` hiccup would be a loud
+    failure the operator can do nothing about.
+    """
+    from remote import orphan_sweep
+    from shared import process_identity, run_records
+
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    run_records.update_record("n1", "remote", pgid=4242)
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: False)
+    monkeypatch.setattr(process_identity, "group_alive", lambda pgid: False)  # our whole session is gone
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: None)
+    _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert "Left team" in capsys.readouterr().out
+
+
 def test_remote_leave_tears_down_the_identity(monkeypatch, tmp_path, capsys):
     """Bare leave tears down the singleton identity AND sends the authoritative backstop deregister —
     a role=consumer PUT to the JWT-claim node id, so the model drops from the grid immediately even
@@ -7063,6 +7645,11 @@ def test_remote_leave_backstop_lands_even_when_child_was_killed(monkeypatch, tmp
     )
     killed = []
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: killed.append(pid) or True)
+    # The record must name a *live* child for "leave terminates it" to be the behaviour under test.
+    # Mocking `terminate_pid` alone used to imply that, because the old teardown called it
+    # unconditionally and it did its own liveness check inside; the terminator now classifies the
+    # record first and never signals a pid that names nothing (grid-leave issue 08).
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
     puts = _capture_relay_puts(monkeypatch)
     _disable_orphan_sweep(monkeypatch)  # this asserts killed==[4242] — sweep must not touch the host ps
 
@@ -7155,10 +7742,18 @@ def test_remote_leave_backstop_still_lands_when_the_sweep_blows_up(monkeypatch, 
     _seed_remote_identity(
         monkeypatch, tmp_path,
         [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
-        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
     )
     _disable_orphan_sweep(monkeypatch)
     from remote import orphan_sweep
+
+    from shared import run_records
+
+    # A record that verifies clean, so the subject of this test is the SWEEP failing on its own.
+    # `pid: 0` (never stamped) plus an unreadable process table is a different case — neither net
+    # checked anything — and leave now fails loud there instead (grid-leave issue 08, criterion 7).
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: True)
+    monkeypatch.setattr(run_records, "terminate_pid", lambda p: True)
 
     def boom(network_id, **k):
         raise failure
@@ -7239,6 +7834,7 @@ def test_remote_leave_reads_launcher_ancestry_before_killing_the_recorded_child(
 
     monkeypatch.setattr(orphan_sweep, "launcher_ancestors", ancestry)
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", terminate)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)  # a live child to kill
     _capture_relay_puts(monkeypatch)
 
     cli.main(["leave"])
@@ -7260,6 +7856,24 @@ def test_full_leave_survivor_message_names_a_remedy_the_operator_can_run(monkeyp
         exiter([4242], "team", True)
     assert "taskkill /F /PID 4242" in str(windows.value)
     assert "kill -9" not in str(windows.value)
+
+
+def test_full_leave_survivor_message_names_a_process_group_as_a_group(monkeypatch):
+    """A survivor can be a process **group**, not a pid, and the remedy has to say so.
+
+    When the recorded pid was a launcher shim that exited, the teardown escalates to the shim's
+    session group — so what survives is the group. Reporting its id as a "pid" hands the operator
+    `kill -9 <group leader>`, and the group leader is precisely the process that is already gone: the
+    command does nothing and the engine keeps serving. Groups are POSIX-only (`group_alive` is False
+    on Windows, where `taskkill /T` already takes the tree), so the negative form is always valid here.
+    """
+    monkeypatch.setattr(cli.remote_provider.sys, "platform", "linux")
+    with pytest.raises(SystemExit) as exc:
+        cli.remote_provider._full_leave_survivor_exit([-4242], "team", True)
+
+    message = str(exc.value)
+    assert "process group 4242" in message, f"a group reported as a pid: {message!r}"
+    assert "kill -9 -4242" in message, f"the remedy targets the dead group leader: {message!r}"
 
 
 def test_remote_leave_sweep_reports_foreign_process(monkeypatch, tmp_path, capsys):
@@ -7292,9 +7906,17 @@ def test_remote_leave_ps_failure_qualifies_success(monkeypatch, tmp_path, capsys
     _seed_remote_identity(
         monkeypatch, tmp_path,
         [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
-        pid=0, access_token=_jwt({"node_id": "node-jwt"}),
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
     )
     from remote import orphan_sweep
+
+    from shared import run_records
+
+    # A record that verifies clean, so the subject of this test is the SWEEP failing on its own.
+    # `pid: 0` (never stamped) plus an unreadable process table is a different case — neither net
+    # checked anything — and leave now fails loud there instead (grid-leave issue 08, criterion 7).
+    monkeypatch.setattr(run_records, "pid_alive", lambda p: True)
+    monkeypatch.setattr(run_records, "terminate_pid", lambda p: True)
     monkeypatch.setattr(orphan_sweep, "_process_table_output",
                         lambda: None)  # process table unreadable → couldn't scan
     puts = _capture_relay_puts(monkeypatch)
@@ -7315,6 +7937,7 @@ def test_remote_leave_record_survivor_keeps_record_and_fails_loud(monkeypatch, t
         pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
     )
     monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: False)  # wedged
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)  # ...and alive
     _disable_orphan_sweep(monkeypatch)  # isolate the record-survivor path from the argv sweep
     puts = _capture_relay_puts(monkeypatch)
 
@@ -9199,8 +9822,12 @@ def test_stamp_own_pid_overwrites_a_stale_spawner_value(monkeypatch, tmp_path):
 
 
 def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
-    """Only ``pid`` changes: a concurrent CLI join-append (under the same record lock) that added
-    engines/models/meta must keep every field it wrote — the stamp merges, never clobbers."""
+    """Only the **identity** changes: a concurrent CLI join-append (under the same record lock) that
+    added engines/models/meta must keep every field it wrote — the stamp merges, never clobbers.
+
+    The identity is three fields, not one (grid-leave issue 08): `pid` plus the `(pid_start_time,
+    pgid)` that make it verifiable. They are written together and only together, which is what lets a
+    verified pid vouch for the process group stamped beside it."""
     from remote import serve
     from shared import run_records
 
@@ -9216,8 +9843,13 @@ def test_stamp_own_pid_preserves_sibling_fields(monkeypatch, tmp_path):
     serve._stamp_own_pid("n1", "remote")
 
     got = run_records.read_record("n1", "remote")
+    identity = set(run_records.identity_stamp(os.getpid()))
     assert got["pid"] == os.getpid()
-    assert {k: v for k, v in got.items() if k != "pid"} == {k: v for k, v in seeded.items() if k != "pid"}
+    assert got["pgid"] == os.getpgrp()
+    assert run_records.record_verdict(got) is run_records.RecordVerdict.LIVE_OURS
+    assert {k: v for k, v in got.items() if k not in identity} == {
+        k: v for k, v in seeded.items() if k not in identity
+    }
 
 
 def test_stamp_own_pid_does_not_recreate_a_deleted_record(monkeypatch, tmp_path):

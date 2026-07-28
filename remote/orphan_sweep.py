@@ -404,16 +404,21 @@ def launcher_ancestors(network_id: str, pids: set[int] | frozenset[int]) -> froz
 
 
 def _has_exited(pid: int) -> bool:
-    """Whether ``pid`` is gone, allowing a bounded settle first — a process that was just signalled is
-    briefly still there (Windows ``TerminateProcess`` is asynchronous; a POSIX child is a zombie until
-    reaped, and ``pid_alive`` reports a zombie as alive). Probing the instant a tree kill returns
-    would report a successful teardown as a survivor and hand the operator a kill command for a pid
-    that is already dying — or, by then, belongs to something else."""
+    """Whether ``pid`` has stopped running, allowing a bounded settle first — a process that was just
+    signalled is briefly still there (Windows ``TerminateProcess`` is asynchronous). Probing the
+    instant a tree kill returns would report a successful teardown as a survivor and hand the operator
+    a kill command for a pid that is already dying — or, by then, belongs to something else.
+
+    The cheap ``pid_alive`` drives the loop and the zombie discrimination is asked **once**, at the
+    end: on macOS the richer probe is a ``ps`` fork, and this polls twenty times. Asking it at all is
+    what stops a child that exited into a container with no reaper — where a corpse answers "alive"
+    forever — from being reported as a survivor `grid leave` failed to stop (grid-leave issue 08).
+    """
     for _ in range(_SETTLE_POLLS):
         if not run_records.pid_alive(pid):
             return True
         time.sleep(_SETTLE_INTERVAL_SECONDS)
-    return not run_records.pid_alive(pid)
+    return run_records.stopped_running(pid)
 
 
 def sweep_orphans(
@@ -472,7 +477,9 @@ def sweep_orphans(
             # `_SWEEP_DEADLINE_SECONDS`). Report only what is still ALIVE — a pid we never got to may
             # well have exited on its own, and naming a dead one would tell the operator to `kill -9`
             # a pid that by now belongs to something else.
-            survivors.extend(pid for pid in targets[index:] + descendants if run_records.pid_alive(pid))
+            survivors.extend(
+                pid for pid in targets[index:] + descendants if not run_records.stopped_running(pid)
+            )
             return SweepResult(tuple(reaped), tuple(survivors), tuple(foreign))
         terminate(pid)
     # Terminating a root was *supposed* to take its descendants with it. "Supposed to" is not
@@ -482,7 +489,7 @@ def sweep_orphans(
     # would turn a case the sweep used to finish in one pass into a loud failure needing a retry.
     for index, pid in enumerate(descendants):
         if time.monotonic() >= deadline:
-            survivors.extend(p for p in descendants[index:] if run_records.pid_alive(p))
+            survivors.extend(p for p in descendants[index:] if not run_records.stopped_running(p))
             break
         if not _has_exited(pid):
             terminate(pid)
