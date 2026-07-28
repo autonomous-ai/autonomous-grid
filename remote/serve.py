@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from remote import (
-    api_keys, control_plane, credentials, engine_health, probe, relay, service_truth,
+    api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
     codex_auth, codex_oauth,
 )
 from shared.handlers import HANDLERS
@@ -111,8 +111,12 @@ def _debug(msg: str) -> None:
 def _warn(msg: str) -> None:
     """Always log a reload problem to stderr (unlike ``_debug``, which is opt-in tracing). A refused or
     failed hot-reload must leave a trace — the CLI has already told the operator the join/leave
-    succeeded, so a silent stale union would be invisible (ADR 0010 D4 F6)."""
-    print(f"[engine] {msg}", file=sys.stderr, flush=True)
+    succeeded, so a silent stale union would be invisible (ADR 0010 D4 F6).
+
+    Delegates to ``bringup.log`` so the child has exactly ONE narration voice: the bring-up trail and
+    every later warning land in the same file, in the same shape, and a test that captures one
+    captures the other (ADR 0022)."""
+    bringup.log(msg)
 
 
 def _bookkeep(what: str, write: Callable[..., Any], *args: Any) -> bool:
@@ -171,6 +175,13 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
 
 def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     """Detached ``__remote-engine`` entry: serve one engine to the grid's relay until SIGTERM."""
+    # Name ourselves before anything else can fail — including the record read below, which raises
+    # `SystemExit` on a corrupt *sibling* record (`read_record` globs the whole grid directory) from
+    # outside the try, before any handler exists. From here on this child's log cannot be empty
+    # (ADR 0022): the log file is created by the spawner and the child is unbuffered, so a 0-byte log
+    # used to be positive evidence that the first line simply came too late — it came after
+    # registration, which is precisely the step a wedged child never reaches.
+    bringup.log(f"starting engine {engine_id}@{grid_id} (pid {os.getpid()})")
     record = run_records.read_record(grid_id, engine_id)
     if not record:
         raise SystemExit(f"No engine record for {engine_id} on {grid_id}.")
@@ -189,6 +200,10 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             "This grid's access token carries no node identity; run `grid login` to refresh your "
             "tokens, then re-join."
         )
+    # The intent line: what this child will serve and where it will register, from the record alone,
+    # so it lands before the first socket rather than after the last one.
+    bringup.log(bringup.describe_intent(record, signaling_url))
+
     def _on_term(_signum, _frame):  # noqa: ANN001
         raise KeyboardInterrupt
 
@@ -290,16 +305,41 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # with no stored seat dies HERE naming the fix (still inside the try, so the record is
         # reaped like any died-before-registering engine), never as N per-job 401s.
         _prime_codex_seat(state, record)
-        try:
-            register_once(state)
-        except (Exception, SystemExit) as exc:
-            # Leave the reason on the record before this child dies of it. Today the record usually
-            # goes with it (the `finally` reaps a never-registered child), but not when ownership
-            # can't be proven — and once issue 11 gives bring-up its retry loop, this is the field
-            # that explains a child still trying. Bounded and body-only: `RelayError` carries the
-            # response text, never the request's bearer.
+        def _note_register_error(message: str | None) -> None:
+            # Bounded and body-only: `RelayError` carries the response text, never the bearer.
+            #
+            # `_bookkeep`'s "did the write land" answer is deliberately NOT consumed here, unlike
+            # `mark_registered`'s. Three reasons, and the last one is why keying a retry off it would
+            # be a bug: this field fails OPEN (absent reads as "no error", never as an accusation —
+            # `registered_at` is what says "not registered"); a transient failure self-heals within
+            # one backoff *structurally*, because `mutate_record` re-reads the record under lock and
+            # compares against DISK — a write that never landed leaves the record still differing, so
+            # the next attempt writes it, with nothing to remember between them; and `mutate_record`
+            # returns False both when the record is gone AND when nothing changed
+            # — and "nothing changed" is the *normal* case here, since a relay down for an hour keeps
+            # producing the identical reason. A caller that retried on that would spin on the healthy
+            # path. `mark_registered` has to compensate for the same conflation explicitly.
             _bookkeep("last_register_error", service_truth.note_register_error,
-                      network_id, engine_id, str(exc) or repr(exc))
+                      network_id, engine_id, message)
+
+        try:
+            # Retry a relay that is merely temporarily wrong, rather than dying of it (ADR 0022).
+            # This is where the field incident lands: a master mid-respawn answers 503 (or 404), and
+            # before this loop that single answer ended the child. `state.stop` is the wait, so a
+            # SIGTERM during a backoff still unwinds inside the parent's 25s kill grace.
+            bringup.register_with_backoff(
+                lambda: register_once(state),
+                stop=state.stop,
+                log=bringup.log,
+                note_error=_note_register_error,
+            )
+        except (Exception, SystemExit) as exc:
+            # Only a TERMINAL failure reaches here now (the relay understood and refused, or
+            # something unexpected raised). Leave the reason on the record before this child dies of
+            # it: the record usually goes with it (the `finally` reaps a never-registered child), but
+            # not when ownership can't be proven — and a still-trying child's reason is written by
+            # the loop above, which is what `grid join` reports while it keeps trying.
+            _note_register_error(str(exc) or repr(exc))
             raise
         registered = True
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
@@ -386,6 +426,11 @@ def _bring_up_engines(
     results: list[tuple[str, list[str], list[str], dict[str, Any]]] = []
     launched: list[Any] = []
     launcher_mod = None
+    # ONE clock for the whole fan-out — every spec, every model — because the wedge this bounds is the
+    # sum, not any single probe (ADR 0022). Opened here rather than inside `_probe_spec_caps` so a
+    # second engine cannot buy itself a fresh budget after the first spent it.
+    deadline = bringup.probe_deadline()
+    unprobed: list[str] = []
     try:
         for spec in specs:
             llm_url, proc, mod, advertised, upstream = _bring_up_one(spec, record, aliases)
@@ -394,17 +439,50 @@ def _bring_up_engines(
                 launcher_mod = mod
             # Probe EVERY model this spec serves (not just the first), so a multi-model `--at` advertises
             # caps for all of them — shared with the hot-reload path (`_reload_once`) so the two can't drift.
-            caps = _probe_spec_caps(
-                llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
-                plan_type=spec.get("plan_type"),
-            )
+            try:
+                caps = _probe_spec_caps(
+                    llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
+                    plan_type=spec.get("plan_type"), deadline=deadline,
+                )
+            except bringup.ProbeBudgetExceeded as exc:
+                # Startup's policy: keep whatever was probed and give the rest the same fail-closed
+                # entry a failed probe already produces. Correct HERE — and only here — because there
+                # is no previous verdict to keep: an unprobed model degrades to the chat-only posture
+                # rather than lying about what it can do.
+                caps = _degraded_caps(exc, record.get("ctx_size"))
+                unprobed.extend(exc.skipped)
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
         if launcher_mod is not None:
             for proc in launched:
                 launcher_mod.stop(proc)
         raise
+    if unprobed:
+        # Never silent: a model losing its capabilities is the failure this bound exists to prevent,
+        # not an acceptable way to achieve it.
+        bringup.log(
+            f"capability probing hit its {bringup.PROBE_BUDGET:.0f}s budget — advertising "
+            f"{', '.join(unprobed)} without probed capabilities (the engine was not answering); "
+            "re-join once it is healthy to advertise them fully"
+        )
     return results, launched, launcher_mod
+
+
+def _degraded_caps(exc: bringup.ProbeBudgetExceeded, ctx_size: Any) -> dict[str, Any]:
+    """The envelope to advertise when the probe budget bit part-way through a spec.
+
+    Every model the spec serves gets an entry — the probed ones theirs, the skipped ones the
+    fail-closed all-False entry a failed probe already produces. The **key must be present** even
+    though nothing is claimed: the relay validates that ``capabilities.models``' keys equal the
+    advertised model list exactly and answers 400 otherwise, and 400 is terminal to bring-up's retry
+    loop — so omitting the skipped models would make this degrade *kill* the slow engine it exists to
+    keep serving, on every join. That mismatch was unreachable before the budget existed, because
+    ``probe.capabilities`` never omits a model, only empties it.
+    """
+    models = dict((exc.probed or {}).get("models") or {})
+    for name in exc.skipped:
+        models[name] = probe.unprobed_entry(ctx_size)
+    return {"schema_version": 1, "models": models} if models else {}
 
 
 def _flat_spec(record: dict[str, Any]) -> dict[str, Any]:
@@ -718,7 +796,7 @@ def _static_api_caps(api_kind: str, advertised: list[str], plan_type: str | None
 
 def _probe_spec_caps(
     llm_url: str, advertised: list[str], upstream: list[str], ctx_size: Any,
-    api_kind: str | None = None, plan_type: str | None = None,
+    api_kind: str | None = None, plan_type: str | None = None, deadline: float | None = None,
 ) -> dict[str, Any]:
     """Probe EVERY model a spec serves into one caps envelope — keyed by the advertised name, probed by
     the upstream name (Ollama/vLLM only know that). Shared by startup (`_bring_up_engines`) and the
@@ -733,6 +811,12 @@ def _probe_spec_caps(
         return _static_api_caps(api_kind, advertised, plan_type=plan_type)
     if not advertised:
         return {}  # no models → nothing to advertise; skip the route probe's network round-trip (loop was a no-op)
+    # `deadline` bounds this whole fan-out, not each call in it (ADR 0022) — the API branch above is
+    # static data and is never gated. It RAISES rather than degrading, because the two callers want
+    # opposite things: startup has no previous verdict and degrades fail-closed, while a reload holds
+    # a live registration it must not poison, so it refuses instead. Policy belongs to the caller.
+    if deadline is not None and time.monotonic() >= deadline:
+        raise bringup.ProbeBudgetExceeded({}, advertised)
     # Discover the Responses dialect ONCE per engine (issue 08 / ADR 0018): the route is a property of
     # the server, not of a model, so probe here — OUTSIDE the per-model loop — and stamp the one answer
     # onto every model. A capable engine advertises `responses` in its endpoints and (PRD §3 — every
@@ -745,7 +829,11 @@ def _probe_spec_caps(
     _debug(f"responses probe {llm_url!r}: {'serves' if serves_responses else 'does not serve'} /responses")
     endpoints = ["chat/completions", "completions"] + (["responses"] if serves_responses else [])
     caps_models: dict[str, Any] = {}
-    for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
+    for index, (advertised_model, upstream_model) in enumerate(zip(advertised, upstream, strict=True)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise bringup.ProbeBudgetExceeded(
+                {"schema_version": 1, "models": caps_models} if caps_models else {}, advertised[index:]
+            )
         env = probe.capabilities(
             llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
             endpoints=endpoints, honours_output_cap=serves_responses,
@@ -1482,6 +1570,16 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
 
     retained = {r[0]: r for r in state.engine_results()}  # keyed by the normalized llm_url
     reassembled: _EngineResults = []
+    # One budget for this reload's whole fan-out, and — unlike startup — NOT caught: exhausting it
+    # refuses the reload (the exception reaches `_reload_loop`, which keeps the old routing and
+    # records why). What makes that the right policy here is the state, not which spec: this node is
+    # ALREADY registered and serving, so an all-False envelope would poison a live registration the
+    # CLI has already reported as hot-reloaded, and it would stick until the next reload — the
+    # opposite of `engine_health`'s rule that what a bounded sweep could not reach keeps its previous
+    # verdict. (A spec only reaches the probe below when it is not already retained under that URL
+    # with the same first advertised model — a newly added engine, or one whose model list changed at
+    # the front; see the branch comment below, which this must not contradict.)
+    deadline = bringup.probe_deadline()
     for spec in specs:
         url = (spec.get("endpoint_url") or "").rstrip("/")
         models = list(spec.get("models") or [])
@@ -1500,7 +1598,7 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             # (`_probe_spec_caps` is the shared site, so startup and reload can't drift — ADR 0009 C2).
             caps = (
                 _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind,
-                                 plan_type=spec.get("plan_type"))
+                                 plan_type=spec.get("plan_type"), deadline=deadline)
                 if models else {}
             )
             reassembled.append((url, advertised, upstream, caps))

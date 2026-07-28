@@ -87,8 +87,17 @@ def llama_server_path() -> str:
     raise SystemExit("llama-server not found. Run `grid engine install llama.cpp` first.")
 
 
+# A raw `connect_ex` with no `settimeout` inherits the OS TCP connect timeout — minutes against a
+# filtered address, and unbounded as far as this code is concerned. This check is the FIRST thing the
+# remote serve child's engine bring-up runs, where a stall is invisible (ADR 0022). `localhost` is
+# expected to answer or refuse immediately; `local/media_runtime` has always bounded the identical
+# check, so this is the sibling catching up rather than a new policy.
+_PORT_CHECK_TIMEOUT = 1.0
+
+
 def is_port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(_PORT_CHECK_TIMEOUT)
         return sock.connect_ex(("localhost", port)) == 0
 
 

@@ -57,7 +57,7 @@ import pytest
 
 import cli
 from local import runtime
-from remote import credentials, orphan_sweep, service_truth
+from remote import bringup, credentials, orphan_sweep, service_truth
 from shared import paths, process_identity, run_records, state
 
 # The sweep half of the old skip reason is gone — grid-leave issue 06 gave the argv sweep Windows
@@ -212,6 +212,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:  # register / the child's own unregister / the CLI backstop deregister
         body = self._read_body()
+        if body.get("role") == "provider" and self.server.take_register_failure():  # type: ignore[attr-defined]
+            # A master mid-respawn: the relay is reachable but its upstream is not. Deliberately NOT
+            # recorded as a node PUT — a refused registration must not make the node look live, or
+            # the recovery regime would pass without the child ever getting on the grid.
+            self._send_json(503, {"error": "upstream unavailable"})
+            return
         gate = self.server.register_gate  # type: ignore[attr-defined]
         if gate is not None and body.get("role") == "provider":
             # Park the child INSIDE its registration so the test can act while it is demonstrably
@@ -220,7 +226,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.server.register_seen.set()  # type: ignore[attr-defined]
             gate.wait(timeout=_WAIT_TIMEOUT)
             self._state.put_node(self.path, body)
-            self._send_json(500, {"error": "relay unavailable"})
+            self._send_json(self.server.gate_status, {"error": "relay unavailable"})  # type: ignore[attr-defined]
             return
         self._state.put_node(self.path, body)
         self._send_json(200, {"status": "updated"})
@@ -255,20 +261,40 @@ class _FakeRelay(ThreadingHTTPServer):
     """The grid's relay and control plane on one ephemeral loopback port.
 
     With ``gate_register`` the register ``PUT`` is held open until the test releases it and then
-    answered ``500`` — a relay that is up but unwell, which is what a master mid-respawn looks like
-    to a joining child (the PRD's field confirmation #2) and the only way to fail a *real* child
-    after its startup self-stamp without mocking anything inside it.
+    answered with ``gate_status`` — a relay that is up but unwell, which is what a master mid-respawn
+    looks like to a joining child (the PRD's field confirmation #2) and the only way to fail a *real*
+    child after its startup self-stamp without mocking anything inside it.
+
+    ``gate_status`` matters since ADR 0022, which is why it is a parameter rather than a literal: the
+    child now **retries** a 500 instead of dying of it, so a regime that needs the child to actually
+    exit must answer something bring-up classes as terminal (403 — the relay understood and refused).
     """
 
     daemon_threads = True  # a parked poll handler must never hold up interpreter exit
 
-    def __init__(self, *, gate_register: bool = False) -> None:
+    def __init__(self, *, gate_register: bool = False, gate_status: int = 500,
+                 fail_registers: int = 0) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
         self.relay_state = _RelayState()
         self.base_url = f"http://127.0.0.1:{self.server_address[1]}"
         self.register_gate = threading.Event() if gate_register else None
         self.register_seen = threading.Event()
+        self.gate_status = gate_status
+        self._failures_left = fail_registers
+        self._failure_lock = threading.Lock()
+        self.register_attempts = 0
         threading.Thread(target=self.serve_forever, daemon=True).start()
+
+    def take_register_failure(self) -> bool:
+        """Whether this registration attempt should be answered 503 — a master that is mid-respawn
+        for its first ``fail_registers`` attempts and healthy afterwards. Handler threads are
+        concurrent, so the countdown is locked."""
+        with self._failure_lock:
+            self.register_attempts += 1
+            if self._failures_left <= 0:
+                return False
+            self._failures_left -= 1
+            return True
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +345,13 @@ def _log_tail(network_id: str, limit: int = 2000) -> str:
         return path.read_text(errors="replace")[-limit:]
     except OSError as exc:
         return f"<no child log at {path}: {exc}>"
+
+
+def _wait_for_log(network_id: str, needle: str, *, timeout: float = _WAIT_TIMEOUT) -> bool:
+    """Wait for ``needle`` to appear in the child's own log. The one place this file asserts on log
+    *content* rather than only quoting it into a failure message — ADR 0022 made the log a contract
+    (a spawned child's log is never empty), so it needs a test that reads it."""
+    return _wait_until(lambda: needle in _log_tail(network_id, limit=40000), timeout=timeout)
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
@@ -429,18 +462,22 @@ def live_engine(monkeypatch, tmp_path, spawned):
     ``reap=False`` skips the reaper thread so a killed child becomes a **real zombie** — the opposite
     of what every other regime here wants, and the point of the zombie regime. ``shim=True`` spawns
     through a real launcher process, so the recorded pid is not the serve child's.
+
+    ``fail_registers=N`` answers the first N registrations 503, i.e. a master mid-respawn at join
+    time. Because this fixture's own wait is for the relay to see a **live provider**, returning at
+    all is the proof that the child recovered on its own, with no CLI action (ADR 0022).
     """
     relays = spawned.relays
     procs = spawned.children
 
-    def start(tag: str, *, reap: bool = True, shim: bool = False) -> _LiveEngine:
+    def start(tag: str, *, reap: bool = True, shim: bool = False, fail_registers: int = 0) -> _LiveEngine:
         # A unique network id per regime, because the argv sweep under test is the REAL one: it
         # enumerates the whole host process table. A unique id guarantees this test can never match
         # — and kill — a `grid join` child the developer is actually running, nor a leftover from a
         # sibling regime. Satisfies remote_grid._NETWORK_ID_RE ([A-Za-z0-9_-]+).
         network_id = f"itest-{os.getpid()}-{tag}"
         node_id = f"node-{tag}"
-        relay = _FakeRelay()
+        relay = _FakeRelay(fail_registers=fail_registers)
         relays.append(relay)  # registered BEFORE anything below can raise, or its listener leaks
 
         _seed_grid_home(monkeypatch, tmp_path, network_id=network_id, node_id=node_id,
@@ -461,9 +498,15 @@ def live_engine(monkeypatch, tmp_path, spawned):
         if reap:
             threading.Thread(target=proc.wait, daemon=True).start()
 
-        _wait_until(lambda: relay.relay_state.overview_live() or proc.poll() is not None)
+        # Wait for the backoff this regime deliberately provokes ON TOP of the normal budget, taken
+        # from the production schedule so the two can never drift. Without it `fail_registers=2`
+        # spends 1s + 2s of mandatory backoff inside the fixed budget and leaves almost no margin for
+        # a loaded interpreter start — measured as a ~5% flake before this line existed.
+        provoked = sum(bringup._BACKOFF_SCHEDULE[:fail_registers])
+        deadline = _WAIT_TIMEOUT + provoked
+        _wait_until(lambda: relay.relay_state.overview_live() or proc.poll() is not None, timeout=deadline)
         assert relay.relay_state.overview_live(), (
-            f"the serve child never became a live provider (exit={proc.poll()}, "
+            f"the serve child never became a live provider in {deadline:.0f}s (exit={proc.poll()}, "
             f"role={relay.relay_state.role()!r}). Child log:\n{_log_tail(network_id)}"
         )
         return _LiveEngine(
@@ -479,12 +522,16 @@ def dying_engine(monkeypatch, tmp_path, spawned):
     """Same real spawn, but against a relay that holds the register ``PUT`` open and then fails it.
     Returns once the child is parked inside its registration — past its startup pid self-stamp,
     never registered — which is the only window where the exit-path record reap under test decides
-    anything. The caller releases the gate (``engine.relay.register_gate.set()``)."""
+    anything. The caller releases the gate (``engine.relay.register_gate.set()``).
 
-    def start(tag: str) -> _LiveEngine:
+    ``gate_status`` is what the released ``PUT`` answers. The default 500 leaves the child **alive
+    and retrying** (ADR 0022), which is what the parked-in-bring-up regimes want; a regime that needs
+    the child to die instead must pass a status bring-up classes as terminal."""
+
+    def start(tag: str, *, gate_status: int = 500) -> _LiveEngine:
         network_id = f"itest-{os.getpid()}-{tag}"  # unique per regime — see `live_engine`
         node_id = f"node-{tag}"
-        relay = _FakeRelay(gate_register=True)
+        relay = _FakeRelay(gate_register=True, gate_status=gate_status)
         spawned.relays.append(relay)
 
         _seed_grid_home(monkeypatch, tmp_path, network_id=network_id, node_id=node_id,
@@ -734,7 +781,10 @@ def test_real_child_dying_before_registration_reaps_only_its_own_record(dying_en
     Real child, real self-stamp, real record files: with ``Popen`` mocked, an unlink that checks
     ownership and one that doesn't are indistinguishable.
     """
-    engine = dying_engine(owner)
+    # 403, not 500: since ADR 0022 a 500 is retried rather than fatal, so only a status the relay
+    # could not take back — it understood the request and refused it — still produces the
+    # died-before-registering child this test is about.
+    engine = dying_engine(owner, gate_status=403)
     stamped = int(run_records.read_record(engine.network_id, _ENGINE_ID)["pid"])
     assert stamped == engine.proc.pid, (
         "the child had not self-stamped its pid by the time it reached its register PUT, so this "
@@ -750,7 +800,7 @@ def test_real_child_dying_before_registration_reaps_only_its_own_record(dying_en
         spawned.helpers.append(successor)
         run_records.update_record(engine.network_id, _ENGINE_ID, pid=successor.pid)
 
-    engine.relay.register_gate.set()  # 500 → the child dies having never registered
+    engine.relay.register_gate.set()  # 403 → terminal, so the child dies having never registered
 
     assert _wait_until(lambda: not run_records.pid_alive(engine.proc.pid)), (
         f"the serve child (pid {engine.proc.pid}) never exited after its registration failed. "
@@ -767,6 +817,50 @@ def test_real_child_dying_before_registration_reaps_only_its_own_record(dying_en
             "keeps serving with no record, untracked by `grid leave` and invisible to `grid join`"
         )
         assert int(run_records.read_record(engine.network_id, _ENGINE_ID)["pid"]) == successor.pid
+
+
+def test_real_child_rejoins_a_master_that_was_mid_respawn(live_engine):
+    """The field incident's cure, on a real child (ADR 0022, AC3).
+
+    A `grid join` issued while the grid's master was mid-respawn used to die on the first 503 — the
+    box then served nothing until an operator noticed and re-joined by hand. Here the relay refuses
+    the first two registrations and then recovers, and the child gets itself onto the grid with **no
+    CLI action at all**: `live_engine` only returns once the relay sees a live provider, so the
+    fixture returning is the assertion. The rest is about the trail it left while it was failing.
+    """
+    engine = live_engine("bringup-recovers", fail_registers=2)
+
+    assert engine.relay.register_attempts >= 3, (
+        f"the relay saw only {engine.relay.register_attempts} registration attempts; the child "
+        "cannot have retried past the two refusals"
+    )
+    assert engine.relay.relay_state.overview_live()
+    log = _log_tail(engine.network_id, limit=40000)
+    assert "register attempt 1 failed" in log and "503" in log, (
+        f"a child that had to retry left no trace of why:\n{log}"
+    )
+    assert "retrying in" in log, f"the retry was not narrated:\n{log}"
+
+
+def test_real_child_log_names_its_spec_and_relay_before_it_ever_registers(dying_engine):
+    """The 0-byte log, closed on a real child (ADR 0022, AC1).
+
+    `dying_engine` returns with the child parked *inside* its register PUT — past its self-stamp,
+    demonstrably not registered, which is exactly the state that produced an empty log in the field
+    and left the incident diagnosable only from /proc. Its log must already name what it is serving
+    and which relay it is talking to.
+    """
+    engine = dying_engine("bringup-narrates")
+
+    assert _wait_for_log(engine.network_id, "starting engine"), (
+        f"a spawned child's log was still empty at its register PUT:\n{_log_tail(engine.network_id)}"
+    )
+    log = _log_tail(engine.network_id, limit=40000)
+    assert _MODEL in log, f"the log never named what this child serves:\n{log}"
+    assert engine.relay.base_url in log, f"the log never named the relay it was blocked on:\n{log}"
+    assert f"{_ENGINE_ID}@{engine.network_id}" in log, f"the log never identified the child:\n{log}"
+
+    engine.relay.register_gate.set()  # let the parked handler go, so teardown is clean
 
 
 def _identical_join(engine: _LiveEngine) -> list[str]:

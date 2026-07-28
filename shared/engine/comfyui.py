@@ -350,8 +350,15 @@ def install() -> None:
     print(f"ComfyUI installed at {comfyui_dir()} (venv {comfyui_venv()})")
 
 
+# Bounded for the same reason as its twin in `shared/engine/launcher.py`: an unbounded `connect_ex`
+# waits out the OS TCP connect timeout, and this runs inside the media bring-up a remote serve child
+# performs before it ever reaches the relay (ADR 0022).
+_PORT_CHECK_TIMEOUT = 1.0
+
+
 def _is_port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(_PORT_CHECK_TIMEOUT)
         return s.connect_ex(("localhost", port)) == 0
 
 

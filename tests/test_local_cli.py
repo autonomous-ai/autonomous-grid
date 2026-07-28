@@ -9330,6 +9330,211 @@ def test_relay_deregister_node_maps_invalid_url_to_relay_error(monkeypatch, tmp_
         relay.deregister_node(":::not a url:::", "AT", "node-1")
 
 
+def test_relay_register_node_maps_invalid_url_to_relay_error(monkeypatch, tmp_path):
+    """The same landmine on the register call, where it now matters far more (ADR 0022).
+
+    Bring-up's retry loop catches `RelayError`/`RelayUnauthorized`; an `InvalidURL` from a malformed
+    `signaling_url` on the run record would sail straight through it and kill the child on a bad
+    record instead of reporting it — which is exactly what the retry loop exists to stop.
+    """
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    with pytest.raises(relay.RelayError) as excinfo:
+        relay.register_node(":::not a url:::", "AT", "node-1", models=["m"])
+    assert excinfo.value.terminal, (
+        "a relay address that is not a usable URL was left retryable; nothing was ever asked, so "
+        "waiting cannot change the answer"
+    )
+
+
+def test_bringup_never_writes_the_access_token_to_the_log_or_the_record(monkeypatch):
+    """The bearer must not reach the child's log or its run record — on any bring-up failure path.
+
+    This became worth pinning rather than reasoning about when bring-up started retrying forever:
+    the failure text is now written repeatedly, to a file on disk and to a record every CLI command
+    reads, instead of once just before the process died. Both arms are exercised, because they build
+    their message differently — a relay status arm surfaces `resp.text[:200]` (a relay-authored
+    body), and the transport arm interpolates the raw exception.
+    """
+    from remote import bringup, relay
+
+    token = "eyJhbGciOiJub25lIn0.SUPERSECRET-ACCESS-TOKEN.sig"
+    lines: list[str] = []
+    noted: list[str | None] = []
+    attempts: list[int] = []
+
+    def failing_status(_request):  # a relay that echoes the request back in its error body
+        return httpx.Response(503, text="upstream unavailable while proxying PUT /nodes/n")
+
+    def refusing_transport(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) == 1:  # the relay-status arm: message carries `resp.text[:200]`
+            _mock_relay(monkeypatch, failing_status)
+            relay.register_node("https://r", token, "n", models=["m"])
+        if len(attempts) == 2:  # the transport arm: message interpolates the raw exception
+            _mock_relay(monkeypatch, refusing_transport)
+            relay.register_node("https://r", token, "n", models=["m"])
+        if len(attempts) == 3:  # the auth arm: message is authored here, not by the wire
+            raise relay.RelayUnauthorized()
+
+    bringup.register_with_backoff(
+        register, stop=_RecordingStop(), log=lines.append, note_error=noted.append,
+        schedule=(0.0,),
+    )
+
+    assert len(lines) == 3 and len(noted) == 3, "all three failure arms must have been exercised"
+    for text in [*lines, *[n or "" for n in noted]]:
+        assert token not in text, f"the access token reached an operator-visible surface: {text}"
+        assert "SUPERSECRET" not in text
+
+
+def test_bringup_register_gives_up_on_an_unusable_relay_address():
+    """The third terminal category, which no HTTP status can express.
+
+    `httpx.InvalidURL` is raised while *building* the request, so no relay was ever asked — and
+    `RelayError.status` is therefore `None`, which is otherwise the signature of a plain transport
+    failure (the mid-respawn case that MUST retry). Without an explicit marker a broken
+    `signaling_url` on the run record would spin at the 60s floor forever instead of dying and
+    saying so.
+    """
+    from remote import bringup, relay
+
+    stop = _RecordingStop()
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        relay.register_node(":::not a url:::", "AT", "node-1", models=["m"])
+
+    with pytest.raises(relay.RelayError) as excinfo:
+        bringup.register_with_backoff(
+            register, stop=stop, log=lambda _m: None, note_error=lambda _m: None, schedule=(0.0,),
+        )
+
+    assert len(attempts) == 1, "a malformed relay address was retried"
+    assert stop.waits == [], "it backed off before giving up on an address it can never use"
+    assert ":::not a url:::" in str(excinfo.value), "the operator is not told which address is broken"
+
+
+def test_probe_unprobed_entry_covers_every_feature_a_real_probe_reports():
+    """`PROBED_FEATURES` must stay the complete key set, or `unprobed_entry` builds a partial dict.
+
+    Without this the tuple is decorative: `probe_llama_capabilities` assigns all five keys
+    explicitly, so removing one from the tuple changes nothing there — the damage lands in
+    `unprobed_entry`, whose dict feeds `capability_entry`, which indexes most of these keys
+    *directly*. A sixth feature added to the probe and forgotten here would either KeyError every
+    budget-degraded registration or silently claim False for something the probe can prove.
+    """
+    from remote import probe
+
+    reported = probe.probe_llama_capabilities(":::not a url:::", "m")  # every probe fails → all False
+
+    assert set(probe.PROBED_FEATURES) == set(reported), (
+        f"PROBED_FEATURES {sorted(probe.PROBED_FEATURES)} has drifted from what the probe reports "
+        f"{sorted(reported)} — `unprobed_entry` would build an incomplete entry"
+    )
+    assert not any(probe.unprobed_entry()["features"][key] for key in reported), (
+        "the fail-closed entry claims a capability nothing probed"
+    )
+
+
+def test_probe_survives_a_malformed_engine_url():
+    """A malformed `endpoint_url` on the run record must degrade to "no capabilities", not kill the
+    child. `httpx.InvalidURL` is not an `HTTPError` subclass, so it sailed past every probe guard and
+    out through `_bring_up_engines`' bare re-raise: a bad record killed a child that could have
+    served. The repo's third encounter with this exact trap (ADR 0022)."""
+    from remote import probe
+
+    assert probe.probe_responses_endpoint(":::not a url:::") is False
+    caps = probe.capabilities(":::not a url:::", "m")
+    assert "m" in caps["models"], "a malformed URL must degrade to a fail-closed envelope, not raise"
+
+
+@pytest.mark.parametrize("where", ["launcher", "comfyui"])
+def test_port_check_bounds_its_own_connect(monkeypatch, where):
+    """The only two literally unbounded calls on the bring-up path: a raw `connect_ex` with no
+    `settimeout` inherits the OS TCP connect timeout, which on a filtered address is minutes — and
+    `launcher.is_port_in_use` is the *first* thing engine bring-up runs. `local/media_runtime` has
+    always set one on the identical check; these two never did (ADR 0022)."""
+    if where == "launcher":
+        from shared.engine import launcher as module
+        check = module.is_port_in_use
+    else:
+        from shared.engine import comfyui as module
+        check = module._is_port_in_use
+    seen: dict[str, float | None] = {}
+
+    class _Sock:
+        def __enter__(self): return self
+        def __exit__(self, *_a): return False
+        def settimeout(self, value): seen["timeout"] = value
+        def connect_ex(self, _addr): return 1
+
+    monkeypatch.setattr(module.socket, "socket", lambda *a, **k: _Sock())
+
+    assert check(9) is False
+    assert seen.get("timeout"), f"{where}'s port check never bounded its connect: {seen}"
+
+
+def _captured_timeout(monkeypatch, module, call, _real=httpx.Client):
+    """Run `call` and return the `timeout=` the module's httpx client was actually built with."""
+    seen = {}
+
+    def _client(*a, **k):
+        seen["timeout"] = k.get("timeout")
+        return _real(*a, **{**k, "transport": httpx.MockTransport(lambda r: httpx.Response(200, json={}))})
+
+    monkeypatch.setattr(module.httpx, "Client", _client)
+    call()
+    return seen["timeout"]
+
+
+@pytest.mark.parametrize("what", ["register", "probe-route", "probe-models"])
+def test_bringup_requests_state_a_connect_and_a_read_deadline(monkeypatch, what):
+    """A bare float is applied by httpx to all FOUR phases *independently*, so it never states what
+    the caller thinks it does: "15s" is up to 15s connecting and then 15s reading, and nothing names
+    the read deadline that a half-open relay — accepted, never answered — actually runs into.
+
+    Asserted on the request the code really builds, not on a constant, so a new bring-up call that
+    forgets its deadline is caught (ADR 0022). Steady-state poll/heartbeat/submit are out of scope
+    and deliberately untouched.
+    """
+    from remote import probe, relay
+
+    if what == "register":
+        module, call = relay, lambda: relay.register_node("https://r", "AT", "n", models=["m"])
+    elif what == "probe-route":
+        module, call = probe, lambda: probe.probe_responses_endpoint("http://e/v1")
+    else:
+        module, call = probe, lambda: probe.capabilities("http://e/v1", "m")
+
+    timeout = _captured_timeout(monkeypatch, module, call)
+
+    assert isinstance(timeout, httpx.Timeout), f"{what} passes a bare float, not named phases: {timeout!r}"
+    assert timeout.connect and timeout.read, f"{what} left a phase unbounded: {timeout!r}"
+    assert timeout.write and timeout.pool, f"{what} left a phase unbounded: {timeout!r}"
+
+
+def test_relay_register_node_carries_the_status_for_classification(monkeypatch):
+    """`RelayError.status` is what lets bring-up tell a 503 (retry) from a 403 (die). Without it the
+    only discriminator would be the message text, which is a relay-authored response body."""
+    from remote import relay
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(503, text="upstream unavailable"))
+    with pytest.raises(relay.RelayError) as excinfo:
+        relay.register_node("https://r", "AT", "n", models=["m"])
+    assert excinfo.value.status == 503
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(403, text="Cannot access another node"))
+    with pytest.raises(relay.RelayError) as excinfo:
+        relay.register_node("https://r", "AT", "n", models=["m"])
+    assert excinfo.value.status == 403
+
+
 # ---------------------------------------------------------------------------
 # Remote capability probe + benchmark (remote/probe.py)
 # ---------------------------------------------------------------------------
@@ -10441,6 +10646,283 @@ def test_serve_register_once_holds_register_lock_during_put(monkeypatch, tmp_pat
     assert held == [True]
 
 
+# ---------------------------------------------------------------------------
+# Bounded, observable bring-up (remote/bringup.py) — ADR 0022
+# ---------------------------------------------------------------------------
+
+
+def test_bringup_register_retries_a_transient_relay_error_then_succeeds():
+    """The master-mid-respawn regime: a relay that is temporarily unwell must not kill the child.
+
+    Bring-up retries and converges on its own once the relay answers — no operator action, which is
+    the whole point of ADR 0022. Before this, one 503 at join time killed the serve child outright.
+    """
+    from remote import bringup, relay
+
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise relay.RelayError("register failed (503): upstream unavailable", status=503)
+
+    bringup.register_with_backoff(
+        register, stop=threading.Event(), log=lambda _m: None,
+        note_error=lambda _m: None, schedule=(0.0, 0.0),
+    )
+
+    assert len(attempts) == 3, "bring-up gave up instead of retrying a transient relay failure"
+
+
+@pytest.mark.parametrize("status", [400, 403, 422])
+def test_bringup_register_gives_up_on_a_status_that_can_never_self_heal(status):
+    """400/403/422 mean the relay understood the request and refused it.
+
+    Retrying those forever would spin on a misconfiguration and hide it behind "starting", so the
+    child still dies naming the reason — exactly as every registration failure did before ADR 0022.
+    """
+    from remote import bringup, relay
+
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        raise relay.RelayError(f"register failed ({status}): refused", status=status)
+
+    # A recording stop, not a bare Event: if this status ever became retryable the loop would run
+    # forever, and the guard turns that into a failure instead of a hung suite.
+    with pytest.raises(relay.RelayError):
+        bringup.register_with_backoff(
+            register, stop=_RecordingStop(), log=lambda _m: None,
+            note_error=lambda _m: None, schedule=(0.0,),
+        )
+
+    assert len(attempts) == 1, f"{status} was retried; it will never self-heal"
+
+
+@pytest.mark.parametrize("status", [404, 408, 429, 500, 502, 503, None])
+def test_bringup_register_retries_anything_a_recovering_relay_can_answer(status):
+    """Everything outside the terminal set retries — 404 above all.
+
+    A master mid-respawn answers 503, but it answers **404** just as readily (its routes are not
+    mounted yet, or a proxy sits in front of an app that has not started). ``None`` is a transport
+    failure: nothing answered, so there is nothing to call terminal. An allowlist of retryable
+    statuses would have missed the incident this module was written for.
+    """
+    from remote import bringup, relay
+
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise relay.RelayError(f"register failed ({status})", status=status)
+
+    bringup.register_with_backoff(
+        register, stop=threading.Event(), log=lambda _m: None,
+        note_error=lambda _m: None, schedule=(0.0,),
+    )
+
+    assert len(attempts) == 2, f"{status} was treated as terminal; a recovering relay answers it"
+
+
+class _RecordingStop(threading.Event):
+    """A stop event that records what it was asked to wait for and never actually sleeps.
+
+    Lets the backoff schedule be asserted against the REAL production constants — no injected
+    schedule, no clock fake — in no wall-clock time.
+
+    The runaway guard is load-bearing, not defensive: bring-up retries *forever* by design, so any
+    regression that makes a terminal status retryable would otherwise hang the suite instead of
+    failing it. A test that can only hang is a test that cannot be mutation-checked.
+    """
+
+    _RUNAWAY = 50
+
+    def __init__(self, set_after: int | None = None) -> None:
+        super().__init__()
+        self.waits: list[float] = []
+        self._set_after = set_after
+
+    def wait(self, timeout: float | None = None) -> bool:  # type: ignore[override]
+        self.waits.append(timeout)
+        if len(self.waits) > self._RUNAWAY:
+            raise AssertionError(f"bring-up retried {len(self.waits)} times without stopping")
+        return self._set_after is not None and len(self.waits) >= self._set_after
+
+
+def test_bringup_register_backoff_grows_then_caps():
+    """The wait grows and then stops growing.
+
+    Capped rather than unbounded because the relay's own node TTL is 120s — a child waiting longer
+    than that between attempts would be rejoining a grid that had already written it off.
+    """
+    from remote import bringup, relay
+
+    stop = _RecordingStop()
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) <= 9:
+            raise relay.RelayError("register failed (503): upstream unavailable", status=503)
+
+    bringup.register_with_backoff(register, stop=stop, log=lambda _m: None, note_error=lambda _m: None)
+
+    assert stop.waits == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0]
+
+
+def test_bringup_register_stops_backing_off_when_the_child_is_shutting_down():
+    """SIGTERM during a backoff must exit promptly and must NOT read as a successful registration.
+
+    The parent's SIGTERM->SIGKILL grace is 25s, shorter than the 60s cap, so a backoff that ignored
+    the stop event would be killed mid-wait — and a plain `return` would tell the caller it had
+    registered, flipping the flag that decides whether the record gets reaped.
+    """
+    from remote import bringup, relay
+
+    stop = _RecordingStop(set_after=2)
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        raise relay.RelayError("register failed (503): upstream unavailable", status=503)
+
+    with pytest.raises(bringup.BringUpStopped):
+        bringup.register_with_backoff(register, stop=stop, log=lambda _m: None, note_error=lambda _m: None)
+
+    assert len(attempts) == 2, "bring-up kept attempting after the child was told to stop"
+
+
+def test_bringup_register_attempt_line_is_length_bounded():
+    """One line per attempt, for the life of a child that may never register — so the line is bounded.
+
+    `relay._guard` truncates response *bodies*, but the transport arm interpolates the raw exception,
+    and the child's log has no in-process rotation (it is capped only when the next child is spawned).
+    """
+    from remote import bringup, relay
+
+    lines: list[str] = []
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise relay.RelayError("register transport error: " + "x" * 5000, status=None)
+
+    bringup.register_with_backoff(
+        register, stop=threading.Event(), log=lines.append,
+        note_error=lambda _m: None, schedule=(0.0,),
+    )
+
+    assert len(lines) == 1
+    assert len(lines[0]) < 500, f"the attempt line is unbounded ({len(lines[0])} chars)"
+    assert "xxxx" in lines[0], "the reason was truncated away entirely; it should be shortened, not dropped"
+
+
+def test_bringup_register_records_one_stable_reason_across_attempts():
+    """The recorded reason must be byte-identical while the failure is unchanged.
+
+    `run_records.mutate_record` skips the write when nothing changed, so a relay that has been down
+    for a day costs one locked write rather than one per attempt — but only while the string is
+    stable. Attempt numbers and elapsed times are narration, and belong in the log alone.
+    """
+    from remote import bringup, relay
+
+    noted: list[str | None] = []
+    attempts: list[int] = []
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) <= 3:
+            raise relay.RelayError("register failed (503): upstream unavailable", status=503)
+
+    bringup.register_with_backoff(
+        register, stop=threading.Event(), log=lambda _m: None,
+        note_error=noted.append, schedule=(0.0,),
+    )
+
+    assert len(noted) == 3
+    assert len(set(noted)) == 1, f"the recorded reason changed between attempts: {noted}"
+    assert not any("attempt" in (n or "").lower() for n in noted), (
+        "the attempt counter reached the run record; it belongs in the log only"
+    )
+
+
+def test_bringup_register_cannot_be_held_by_a_relay_that_never_answers(monkeypatch):
+    """A half-open relay — it ACCEPTS the connection and then never writes a byte — must not be able
+    to hold bring-up (ADR 0022, AC2). This is the shape the field incident had, and the shape a
+    connect timeout does not cover *at all*: the connection succeeds, then the read blocks forever.
+
+    Driven against a real listening socket, because `httpx.MockTransport` bypasses the transport
+    layer entirely and so cannot exercise an `httpx.Timeout` at all — a mocked "timeout" would only
+    prove that a raised exception propagates. The production read deadline is asserted separately;
+    here it is shortened so the test costs milliseconds instead of seconds.
+    """
+    import socket as _socket
+
+    from remote import bringup, relay
+
+    listener = _socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)  # backlog completes the handshake; nothing ever accept()s or replies
+    try:
+        base = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        monkeypatch.setattr(relay, "_SERVE_REGISTER_TIMEOUT",
+                            httpx.Timeout(connect=2.0, read=0.3, write=2.0, pool=2.0))
+        stop = _RecordingStop(set_after=2)
+        lines: list[str] = []
+        started = time.monotonic()
+
+        with pytest.raises(bringup.BringUpStopped):
+            bringup.register_with_backoff(
+                lambda: relay.register_node(base, "AT", "n", models=["m"]),
+                stop=stop, log=lines.append, note_error=lambda _m: None,
+            )
+
+        elapsed = time.monotonic() - started
+        assert elapsed < 5.0, f"a half-open relay held bring-up for {elapsed:.1f}s"
+        assert len(lines) == 2, f"the blocked attempts were not narrated: {lines}"
+        assert all("transport error" in line for line in lines), lines
+        assert stop.waits == [1.0, 2.0], f"it did not back off between attempts: {stop.waits}"
+    finally:
+        listener.close()
+
+
+def test_bringup_register_retries_an_exhausted_token_on_its_own_floor_naming_grid_login():
+    """An exhausted token cannot fix itself, so it must not be retried like a 503 — but killing the
+    child is wrong too: `_ServeState.refresh` re-reads `credentials.toml` and adopts a token another
+    **process** stored, which makes `grid login` on the same box a real remedy for a child that is
+    already running, with no re-join.
+
+    So it gets its own, much longer schedule (each attempt is otherwise a control-plane round trip),
+    and both the log line and the recorded reason name the command. That is strictly better than
+    what it replaces: `RelayUnauthorized` carries no message, so this path used to die printing
+    `Remote engine stopped: ` with nothing after the colon.
+    """
+    from remote import bringup, relay
+
+    stop = _RecordingStop()
+    attempts: list[int] = []
+    lines: list[str] = []
+    noted: list[str | None] = []
+
+    def register() -> None:
+        attempts.append(1)
+        if len(attempts) <= 2:
+            raise relay.RelayUnauthorized()
+
+    bringup.register_with_backoff(register, stop=stop, log=lines.append, note_error=noted.append)
+
+    assert len(attempts) == 3, "an exhausted token killed the child instead of retrying"
+    assert stop.waits == [60.0, 120.0], (
+        f"auth retries used the transport schedule {stop.waits}; each attempt is a control-plane "
+        "round trip, so it needs its own floor"
+    )
+    assert all("grid login" in line for line in lines), f"the log never named the remedy: {lines}"
+    assert all("grid login" in (n or "") for n in noted), f"the record never named the remedy: {noted}"
+
+
 def test_serve_apply_swaps_snapshot_atomically(monkeypatch, tmp_path):
     """apply() rebinds one immutable snapshot: readers see the new routing union, and a snapshot
     captured before the swap stays frozen-intact (F4 — the swap never mutates a published snapshot)."""
@@ -10874,6 +11356,51 @@ def test_serve_reload_loop_persists_failure_on_the_record(monkeypatch, tmp_path)
     assert "no key is stored" in rec["last_reload_error"]  # the failure survived the process's log
 
 
+def test_serve_reload_refuses_rather_than_degrading_a_live_node_when_the_probe_budget_is_spent(
+    monkeypatch, tmp_path
+):
+    """The same budget as bring-up, the opposite policy — and `engine_health.py` already states the
+    rule for this exact trade-off: *the engines it did not reach keep their previous verdict*.
+
+    `_reload_once` only probes a **genuinely new** engine, i.e. `grid join --at <new>` appended to a
+    live node — the case most likely to be legitimately slow, because it is still loading. Writing
+    all-False caps there would poison a registration the CLI has already reported as "hot-reloaded",
+    and it would stick until the next reload. So the reload is refused instead: the loop keeps the
+    old routing and records why, which the join gate then surfaces.
+    """
+    from remote import bringup, probe, serve
+    from shared import run_records
+
+    state = _seed_reload_state(monkeypatch, tmp_path, retained=[
+        ("http://e1/v1", ["a"], ["a"], {"schema_version": 1, "models": {"a": {}}}),
+    ], engines=[
+        {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
+        {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
+    ])
+
+    def spent_budget():
+        state.stop.set()  # one iteration of the reload loop is all this needs
+        return time.monotonic() - 1.0
+
+    monkeypatch.setattr(bringup, "probe_deadline", spent_budget)
+    monkeypatch.setattr(probe, "capabilities", lambda *a, **k: pytest.fail("probed past a spent budget"))
+    monkeypatch.setattr(probe, "probe_responses_endpoint",
+                        lambda *a, **k: pytest.fail("probed past a spent budget"))
+    state.reload_requested.set()
+
+    serve._reload_loop(state, "remote")
+
+    # Asserted on the advertised union, not on `route()`: with a single distinct engine that falls
+    # back for an unknown model, so it would answer for "b" whether or not the swap happened.
+    assert state.models == ["a"], (
+        f"the new engine was advertised with degraded caps on a LIVE node: {state.models}"
+    )
+    assert state.route("a") == "http://e1/v1", "the previous union did not survive the refused reload"
+    assert "budget" in (run_records.read_record("n1", "remote") or {}).get("last_reload_error", ""), (
+        "the refusal left no trace for `grid join` to surface"
+    )
+
+
 def test_serve_reload_success_clears_last_reload_error(monkeypatch, tmp_path):
     """A successful reload clears a previous failure's `last_reload_error`, so the CLI stops warning
     about a condition that healed."""
@@ -11273,6 +11800,147 @@ def test_remote_engine_startup_reads_api_key_from_env_when_store_empty(monkeypat
     assert serve._api_bearers(record) == {"https://api.openai.com/v1": "sk-env-999"}
 
 
+def test_remote_engine_narrates_its_intent_before_it_opens_a_socket(monkeypatch, tmp_path):
+    """The 0-byte log, closed (ADR 0022).
+
+    The child's first unconditional line used to come *after* it registered, so a child wedged in
+    bring-up left a 0-byte log and the incident had to be diagnosed from /proc. Ordering is the
+    assertion, not presence: the spec and the target relay must be on disk before the first socket,
+    and the child must name itself before it even reads its own record — that read raises
+    `SystemExit` on a corrupt *sibling* record, outside the try, before any handler exists.
+    """
+    from remote import bringup, probe, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "http://e1/v1", "models": ["m"], "engine_label": None}]}
+    events: list[str] = []
+
+    def read_record(_grid, _engine):
+        events.append("read-record")
+        return record
+
+    def probed(*_a, **_k):
+        events.append("network: probe")
+        return {}
+
+    monkeypatch.setattr(serve.run_records, "read_record", read_record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(bringup, "log", lambda m: events.append(f"log: {m}"))
+    monkeypatch.setattr(probe, "capabilities", probed)
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: bool(probed()))
+    monkeypatch.setattr(relay, "register_node", lambda *a, **k: events.append("network: register"))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: s.stop.set())
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+
+    assert events[0].startswith("log: "), f"the child read its record before saying anything: {events[:3]}"
+    first_socket = next(i for i, e in enumerate(events) if e.startswith("network: "))
+    said = [e for e in events[:first_socket] if e.startswith("log: ")]
+    assert len(said) >= 2, f"the child opened a socket having said only {said}"
+    assert "n1" in said[0] and "remote" in said[0], f"the first line names neither engine nor grid: {said[0]}"
+    spec_line = next((line for line in said if "https://relay.example" in line), None)
+    assert spec_line is not None, f"the target relay was never named before the first socket: {said}"
+    assert "m" in spec_line, f"the models were never named before the first socket: {spec_line}"
+
+
+def test_remote_engine_startup_survives_a_relay_that_is_mid_respawn(monkeypatch, tmp_path):
+    """The field incident at the startup seam (ADR 0022).
+
+    A `grid join` issued while the grid's master was mid-respawn used to die on the first 503 — one
+    transient relay failure, and the box served nothing until an operator noticed. The child now
+    retries and comes up on its own, and the reason is on the run record while it is still trying.
+    """
+    from remote import bringup, probe, relay, serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    record = {"grid_id": "n1", "engine_id": "remote", "signaling_url": "https://relay.example",
+              "media": False, "pid": 0,
+              "engines": [{"endpoint_url": "http://e1/v1", "models": ["m"], "engine_label": None}]}
+    run_records.write_record("n1", "remote", record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
+    monkeypatch.setattr(probe, "capabilities", lambda *a, **k: {})
+    monkeypatch.setattr(bringup, "_BACKOFF_SCHEDULE", (0.0,))  # the schedule is resolved per call
+    attempts: list[int] = []
+    noted_while_trying: list[str | None] = []
+
+    def flaky_register(*_a, **_k):
+        attempts.append(1)
+        if len(attempts) <= 2:
+            noted_while_trying.append(
+                (run_records.read_record("n1", "remote") or {}).get("last_register_error")
+            )
+            raise relay.RelayError("register failed (503): upstream unavailable", status=503)
+
+    monkeypatch.setattr(relay, "register_node", flaky_register)
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: s.stop.set())
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0, "a transient 503 killed the child"
+
+    assert len(attempts) == 3
+    assert noted_while_trying[-1] == "register failed (503): upstream unavailable", (
+        "a still-trying child left no reason on its record for `grid join` to report"
+    )
+    settled = run_records.read_record("n1", "remote") or {}
+    assert settled.get("registered_at") and "last_register_error" not in settled
+
+
+def test_remote_engine_registers_caps_for_every_model_when_the_probe_budget_bites(monkeypatch, tmp_path):
+    """A partial fan-out must not build a registration the relay refuses.
+
+    The relay validates that `capabilities.models`' keys equal the advertised `models` **exactly**
+    (grid-src `registry._normalize_capabilities` → `ValueError` → 400). A normal failed probe always
+    emits a *keyed* all-False entry, so those two sets could never diverge — until the probe budget
+    began skipping models by omitting their key entirely. And 400 is terminal to bring-up's own retry
+    loop, so the degrade that exists to keep a slow engine serving would instead kill it, on every
+    join, permanently. Asserted on the registration payload rather than on `_bring_up_engines`'
+    return value, because the payload is where the cross-repo contract actually lives.
+    """
+    from remote import bringup, probe, relay, serve
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    record = {"grid_id": "n1", "signaling_url": "https://relay.example", "media": False,
+              "engines": [{"endpoint_url": "http://e1/v1", "models": ["A", "B"], "engine_label": None}]}
+    monkeypatch.setattr(serve.run_records, "read_record", lambda g, e: record)
+    monkeypatch.setattr(serve, "_load_tokens", lambda net: ("AT", "RT"))
+    monkeypatch.setattr(serve.credentials, "node_id_from_token", lambda t: "node-1")
+    ticks = {"n": 0}
+
+    def fake_monotonic():  # under the deadline for the pre-loop and model-A checks, past it for B
+        ticks["n"] += 1
+        return 0.0 if ticks["n"] <= 2 else 100.0
+
+    monkeypatch.setattr(bringup, "probe_deadline", lambda: 50.0)
+    monkeypatch.setattr(serve.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **k: {
+        "schema_version": 1, "models": {model: {"features": {"tools": True}}}})
+    seen = {}
+    monkeypatch.setattr(relay, "register_node", lambda url, tok, node, **kw: seen.update(kw))
+    monkeypatch.setattr(relay, "unregister_node", lambda *a, **k: None)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda s: None)
+    monkeypatch.setattr(serve, "_poll_loop", lambda s: s.stop.set())
+
+    assert serve.run_remote_engine_from_record("n1", "remote") == 0
+
+    assert seen["models"] == ["A", "B"]
+    assert set(seen["capabilities"]["models"]) == set(seen["models"]), (
+        "the relay rejects a capabilities map whose keys are not exactly the advertised models "
+        f"(400, terminal) — got {sorted(seen['capabilities']['models'])} for {seen['models']}"
+    )
+    assert seen["capabilities"]["models"]["B"]["features"]["tools"] is False, (
+        "an unprobed model must claim nothing, like a failed probe already does"
+    )
+
+
 def test_remote_engine_api_record_registers_static_caps_and_kind(monkeypatch, tmp_path):
     """Startup-seam proof for the API-engine tracer bullet: a record with one api spec comes up with
     whitelist caps (no probe), advertises the namespaced models, reports kind `openai` on the grid
@@ -11556,7 +12224,10 @@ def test_remote_engine_codex_vendor_rank_follows_the_seats_tier_row(monkeypatch,
     assert "vendor_rank" not in models[f"codex:{big.vendor_name}"]
     err = capsys.readouterr().err
     assert f"codex:{big.vendor_name}" in err and "rank" in err  # off-row model flagged (not silent)
-    assert f"codex:{mini.vendor_name}" not in err               # a ranked model is not flagged
+    # Scoped to the rank warnings on purpose: bring-up's intent line names every advertised model
+    # (ADR 0022), so a bare substring search over the whole log now matches it and proves nothing.
+    rank_warnings = [line for line in err.splitlines() if "rank" in line]
+    assert not any(f"codex:{mini.vendor_name}" in line for line in rank_warnings)  # a ranked model is not flagged
 
 
 def test_remote_engine_api_only_defaults_to_eight_workers(monkeypatch, tmp_path):
@@ -14563,6 +15234,101 @@ def test_bring_up_engines_single_spec_multi_model_probes_every_model(monkeypatch
     assert advertised == ["A", "B", "C"] and upstream == ["A", "B", "C"]
     assert set(caps["models"]) == {"A", "B", "C"}           # one merged envelope carries all models
     assert caps["models"]["B"] == {"f": "B"}                # later models keep their own probed entry
+
+
+def test_bring_up_engines_stops_probing_once_the_budget_is_spent(monkeypatch, tmp_path, capsys):
+    """The 8-minute wedge was an unbounded AGGREGATE, not one unbounded call (ADR 0022).
+
+    Every probe is individually capped, but the fan-out is 4 metadata probes plus up to 4 real
+    *inference* probes PER MODEL, run sequentially with no shared clock. One wall-clock budget covers
+    the whole fan-out. Past it the remaining models are still advertised, with no probed capabilities
+    — the same fail-closed degrade a failed probe already produces, and correct at startup precisely
+    because there is no previous verdict to keep — and the log names them, because a model quietly
+    losing its capabilities is not an acceptable way to fix a hang.
+    """
+    from remote import bringup, probe, serve
+
+    record = {"engines": [
+        {"endpoint_url": "http://h:9000/v1", "models": ["A", "B"], "engine_label": None},
+        {"endpoint_url": "http://h:9001/v1", "models": ["C"], "engine_label": None},
+    ], "advertise_as": []}
+    monkeypatch.setattr(bringup, "PROBE_BUDGET", 0.0)  # resolved per call, so it bites immediately
+    probed: list[str] = []
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: bool(probed.append("route")))
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **k: probed.append(model) or {})
+
+    results, launched, _ = serve._bring_up_engines(record)
+
+    assert probed == [], "the budget was spent and the fan-out kept probing anyway"
+    assert [r[1] for r in results] == [["A", "B"], ["C"]], "models stopped being advertised"
+    for _url, advertised, _upstream, caps in results:
+        # A key per advertised model, claiming nothing — NOT an absent key. The relay rejects a
+        # capabilities map whose keys are not exactly the advertised list, and that rejection is
+        # terminal, so omitting them would kill the engine this degrade exists to keep serving.
+        assert set(caps["models"]) == set(advertised), f"{sorted(caps['models'])} vs {advertised}"
+        assert all(not any(e["features"].values()) for e in caps["models"].values()), (
+            "a skipped model must claim nothing, not guess"
+        )
+    err = capsys.readouterr().err
+    assert "budget" in err and all(model in err for model in ("A", "B", "C")), (
+        f"the skipped models were dropped silently: {err}"
+    )
+
+
+def test_bring_up_engines_keeps_what_it_probed_when_the_budget_runs_out_mid_fan_out(
+    monkeypatch, tmp_path, capsys
+):
+    """The realistic shape: the budget expires BETWEEN models, not before the first one.
+
+    The whole point of a fan-out budget is that it bites part-way through — model A answered, then
+    the engine stopped answering and B ran out of clock. What A cost must not be thrown away, and B
+    must be named. (Found by mutation: with the budget spent up front, the pre-loop check fires and
+    the per-model check is never exercised at all.)
+    """
+    from remote import bringup, probe, serve
+
+    record = {"engines": [{"endpoint_url": "http://h:9000/v1", "models": ["A", "B"], "engine_label": None}],
+              "advertise_as": []}
+    ticks = {"n": 0}
+
+    def fake_monotonic():  # under the deadline for the pre-loop and model-A checks, past it for B
+        ticks["n"] += 1
+        return 0.0 if ticks["n"] <= 2 else 100.0
+
+    monkeypatch.setattr(bringup, "probe_deadline", lambda: 50.0)
+    monkeypatch.setattr(serve.time, "monotonic", fake_monotonic)
+    probed: list[str] = []
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
+    monkeypatch.setattr(probe, "capabilities", lambda url, model, **k: probed.append(model) or {
+        "schema_version": 1, "models": {model: {"f": model}}})
+
+    results, _launched, _ = serve._bring_up_engines(record)
+
+    assert probed == ["A"], f"the budget did not bite between models: probed {probed}"
+    (_url, advertised, _upstream, caps), = results
+    assert advertised == ["A", "B"], "a model stopped being advertised because it was not probed"
+    assert set(caps["models"]) == {"A", "B"}, "every advertised model needs an entry, or the relay 400s"
+    assert caps["models"]["A"] == {"f": "A"}, "the probe work already paid for was thrown away"
+    assert not any(caps["models"]["B"]["features"].values()), "the skipped model claimed something"
+    err = capsys.readouterr().err
+    assert "B" in err and "budget" in err, f"the model that lost its capabilities was not named: {err}"
+
+
+def test_bring_up_engines_probes_normally_when_the_budget_is_ample(monkeypatch, tmp_path):
+    """The other half, so the budget can't quietly bite on every healthy engine: with the real
+    budget in force, a fast probe is untouched. On a healthy engine every probe answers in
+    milliseconds, so the budget only ever bites on one that is not answering."""
+    from remote import probe, serve
+
+    record = {"engines": [{"endpoint_url": "http://h:9000/v1", "models": ["A", "B"], "engine_label": None}],
+              "advertise_as": []}
+    monkeypatch.setattr(probe, "probe_responses_endpoint", lambda *a, **k: False)
+    monkeypatch.setattr(probe, "capabilities",
+                        lambda url, model, **k: {"schema_version": 1, "models": {model: {"f": model}}})
+
+    results, _launched, _ = serve._bring_up_engines(record)
+
+    assert set(results[0][3]["models"]) == {"A", "B"}
 
 
 def test_bring_up_engines_api_spec_static_caps_never_probes(monkeypatch, tmp_path):
