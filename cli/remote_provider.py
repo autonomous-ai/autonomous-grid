@@ -148,14 +148,17 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # member can't pre-check fails later at register). See remote_grid.resolve_relay_base.
     signaling_url, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
 
+    respawn = bool(getattr(args, "respawn", False))  # never no-op, never SIGHUP — always stop-and-start
     key_rotated = False  # a `join --api` that stored a NEW key must reach a live identity via respawn
+    deferred_target_error: SystemExit | None = None
     if getattr(args, "api", None) is not None:
         specs, key_rotated = _resolve_api_targets(args, network_id)
         media_detected = False
     else:
-        specs, media_detected = _resolve_serve_targets(args)
+        specs, media_detected, deferred_target_error = _resolve_or_defer(args, respawn=respawn)
     media = bool(getattr(args, "media", False)) or media_detected
-    if not specs and not media:  # engines detected and the operator declined, or nothing to serve
+    if not specs and not media and deferred_target_error is None:
+        # engines detected and the operator declined, or nothing to serve
         print("Nothing joined.")
         return 0
     engine_id = _REMOTE_IDENTITY
@@ -177,6 +180,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # leave-then-rejoin instruction instead. (`meta_name` is not inherited by either path — it comes
         # from `--name` or the hostname.) Same shape as `_leave_one_engine`'s
         # `survivors or list(records.values())` (ADR 0010).
+        if deferred_target_error is not None and not live:
+            # Nothing running to restart, so there is no union to inherit and `--respawn` has nothing
+            # to act on: the operator gets the guidance auto-detect would have given them anyway.
+            raise deferred_target_error
         base = live or list(run_records.read_records(network_id).values())
         merged_specs, changed = _merge_engines(_engine_union(base), specs)
         # A rotated key only matters when this kind's API spec is already LIVE. A reload WOULD re-read the
@@ -196,7 +203,26 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if (
             live and not changed and media == base_media and bundles == base_bundles
             and meta_name == _identity_field(live, "meta_name") and not rotated_live
+            and not respawn
         ):
+            # Lazy, per this module's import rule: `cli.dispatch` imports it while `cli` is still
+            # initialising, and `remote.relay` pulls httpx in eagerly.
+            from remote import service_truth
+
+            log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
+            # Running is not serving (grid-leave issue 10). A child that never registered with the
+            # relay, or stopped heartbeating, is alive and useless — and the reassuring line below is
+            # the exact transcript the mid-respawn incident produced: join says joined, `grid models`
+            # empty. Report the state instead. Exit stays 0 (declining to act is still correct) and
+            # `--respawn` is the way out; the message is the fix.
+            adrift = service_truth.not_serving(
+                _identity_record(live) or {}, network_id, engine_id, log_path=log_path
+            )
+            if adrift is not None:
+                print(f"Not serving on {label}: {adrift.state}; nothing was appended.")
+                if adrift.detail:
+                    print(adrift.detail, file=sys.stderr)
+                return 0
             print(f"Already serving on {label}; nothing to append.")
             # The serve process records a hot-reload that failed AFTER the CLI reported success (the
             # SIGHUP is fire-and-forget) — surface it here, or the no-op compounds the false success.
@@ -230,7 +256,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
             # "credential", not "key": for openai it IS a key; for codex it is a fresh sign-in's
             # OAuth bundle, which counts as a rotation for exactly the same reason.
             print(f"Rotated the stored {args.api} credential — restarting the engine to apply it.")
-        reloaded = (not rotated_live) and _hot_reloadable(live, merged_specs, record)
+        # `--respawn` suppresses the SIGHUP for the same reason a rotated credential does, and more
+        # sharply: a hot-reload re-reads the record, which does nothing for a child whose problem is
+        # that it never registered — the state the honest gate above points the operator here from.
+        reloaded = (not rotated_live) and (not respawn) and _hot_reloadable(live, merged_specs, record)
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
         else:
@@ -766,12 +795,18 @@ def _engine_union(records: list[dict[str, object]]) -> list[dict[str, object]]:
     return union
 
 
-def _identity_field(live: list[dict[str, object]], key: str) -> object:
-    """One field of the live identity — the singleton's if present, else the first live record's."""
+def _identity_record(live: list[dict[str, object]]) -> dict[str, object] | None:
+    """The live identity's record — the singleton's if present, else the first live one's."""
     for record in live:
         if record.get("engine_id") == _REMOTE_IDENTITY:
-            return record.get(key)
-    return live[0].get(key) if live else None
+            return record
+    return live[0] if live else None
+
+
+def _identity_field(live: list[dict[str, object]], key: str) -> object:
+    """One field of the live identity — the singleton's if present, else the first live record's."""
+    record = _identity_record(live)
+    return record.get(key) if record is not None else None
 
 
 def _reject_unserveable_union(
@@ -874,6 +909,19 @@ def _hot_reload_identity(
     record["pid"] = pid
     record["pid_start_time"] = singleton.get("pid_start_time")
     record["pgid"] = singleton.get("pgid")
+    # …and its clock. `_build_record` stamps `started_at` = now for every join, which is right for
+    # `_respawn_identity` (a genuinely new process) and wrong here: nothing restarted. Left uncarried,
+    # any hot-reloadable append to a WEDGED engine resets its uptime, putting it back inside the
+    # bring-up quiet window — so the gate reports "still starting (up 0s)" and withholds the
+    # `--respawn` suggestion from an engine that has been stuck for ten minutes, and each further
+    # append re-extends the grace (grid-leave issue 10 review).
+    record["started_at"] = singleton.get("started_at") or record.get("started_at")
+    # Its registration travels with it for the same reason and by the same hand (grid-leave issue 10):
+    # this process is still the one that registered, so dropping the fact would make the next re-join
+    # accuse a healthy engine of never having reached the relay.
+    from remote import service_truth  # lazy, per this module's import rule
+
+    service_truth.carry_service_truth(record, singleton)
     run_records.write_record(network_id, _REMOTE_IDENTITY, record)
     try:
         _signal_reload(pid)
@@ -911,7 +959,7 @@ def _respawn_identity(
             continue
         prior_id = str(prior.get("engine_id") or "")
         if prior_id and prior_id != engine_id:  # drop a legacy record's file so only the singleton remains
-            run_records.record_path(network_id, prior_id).unlink(missing_ok=True)
+            run_records.remove_record(network_id, prior_id)
     if undead:
         raise SystemExit(
             f"Could not stop the engine(s) already serving this grid ({', '.join(undead)}); they may "
@@ -919,6 +967,14 @@ def _respawn_identity(
         )
 
     record.update(run_records.identity_stamp(0))  # clear pid AND its identity — never a stale token
+    # …and never a stale registration (grid-leave issue 10). The child about to be spawned has told
+    # the relay nothing yet. `started_at` is refreshed with it so "up 42s" measures THIS process:
+    # `_leave_one_engine` rebuilds its record by copying a survivor's, which carries the old one's.
+    from local import runtime  # lazy, per this module's import rule
+    from remote import service_truth
+
+    service_truth.clear_service_truth(record)
+    record["started_at"] = runtime.utc_now()
     run_records.write_record(network_id, engine_id, record)
     proc = _spawn_remote_engine(network_id, engine_id)
     # Stamp the identity, not just the pid: this is the ONLY stamp a `grid leave` racing this join
@@ -931,13 +987,47 @@ def _respawn_identity(
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
     if _await_remote_engine_start(proc) == "died":
-        run_records.record_path(network_id, engine_id).unlink(missing_ok=True)
+        run_records.remove_record(network_id, engine_id)
         from . import provider
 
         raise SystemExit(
             f"Engine exited before it started — the grid is not serving now. See {log_path}:\n"
             f"{provider._log_tail(log_path)}"
         )
+
+
+def _resolve_or_defer(
+    args: argparse.Namespace, *, respawn: bool
+) -> tuple[list[dict[str, object]], bool, SystemExit | None]:
+    """``_resolve_serve_targets``, except that a bare ``grid join --respawn`` may postpone its refusal.
+
+    `--respawn` is also a **restart** — the one-command form of the `grid leave` + `grid join` folklore
+    it replaces, which an operator runs with no arguments. But auto-detect probes loopback only, so an
+    identity serving `--at <otherhost>` or an API engine has nothing to find, and the refusal would
+    land before the CLI ever looked at what is running. Deferring it lets the caller answer from the
+    live identity's own union instead, and re-raise untouched when there is no live identity.
+
+    Only a join that names **nothing** defers, which is what makes this safe to express as "catch
+    ``SystemExit``". `_resolve_serve_targets` has five refusals; three of them (`--at` without `-m`,
+    a bare `-m`, an unmatched `--kind`) are unreachable here because each is guarded by the very flag
+    this branch excludes — swallowing one would hide a typo. The two that remain are both about
+    **detection**: "no running engine detected" and "multiple engines detected, pass --all". Neither
+    is a question `--respawn` needs answered when something is already live, because the union that
+    identity is serving IS the answer; deferring the second is what keeps `grid join --respawn`
+    working on the multi-engine boxes it is most useful on. `provider._detect` itself cannot raise
+    (`shared/system/detect.py` has no `raise`), so nothing else can arrive here.
+    """
+    named_nothing = not any((
+        args.at, args.serve, getattr(args, "models", None), getattr(args, "media", False),
+        getattr(args, "kind", None),
+    ))
+    try:
+        specs, media_detected = _resolve_serve_targets(args)
+    except SystemExit as exc:
+        if not (respawn and named_nothing):
+            raise
+        return [], False, exc
+    return specs, media_detected, None
 
 
 def _resolve_serve_targets(args: argparse.Namespace) -> tuple[list[dict[str, object]], bool]:

@@ -57,7 +57,7 @@ import pytest
 
 import cli
 from local import runtime
-from remote import credentials, orphan_sweep
+from remote import credentials, orphan_sweep, service_truth
 from shared import paths, process_identity, run_records, state
 
 # The sweep half of the old skip reason is gone — grid-leave issue 06 gave the argv sweep Windows
@@ -767,3 +767,77 @@ def test_real_child_dying_before_registration_reaps_only_its_own_record(dying_en
             "keeps serving with no record, untracked by `grid leave` and invisible to `grid join`"
         )
         assert int(run_records.read_record(engine.network_id, _ENGINE_ID)["pid"]) == successor.pid
+
+
+def _identical_join(engine: _LiveEngine) -> list[str]:
+    """The `grid join` argv that re-states exactly what this identity's record already says — the
+    idempotent re-join the no-op gate exists for, and the only shape that reaches it."""
+    record = run_records.read_record(engine.network_id, _ENGINE_ID)
+    return ["join", "--at", record["endpoint_url"], "-m", _MODEL, "--name", record["meta_name"]]
+
+
+def test_real_child_that_is_serving_is_reported_as_serving(live_engine, capsys):
+    """The healthy cell of issue 10's *registered × sidecar-fresh* matrix, with a real child.
+
+    Everything else about service truth is asserted against records this suite writes by hand, which
+    proves the gate reads them correctly but not that anything ever writes them. This is the one test
+    where a genuine detached serve child registers with a genuine relay and leaves both facts behind
+    on its own — and where the no-op gate then has to still say the reassuring thing, because a gate
+    that only ever accused would pass every other test in this feature.
+    """
+    engine = live_engine("service-truth-healthy")
+    capsys.readouterr()
+
+    # `live_engine` returns as soon as the RELAY has processed the register PUT — but the child
+    # writes `registered_at` after `register_node` returns, so the two are not ordered. Wait for the
+    # record, don't read it: the fixture's readiness condition is about the relay, not about disk.
+    def _registered():
+        return (run_records.read_record(engine.network_id, _ENGINE_ID) or {}).get("registered_at")
+
+    assert _wait_until(_registered), (
+        f"the child registered with the relay but left no trace of it on its record. "
+        f"Child log:\n{_log_tail(engine.network_id)}"
+    )
+    sidecar = run_records.heartbeat_path(engine.network_id, _ENGINE_ID)
+    assert sidecar.exists(), f"no heartbeat sidecar. Child log:\n{_log_tail(engine.network_id)}"
+    age = time.time() - sidecar.stat().st_mtime
+    assert age < service_truth.HEARTBEAT_STALE_AFTER_SECONDS, (
+        f"the sidecar was already {age:.0f}s stale on a child that just registered"
+    )
+
+    assert cli.main(_identical_join(engine)) == 0
+    out = capsys.readouterr().out
+    assert "Already serving" in out, (
+        f"the gate refused to vouch for an engine that IS serving — every accusation in this feature "
+        f"is worthless if this one is a false positive. Got:\n{out}"
+    )
+
+
+def test_real_child_stuck_in_registration_is_not_reported_as_already_serving(dying_engine, capsys):
+    """The incident, reproduced end to end (`.scratch/grid-leave/` PRD, field confirmation #2).
+
+    A join issued while the grid's master was mid-respawn left a serve child parked in bring-up for
+    8+ minutes; `grid join` answered "Already serving …; nothing to append." at exit 0 while `grid
+    models` stayed empty. `dying_engine`'s gated relay reproduces exactly that: a REAL child, alive
+    and healthy by every process-level measure, blocked inside its register PUT — past its self-stamp,
+    never registered. No liveness check can tell this from a working engine, which is why issue 08's
+    fix cannot reach it and this one has to.
+    """
+    engine = dying_engine("service-truth-stuck")
+    # `_seed_grid_home` writes the harness's record by hand; production's `_build_record` always
+    # stamps `started_at`. Set it past the bring-up quiet window so the remedy is offered too — a
+    # child this stuck is exactly who the escape hatch is for.
+    run_records.update_record(engine.network_id, _ENGINE_ID, started_at="2020-01-01T00:00:00+00:00")
+    capsys.readouterr()
+
+    assert cli.main(_identical_join(engine)) == 0
+
+    captured = capsys.readouterr()
+    assert "Already serving" not in captured.out, (
+        f"the gate vouched for a child that has never reached the relay — the exact transcript the "
+        f"incident produced. Got:\n{captured.out}"
+    )
+    assert "not registered" in captured.out and f"pid={engine.proc.pid}" in captured.out
+    assert "--respawn" in captured.err, "the operator was left with no way out"
+
+    engine.relay.register_gate.set()  # let the child finish dying, so teardown is clean

@@ -24,7 +24,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from remote import api_keys, control_plane, credentials, engine_health, probe, relay, codex_auth, codex_oauth
+from remote import (
+    api_keys, control_plane, credentials, engine_health, probe, relay, service_truth,
+    codex_auth, codex_oauth,
+)
 from shared.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
@@ -112,6 +115,29 @@ def _warn(msg: str) -> None:
     print(f"[engine] {msg}", file=sys.stderr, flush=True)
 
 
+def _bookkeep(what: str, write: Callable[..., Any], *args: Any) -> bool:
+    """Run one piece of best-effort run-record bookkeeping that must never take a serving engine down.
+
+    Every one of these runs *inside* something more important than itself — a registration, a
+    heartbeat tick, a reload's except arm. A raise there would either kill a watcher thread or
+    replace the operator's real failure reason with a disk error (Python demotes the original to
+    ``__context__``, which nothing prints). ``SystemExit`` is caught alongside ``Exception`` because
+    ``jsonio`` raises it for a corrupt record, and this is a thread, where a bare ``SystemExit`` dies
+    silently. The failure is reported, never swallowed: the child's log is where a future orphan
+    investigation starts.
+
+    Returns whether the write **landed**. Callers whose fact must not be lost (the registration
+    stamp, the error heal) key their retry off this instead of assuming one attempt is enough — a
+    swallowed failure is invisible to the operator by design, so it has to be visible to us. A writer
+    that returns nothing has simply succeeded; only an explicit ``False`` means "not settled"."""
+    try:
+        outcome = write(*args)
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not update {what} on the run record (ignoring): {exc!r}")
+        return False
+    return outcome is not False
+
+
 # ---------------------------------------------------------------------------
 # Detached entry
 # ---------------------------------------------------------------------------
@@ -133,6 +159,12 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
     try:
         with file_lock(run_records.record_path(grid_id, engine_id)):
             run_records.update_record(grid_id, engine_id, **run_records.identity_stamp(os.getpid()))
+            # Declare, before any socket is opened, that this build reports service truth (issue 10).
+            # The sidecar's ABSENCE is what keeps the join gate quiet about an older build's child, so
+            # this must land here rather than at first registration: the incident regime is a child
+            # wedged in bring-up, which never reaches its first heartbeat. Its own wrapper, so a
+            # sidecar failure can neither mask nor be mistaken for the pid stamp's.
+            _bookkeep("heartbeat sidecar", service_truth.touch_heartbeat, grid_id, engine_id)
     except (Exception, SystemExit) as exc:  # never let a disk hiccup stop the engine serving
         _warn(f"could not stamp live pid into the run record for {engine_id}@{grid_id}: {exc}")
 
@@ -236,6 +268,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             signaling_url=signaling_url,
             node_id=node_id,
             network_id=network_id,
+            engine_id=engine_id,  # which record this process writes its service truth onto
             llm_url=engine_results[0][0] if engine_results else "",
             access_token=access_token,
             refresh_token=refresh_token,
@@ -257,7 +290,17 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # with no stored seat dies HERE naming the fix (still inside the try, so the record is
         # reaped like any died-before-registering engine), never as N per-job 401s.
         _prime_codex_seat(state, record)
-        register_once(state)
+        try:
+            register_once(state)
+        except (Exception, SystemExit) as exc:
+            # Leave the reason on the record before this child dies of it. Today the record usually
+            # goes with it (the `finally` reaps a never-registered child), but not when ownership
+            # can't be proven — and once issue 11 gives bring-up its retry loop, this is the field
+            # that explains a child still trying. Bounded and body-only: `RelayError` carries the
+            # response text, never the request's bearer.
+            _bookkeep("last_register_error", service_truth.note_register_error,
+                      network_id, engine_id, str(exc) or repr(exc))
+            raise
         registered = True
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
         print("Send SIGTERM (grid leave) to unregister.")
@@ -1063,6 +1106,10 @@ class _ServeState:
         signaling_url: str,
         node_id: str,
         network_id: str,
+        # Which run record this process owns. Remote keeps one identity per grid, so it is always
+        # `_REMOTE_IDENTITY` in production — but the record-writing bookkeeping below (the reload
+        # error, and issue 10's service truth) needs it by name, and only the entrypoint knows it.
+        engine_id: str = "remote",
         llm_url: str,
         access_token: str,
         refresh_token: str | None,
@@ -1081,6 +1128,7 @@ class _ServeState:
         self.signaling_url = signaling_url
         self.node_id = node_id
         self.network_id = network_id
+        self.engine_id = engine_id
         self.llm_url = llm_url.rstrip("/")
         # `bearer_by_url` and `api_kind_by_url` are resolved from the key store / record and live on the
         # reload-swappable snapshot built below (NOT as fixed attributes — see the `bearer_by_url`
@@ -1113,6 +1161,13 @@ class _ServeState:
         self.media_models: list[str] = []
         self.media_signature: tuple[bool, tuple[str, ...], int, int] = _media_signature({})
         self._reload_register_fails = 0  # consecutive post-swap re-register failures (bounded retry, C5)
+        # Whether THIS process has written a `last_register_error` that still needs healing. In
+        # memory so the healthy path never reads the record to discover there is nothing to clear —
+        # the heartbeat runs every 30s for the life of the engine (issue 10). Both flags track what
+        # actually LANDED on disk, not what was attempted: `_bookkeep` swallows write failures by
+        # design, so trusting the attempt is how a lost write becomes permanent.
+        self._register_error_noted = False
+        self._registration_recorded = False
         # Local-engine reachability, folded into the heartbeat's `load` (ADR 0019). Keyed by engine
         # URL, not model, so a hot-reload that re-points a model can't carry a stale verdict onto a
         # different engine. Empty = nothing withheld, which is also what every failure path leaves.
@@ -1344,6 +1399,12 @@ def register_once(state: _ServeState, *, _allow_refresh: bool = True) -> None:
         if _allow_refresh and token is not None and state.refresh(stale_token=token):
             return register_once(state, _allow_refresh=False)
         raise
+    # We are on the grid. Say so on the record, where the CLI can read it offline: "the process is
+    # running" was never evidence of that, and the join gate believed it for a year (issue 10). The
+    # outcome is remembered because this write must not be lost — see `_heartbeat_loop`'s retry.
+    state._registration_recorded = _bookkeep(
+        "registered_at", service_truth.mark_registered, state.network_id, state.engine_id
+    )
 
 
 def poll_once(state: _ServeState, *, _allow_refresh: bool = True) -> dict[str, Any] | None:
@@ -1374,21 +1435,21 @@ def heartbeat_once(state: _ServeState, *, _allow_refresh: bool = True) -> str:
 def _set_last_reload_error(state: _ServeState, engine_id: str, message: str | None) -> None:
     """Persist (``str``) or clear (``None``) a reload failure on the run record so the NEXT CLI command
     can surface it: the CLI prints success as soon as the SIGHUP is delivered, so a failure inside this
-    process would otherwise be visible only in this log. Locked read-modify-write — the CLI merges
-    joins under the same lock, so an unlocked write here could lose a concurrent join's union (ADR
-    0010 F3). Best-effort bookkeeping that never raises: a raise inside ``_reload_loop``'s except
-    would kill the watcher, and one after a successful swap would mislabel the reload as failed."""
-    try:
-        with file_lock(run_records.record_path(state.network_id, engine_id)):
-            record = run_records.read_record(state.network_id, engine_id)
-            if not record or (message is None and "last_reload_error" not in record):
-                return
-            updated = {k: v for k, v in record.items() if k != "last_reload_error"}
-            if message is not None:
-                updated["last_reload_error"] = message[:300]  # a trace, not a transcript (never the key)
-            run_records.write_record(state.network_id, engine_id, updated)
-    except (Exception, SystemExit) as exc:
-        _warn(f"could not update last_reload_error on the run record (ignoring): {exc!r}")
+    process would otherwise be visible only in this log.
+
+    ``run_records.mutate_record`` supplies the three properties this used to hand-roll — the record
+    lock the CLI's join merge also takes (so an unlocked write here cannot lose a concurrent join's
+    union, ADR 0010 F3), a no-op when a leave has already deleted the record, and no rewrite when
+    nothing changed. Best-effort and never raises: a raise inside ``_reload_loop``'s except would kill
+    the watcher, and one after a successful swap would mislabel the reload as failed."""
+
+    def _set(record: dict[str, Any]) -> None:
+        if message is None:
+            record.pop("last_reload_error", None)
+        else:
+            record["last_reload_error"] = message[:300]  # a trace, not a transcript (never the key)
+
+    _bookkeep("last_reload_error", run_records.mutate_record, state.network_id, engine_id, _set)
 
 
 def _reload_once(state: _ServeState, engine_id: str) -> None:
@@ -2124,8 +2185,38 @@ def _heartbeat_loop(state: _ServeState) -> None:
             break
         except relay.RelayError as exc:
             print(f"\nHeartbeat error: {exc}", file=sys.stderr)
+            # That line is inside a detached child's log. Put the reason where the CLI can read it
+            # too: the operator's next move is a `grid join`, which must not answer "Already serving"
+            # while this box is off the grid (issue 10).
+            # `or` keeps the flag set when THIS write is the one that failed: an accusation an
+            # earlier beat did land still needs healing.
+            state._register_error_noted = _bookkeep(
+                "last_register_error", service_truth.note_register_error,
+                state.network_id, state.engine_id, str(exc) or repr(exc),
+            ) or state._register_error_noted
         else:
             _debug(f"heartbeat: ok ({result})")
+            # The relay heard from us — the one fact the join gate's freshness check is about. Touched
+            # only here, on success: freshening it after a failed beat would launder an unreachable
+            # engine into a healthy-looking one.
+            _bookkeep("heartbeat sidecar", service_truth.touch_heartbeat,
+                      state.network_id, state.engine_id)
+            # Retry the registration stamp until it is durable. It is the one fact here that fails
+            # CLOSED — absent reads as a confident "has not registered" — so a single swallowed write
+            # would leave this engine accused for as long as it runs, and the operator's natural
+            # response (re-running the same join) is the read-only no-op path that can never heal it.
+            if not state._registration_recorded:
+                state._registration_recorded = _bookkeep(
+                    "registered_at", service_truth.mark_registered,
+                    state.network_id, state.engine_id,
+                )
+            # Heal, without a disk read on every healthy tick — and only clear the flag once the heal
+            # actually landed, or a failed heal would strand a stale, undatable accusation forever.
+            if state._register_error_noted and _bookkeep(
+                "last_register_error", service_truth.note_register_error,
+                state.network_id, state.engine_id, None,
+            ):
+                state._register_error_noted = False
         # On EVERY surviving tick — including a failed relay call (the relay being unreachable
         # says nothing about the vendor), so an idle grid behind a flaky relay still rotates.
         _maybe_refresh_codex(state)

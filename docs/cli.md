@@ -220,6 +220,18 @@ join --all` serves several detected engines under **one** identity: it advertise
 models and routes each job to the engine that serves the requested model (first-detected wins when
 two engines share a model name).
 
+Re-running a join that changes nothing is a **no-op** — but only when the engine is actually serving.
+The serve loop records when it registered with the relay and touches a heartbeat file beside its run
+record on every successful beat, so `grid join` can tell a working engine from a live-but-stuck one
+without any network call. When it can't vouch for the engine it says so instead — naming the pid, how
+long the process has been up, the last registration error and the log path — rather than the old
+reassuring "Already serving …; nothing to append." An engine still inside its bring-up window is
+reported as *starting*, with no suggestion to restart it (a large model can take minutes to load).
+**`grid join --respawn`** is the way out: it stops the engine already serving this grid and starts a
+fresh one, never no-ops and never hot-reloads. On its own (`grid join --respawn`, no other flags) it
+restarts whatever this box is already serving; with nothing running it is an ordinary join. See
+[ADR 0021](./adr/0021-service-truth-at-the-join-gate.md).
+
 `grid join --media [--bundle <bundle>]...` serves this box's built-in media (ComfyUI) engine to the
 relay — media-only, or alongside a text engine (`--serve`/`--at` + `--media`). The serve loop brings
 up ComfyUI + the media server, registers the `comfyui:*` workflows the host's VRAM gates in, and the
@@ -354,7 +366,8 @@ The `grid join` flag set is the union of both modes, gated by mode:
   sign-in's paste flow for headless boxes; inert elsewhere, with a note), and `--max-concurrency`
   (how many requests this engine serves at once; the provider runs one poll worker per slot —
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
-  them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default).
+  them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default), and
+  `--respawn` (stop the engine already serving this grid and start a fresh one — see below).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
   `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.

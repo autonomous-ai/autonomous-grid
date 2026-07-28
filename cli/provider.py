@@ -38,6 +38,7 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
     ("max_concurrency", "--max-concurrency"),
+    ("respawn", "--respawn"),
 )
 
 

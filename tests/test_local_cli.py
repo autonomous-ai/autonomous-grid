@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import datetime
 import errno
 import json
 import os
@@ -7305,9 +7306,12 @@ def _seed_remote_identity(monkeypatch, tmp_path, engines, *, pid=4242, media=Fal
     })
 
 
-def _seed_live_identity_record(*, pid, engines, grid_id="n1"):
+def _seed_live_identity_record(*, pid, engines, grid_id="n1", **fields):
     """The singleton remote identity's run record, for a grid already seeded by
-    `_seed_running_remote_grid` (which mocks the control-plane status the join path resolves)."""
+    `_seed_running_remote_grid` (which mocks the control-plane status the join path resolves).
+
+    `**fields` merges extra record keys (`started_at`, `registered_at`, `last_register_error`) so a
+    service-truth test can seed the exact state the serve child would have left."""
     from shared import run_records
 
     run_records.write_record(grid_id, "remote", {
@@ -7317,6 +7321,7 @@ def _seed_live_identity_record(*, pid, engines, grid_id="n1"):
         "engines": engines,
         "models": list(dict.fromkeys(m for e in engines for m in e.get("models") or [])),
         "endpoint_url": engines[0]["endpoint_url"] if len(engines) == 1 else None,
+        **fields,
     })
 
 
@@ -7397,6 +7402,397 @@ def test_remote_join_onto_a_dead_identity_keeps_the_engines_it_was_already_servi
         "the engine the box was already serving was dropped by a join that only meant to add one"
     )
     assert record["meta_name"] == "mybox"
+
+
+def _seed_heartbeat_sidecar(grid_id="n1", engine_id="remote", *, age_seconds=0.0):
+    """The heartbeat sidecar a service-truth-reporting serve child creates at startup and touches on
+    every successful beat, aged by ``age_seconds``.
+
+    Aged with ``os.utime`` rather than a faked clock, deliberately: the staleness question IS "how old
+    is this file", so faking `time.time` would test the fake. Same reasoning the real-child harness
+    gives for leaving its TTL unscaled (tests/test_remote_leave_real_child.py)."""
+    from shared import run_records
+
+    path = run_records.heartbeat_path(grid_id, engine_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_remote_join_noop_reports_an_engine_that_never_registered(monkeypatch, tmp_path, capsys):
+    """The other half of the container incident (`.scratch/grid-leave/` issue 10, PRD follow-up F8).
+
+    Issue 08 taught the gate that a corpse is not a live engine. This is the second lie, and the
+    liveness fix cannot reach it: a **genuinely live** child that never got onto the grid. A join
+    issued while the grid's master was mid-respawn sat in bring-up for 8+ minutes with a 0-byte log,
+    and the gate still printed "Already serving …; nothing to append." at exit 0 while `grid models`
+    showed nothing from the box. Process existence is not service.
+
+    Declining to act stays correct (exit 0, nothing respawned) — the message is the fix, and it has to
+    carry the three things the operator needs: which process, where its log is, and the way out.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00")  # long past the bring-up quiet window
+    _seed_heartbeat_sidecar()  # the child stamped it at startup — then never registered
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    # The SAME engine, model and display name the record carries: the idempotent re-join the gate is for.
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Already serving" not in out, (
+        "the gate reported success over a live child that never registered — the exact transcript the "
+        "mid-respawn incident produced (join says joined, `grid models` empty)"
+    )
+    assert "not registered" in out and "pid=4242" in out
+    assert "cmd" not in spawned, "declining to act is still correct — the gate must not respawn by itself"
+
+
+def test_remote_join_noop_does_not_tell_you_to_respawn_an_engine_that_is_still_starting(
+    monkeypatch, tmp_path, capsys
+):
+    """The honest message must not become destructive advice.
+
+    `_await_remote_engine_start` waits 3s, but a real bring-up — a large GGUF load, a ComfyUI start —
+    takes minutes, and the child stamps its heartbeat sidecar BEFORE bringing engines up. So a re-join
+    a minute into a four-minute model load lands in exactly the same "up but not registered" state as
+    the wedged child. Telling that operator to `--respawn` would kill a healthy engine and restart the
+    load, repeatably, on every re-join. Inside the bring-up window the state is reported as *starting*
+    and the remedy is withheld — the operator is pointed at the log instead.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at=runtime.utc_now())  # spawned just now — well inside the quiet window
+    _seed_heartbeat_sidecar()
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    captured = capsys.readouterr()
+    assert "still starting" in captured.out
+    assert "--respawn" not in captured.out + captured.err, (
+        "a bring-up in progress was reported as a stuck engine — following that advice kills a "
+        "healthy load and starts it over"
+    )
+    assert "remote.log" in captured.err  # the operator still gets the artifact to watch
+
+
+def test_remote_join_noop_reports_an_engine_that_stopped_heartbeating(monkeypatch, tmp_path, capsys):
+    """The staleness half of service truth — and it must work **without** issue 08's liveness fix.
+
+    The two follow-ups close different halves of one false "Already serving", so neither may hide the
+    other's regression. Here the record's pid reads plainly alive (the pre-issue-08 answer, and the
+    truth for a wedged-but-living child), the identity did register once, and the heartbeat simply
+    stopped. Nothing about process state can detect that; only the sidecar's mtime can.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=600)  # ~7× the 90s threshold
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    captured = capsys.readouterr()
+    assert "Already serving" not in captured.out, (
+        "the gate vouched for an identity whose heartbeat stopped ten minutes ago — the relay dropped "
+        "it from the grid long before the CLI noticed"
+    )
+    assert "last heartbeat" in captured.out and "10m ago" in captured.out
+    assert "--respawn" in captured.err  # past the bring-up window, the remedy is offered
+    assert "cmd" not in spawned
+
+
+def test_remote_join_noop_still_says_already_serving_when_the_engine_really_is(
+    monkeypatch, tmp_path, capsys
+):
+    """The negative control. Without it, every test above would also pass for a gate that simply
+    stopped ever saying "Already serving" — and the idempotent no-op is the behaviour ADR 0010 built
+    the gate for. A registered identity with a fresh heartbeat is serving, and says so."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)  # beat five seconds ago — healthy
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    captured = capsys.readouterr()
+    assert "Already serving on team; nothing to append." in captured.out
+    assert "Not serving" not in captured.out
+    assert "cmd" not in spawned
+
+
+def test_remote_join_noop_over_a_record_from_an_older_build_behaves_exactly_as_before(
+    monkeypatch, tmp_path, capsys
+):
+    """Upgrading is never a new failure.
+
+    A child from a build that predates service truth writes no sidecar, so it can report neither
+    `registered_at` nor a heartbeat — and "no facts" must never read as "bad facts". The sidecar's
+    absence IS the upgrade marker, which is why this needs no version field: the gate simply says
+    nothing new. It fails open the same way for a NEW child whose best-effort self-stamp failed.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00")  # no registered_at, and NO sidecar seeded
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]) == 0
+
+    captured = capsys.readouterr()
+    assert "Already serving on team; nothing to append." in captured.out
+    assert "Not serving" not in captured.out and "--respawn" not in captured.err
+
+
+def test_remote_join_respawn_restarts_a_healthy_identity_instead_of_no_opping(
+    monkeypatch, tmp_path, capsys
+):
+    """`--respawn` is the escape hatch the honest gate points at, so it must never no-op.
+
+    Its whole job is to reach an identity the CLI has just declined to touch — and the gate declines
+    precisely when the state is ambiguous. A `--respawn` that hot-reloaded instead would SIGHUP a
+    process whose problem is that it is not registered; only a full stop-and-start clears that. The
+    healthiest possible identity is used here on purpose: if the flag can restart one that is
+    genuinely serving, nothing weaker can make it no-op.
+    """
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)  # healthy — this join is otherwise a pure no-op
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: terminated.append(pid) or True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main([
+        "join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox", "--respawn",
+    ]) == 0
+
+    out = capsys.readouterr().out
+    assert "Already serving" not in out, "--respawn no-opped — the escape hatch is the one path that must not"
+    assert terminated == [4242], "the prior engine was never stopped"
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"], "no fresh engine was started"
+    assert (4242, _sig.SIGHUP) not in spawned["signals"], (
+        "--respawn hot-reloaded instead of restarting: a SIGHUP re-reads the record, which does "
+        "nothing for a child whose problem is that it never registered"
+    )
+
+
+def test_remote_join_bare_respawn_restarts_the_inherited_union_with_nothing_to_detect(
+    monkeypatch, tmp_path
+):
+    """A bare `grid join --respawn` must work as a restart, not only as a modifier on a join that
+    names an engine.
+
+    The remedy it replaces is `grid leave` then `grid join` — which the operator runs with no
+    arguments. But auto-detect probes loopback only, so an identity serving `--at
+    http://otherhost:11434/v1` (or an API engine) has nothing to detect, and target resolution would
+    raise "No running engine detected on this box." before the CLI ever looks at what is running.
+    With a live identity to inherit from, the union it is already serving is the answer.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://otherhost:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli.provider, "_detect", lambda host: [])  # nothing of ours on loopback
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: terminated.append(pid) or True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--respawn"]) == 0
+
+    assert terminated == [4242]
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["llama3"], (
+        "the restart dropped the union the identity was already serving — a restart that serves less "
+        "than it restarted is the regression issue 08 hit from the other direction"
+    )
+
+
+def test_remote_join_bare_with_nothing_live_and_nothing_detected_still_errors(monkeypatch, tmp_path):
+    """The negative control for the deferral above: `--respawn` postpones that error, it must not
+    swallow it. With no live identity there is no union to inherit and nothing to restart, so the
+    operator gets exactly the guidance they got before."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.provider, "_detect", lambda host: [])
+    _mock_remote_spawn(monkeypatch)
+
+    with pytest.raises(SystemExit, match="No running engine detected"):
+        cli.main(["join", "--respawn"])
+
+
+def test_remote_join_bare_respawn_restarts_rather_than_asking_which_engine_to_join(
+    monkeypatch, tmp_path
+):
+    """The second detection refusal `--respawn` swallows, pinned deliberately rather than left to
+    fall out of a broad `except SystemExit`.
+
+    A bare `grid join` on a box with several detected engines refuses with "Multiple engines
+    detected; pass --all, --kind <kind>, or --at <url>." — it cannot guess what to serve. But
+    `--respawn` over a LIVE identity is not being asked to guess: the union that identity is already
+    serving is the answer, and failing here would mean `grid join --respawn` breaks on exactly the
+    multi-engine boxes it is most useful on. The other three refusals in that function stay fatal,
+    because each is about an intent the operator stated (`--at` without `-m`, a bare `-m`, an
+    unmatched `--kind`) rather than about detection.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli.provider, "_detect", lambda host: [
+        SimpleNamespace(label="ollama", endpoint_url="http://h:11434/v1", models=["llama3"], media=False),
+        SimpleNamespace(label="vllm", endpoint_url="http://h:8000/v1", models=["qwen"], media=False),
+    ])
+    terminated = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: terminated.append(pid) or True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["join", "--respawn"]) == 0
+
+    assert terminated == [4242]
+    assert spawned["cmd"][-3:] == ["__remote-engine", "n1", "remote"]
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["llama3"], (
+        "a restart quietly adopted an engine the operator never joined — --respawn restarts what is "
+        "serving, it does not re-run detection"
+    )
+
+
+def test_remote_join_hot_reload_keeps_the_identitys_registration(monkeypatch, tmp_path, capsys):
+    """A hot-reload is the SAME process, so its service truth has to survive one.
+
+    `_hot_reload_identity` writes a freshly built record and carries the identity block (pid, start
+    token, pgid) forward by hand, because `_build_record` has none of it. `registered_at` travels the
+    same way for the same reason — drop it and every append to a perfectly healthy engine would make
+    the NEXT re-join report "up but has not registered" about a process that has been serving all
+    along. That turns the honest gate into a new false alarm, on the commonest path there is.
+    """
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00")
+    _seed_heartbeat_sidecar(age_seconds=5)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    append = ["join", "--at", "http://h:11434/v1", "-m", "llama3", "-m", "mistral", "--name", "mybox"]
+    assert cli.main(append) == 0
+    assert (4242, _sig.SIGHUP) in spawned["signals"], "precondition: this append must hot-reload"
+    capsys.readouterr()
+
+    assert cli.main(append) == 0  # now an idempotent re-join, over a process that never stopped
+    out = capsys.readouterr().out
+    assert "Already serving" in out
+    assert "not registered" not in out, (
+        "the hot-reload dropped the identity's registration, so the gate accused a healthy engine"
+    )
+
+
+def test_remote_join_hot_reload_does_not_reset_a_stuck_engines_clock(monkeypatch, tmp_path, capsys):
+    """A hot-reload is the same process, so its *uptime* has to survive one too.
+
+    `_hot_reload_identity` is fed a record from `_build_record`, which unconditionally stamps
+    `started_at` = now — right for `_respawn_identity` (a genuinely new process) and wrong here. Left
+    uncarried, any hot-reloadable append to a wedged engine resets its clock, which puts it back
+    inside the 300s bring-up window: the gate then reports "still starting (up 0s)" and **withholds
+    the `--respawn` suggestion**, on an engine that has been stuck for ten minutes. Routine model
+    additions would re-extend that grace indefinitely, masking exactly the state this issue exists to
+    surface. `_hot_reloadable` has no registration awareness by design, so nothing else stops it.
+    """
+    import signal as _sig
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    stuck_since = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=10)
+    ).isoformat()
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+    ], started_at=stuck_since)  # wedged 10 min, never registered
+    _seed_heartbeat_sidecar()
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    spawned = _mock_remote_spawn(monkeypatch)
+
+    # An ordinary append — not --respawn — that `_hot_reloadable` accepts.
+    assert cli.main([
+        "join", "--at", "http://h:11434/v1", "-m", "llama3", "-m", "mistral", "--name", "mybox",
+    ]) == 0
+    assert (4242, _sig.SIGHUP) in spawned["signals"], "precondition: this append must hot-reload"
+    capsys.readouterr()
+
+    assert cli.provider._read_records("n1")["remote"]["started_at"] == stuck_since, (
+        "the hot-reload restamped started_at, so the engine's real uptime was lost"
+    )
+    assert cli.main([
+        "join", "--at", "http://h:11434/v1", "-m", "llama3", "-m", "mistral", "--name", "mybox",
+    ]) == 0
+    captured = capsys.readouterr()
+    assert "still starting" not in captured.out, (
+        "a ten-minute-old wedged engine was reported as still starting — the bring-up window was "
+        "reset by an unrelated append"
+    )
+    assert "--respawn" in captured.err, "the remedy was withheld from an engine that needs it"
+
+
+def test_remote_leave_shrink_respawn_does_not_inherit_the_old_childs_registration(
+    monkeypatch, tmp_path
+):
+    """A respawn is a NEW process, so it starts with no service truth — and the shrink path is where
+    that has to be said out loud.
+
+    `_leave_one_engine` rebuilds the record by copying a survivor's (`dict(next(iter(survivors)))`),
+    so it inherits every field including `registered_at`. On its hot-reload branch that is right; on
+    its respawn branch the child is brand new and has registered nothing. Left inherited, the gate
+    would vouch for a fresh child that had not yet reached the relay — the exact false "already
+    serving" this issue exists to end, re-created from the other side.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=[
+        {"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"},
+        {"endpoint_url": "http://h2:8000/v1", "models": ["qwen"], "engine_label": "vllm"},
+    ], started_at="2020-01-01T00:00:00+00:00", registered_at="2020-01-01T00:00:01+00:00",
+        reload_signal=None)  # a pre-handler identity: the shrink must respawn, not SIGHUP
+    _seed_heartbeat_sidecar(age_seconds=5)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    _disable_orphan_sweep(monkeypatch)
+    _mock_remote_spawn(monkeypatch)
+
+    assert cli.main(["leave", "--engine", "http://h2:8000/v1"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["llama3"], "precondition: the shrink kept the survivor"
+    assert "registered_at" not in record, (
+        "the respawned child inherited the dead child's registration — the gate would now vouch for "
+        "a process that has never spoken to the relay"
+    )
 
 
 def test_remote_leave_shrink_never_reports_a_hot_reload_it_signalled_into_a_corpse(
@@ -7656,6 +8052,35 @@ def test_remote_leave_backstop_lands_even_when_child_was_killed(monkeypatch, tmp
     assert cli.main(["leave"]) == 0
     assert killed == [4242]                                # the child was terminated first (kill-first)
     assert puts == [("/nodes/node-jwt", "consumer", [])]   # ...and the backstop still landed
+
+
+def test_remote_leave_removes_the_heartbeat_sidecar_with_the_record(monkeypatch, tmp_path):
+    """The sidecar's lifecycle closes where the record's does: the child writes it, and the teardown
+    that just proved the child dead takes it away.
+
+    Leaving it behind would be *harmless* — the gate only reads a sidecar a live record points at —
+    but not free. This directory already keeps `.log` and `.lock` files forever, and the one moment
+    it is provably safe to remove a heartbeat file is the moment we have confirmed nothing is left to
+    write it. Unlinking both together is also what makes "a sidecar without a record does nothing"
+    true by construction rather than by luck.
+    """
+    from shared import run_records
+
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid=4242, access_token=_jwt({"node_id": "node-jwt"}),
+    )
+    sidecar = _seed_heartbeat_sidecar()
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _capture_relay_puts(monkeypatch)
+    _disable_orphan_sweep(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+
+    assert not run_records.record_path("n1", "remote").exists()  # precondition: the record went
+    assert not sidecar.exists(), "the heartbeat sidecar outlived the record it belonged to"
 
 
 def test_remote_leave_stale_pid_sweep_reaps_live_child(monkeypatch, tmp_path):
@@ -9888,6 +10313,84 @@ def test_stamp_own_pid_is_best_effort_on_write_failure(monkeypatch, tmp_path, ca
     err = capsys.readouterr().err
     assert "could not stamp live pid" in err and "disk full" in err  # the warn carries the diagnostic
     assert run_records.read_record("n1", "remote")["pid"] == 0  # untouched by the failed stamp
+
+
+def test_stamp_own_pid_creates_the_heartbeat_sidecar(monkeypatch, tmp_path):
+    """The sidecar is created here — before any socket is opened — and that is what makes its ABSENCE
+    the upgrade marker (grid-leave issue 10).
+
+    A child from a build that predates service truth never creates one, so the join gate can tell
+    "this engine reports nothing" from "this engine reports bad news" without a version field. Doing
+    it in the self-stamp also means a child wedged in bring-up — the incident regime, which never
+    reaches its first heartbeat — still has a sidecar, so the gate reads "up but not registered"
+    rather than falling back to today's reassuring silence.
+    """
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+
+    serve._stamp_own_pid("n1", "remote")
+
+    assert run_records.heartbeat_path("n1", "remote").exists()
+
+
+def test_stamp_own_pid_leaves_no_sidecar_beside_a_deleted_record(monkeypatch, tmp_path):
+    """The never-resurrect rule covers the sidecar too. A concurrent full leave that already removed
+    the record has earned a clean directory; a sidecar written after it is litter that outlives the
+    grid it belonged to."""
+    from remote import serve
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    serve._stamp_own_pid("n1", "remote")  # no record at all — the leave won the race
+
+    assert not run_records.heartbeat_path("n1", "remote").exists()
+
+
+def test_a_heartbeat_sidecar_does_not_break_reading_the_records(monkeypatch, tmp_path):
+    """The sidecar's *name* is load-bearing, and nothing else would say so.
+
+    `read_records` globs `*.json` and hands every hit to `jsonio.load_json`, which raises `SystemExit`
+    on a bad parse. The sidecar's content is deliberately nothing — its mtime is the payload — so
+    naming it `<engine>.json.…` or `.json` would make one empty file break every record read in the
+    CLI, on the single path `grid join`, `grid leave` and `grid models` all go through. A rename is
+    the plausible mistake; this is the only thing that catches it.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+    run_records.heartbeat_path("n1", "remote").touch()  # empty, as the real one always is
+
+    assert list(run_records.read_records("n1")) == ["remote"]
+    assert run_records.read_record("n1", "remote")["pid"] == 0
+
+
+def test_the_heartbeat_sidecar_is_owner_only_like_every_other_grid_file(monkeypatch, tmp_path):
+    """0o600, like the run record, the lock sentinel and the credential stores.
+
+    The file has no content — its mtime is the payload — so this is about integrity, not secrecy:
+    `Path.touch()`'s default 0o666 lands 0o644 under a normal umask and 0o666 under `umask 0`, where
+    any local user could forge a beat and make a dead engine read as healthy to the join gate. The
+    directory is 0o755, so it is reachable.
+    """
+    import stat
+
+    from remote import service_truth
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+
+    service_truth.touch_heartbeat("n1", "remote")
+
+    mode = run_records.heartbeat_path("n1", "remote").stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600, (
+        f"the sidecar is {oct(stat.S_IMODE(mode))}; a umask can only make 0o600 stricter, so this "
+        "means it was created with the wrong mode"
+    )
 
 
 def test_serve_register_once_sends_cached_payload(monkeypatch, tmp_path):
@@ -13695,6 +14198,212 @@ def test_serve_heartbeat_loop_stops_when_auth_exhausted(monkeypatch, tmp_path):
     monkeypatch.setattr(relay, "heartbeat", _raise_unauth)
     serve._heartbeat_loop(state)  # must return, not spin: it sets stop on auth exhaustion
     assert state.stop.is_set()
+
+
+def test_serve_register_records_that_the_engine_reached_the_relay(monkeypatch, tmp_path):
+    """`registered_at` is what lets a later `grid join` tell *running* from *serving*.
+
+    Until this landed, the only trace of a successful registration was a line in the child's own log
+    and a local `registered` bool consumed by one `finally` — neither of which the CLI can read. So a
+    child that never got onto the grid looked, from the record, exactly like one that did
+    (grid-leave issue 10).
+    """
+    from remote import relay, serve
+    from shared import run_records
+
+    state = _serve_state(monkeypatch, tmp_path)
+    run_records.write_record("n1", "remote", {
+        "engine_id": "remote", "grid_id": "n1", "pid": 0,
+        "last_register_error": "relay 503 upstream unavailable",  # an earlier attempt failed
+    })
+    monkeypatch.setattr(relay, "register_node", lambda *a, **kw: None)
+
+    serve.register_once(state)
+
+    record = run_records.read_record("n1", "remote")
+    assert record["registered_at"], "nothing on disk says the engine ever reached the relay"
+    assert "last_register_error" not in record, (
+        "a healed failure kept accusing a working engine — the gate would surface it forever"
+    )
+
+
+def test_serve_heartbeat_loop_records_a_relay_failure_and_heals_on_the_next_beat(
+    monkeypatch, tmp_path
+):
+    """The heartbeat is where "still serving" is proved or lost, so it is where both facts are kept.
+
+    A failing beat leaves a bounded, non-secret reason on the record and — crucially — does NOT touch
+    the sidecar: the sidecar's whole meaning is "the relay heard from us", so a failed beat that
+    freshened it would launder an unreachable engine into a healthy-looking one. Recovery is one
+    successful beat, because a stale accusation is its own failure mode.
+    """
+    from remote import relay, serve
+    from shared import run_records
+
+    state = _serve_state(monkeypatch, tmp_path)
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+    sidecar = run_records.heartbeat_path("n1", "remote")
+    monkeypatch.setattr(serve, "_maybe_refresh_codex", lambda s: None)
+    monkeypatch.setattr(serve, "_maybe_probe_engines", lambda s: None)
+
+    beats = []
+
+    def flaky(url, tok, *, load):
+        beats.append(1)
+        state.stop.set()  # exactly one tick per _heartbeat_loop call
+        if len(beats) == 1:
+            raise relay.RelayError("relay 503 upstream unavailable")
+        return "ok"
+
+    monkeypatch.setattr(relay, "heartbeat", flaky)
+
+    serve._heartbeat_loop(state)
+    assert "503" in run_records.read_record("n1", "remote")["last_register_error"]
+    assert not sidecar.exists(), (
+        "a failed heartbeat freshened the sidecar — the join gate would read an unreachable engine "
+        "as healthy, which is the lie this file exists to end"
+    )
+
+    state.stop.clear()
+    serve._heartbeat_loop(state)
+    assert "last_register_error" not in run_records.read_record("n1", "remote")
+    assert sidecar.exists(), "a successful beat left no trace for the join gate to read"
+
+
+def test_serve_heartbeat_loop_does_not_touch_the_record_on_a_healthy_tick(monkeypatch, tmp_path):
+    """The steady state must cost one `utime`, not a locked read-modify-write.
+
+    This loop runs every 30s for the entire life of an engine, and the lock it would take is the one
+    `grid join` and `grid leave` serialize their union merge on. So both "is there an error to heal?"
+    and "is the registration recorded?" are answered from memory and the record is opened only when
+    the answer says so. Without those flags the healthy path would acquire the record lock ~2 880
+    times a day to discover there was nothing to do.
+    """
+    from remote import relay, serve
+    from shared import run_records
+
+    state = _serve_state(monkeypatch, tmp_path)
+    state._registration_recorded = True  # what a successful startup `register_once` leaves behind
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+    monkeypatch.setattr(serve, "_maybe_refresh_codex", lambda s: None)
+    monkeypatch.setattr(serve, "_maybe_probe_engines", lambda s: None)
+
+    mutations = []
+    real_mutate = run_records.mutate_record
+    monkeypatch.setattr(run_records, "mutate_record",
+                        lambda *a, **k: mutations.append(a[:2]) or real_mutate(*a, **k))
+
+    def ok(url, tok, *, load):
+        state.stop.set()
+        return "ok"
+
+    monkeypatch.setattr(relay, "heartbeat", ok)
+    serve._heartbeat_loop(state)
+
+    assert mutations == [], f"a healthy beat opened the run record under its lock: {mutations}"
+    assert run_records.heartbeat_path("n1", "remote").exists()  # ...but the sidecar was still touched
+
+
+def test_serve_retries_the_registration_stamp_until_it_lands(monkeypatch, tmp_path):
+    """The one bookkeeping write whose failure must NOT be shrugged off.
+
+    Every other write here fails *open* — a lost sidecar reads as "not a reporting build", a lost
+    error reads as "no error" — but `registered_at` fails **closed**: absent means "has not
+    registered", which is a confident accusation, not an unknown. `_bookkeep` swallows the failure by
+    design (a disk hiccup must not stop a serving engine), so a single lost write would leave a
+    genuinely registered, happily heartbeating engine reported as never-registered forever, with the
+    gate suggesting `--respawn` — the exact "accuse a healthy engine" outcome ADR 0021 says the design
+    must never produce. Worse, the operator's natural move (re-running the same join) is the read-only
+    no-op path, so it can never heal it. The heartbeat loop retries until the fact is durable.
+    """
+    from remote import relay, serve, service_truth
+    from shared import run_records
+
+    state = _serve_state(monkeypatch, tmp_path)
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+    monkeypatch.setattr(serve, "_maybe_refresh_codex", lambda s: None)
+    monkeypatch.setattr(serve, "_maybe_probe_engines", lambda s: None)
+    monkeypatch.setattr(relay, "register_node", lambda *a, **kw: None)
+
+    real_mark, attempts = service_truth.mark_registered, []
+
+    def flaky_mark(grid_id, engine_id):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("simulated transient disk hiccup")
+        return real_mark(grid_id, engine_id)
+
+    monkeypatch.setattr(service_truth, "mark_registered", flaky_mark)
+
+    serve.register_once(state)  # registers with the relay; the record write is lost
+    assert run_records.read_record("n1", "remote").get("registered_at") is None
+
+    def ok(url, tok, *, load):
+        state.stop.set()
+        return "ok"
+
+    monkeypatch.setattr(relay, "heartbeat", ok)
+    serve._heartbeat_loop(state)
+
+    assert run_records.read_record("n1", "remote").get("registered_at"), (
+        "the lost registration stamp was never retried — a healthy engine now reads as "
+        "never-registered forever, and the gate tells the operator to --respawn it"
+    )
+
+
+def test_serve_keeps_retrying_a_heal_whose_own_write_failed(monkeypatch, tmp_path):
+    """The in-memory heal flag must track what actually landed on disk, not what was attempted.
+
+    `_register_error_noted` was being flipped unconditionally around a write `_bookkeep` may have
+    swallowed. If the *heal* write failed, the flag still cleared — so this process would never try
+    again, and the record kept a stale `last_register_error` with no timestamp, indistinguishable
+    from a live one, until a respawn. That also falsifies the reason ADR 0021 gives for not popping
+    this field on a shrink ("it self-heals on the next successful beat").
+    """
+    from remote import relay, serve, service_truth
+    from shared import run_records
+
+    state = _serve_state(monkeypatch, tmp_path)
+    # Registration already recorded, so the heal path is the only writer under test — otherwise the
+    # stamp's retry would clear the error itself (it pops the field, being proof we are on the grid).
+    state._registration_recorded = True
+    run_records.write_record("n1", "remote", {"engine_id": "remote", "grid_id": "n1", "pid": 0})
+    monkeypatch.setattr(serve, "_maybe_refresh_codex", lambda s: None)
+    monkeypatch.setattr(serve, "_maybe_probe_engines", lambda s: None)
+
+    beats = []
+
+    def flaky(url, tok, *, load):
+        beats.append(1)
+        state.stop.set()
+        if len(beats) == 1:
+            raise relay.RelayError("relay 503 upstream unavailable")
+        return "ok"
+
+    monkeypatch.setattr(relay, "heartbeat", flaky)
+    serve._heartbeat_loop(state)  # beat 1 fails -> the error lands on the record
+    assert "503" in run_records.read_record("n1", "remote")["last_register_error"]
+
+    real_note, heals = service_truth.note_register_error, []
+
+    def flaky_note(grid_id, engine_id, message):
+        if message is None:
+            heals.append(1)
+            if len(heals) == 1:
+                raise OSError("simulated transient disk hiccup")
+        return real_note(grid_id, engine_id, message)
+
+    monkeypatch.setattr(service_truth, "note_register_error", flaky_note)
+
+    state.stop.clear()
+    serve._heartbeat_loop(state)  # beat 2 succeeds, but the heal write is lost
+    assert "503" in run_records.read_record("n1", "remote")["last_register_error"]
+
+    state.stop.clear()
+    serve._heartbeat_loop(state)  # beat 3 must try again
+    assert "last_register_error" not in run_records.read_record("n1", "remote"), (
+        "a heal whose write failed was marked done, so the stale accusation outlived the outage"
+    )
 
 
 # ---------------------------------------------------------------------------

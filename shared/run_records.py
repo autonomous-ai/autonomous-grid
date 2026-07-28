@@ -19,13 +19,14 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from shared import jsonio, paths, process_identity
-from shared.filelock import try_file_lock
+from shared.filelock import file_lock, try_file_lock
 from shared.models import api_catalog
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -49,6 +50,31 @@ _STOP_GRACE_SECONDS = 25
 
 def record_path(grid_id: str, engine_id: str) -> Path:
     return paths.engines_dir(grid_id) / f"{engine_id}.json"
+
+
+def heartbeat_path(grid_id: str, engine_id: str) -> Path:
+    """The serve child's heartbeat sidecar, beside its record. Its **mtime** is the whole payload: the
+    child touches it once per successful heartbeat, at a cadence (30s) that must not take the record
+    lock a `grid join`/`leave` serializes on, nor rewrite the record ~2 880 times a day.
+
+    Deliberately **not** ``.json``: ``read_records`` globs ``*.json`` and hands every hit to
+    ``jsonio.load_json``, which raises ``SystemExit`` on a bad parse — so a ``.json`` sidecar would
+    make one empty file break every record read in the CLI. (``file_lock`` already leaves
+    ``<name>.json.lock`` siblings here, so a non-``.json`` neighbour is nothing new.)"""
+    return paths.engines_dir(grid_id) / f"{engine_id}.heartbeat"
+
+
+def remove_record(grid_id: str, engine_id: str) -> None:
+    """Drop one engine's on-disk footprint — the record **and** its heartbeat sidecar.
+
+    One function rather than an unlink at each site on purpose: the sidecar has to go wherever the
+    record goes, and the sites are scattered (the leave teardown, the child's own died-before-
+    registering reap, and two in the respawn path). Enumerating them by hand is exactly how a fifth
+    one gets added later without its sidecar — which would leave a heartbeat file with nothing to
+    explain it, in the directory whose stray `.log`/`.lock` leftovers were the evidence trail for the
+    incident this feature came from."""
+    record_path(grid_id, engine_id).unlink(missing_ok=True)
+    heartbeat_path(grid_id, engine_id).unlink(missing_ok=True)
 
 
 def write_record(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
@@ -79,6 +105,37 @@ def update_record(grid_id: str, engine_id: str, **fields: Any) -> None:
         return
     record.update(fields)
     write_record(grid_id, engine_id, record)
+
+
+def mutate_record(grid_id: str, engine_id: str, mutate: Callable[[dict[str, Any]], None]) -> bool:
+    """Read-modify-write one engine's record under its lock, or do nothing if it is gone. Returns
+    whether anything was written.
+
+    Three properties, each of which every caller previously had to remember on its own:
+
+    * **Locked.** The CLI merges a join's union under this same lock, so an unlocked write from the
+      serve child could lose it (ADR 0010 F3).
+    * **Never resurrects.** A record a concurrent `grid leave` just deleted stays deleted. A live
+      serve child with no record is the untracked orphan this whole feature exists to prevent, and
+      re-creating one from a stale in-memory copy is the other way to manufacture it (issue 05).
+    * **Reads OUR file by path**, not through ``read_record``'s whole-directory glob, so one corrupt
+      sibling (a legacy ``engine-<uuid>.json``) can't decide the fate of ours.
+
+    It **raises** — on I/O, or on a corrupt record, which ``jsonio`` turns into ``SystemExit``. Every
+    caller is best-effort bookkeeping that must not take a serving engine down with it, so each keeps
+    its own never-raise wrapper: the warning text belongs where the caller knows what it was doing.
+    """
+    path = record_path(grid_id, engine_id)
+    with file_lock(path):
+        record = jsonio.load_json(path)
+        if not record:
+            return False
+        updated = dict(record)
+        mutate(updated)
+        if updated == record:
+            return False  # nothing changed — don't rewrite the file on every healthy tick
+        write_record(grid_id, engine_id, updated)
+        return True
 
 
 def match_engine(
@@ -540,7 +597,7 @@ def _discard_own_record(grid_id: str, engine_id: str) -> bool:
                 file=sys.stderr,
             )
             return False
-        path.unlink(missing_ok=True)
+        remove_record(grid_id, engine_id)  # the sidecar goes with it — this child wrote both
         return True
 
 
@@ -726,5 +783,5 @@ def stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> Teardow
     """
     outcome = terminate_recorded(record)
     if not outcome.survivor:
-        record_path(grid_id, engine_id).unlink(missing_ok=True)
+        remove_record(grid_id, engine_id)
     return outcome
