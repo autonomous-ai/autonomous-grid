@@ -30,9 +30,12 @@ Choices a future reader will otherwise re-litigate:
   first unconditional `print` on the serve path sat *after* registration. So the child now names
   itself before it reads its own record (that read can fail on a corrupt *sibling* record, before any
   handler exists), and names the engines, the models and the relay it is about to register with
-  before it opens a socket. Everything after that is narrated per phase with its elapsed time. A
-  0-byte log from a spawned child is now structurally impossible, which is worth more than any single
-  line in it: the artifact an orphan investigation starts from is the child's own log.
+  before it opens a socket. After that, each failed registration names its attempt number, its reason
+  and **the wait it is about to take**, and a probe budget that bites names the budget and what it
+  cost. Deliberately not elapsed times: the child has no phase clock, and the next wait is what tells
+  a reader whether this is a fresh failure or one that has been backing off for an hour. A 0-byte log
+  from a spawned child is now structurally impossible, which is worth more than any single line in
+  it: the artifact an orphan investigation starts from is the child's own log.
 
 - **A deadline per call was not the missing thing; a deadline over the *fan-out* was.** Auditing the
   path for "a call inheriting an unbounded default" found only two, both trivial — raw
@@ -113,7 +116,7 @@ Choices a future reader will otherwise re-litigate:
 - **The attempt count is log-only.** The recorded `last_register_error` must stay byte-identical
   while the failure is unchanged, or the record writer's no-op-write skip stops working and a relay
   that has been down for a day costs one locked write per attempt instead of one. Attempt numbers and
-  elapsed times are narration; the record holds the reason.
+  retry waits are narration; the record holds the reason.
 
 Consequences. A child that cannot reach its relay is now visible from disk from its first
 millisecond, converges on its own when the relay comes back, and cannot spend minutes in a socket
