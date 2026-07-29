@@ -1346,20 +1346,25 @@ def _full_leave_survivor_exit(survivors: list[int], label: str, sent: bool) -> N
 
 
 def _recorded_pids(records: dict[str, dict[str, object]]) -> set[int]:
-    """The real process ids among a grid's records. A `pid` field can be absent, the join write-race's
-    `0`, or — on a hand-edited/corrupt record — not a number at all; `int(...)` on the last would raise
-    from inside a teardown, ahead of the deregister that is the mechanism of record.
+    """The process ids the record path will act on — the sweep's exclusion set.
 
-    A decimal *string* is accepted because `run_records.stop_engine` still coerces one and would kill
-    it: reading pids more narrowly than the code that kills them would let a child be terminated by
-    the record path yet stay eligible for the sweep, breaking the disjointness the caller documents
-    and listing one process twice in a failure message."""
+    Exactly ``run_records.recorded_pid``'s answer, and deliberately nothing of its own. The invariant
+    is that this set must be **neither wider nor narrower** than what the record teardown actually
+    kills, and the only way to keep that true through later edits is to ask the same function the
+    teardown asks (``record_verdict`` → ``recorded_pid``). Two parallel readers is precisely how this
+    drifted: this one used to coerce a decimal *string* to an int while ``recorded_pid`` answered
+    ``None`` for it, so a record carrying ``"4242"`` was declined by the record path (nothing to prove,
+    nothing signalled) **and** excluded from the sweep — both nets standing down over one live child,
+    behind a ``Teardown(verified=True)`` and a ``Left <grid>.`` at exit 0.
+
+    ``0`` (never stamped — the join write-race) and ``None`` (any shape we can prove nothing about)
+    are both dropped: neither names a process to exclude, so the sweep stays free to find the child by
+    argv, which is the whole point of having a second net.
+    """
     pids: set[int] = set()
     for record in records.values():
-        pid = record.get("pid")
-        if isinstance(pid, str) and pid.isdecimal():
-            pid = int(pid)
-        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        pid = run_records.recorded_pid(record)
+        if pid:
             pids.add(pid)
     return pids
 

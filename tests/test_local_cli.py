@@ -9653,6 +9653,37 @@ def test_remote_leave_removes_the_heartbeat_sidecar_with_the_record(monkeypatch,
     assert not sidecar.exists(), "the heartbeat sidecar outlived the record it belonged to"
 
 
+def test_remote_leave_sweeps_a_child_whose_recorded_pid_is_a_string(monkeypatch, tmp_path):
+    """A record whose `pid` is the decimal STRING "4242" must not stand both nets down at once.
+
+    `recorded_pid` answers `None` for any non-int shape, so the record path treats the record as dead
+    and signals nothing — correctly, since it can prove nothing about the field. That only works while
+    the sweep is still free to find the child by argv, and `_recorded_pids` used to coerce the same
+    string to `4242` and put it in `exclude_pids`. Both nets then declined over one live process, and
+    the teardown reported `Teardown(verified=True)` — a positively claimed clean box — so leave printed
+    `Left team.` at exit 0 and unlinked the record while the child kept serving.
+
+    Reachable from a hand-edited record or one written by any other tool; every writer here stamps an
+    int. The regression is cheap to re-introduce because the two readers are in different modules."""
+    _seed_remote_identity(
+        monkeypatch, tmp_path,
+        [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}],
+        pid="4242", access_token=_jwt({"node_id": "node-jwt"}),  # a STRING, not an int
+    )
+    from shared import orphan_sweep
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  4242 /bin/grid __remote-engine n1 remote")
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert killed == [4242], "the sweep excluded the pid the record path had already declined to kill"
+    assert puts == [("/nodes/node-jwt", "consumer", [])]
+    assert cli.provider._read_records("n1") == {}
+
+
 def test_remote_leave_stale_pid_sweep_reaps_live_child(monkeypatch, tmp_path):
     """AC#1 (the diagnosis red case): the record's pid is stale/dead while the REAL serve child (a
     different pid) is alive. Full leave's argv sweep finds and reaps it, the backstop flips the node to
@@ -9926,17 +9957,31 @@ def test_remote_leave_backstop_still_lands_when_the_sweep_blows_up(monkeypatch, 
     assert "Couldn't scan" in captured.out  # the success line is qualified, not an unconditional "Left"
 
 
-def test_recorded_pids_reads_every_pid_the_record_kill_would_act_on(monkeypatch, tmp_path):
-    """The exclusion set must not be narrower than what `run_records.stop_engine` will actually kill,
-    or a child is terminated by the record path yet stays eligible for the sweep — escalated twice and
-    named twice in the failure message, contradicting the disjointness `_full_leave_reap` documents.
-    A decimal string is the case that drifted: `stop_engine` coerces one, so this must read it too.
+def test_recorded_pids_reads_exactly_what_the_record_kill_would_act_on(monkeypatch, tmp_path):
+    """The exclusion set must be neither wider nor narrower than what the record teardown kills.
 
-    The junk values are the other half: they must not raise. This runs ahead of the relay deregister
-    that is the mechanism of record, and a traceback here means the model stays advertised."""
+    Narrower and a child is escalated twice and named twice in the failure message, contradicting the
+    disjointness `_full_leave_reap` documents. **Wider** and a live child is excluded from the sweep
+    that the record path already declined to touch — both nets standing down at once, which is what a
+    decimal-string pid used to do (see
+    `test_remote_leave_sweeps_a_child_whose_recorded_pid_is_a_string`).
+
+    So the assertion is a per-shape equality with `run_records.recorded_pid`, not a hand-maintained
+    list: a second reader is exactly how this drifted, and pinning the shapes without pinning the
+    agreement would let it drift again. The junk values are the other half — they must not raise,
+    because this runs ahead of the relay deregister that is the mechanism of record."""
+    from shared import run_records
+
     reap = cli.remote_provider._recorded_pids
 
-    assert reap({"a": {"pid": 4242}, "b": {"pid": "4243"}}) == {4242, 4243}
+    shapes = [4242, "4243", 0, None, True, [], {}, 0.0, "nope", -1, 2**31, 2**31 - 1]
+    for shape in shapes:
+        expected = run_records.recorded_pid({"pid": shape})
+        assert reap({"a": {"pid": shape}}) == ({expected} if expected else set()), (
+            f"{shape!r}: the sweep's exclusion set disagrees with the record teardown"
+        )
+
+    assert reap({"a": {"pid": 4242}, "b": {"pid": "4243"}}) == {4242}   # only the int is ours to skip
     assert reap({"a": {"pid": 0}, "b": {"pid": None}, "c": {}}) == set()          # never stamped
     assert reap({"a": {"pid": True}, "b": {"pid": []}, "c": {"pid": "nope"}}) == set()  # junk, no raise
     assert reap({"a": {"pid": -1}}) == set()                                       # never a real pid
