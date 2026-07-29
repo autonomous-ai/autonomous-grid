@@ -41,6 +41,7 @@ believing this file subsumes them; it proves the backstop *fires*, not that it f
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import signal
@@ -60,6 +61,7 @@ from local import runtime
 from remote import bringup, credentials, service_truth
 from shared import orphan_sweep
 from shared import paths, process_identity, run_records, state
+from shared.filelock import file_lock
 
 # The sweep half of the old skip reason is gone — grid-leave issue 06 gave the argv sweep Windows
 # parity, and `tests/test_windows_orphan_sweep.py` proves it against the real process table. What
@@ -319,6 +321,20 @@ def _closed_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _set_record(engine: "_LiveEngine", **fields: Any) -> None:
+    """Rewrite fields of a live engine's run record **under its lock**.
+
+    Every regime that doctors a record is racing the child's own bookkeeping: `live_engine` returns
+    once the relay has processed the register PUT, and `service_truth.mark_registered` runs after
+    that, so a `mutate_record` can still be in flight. `run_records.update_record` is an unlocked
+    read-modify-write, so its read can straddle ours and its write then undoes it — silently turning
+    a regime into a different one. `mutate_record` takes the same lock the child does.
+    """
+    assert run_records.mutate_record(
+        engine.network_id, _ENGINE_ID, lambda record: record.update(fields)
+    ), "the record vanished before it could be doctored"
+
+
 def _dead_pid() -> int:
     """A pid that is certainly dead **and reaped**: run a no-op child and wait for it. (Synthesising
     one by arithmetic risks exceeding ``pid_max`` — 99999 on macOS — or naming a live process.)"""
@@ -355,20 +371,104 @@ def _wait_for_log(network_id: str, needle: str, *, timeout: float = _WAIT_TIMEOU
     return _wait_until(lambda: needle in _log_tail(network_id, limit=40000), timeout=timeout)
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """Best-effort SIGKILL of the child's own process group, so a serve child that survived a failed
-    assertion never escapes the test. Confined **because** ``_spawn_remote_engine`` spawns with
-    ``start_new_session=True``: ``setsid()`` runs in the child before exec, making it session *and*
-    group leader for life, so its pgid is its own pid and this cannot in practice reach the pytest
-    process group. The residual is the pid-reuse TOCTOU between ``poll()`` and ``killpg`` that the
-    production kill path already documents and accepts (``shared/orphan_sweep.py`` on
-    ``terminate_pid``: "not fully fixable without pidfd"). The reaper thread does the reaping."""
-    if proc.poll() is not None:
-        return
+# The network-id prefix every fixture in this module builds (`live_engine`, `dying_engine`), and the
+# discriminator the leak guard runs on. Pinned to THIS pytest process, so the guard can only ever
+# accuse this run — never a leftover from another checkout, nor a `grid join` the developer is
+# actually running.
+_ITEST_NETWORK_PREFIX = f"itest-{os.getpid()}-"
+
+
+def _leaked_serve_children(rows: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """The rows that are serve children of a network id **this run** invented.
+
+    Pure, so the guard's discrimination is testable without manufacturing real processes. Unlike
+    ``shared.orphan_sweep._match_engine_children`` there is no argument-count guard: that one exists
+    to tell a serve child from an operator's own ``pgrep``/``watch`` *before signalling it*, whereas
+    this only reports — and the prefix already carries a live pid nothing else can name. Fewer rules
+    is the safer direction here, because a guard's dangerous failure is the false **negative**.
+    """
+    leaked = []
+    for row in rows:
+        tokens = row[2].split()
+        if run_records.REMOTE_ENGINE_MARKER not in tokens:
+            continue
+        network = tokens[tokens.index(run_records.REMOTE_ENGINE_MARKER) + 1:]
+        if network and network[0].startswith(_ITEST_NETWORK_PREFIX):
+            leaked.append(row)
+    return leaked
+
+
+_PS_TIMEOUT_SECONDS = 10  # a wedged `ps` must not hang teardown; generous, this is one fork
+
+
+def _process_rows() -> list[tuple[int, int, str]] | None:
+    """``(pid, pgid, command)`` for every process on the host, or ``None`` when ``ps`` could not be
+    read at all.
+
+    This is the TEST's tool for naming the processes it must assert about — deliberately separate
+    from ``shared.orphan_sweep``'s enumerator, which is the code under test and is denied a process
+    table outright in one regime. A row `ps` prints in an unexpected shape is skipped rather than
+    raising: this feeds teardown paths and a guard, and neither may die of a stray line.
+
+    ``None`` rather than an empty list, and it is the whole point: the leak guard's question is
+    "did this run leave anything running", and zero rows from a `ps` that failed, timed out or was
+    killed answers it *identically to a clean box*. That is the silent failure this feature exists
+    to end, so it is refused here the same way the production sweep refuses it
+    (``orphan_sweep._posix_ps_output`` returns ``None`` on exactly these three conditions). An empty
+    row list counts as unreadable too — this process is itself in the table, so zero parseable rows
+    means the output was not a process table.
+    """
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except OSError:  # ProcessLookupError/PermissionError included — it exited, or isn't ours
-        pass
+        proc = subprocess.run(
+            ["ps", "-A", "-ww", "-o", "pid=,pgid=,command="],
+            capture_output=True, text=True, errors="replace", timeout=_PS_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    rows = []
+    for line in proc.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdecimal() and parts[1].isdecimal():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return rows or None
+
+
+def _group_members(pgid: int) -> str:
+    """Everything still running in ``pgid``, for a teardown failure to name. Diagnostics only."""
+    rows = _process_rows()
+    if rows is None:
+        return "<couldn't read the process table>"
+    return "; ".join(f"{pid} {command}" for pid, group, command in rows if group == pgid)
+
+
+def _reap_process_group(proc: subprocess.Popen) -> bool:
+    """SIGKILL the process group ``proc`` leads, reap ``proc`` itself, and report whether the group
+    is empty afterwards — so a serve child that survived a failed assertion never escapes the test.
+
+    ``proc.pid`` **is** the group id, and that is the whole point. ``_spawn_remote_engine`` spawns
+    with ``start_new_session=True``, so ``setsid()`` runs in the child before exec and makes it
+    session *and* group leader for life. Deriving the group with ``os.getpgid(proc.pid)`` instead —
+    what this used to do — raises ``ProcessLookupError`` the moment the leader is reaped, which is
+    exactly the state a **launcher shim** reaches while the real serve child is still running in its
+    group. That, plus an early return on ``proc.poll() is not None``, is how this file leaked two
+    live `__remote-engine` children for a day (`.scratch/grid-leave/` issue 19 B). Neither guard
+    survives: the group is signalled unconditionally.
+
+    Safe unconditionally because a group id is not recycled while the group has members (ADR 0020,
+    ``shared.process_identity.group_alive``) — an empty group answers ESRCH and reaches nothing.
+    It is also strictly *narrower* than the form it replaces, which resolved a non-leader pid to
+    whatever group it had joined — pytest's own, had a spawn ever lost its ``start_new_session``.
+
+    Reaping ``proc`` before the verdict is load-bearing: a **zombie** still occupies its process
+    group, so the zombie regime's own corpse would otherwise report the group as forever alive.
+    """
+    with contextlib.suppress(OSError):  # ESRCH: nothing left. EPERM: not ours to signal.
+        os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        proc.wait(timeout=_WAIT_TIMEOUT)
+    return _wait_until(lambda: not process_identity.group_alive(proc.pid))
 
 
 class _LiveEngine(NamedTuple):
@@ -428,19 +528,72 @@ class _Spawned:
         self.helpers: list[subprocess.Popen] = []
 
 
+# How long a leaked-looking child gets to finish dying before the guard calls it a leak. A child
+# that took SIGKILL during the last test's teardown is briefly still in the process table, and a
+# guard that cried wolf on that would be switched off within a week.
+_LEAK_SETTLE_SECONDS = 5.0
+
+
+@pytest.fixture(scope="module", autouse=True)
+def no_leaked_serve_children():
+    """Fail this module if it leaves a live serve child of its own behind.
+
+    The backstop for the defect in `.scratch/grid-leave/` issue 19 B — and, more to the point, for
+    the *next* one. The leak that prompted this was invisible for a day precisely because it was
+    silent: every network id here is unique per run, so a stranded child matches nothing anybody
+    would ever grep for, accumulates one directory per run under `~/.grid/run/engines`, and goes on
+    heartbeating. A file that spawns real detached processes has to prove it cleaned up, not assume
+    the per-test fixture did.
+
+    Module-scoped rather than a `tests/conftest.py` session fixture: this is the only file in the
+    suite that spawns detached children, and a session hook would put a `ps` fork on the tail of
+    1 500 tests that cannot leak anything. Whatever it finds is reaped as well as reported, so the
+    developer is left with a red suite and a clean machine rather than one of the two.
+    """
+    yield
+    _wait_until(lambda: _process_rows() is not None and not _leaked_serve_children(_process_rows()),
+                timeout=_LEAK_SETTLE_SECONDS)
+    rows = _process_rows()
+    # "Couldn't check" is not "checked, clean" — a guard that treats an unreadable `ps` as a clean
+    # box is the same silent success this whole feature exists to end, one level up.
+    assert rows is not None, "the leak guard could not read the process table, so it cannot vouch " \
+                             "for this run; re-run once `ps` works"
+    leaked = _leaked_serve_children(rows)
+    for pid, group, _command in leaked:
+        with contextlib.suppress(OSError):
+            if group:
+                os.killpg(group, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+    assert not leaked, (
+        "this module leaked live serve children — the orphan class the whole grid-leave feature "
+        "exists to end, manufactured by the suite that proves the fix. Reaped them; fix the "
+        "teardown:\n" + "\n".join(f"  pid {pid} (pgid {group}): {command}"
+                                  for pid, group, command in leaked)
+    )
+
+
 @pytest.fixture
 def spawned():
     box = _Spawned()
     yield box
-    for proc in box.children:  # children first, so none is left polling a relay that's going away
-        _kill_process_group(proc)
+    # Children first, so none is left polling a relay that's going away. Every group is reaped
+    # unconditionally — a child of a *failing* test is exactly the one that used to escape, and
+    # "the assertion already failed" is no reason to leave a process running for a day.
+    survivors = [proc.pid for proc in box.children if not _reap_process_group(proc)]
     for proc in box.helpers:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
-    for relay in box.relays:
+    for relay in box.relays:  # ...and the listeners close whatever the children did
         relay.shutdown()
         relay.server_close()
+    # Asserted last, so a survivor cannot also strand a relay thread. This is a teardown failure by
+    # design: the alternative is the silence that let two children run for a day.
+    assert not survivors, (
+        "a spawned process group survived teardown — this run leaked live children: "
+        + "; ".join(f"pgid {pgid}: {_group_members(pgid) or 'unreadable'}" for pgid in survivors)
+    )
 
 
 # A **real** launcher shim: it re-execs the CLI as a child and waits for it, exactly like the Nuitka
@@ -476,7 +629,7 @@ def live_engine(monkeypatch, tmp_path, spawned):
         # enumerates the whole host process table. A unique id guarantees this test can never match
         # — and kill — a `grid join` child the developer is actually running, nor a leftover from a
         # sibling regime. Satisfies remote_grid._NETWORK_ID_RE ([A-Za-z0-9_-]+).
-        network_id = f"itest-{os.getpid()}-{tag}"
+        network_id = f"{_ITEST_NETWORK_PREFIX}{tag}"
         node_id = f"node-{tag}"
         relay = _FakeRelay(fail_registers=fail_registers)
         relays.append(relay)  # registered BEFORE anything below can raise, or its listener leaks
@@ -530,7 +683,7 @@ def dying_engine(monkeypatch, tmp_path, spawned):
     the child to die instead must pass a status bring-up classes as terminal."""
 
     def start(tag: str, *, gate_status: int = 500) -> _LiveEngine:
-        network_id = f"itest-{os.getpid()}-{tag}"  # unique per regime — see `live_engine`
+        network_id = f"{_ITEST_NETWORK_PREFIX}{tag}"  # unique per regime — see `live_engine`
         node_id = f"node-{tag}"
         relay = _FakeRelay(gate_register=True, gate_status=gate_status)
         spawned.relays.append(relay)
@@ -584,9 +737,22 @@ def test_real_child_leave_kills_the_child_and_deregisters(live_engine, capsys, r
         # been healed by its startup self-stamp, and the bug would not reproduce.
         stale = _dead_pid()
         assert not run_records.pid_alive(stale), f"pid {stale} was recycled; the regime is void"
-        run_records.update_record(engine.network_id, _ENGINE_ID, pid=stale)
+        # `mutate_record`, not `update_record`: the latter is an UNLOCKED read-modify-write, so a
+        # `service_truth.mark_registered` still in flight (see the orphan branch below) can read the
+        # record before this and write it back after, restoring the live pid. Leave would then reach
+        # the child through the record and the sweep — the thing this regime exists to exercise —
+        # would have nothing left to find. Measured as a rare flake.
+        _set_record(engine, pid=stale)
     else:  # orphan: record gone, child alive — four of the five orphans found in the field
-        engine.record_path.unlink()
+        # Under the record's OWN lock, which is not ceremony: `live_engine` returns as soon as the
+        # relay has processed the register PUT, and the child writes `registered_at` afterwards (see
+        # `test_real_child_that_is_serving_is_reported_as_serving`) — so a `mutate_record` can be
+        # mid-flight right now. That reads under the lock and writes after, so an unlocked unlink
+        # landing between its read and its `os.replace` is **undone**: the record comes back, leave
+        # takes the has-records branch, and the regime silently stops being the orphan case it is
+        # named for. Measured as a rare flake before this lock existed.
+        with file_lock(engine.record_path):
+            engine.record_path.unlink()
 
     capsys.readouterr()  # drop the bring-up noise; what follows reads leave's own output
     assert cli.main(["leave"]) == 0
@@ -769,20 +935,19 @@ def _serve_children_in_group(pgid: int, network_id: str) -> list[int]:
     helpers — the one-shot ``ps`` the identity stamp runs, for one — and a test that waited for those
     to die would be asserting about the wrong processes.
     """
-    out = subprocess.run(
-        ["ps", "-A", "-ww", "-o", "pid=,pgid=,command="],
-        capture_output=True, text=True, errors="replace",
-    ).stdout
+    rows = _process_rows()
+    assert rows is not None, "couldn't read the process table, so this regime cannot be set up"
     matched = []
-    for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) != 3 or not parts[0].isdecimal() or not parts[1].isdecimal():
+    for pid, group, command in rows:
+        tokens = command.split()
+        if group != pgid or run_records.REMOTE_ENGINE_MARKER not in tokens:
             continue
-        tokens = parts[2].split()
-        if int(parts[1]) != pgid or run_records.REMOTE_ENGINE_MARKER not in tokens:
-            continue
-        if tokens[tokens.index(run_records.REMOTE_ENGINE_MARKER) + 1] == network_id:
-            matched.append(int(parts[0]))
+        # Sliced, not indexed: a row whose LAST token is the marker would `IndexError` here and take
+        # the whole regime down with a traceback about the wrong thing. Same shape as
+        # `_leaked_serve_children` above, for the same reason.
+        after = tokens[tokens.index(run_records.REMOTE_ENGINE_MARKER) + 1:]
+        if after and after[0] == network_id:
+            matched.append(pid)
     return matched
 
 
@@ -817,9 +982,7 @@ def test_real_child_group_backstop_reaps_the_engine_when_ps_is_unreadable(
     # Roll the record back to what the spawner wrote, i.e. the state a leave racing the join sees
     # before the child's self-stamp lands. The child has really started and really self-stamped; this
     # restores the earlier record rather than faking one that never existed.
-    run_records.update_record(
-        engine.network_id, _ENGINE_ID, **run_records.identity_stamp(shim_pid)
-    )
+    _set_record(engine, **run_records.identity_stamp(shim_pid))  # locked — see `_set_record`
     assert run_records.read_record(engine.network_id, _ENGINE_ID)["pid"] == shim_pid != child_pid
     # Deny the code under test any process table, so only the stamped process group can reach the
     # engine. Both the seam and its POSIX implementation, so a refactor that stops routing through the
@@ -1010,3 +1173,88 @@ def test_real_child_stuck_in_registration_is_not_reported_as_already_serving(dyi
     assert "--respawn" in captured.err, "the operator was left with no way out"
 
     engine.relay.register_gate.set()  # let the child finish dying, so teardown is clean
+
+
+# ---------------------------------------------------------------------------
+# the harness's own teardown (`.scratch/grid-leave/` issue 19 B)
+# ---------------------------------------------------------------------------
+
+def test_teardown_reaps_the_group_when_the_recorded_process_is_already_gone(spawned):
+    """The teardown must reach a serve child whose *recorded* process has already exited.
+
+    This file leaked two live `__remote-engine` children onto the developer's Mac — found still
+    running a day later, one of them spinning — from two separate runs of the `groupreap` regime.
+    That regime is the one where `proc` is the **launcher shim** and the real engine is a *member*
+    of its group, so the moment the shim dies the fixture's handle names nothing: the old teardown
+    returned early on `proc.poll() is not None` and then asked `os.getpgid(proc.pid)`, which raises
+    once the shim is reaped. Nothing was ever signalled, and because the `itest-<pid>-<tag>` ids are
+    unique per run, nothing else would ever match them either — the leak was self-masking.
+
+    The same orphan class this whole feature exists to end, manufactured by the suite that proves
+    the fix. Reproduced here with a real shim and a real grandchild rather than a serve child: no
+    relay, no CLI, one second — the defect is in the teardown, not in anything grid-specific.
+    """
+    shim = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys; "
+         "print(subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']).pid, flush=True)"],
+        start_new_session=True,  # as `_spawn_remote_engine` does: the shim leads its own group
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    spawned.children.append(shim)  # so a failure here cannot itself leak — the point of the exercise
+    grandchild = int(shim.stdout.readline())
+    shim.stdout.close()
+    assert shim.wait(timeout=_WAIT_TIMEOUT) == 0  # the recorded process is now gone AND reaped
+    assert run_records.pid_alive(grandchild), "the grandchild died on its own; the regime is void"
+    with pytest.raises(ProcessLookupError):
+        os.getpgid(shim.pid)  # ...which is why the group can only come from the pid we recorded
+
+    assert _reap_process_group(shim), "the teardown reported the group still populated"
+
+    assert _wait_until(lambda: not run_records.pid_alive(grandchild)), (
+        f"the group member (pid {grandchild}) survived the teardown — its group leader {shim.pid} "
+        "had already exited, which is exactly when a serve child is left behind"
+    )
+
+
+def test_the_leak_guard_matches_only_this_runs_serve_children():
+    """What the end-of-module guard counts as a leak.
+
+    Scoped to `itest-<this pytest pid>-` rather than to every `itest-*`, so it can only ever accuse
+    this run. A leftover from another checkout, another run, or a `grid join` the developer is
+    genuinely running must not fail an unrelated suite — that would make the guard something people
+    switch off, which is how the original leak stayed invisible for a day.
+    """
+    rows = [
+        (11, 11, f"/py -m cli {run_records.REMOTE_ENGINE_MARKER} {_ITEST_NETWORK_PREFIX}groupreap remote"),
+        (12, 12, f"/py -m cli {run_records.REMOTE_ENGINE_MARKER} itest-999999-groupreap remote"),
+        (13, 13, f"/py -m cli {run_records.REMOTE_ENGINE_MARKER} team remote"),
+        (14, 14, f"/py -m cli {run_records.REMOTE_ENGINE_MARKER}"),  # marker last — must not IndexError
+        (15, 15, "/py -m cli models"),
+        (16, 16, ""),
+    ]
+
+    assert _leaked_serve_children(rows) == [rows[0]]
+
+
+@pytest.mark.parametrize("failure", ["missing", "nonzero", "timeout", "empty"])
+def test_an_unreadable_process_table_is_not_a_clean_box(monkeypatch, failure):
+    """`_process_rows` answers `None`, never `[]`, when it could not read the table.
+
+    The distinction is the guard's whole value. Zero rows from a `ps` that was missing, failed,
+    timed out or printed nothing is indistinguishable from a box with no leaked children — so
+    returning `[]` would make the guard silently vouch for a run it never inspected, which is the
+    exact failure mode `grid leave` was rewritten to stop committing. Same contract, and the same
+    three conditions, as `shared.orphan_sweep._posix_ps_output`. (Zero parseable rows counts too:
+    this process is itself in the table.)
+    """
+    outcomes = {
+        "missing": lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("no ps")),
+        "timeout": lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("ps", 10)),
+        "nonzero": lambda *a, **k: subprocess.CompletedProcess("ps", 1, "", "bad flags"),
+        "empty": lambda *a, **k: subprocess.CompletedProcess("ps", 0, "", ""),
+    }
+    monkeypatch.setattr(subprocess, "run", outcomes[failure])
+
+    assert _process_rows() is None
