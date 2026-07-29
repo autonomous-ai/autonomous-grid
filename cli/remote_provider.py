@@ -57,9 +57,22 @@ _SWEEP_UNSCANNED_NOTE = (
 # another user's, so not ours to kill (grid-leave issue 15/C). Not a failure: killing another
 # operator's legitimate node would be wrong, so leave still exits 0. But not a clean success either,
 # and the case that makes it matter is mundane rather than adversarial — a `sudo grid join` followed
-# by an unprivileged `grid leave` over a shared GRID_HOME is the SAME node_id, so the backstop flips
-# the node to consumer and the root-owned child's next heartbeat re-registers it as a provider. The
-# operator was told the box serves nothing at the moment it resumes serving.
+# by an unprivileged `grid leave` over a shared GRID_HOME is the SAME node_id.
+#
+# What survives is the PROCESS, not the advertisement. The backstop flips the node to consumer with
+# no models, and nothing the child does afterwards undoes that: grid-src's `registry.heartbeat`
+# writes only `last_heartbeat`/`load` and never touches `role`, and its pruned-row self-heal
+# (`ensure_node_exists`) re-creates a row as `consumer` too — so the heartbeat that would have made
+# the child re-register (`relay.heartbeat` -> "missing" on a 404) is now essentially unreachable. The
+# child re-registers on exactly two triggers, a heartbeat answered "missing" and a hot-reload, and a
+# foreign child gets neither. That is the "idempotent and resurrection-proof" flip ADR 0023 relies on,
+# working as designed — and it is why this note promises no TTL: there is nothing to wait out.
+#
+# The residual is still real, which is why the note exists at all. The root-owned child keeps the
+# engine, the port and the credentials it loaded at startup, so the box is doing work the operator
+# believes it stopped — and if the backstop *degraded* (401, relay down) rather than landing, the
+# node was never flipped, and this child's heartbeats hold it inside the 120s TTL as a provider
+# indefinitely. Only stopping the process ends either one.
 #
 # Deliberately NOT sharing `_SWEEP_UNSCANNED_NOTE`'s wording, and not merely for readability:
 # `tests/test_remote_leave_real_child.py` asserts that string's *absence* as proof the sweep really

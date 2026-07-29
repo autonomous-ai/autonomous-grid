@@ -54,10 +54,21 @@ Choices a future reader will otherwise re-litigate:
   `Left <grid>.` at exit 0) was wrong in the more expensive direction.
 
   The shape that makes it expensive is mundane. `sudo grid join` then an unprivileged `grid leave`
-  over a shared `GRID_HOME` is the **same node_id**: the backstop flips the node to consumer, and the
-  root-owned child's next heartbeat re-registers it as a provider. The operator was told the box
-  serves nothing at the moment it resumed serving. So the success line carries the caveat and names
-  an elevated retry, and exit 0 stands — which overturns the wording, not the decision, of issue 02.
+  over a shared `GRID_HOME` is the **same node_id**. What survives is the *process*, not the
+  advertisement: the backstop's consumer flip stands, because the master's heartbeat writes only
+  `last_heartbeat`/`load` and never `role`, and its pruned-row self-heal re-creates a `consumer` too.
+  So the grid does stop listing the box — while the root-owned child keeps the engine, the port and
+  the token it loaded at startup, and the operator was told the machine stopped doing work it is
+  still doing. Worse if the backstop *degraded* rather than landed: the node was never flipped, and
+  that child's heartbeats hold it inside the ~120s TTL as a provider for as long as it runs. So the
+  success line carries the caveat and names an elevated retry, and exit 0 stands — which overturns
+  the wording, not the decision, of issue 02.
+
+  (An earlier draft of this paragraph said the child's next heartbeat *re-registers it as a
+  provider*. It cannot: `ensure_node_exists` has self-healed a missing row as `consumer` since the
+  master's first commit, so the 404 the client maps to `"missing"` is unreachable. Recorded rather
+  than silently corrected, because the same sentence was copied into three other files and the
+  correction is what a future reader needs to see.)
   `grid logout` inherits the same caveat as a warning and never as a refusal, for the second reason
   its sibling `_warn_unscanned` is a warning: a box hosting another user's node could otherwise never
   sign out at all.

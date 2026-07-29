@@ -281,9 +281,11 @@ def _warn_unstoppable(outcomes: list[signout.SignoutOutcome]) -> None:
     owned by another user, or a process table it was shown only part of (grid-leave issue 15).
 
     The concrete shape is mundane, not adversarial: `sudo grid join` followed by an unprivileged
-    `grid logout` over a shared `GRID_HOME` is the SAME node_id, so the backstop flips the node to
-    consumer and the root-owned child's next heartbeat re-registers it as a provider — while the
-    credentials that could address it again have just gone.
+    `grid logout` over a shared `GRID_HOME` is the SAME node_id. The backstop's consumer flip stands
+    (the master's heartbeat never writes `role`), so the grid stops listing the box — but the
+    root-owned child keeps the engine, the port and the token it loaded at startup, and the
+    credentials that could address it again have just gone. If the backstop *degraded* instead of
+    landing, the node was never flipped and that child's heartbeats keep it advertised indefinitely.
 
     A warning and never a refusal, for the same two reasons `_warn_unscanned` is: another operator's
     node is not ours to kill, and a box that hosts one would otherwise be unable to sign out at all.
