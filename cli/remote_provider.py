@@ -25,7 +25,7 @@ from typing import NamedTuple
 import uuid
 from typing import TYPE_CHECKING
 
-from shared import logging_setup, paths, run_records
+from shared import logging_setup, orphan_sweep, paths, run_records
 from shared.filelock import file_lock
 from shared.models import api_catalog
 
@@ -1396,7 +1396,6 @@ def _full_leave_reap(
       table was read but mostly hidden from this account (grid-leave issue 15). Neither is fatal;
       both qualify the success line via ``_sweep_caveats``.
     """
-    from remote import orphan_sweep  # argv sweep (lazy: remote.* imports stay in-handler)
     from . import provider  # shared teardown: stops the engine + reaps a media engine's ComfyUI
 
     record_pids = _recorded_pids(records)
@@ -1407,7 +1406,9 @@ def _full_leave_reap(
     # Guarded for the same reason the sweep below is, and more so: this runs EARLIER, so an exception
     # here would abort the leave before the record kills as well as before the deregister.
     try:
-        shim_pids = orphan_sweep.launcher_ancestors(network_id, record_pids)
+        shim_pids = orphan_sweep.launcher_ancestors(
+            run_records.REMOTE_ENGINE_MARKER, network_id, pids=record_pids
+        )
     except (Exception, SystemExit) as exc:
         print(f"Note: couldn't identify launcher processes ({exc}).", file=sys.stderr)
         shim_pids = frozenset()
@@ -1427,7 +1428,9 @@ def _full_leave_reap(
     # and take the deregister with it, which would leave the model advertised for the full ~120s TTL.
     # (`SystemExit` is this repo's clean-error idiom and is not an `Exception`, hence both.)
     try:
-        swept = orphan_sweep.sweep_orphans(network_id, exclude_pids=record_pids | shim_pids)
+        swept = orphan_sweep.sweep_orphans(
+            run_records.REMOTE_ENGINE_MARKER, network_id, exclude_pids=record_pids | shim_pids
+        )
     except (Exception, SystemExit) as exc:
         print(f"Note: the scan for orphaned serve children failed ({exc}).", file=sys.stderr)
         swept = orphan_sweep.SweepResult((), (), (), scanned=False)
@@ -1511,21 +1514,20 @@ def _full_leave_unchecked_exit(unverified: list[int], label: str, sent: bool) ->
     )
 
 
+# Remote's wording for the three things a sweep can fail to establish. The precedence between them
+# lives in `orphan_sweep.caveats`, shared with local mode; only these strings are remote's own.
+_SWEEP_NOTES = orphan_sweep.SweepNotes(
+    unscanned=_SWEEP_UNSCANNED_NOTE, partial=_SWEEP_PARTIAL_NOTE, foreign=_SWEEP_FOREIGN_NOTE
+)
+
+
 def _sweep_caveats(reaped: _ReapResult) -> str:
-    """Everything a full-leave success line must not leave unsaid, as one suffix.
-
-    The success line itself is worded per caller (a bare leave vs a last-engine drop), but what
-    qualifies it never is — so it lives here rather than being inlined at each site, which is how the
-    two drifted before: one carried the unscanned caveat and the other re-derived it.
-
-    "Couldn't read the table at all" **returns early** rather than accumulating: with no rows there
-    was nothing to match and nothing to count, so the other two are empty by construction and would
-    only add a second, quieter version of the same admission.
-    """
-    if not reaped.scanned:
-        return _SWEEP_UNSCANNED_NOTE
-    partial = _SWEEP_PARTIAL_NOTE if reaped.partial else ""
-    return partial + (_SWEEP_FOREIGN_NOTE if reaped.foreign else "")
+    """Everything a full-leave success line must not leave unsaid, as one suffix. The success line
+    itself is worded per caller (a bare leave vs a last-engine drop); what qualifies it never is."""
+    return orphan_sweep.caveats(
+        scanned=reaped.scanned, partial=reaped.partial, foreign=bool(reaped.foreign),
+        notes=_SWEEP_NOTES,
+    )
 
 
 def _full_leave_report(label: str, had_records: bool, sent: bool, reaped: _ReapResult) -> None:

@@ -157,7 +157,7 @@ def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
     (``update_record`` no-ops when the record is gone), so a record a concurrent full leave just
     deleted is never resurrected. This heals drift for a leave that reads the record AFTER our stamp;
     a leave that wins the lock BEFORE it still acts on the spawner's pid, and the true child is then
-    reaped by issue-02's argv orphan sweep (``remote.orphan_sweep``), not by this stamp. Best-effort:
+    reaped by issue-02's argv orphan sweep (``shared.orphan_sweep``), not by this stamp. Best-effort:
     a failed stamp warns and serves on — the engine must serve even if the disk write hiccups (the
     reload bookkeeping's never-raise contract)."""
     try:

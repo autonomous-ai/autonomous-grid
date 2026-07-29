@@ -372,41 +372,30 @@ def _log_tail(path, lines: int = 12) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_leave(args: argparse.Namespace) -> int:
+    """Resolve which engines this leave means, then hand them to the teardown (`cli/local_leave`).
+
+    Two shapes, and the difference is not cosmetic — it decides how widely the argv sweep may reap.
+    `--engine <x>` names ONE of this grid's children (local runs one per engine), so the sweep pins
+    its engine id too. Everything else — `--all`, a bare leave, and a bare leave with no records at
+    all — means the whole grid, so the sweep pins only the grid id and can therefore also reap a
+    record-less orphan, whose engine id nobody knows. A bare leave with no records is a first-class
+    **repair** verb, not the dead end it used to be (grid-leave issue 17).
+    """
+    from . import local_leave
+
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]
     records = _read_records(grid_id)
 
-    if args.all:
-        targets = list(records)
-    elif args.engine:
-        targets = [_resolve_leave_target(records, args.engine, cfg["name"])]
-    elif len(records) == 1:
-        targets = list(records)
-    elif not records:
-        print(f"No engines joined to {cfg['name']}.")
-        return 0
-    else:
+    if args.engine and not args.all:
+        engine_id = _resolve_leave_target(records, args.engine, cfg["name"])
+        return local_leave.tear_down(
+            grid_id, cfg["name"], {engine_id: records[engine_id]}, engine_id=engine_id
+        )
+    if not args.all and len(records) > 1:
         names = ", ".join(sorted(records))
         raise SystemExit(f"Several engines joined ({names}); pass --engine <id> or --all.")
-
-    survivors: list[tuple[str, run_records.Teardown]] = []
-    for engine_id in targets:
-        outcome = _stop_engine(grid_id, engine_id, records[engine_id])
-        if outcome.survivor:  # honest teardown: a child that survived SIGKILL kept its record — don't lie "Left"
-            survivors.append((engine_id, outcome))
-        else:
-            print(f"Left engine {engine_id} on {cfg['name']}.")
-    if survivors:
-        # `describe_survivor`, not a bare pid: a local engine tears down through the same terminator
-        # as a remote one, so what survives can be a process GROUP (grid-leave issue 08).
-        named = ", ".join(
-            f"{engine_id} ({run_records.describe_survivor(outcome)})" for engine_id, outcome in survivors
-        )
-        raise SystemExit(
-            f"Could not stop engine(s) {named} on {cfg['name']}; their record was kept so "
-            "`grid leave` can retry. Investigate the process before re-joining."
-        )
-    return 0
+    return local_leave.tear_down(grid_id, cfg["name"], records)
 
 
 def _resolve_leave_target(records: dict[str, dict[str, Any]], selector: str, grid_name: str) -> str:

@@ -22,7 +22,7 @@ import sys
 
 import pytest
 
-from remote import orphan_sweep
+from shared import orphan_sweep
 from shared import run_records
 
 pytestmark = pytest.mark.skipif(
@@ -161,7 +161,7 @@ def test_sweep_orphans_reaps_a_live_marked_child():
     real orphans for 7-23 days."""
     network_id = _network_id("reap")
     with _marked_child(network_id) as proc:
-        result = orphan_sweep.sweep_orphans(network_id)
+        result = orphan_sweep.sweep_orphans("__remote-engine", network_id)
 
         assert result.scanned is True
         assert result.reaped == (proc.pid,), f"unexpected sweep result: {result}"
@@ -175,7 +175,7 @@ def test_sweep_orphans_leaves_another_grids_child_alone():
     untouched. Without this, the test above would also pass for a sweep that kills everything."""
     network_id = _network_id("control")
     with _marked_child(network_id) as proc:
-        result = orphan_sweep.sweep_orphans(_network_id("someone-else"))
+        result = orphan_sweep.sweep_orphans("__remote-engine", _network_id("someone-else"))
 
         assert result.scanned is True
         # Field by field, not a whole-tuple comparison against a default-constructed result: on a
@@ -205,7 +205,7 @@ def test_the_enumerator_emits_a_sentinel_for_a_process_it_cannot_read():
     ]
     assert sentinels, f"no unreadable process was reported at all: {output[:400]!r}"
     # ...and they are inert: a sentinel carries no marker, so it can never become a kill.
-    assert orphan_sweep._match_orphan_pids("\n".join(sentinels), _network_id("x"), exclude_pids=set()) == []
+    assert orphan_sweep._match_orphan_pids("\n".join(sentinels), "__remote-engine", _network_id("x"), exclude_pids=set()) == []
 
 
 def test_the_unreadable_row_count_stays_under_the_qualifier_floor():
@@ -231,4 +231,4 @@ def test_the_unreadable_row_count_stays_under_the_qualifier_floor():
         f"_WIN_UNREADABLE_FLOOR of {orphan_sweep._WIN_UNREADABLE_FLOOR} — every Windows `grid leave` "
         "would now print a partial-scan caveat. Raise the floor to clear this baseline."
     )
-    assert orphan_sweep.sweep_orphans(_network_id("floor")).partial is False
+    assert orphan_sweep.sweep_orphans("__remote-engine", _network_id("floor")).partial is False

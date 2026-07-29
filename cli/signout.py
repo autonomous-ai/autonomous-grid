@@ -18,7 +18,7 @@ import sys
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
-from shared import run_records
+from shared import orphan_sweep, run_records
 
 
 class LiveScan(NamedTuple):
@@ -85,8 +85,6 @@ def live_identities(network_ids: Iterable[str]) -> LiveScan:
     never joined and for a grid whose record was unlinked out from under a **live** child, and only
     the argv sweep can tell those apart.
     """
-    from remote import orphan_sweep  # lazy: remote.* imports stay out of cli import time
-
     by_grid: dict[str, tuple[int, ...]] = {}
     unvouched: list[str] = []
     for network_id in network_ids:
@@ -97,7 +95,7 @@ def live_identities(network_ids: Iterable[str]) -> LiveScan:
             unvouched.append(network_id)
     if not unvouched:
         return LiveScan(by_grid, True)  # every grid vouched for by a record: nothing was hidden from us
-    scan = orphan_sweep.find_orphans(unvouched)
+    scan = orphan_sweep.find_orphans(run_records.REMOTE_ENGINE_MARKER, unvouched)
     return LiveScan({**by_grid, **scan.found}, scan.scanned, scan.partial)
 
 

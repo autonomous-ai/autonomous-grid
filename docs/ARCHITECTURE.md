@@ -53,6 +53,8 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── grid.py              `grid up` / `down` / `ls` / `info` / `version` / overview (local).
 │   ├── provider.py          `grid join` / `leave` / `engines` / `models` — local engine lifecycle
 │   │                        (file name predates the rename).
+│   ├── local_leave.py       The local `grid leave` teardown: record kills, argv sweep, and what the
+│   │                        success line may claim (ADR 0025).
 │   ├── request.py           `grid chat` / `image` / `edit` / `video` (local).
 │   ├── engine.py            `grid engine install|pull|status|start|stop` (built-in engines).
 │   ├── models.py            `grid catalog` / `pull` / `rm`.
@@ -67,6 +69,8 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── state.py             Persisted mode pointer + per-mode active grid (~/.grid/state.json).
 │   ├── paths.py             ~/.grid filesystem layout.
 │   ├── run_records.py       Detached-engine run record + `grid leave` teardown (local + remote).
+│   ├── orphan_sweep.py      The argv sweep beside that teardown: finds engine children a stale or
+│   │                        missing record can't reach (both modes, both platforms).
 │   ├── jsonio.py            Atomic JSON read/write helpers.
 │   ├── engine/              Install/launch llama.cpp + ComfyUI lifecycle.
 │   ├── models/              Catalog, local GGUF store, downloads, media bundles.

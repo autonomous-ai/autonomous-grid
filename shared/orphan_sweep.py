@@ -1,15 +1,24 @@
-"""Argv sweep for ``grid leave`` (remote full-leave): reap detached serve children the run-record pid
-can no longer reach.
+"""Argv sweep for ``grid leave`` (both modes): reap detached engine children the run-record pid can no
+longer reach.
 
-The bug this closes: full leave kills by the run record's pid alone, so a stale/missing record
-strands a live ``<cli> __remote-engine <network_id> …`` child that heartbeats as a provider forever.
-This enumerates the process table and terminates every child whose argv carries the exact
-``__remote-engine <network_id>`` marker+token — the safety net beside the record-pid kills, and the
-only thing that reaps a record-less orphan (a bare ``grid leave``). Matching is by exact argv tokens
-*and their count* (the marker must be followed by exactly the two positionals ``cli/_main.py``
-parses), so grid B's child (different network id), unrelated commands (no marker), a bystander that
-merely mentions the marker (a ``pgrep``/``watch``/wrapper — one token after it), and the leave process
-itself (own pid, via ``exclude_pids``) are never touched.
+The bug this closes: leave kills by the run record's pid alone, so a stale/missing record strands a
+live engine child that keeps heartbeating forever. This enumerates the process table and terminates
+every child whose argv carries the exact marker+token of the grid being left — the safety net beside
+the record-pid kills, and the only thing that reaps a record-less orphan (a bare ``grid leave``).
+
+Both spawn argvs have the same shape, which is why one matcher serves both modes: a remote serve
+child is ``<cli> __remote-engine <network_id> <engine_id>`` and a local engine child is
+``<cli> __engine <grid_id> <engine_id>``. Callers pass the ``marker`` and however many leading
+positionals they want pinned — remote pins the network id, a local whole-grid leave pins the grid id,
+and a local ``--engine`` leave pins the grid id *and* the engine id so a sibling engine's child on the
+same grid is never touched. Matching is by exact argv tokens *and their count* (the marker must be
+followed by exactly the two positionals ``cli/_main.py`` parses), so another grid's child (different
+id), unrelated commands (no marker), a bystander that merely mentions the marker (a
+``pgrep``/``watch``/wrapper — one token after it), and the leave process itself (own pid, via
+``exclude_pids``) are never touched.
+
+It lives in ``shared/`` rather than under one mode because both modes' leave uses it, exactly as
+``shared.run_records`` holds the record format and teardown they share.
 
 There is deliberately **no owner check** (ADR 0024): unelevated POSIX already declines for free — a
 match owned by another user raises EPERM at terminate time and lands in ``foreign``, reported and
@@ -25,8 +34,8 @@ inert ``_WIN_UNREADABLE_MARKER`` row rather than dropped, so the size of that bl
 and reported (``unreadable`` / ``partial``); dropping them is what let a scan of a fraction of the
 table report itself clean. And ``run_records.terminate_pid`` has no grace loop there, so a Windows
 teardown is a single forced tree kill, and a visible-but-unkillable cross-user match becomes a
-``survivor`` rather than ``foreign``. See ``remote/CONTEXT.md`` ("What ``grid leave`` guarantees") for
-the operator-facing contract.
+``survivor`` rather than ``foreign``. See ``remote/CONTEXT.md`` and ``local/CONTEXT.md`` ("What
+``grid leave`` guarantees") for each mode's operator-facing contract.
 """
 from __future__ import annotations
 
@@ -88,6 +97,36 @@ class SweepResult(NamedTuple):
         it, and so it can never be constructed inconsistently with ``unreadable``.
         """
         return _is_partial_scan(self.unreadable)
+
+
+class SweepNotes(NamedTuple):
+    """One mode's wording for the three things a sweep can fail to establish.
+
+    The *strings* are per mode and cannot be shared: remote's say a stray child's models drop at the
+    ~120s node TTL, which is true there only because the backstop already flipped the node to
+    consumer — locally a stray child keeps heartbeating and its models never drop at all. The
+    *precedence* between them is not per mode, which is why `caveats` below is.
+    """
+
+    unscanned: str  # the process table couldn't be read at all
+    partial: str    # it was read, but most command lines were hidden from this account
+    foreign: str    # a live child of this grid we were not permitted to stop
+
+
+def caveats(*, scanned: bool, partial: bool, foreign: bool, notes: SweepNotes) -> str:
+    """Everything a leave's success line must not leave unsaid, as one suffix.
+
+    Lives here rather than at each caller because that is how the two remote report paths drifted
+    before: one carried the unscanned caveat and the other re-derived it. Now a third caller (local)
+    inherits the rule for free and can only differ in wording.
+
+    "Couldn't read the table at all" **returns early** rather than accumulating: with no rows there
+    was nothing to match and nothing to count, so the other two are empty by construction and would
+    only add a second, quieter version of the same admission.
+    """
+    if not scanned:
+        return notes.unscanned
+    return (notes.partial if partial else "") + (notes.foreign if foreign else "")
 
 
 # ``ps`` wall-clock budget; a hung ``ps`` must not wedge ``grid leave`` (its record kills + backstop
@@ -178,20 +217,45 @@ _WIN_PROCESS_LIST_SCRIPT = (
 )
 
 
-def _match_orphan_pids(
-    table_output: str, network_id: str, *, exclude_pids: set[int] | frozenset[int]
-) -> list[int]:
-    """Pids in ``table_output`` (``pid ppid command`` rows) whose argv is a detached serve child for
-    ``network_id``: the ``__remote-engine`` marker followed *immediately* by the exact ``network_id``
-    token (spawn order is ``… __remote-engine <network_id> <engine_id>``). Skips any pid in
-    ``exclude_pids`` (the leave process's own pid + the recorded pids already handled). Pure — the
-    whole matcher is unit-tested over canned output from both platforms.
+# How many positionals every engine-child dispatch takes after its marker. ONE number because both
+# `cli/_main.py` entries parse exactly two — `__remote-engine <network_id> <engine_id>` and
+# `__engine <grid_id> <engine_id>` — and the matcher's whole discriminator is this count.
+_DISPATCH_ARITY = 2
+
+
+def _match_engine_children(
+    table_output: str, marker: str, *pinned: str, exclude_pids: set[int] | frozenset[int]
+) -> dict[int, str]:
+    """Engine children in ``table_output`` (``pid ppid command`` rows) as ``{pid: engine_id}``.
+
+    A row matches when its argv contains ``marker`` as a whole token, followed *immediately* by each
+    token in ``pinned``, and by exactly ``_DISPATCH_ARITY`` tokens in total — so a caller pins as much
+    of the spawn argv as it means to claim: the grid alone (every engine child of that grid, which is
+    what finds a record-less orphan whose engine id nobody knows) or the grid **and** an engine id
+    (that child only). Skips any pid in ``exclude_pids`` (the leave process's own pid + the recorded
+    pids already handled). Pure — the whole matcher is unit-tested over canned output from both
+    platforms.
+
+    The value is the **engine id**, always the last positional, which is what lets a caller decide per
+    match rather than per scan — `cli/local_leave` spares a child whose engine id belongs to a record
+    it is not leaving.
 
     Position is measured from the marker, never from the start of the row, so the leading ``ppid``
     column is simply another token it steps over — which is why one matcher can read both a Windows
     command line (quoted ``"C:\\Program Files\\…"`` paths and all) and a POSIX ``ps`` row.
+
+    Pinning **nothing** is refused rather than treated as "match everything". The marker alone is not
+    the identity of a grid — it is the identity of the *CLI* — so a caller that forgets its id would
+    match every engine child on the box and hand them all to ``terminate_matches``, killing every
+    other grid's engines. Guarded here rather than trusted to callers, for the reason
+    ``terminate_group`` guards its own ``pgid``: this is the last place before something gets
+    signalled, and both teardowns wrap it in a degrade-to-"couldn't check" handler, so the failure
+    direction is a reported no-op rather than a crash.
     """
-    matched: list[int] = []
+    if not pinned:
+        raise ValueError(f"a {marker!r} sweep must pin at least the grid id; matching on the marker "
+                         "alone would reach every grid's engine children")
+    matched: dict[int, str] = {}
     for line in table_output.splitlines():
         parts = line.split(None, 1)  # split off exactly the pid; robust to a space-padded pid column
         # ``isdecimal`` rather than ``isdigit``: the latter is True for characters ``int()`` rejects
@@ -203,22 +267,34 @@ def _match_orphan_pids(
             continue
         tokens = parts[1].split()
         try:
-            marker = tokens.index(run_records.REMOTE_ENGINE_MARKER)
+            at = tokens.index(marker)
         except ValueError:
-            continue  # not a remote-engine child
+            continue  # not an engine child
         # Exact whole-token, positional, and the marker must be followed by EXACTLY the two arguments
-        # `cli/_main.py` parses for it — `<network_id> <engine_id>`, nothing after. Requiring the
-        # count is what separates a serve child from a bystander that merely mentions it: an operator
+        # `cli/_main.py` parses for it — `<grid id> <engine_id>`, nothing after. Requiring the count
+        # is what separates an engine child from a bystander that merely mentions it: an operator
         # running `pgrep -f "__remote-engine <nid>"`, a `watch`, or a wrapper script has one token
         # after the marker, and without this the next `grid leave` force-kills it (measured). A
         # different grid's child and a coincidental substring never match either way.
         #
-        # Lockstep: this count is the `__remote-engine` dispatch signature in `cli/_main.py`. Adding
-        # an argument or a flag there without updating it makes the sweep stop seeing serve children
-        # entirely — silently, since "no orphans" is also what a clean box looks like.
-        if len(tokens) == marker + 3 and tokens[marker + 1] == network_id:
-            matched.append(pid)
+        # Lockstep, and it is a TWO-way one: this count is the dispatch signature of **both**
+        # `__remote-engine` and `__engine` in `cli/_main.py`. Adding an argument or a flag to either
+        # without updating it makes the sweep stop seeing that mode's engine children entirely —
+        # silently, since "no orphans" is also what a clean box looks like.
+        if len(tokens) != at + 1 + _DISPATCH_ARITY:
+            continue
+        if list(pinned) != tokens[at + 1 : at + 1 + len(pinned)]:
+            continue
+        matched[pid] = tokens[at + _DISPATCH_ARITY]
     return matched
+
+
+def _match_orphan_pids(
+    table_output: str, marker: str, *pinned: str, exclude_pids: set[int] | frozenset[int]
+) -> list[int]:
+    """The pids of ``_match_engine_children``, in process-table order — for every caller that acts on
+    the whole match set rather than deciding per child."""
+    return list(_match_engine_children(table_output, marker, *pinned, exclude_pids=exclude_pids))
 
 
 def _count_unreadable(table_output: str) -> int:
@@ -419,8 +495,10 @@ def _process_table_output() -> str | None:
     return _win_process_output() if sys.platform == "win32" else _posix_ps_output()
 
 
-def launcher_ancestors(network_id: str, pids: set[int] | frozenset[int]) -> frozenset[int]:
-    """The launcher shims of ``pids`` — parents that are themselves serve children of ``network_id``.
+def launcher_ancestors(
+    marker: str, *pinned: str, pids: set[int] | frozenset[int]
+) -> frozenset[int]:
+    """The launcher shims of ``pids`` — parents that are themselves engine children of the same grid.
 
     **Call this before terminating ``pids``, not after.** A shim carries the same argv as the
     interpreter it spawns, so leaving it out of the sweep's exclusions makes a perfectly healthy
@@ -430,12 +508,12 @@ def launcher_ancestors(network_id: str, pids: set[int] | frozenset[int]) -> froz
     row in the process table, which a confirmed kill has already removed; asking afterwards silently
     returns nothing, which is a guard that looks present and never fires.
 
-    **Both** the recorded pid and its parent must carry the marker and this exact network id. Testing
-    only the parent is not enough, and the case that breaks it is this feature's own premise rather
-    than an edge case: a stale recorded pid, recycled onto some unrelated process, whose new parent
-    happens to be a real orphan — that orphan carries the marker, so a parent-only rule would quietly
-    exclude the very thing the sweep exists to reap. Requiring the child to be a serve child too
-    separates them, because a stale pid's new occupant is not one.
+    **Both** the recorded pid and its parent must carry the marker and these exact pinned tokens.
+    Testing only the parent is not enough, and the case that breaks it is this feature's own premise
+    rather than an edge case: a stale recorded pid, recycled onto some unrelated process, whose new
+    parent happens to be a real orphan — that orphan carries the marker, so a parent-only rule would
+    quietly exclude the very thing the sweep exists to reap. Requiring the child to be an engine child
+    too separates them, because a stale pid's new occupant is not one.
 
     Best-effort: this returns nothing on failure and lets the sweep that follows report the problem
     (which it will state twice if the table is unreadable, once per read — noisy, but each note is
@@ -448,13 +526,13 @@ def launcher_ancestors(network_id: str, pids: set[int] | frozenset[int]) -> froz
     output = _process_table_output()
     if output is None:
         return frozenset()
-    ours = set(_match_orphan_pids(output, network_id, exclude_pids=frozenset()))
+    ours = set(_match_orphan_pids(output, marker, *pinned, exclude_pids=frozenset()))
     parents = _ppid_by_pid(output)
     shims: set[int] = set()
     for pid in pids:
         if pid not in ours:
-            continue  # a stale recorded pid whose occupant isn't a serve child has no shim of ours
-        # Walk up while every step is still a serve child of this grid: a chain can be more than one
+            continue  # a stale recorded pid whose occupant isn't an engine child has no shim of ours
+        # Walk up while every step is still an engine child of this grid: a chain can be more than one
         # link (a `.cmd` shim into `grid.exe` into the interpreter), and stopping at the first parent
         # would spare the inner shim while sweeping the outer one — the same false "Reaped 1" on a
         # healthy leave, moved up a level. The ``not in shims`` guard is what terminates an ancestry
@@ -507,7 +585,7 @@ class ScanResult(NamedTuple):
 
 
 def find_orphans(
-    network_ids: Iterable[str], *, exclude_pids: set[int] | frozenset[int] = frozenset()
+    marker: str, network_ids: Iterable[str], *, exclude_pids: set[int] | frozenset[int] = frozenset()
 ) -> ScanResult:
     """Live serve children per network id, from ONE process-table read. Nothing is signalled.
 
@@ -534,16 +612,49 @@ def find_orphans(
     excluded = frozenset(exclude_pids) | {os.getpid()}
     found: dict[str, tuple[int, ...]] = {}
     for network_id in network_ids:
-        matched = _match_orphan_pids(output, network_id, exclude_pids=excluded)
+        matched = _match_orphan_pids(output, marker, network_id, exclude_pids=excluded)
         if matched:
             found[network_id] = tuple(matched)
     return ScanResult(found, unreadable=_count_unreadable(output))
 
 
+class Scan(NamedTuple):
+    """One process-table read, matched but not yet acted on — the halfway point ``sweep_orphans``
+    passes through and a caller that must decide *per match* stops at.
+
+    It exists so a caller can consult other state **between** the read and the kills, which is the
+    only order in which that state is trustworthy: `cli/local_leave` re-reads the run records here, and
+    because a local `grid join` writes the record *before* it spawns the child, every child in this
+    table already has a record in a snapshot taken after this read. Re-reading first would leave
+    exactly the hole the check exists to close — and local leave, unlike remote's, holds no file lock
+    to close it any other way.
+    """
+
+    matches: dict[int, str]        # pid -> engine id, in process-table order
+    ppid_by_pid: dict[int, int]    # for `_tree_roots`: which matches are descendants of other matches
+    unreadable: int                # rows we were not permitted to read a command line for
+
+
+def scan_engine_children(
+    marker: str, *pinned: str, exclude_pids: set[int] | frozenset[int] = frozenset()
+) -> Scan | None:
+    """Read the process table once and match this grid's engine children, signalling nothing.
+    ``None`` when the table couldn't be read at all — "couldn't check" is never "checked, clean"."""
+    output = _process_table_output()
+    if output is None:
+        return None
+    excluded = frozenset(exclude_pids) | {os.getpid()}
+    return Scan(
+        _match_engine_children(output, marker, *pinned, exclude_pids=excluded),
+        _ppid_by_pid(output),
+        _count_unreadable(output),
+    )
+
+
 def sweep_orphans(
-    network_id: str, *, exclude_pids: set[int] | frozenset[int] = frozenset()
+    marker: str, *pinned: str, exclude_pids: set[int] | frozenset[int] = frozenset()
 ) -> SweepResult:
-    """Terminate every detached serve child of ``network_id`` in the process table, classifying each
+    """Terminate every detached engine child of this grid in the process table, classifying each
     matched pid. A process table that can't be read returns an empty result with ``scanned=False``
     (leave degrades and says so, never crashes).
 
@@ -554,14 +665,21 @@ def sweep_orphans(
     escalation: confirmed dead → ``reaped``, survives → ``survivors``; a match owned by another user
     raises ``PermissionError`` (``terminate_pid`` does not catch EPERM) → ``foreign``, reported but
     never fatal. On Windows ``foreign`` stays empty by construction — see the module docstring.
+
+    Terminates **every** match. A caller that must spare some of them stops at
+    ``scan_engine_children`` and calls ``terminate_matches`` itself.
     """
-    output = _process_table_output()
-    if output is None:
+    scan = scan_engine_children(marker, *pinned, exclude_pids=exclude_pids)
+    if scan is None:
         return SweepResult((), (), (), scanned=False)  # couldn't read the table — couldn't check
-    excluded = frozenset(exclude_pids) | {os.getpid()}
-    matched = _match_orphan_pids(output, network_id, exclude_pids=excluded)
-    targets, descendants = _tree_roots(matched, _ppid_by_pid(output))
-    unreadable = _count_unreadable(output)
+    return terminate_matches(scan, scan.matches)
+
+
+def terminate_matches(scan: Scan, pids: Iterable[int]) -> SweepResult:
+    """Terminate ``pids`` (a subset of ``scan.matches``) through the record teardown's own
+    escalation, classifying each. See ``sweep_orphans`` for what each classification means."""
+    targets, descendants = _tree_roots(list(pids), scan.ppid_by_pid)
+    unreadable = scan.unreadable
     reaped: list[int] = []
     survivors: list[int] = []
     foreign: list[int] = []

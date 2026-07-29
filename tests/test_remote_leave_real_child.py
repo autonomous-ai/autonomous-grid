@@ -57,7 +57,8 @@ import pytest
 
 import cli
 from local import runtime
-from remote import bringup, credentials, orphan_sweep, service_truth
+from remote import bringup, credentials, service_truth
+from shared import orphan_sweep
 from shared import paths, process_identity, run_records, state
 
 # The sweep half of the old skip reason is gone — grid-leave issue 06 gave the argv sweep Windows
@@ -360,7 +361,7 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
     ``start_new_session=True``: ``setsid()`` runs in the child before exec, making it session *and*
     group leader for life, so its pgid is its own pid and this cannot in practice reach the pytest
     process group. The residual is the pid-reuse TOCTOU between ``poll()`` and ``killpg`` that the
-    production kill path already documents and accepts (``remote/orphan_sweep.py`` on
+    production kill path already documents and accepts (``shared/orphan_sweep.py`` on
     ``terminate_pid``: "not fully fixable without pidfd"). The reaper thread does the reaping."""
     if proc.poll() is not None:
         return

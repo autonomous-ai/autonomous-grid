@@ -6,7 +6,7 @@ includes the **current directory**, and the CLI runs wherever the operator happe
 whatever privilege we hold. Every Windows tool invocation therefore names an absolute path.
 
 It lives in ``shared/`` because both sides of a teardown need it — ``shared.run_records.kill_group``
-and ``remote.orphan_sweep``'s process enumerator — and ``shared/`` may not import ``remote/``.
+and ``shared.orphan_sweep``'s process enumerator — and neither may depend on the other.
 
 Everything here is import-safe on POSIX: the ``ctypes`` call is inside the function, so a module that
 imports this on Linux pays nothing and crashes nowhere.
