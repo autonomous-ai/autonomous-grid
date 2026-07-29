@@ -353,6 +353,8 @@ def _resolve_api_targets(
         )
     from remote import api_keys  # lazy: only stdlib + shared.* at module top (see module docstring)
 
+    if api_catalog.local_seat_port(kind) is not None:
+        return _resolve_seat_targets(args, kind, chosen)
     if kind == api_keys.CODEX_KIND:
         # `requested`, not `chosen`: codex's no--m default is the seat's LIVE PROBE set (issue 10a —
         # the resolver probes and computes it itself, no static intersection), so the `chosen =
@@ -360,6 +362,35 @@ def _resolve_api_targets(
         # may not actually serve.
         return _resolve_codex_targets(args, whitelist, requested, network_id)
     return _resolve_key_api_targets(args, kind, whitelist, valid, chosen)
+
+
+def _resolve_seat_targets(
+    args: argparse.Namespace, kind: str, chosen: list[str]
+) -> tuple[list[dict[str, object]], bool]:
+    """The CLI seat's engine spec. Its "vendor endpoint" is a loopback server on this box, so the
+    URL is computed here and the port travels with the spec's own options.
+
+    Binary and sign-in are checked at the prompt for the same reason the local join does it: a
+    signed-out seat otherwise registers looking healthy and fails every job into a log file.
+    """
+    from shared.agent import cli_seat
+    from shared.agent.seats import seat_for
+
+    spec = seat_for(kind)
+    try:
+        cli_seat.assert_available(spec)
+    except cli_seat.SeatError as exc:
+        raise SystemExit(str(exc))
+
+    options = cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind))
+    engine = {
+        "endpoint_url": f"http://127.0.0.1:{options.port}",
+        "models": list(chosen),
+        "engine_label": kind,
+        "api_kind": kind,
+        "seat": cli_seat.options_to_dict(options),
+    }
+    return [engine], False  # no stored credential exists, so it can never have rotated
 
 
 def _resolve_codex_targets(
@@ -863,6 +894,11 @@ def _media_key(record: dict[str, object]) -> tuple[bool, tuple[str, ...], int, i
     return run_records.media_signature(record)
 
 
+def _needs_local_process(spec: dict[str, object]) -> bool:
+    """True when serving this spec means running a process on this box (a CLI seat)."""
+    return api_catalog.local_seat_port(str(spec.get("api_kind") or "")) is not None
+
+
 def _hot_reloadable(
     live: list[dict[str, object]], merged_specs: list[dict[str, object]], record: dict[str, object]
 ) -> bool:
@@ -880,7 +916,11 @@ def _hot_reloadable(
         return False
     if singleton.get("reload_signal") != "sighup":  # a pre-Slice-2 process has no SIGHUP handler (C1)
         return False
-    if any(not spec.get("endpoint_url") for spec in merged_specs):  # a built-in --serve needs a launch
+    # A spec that needs a PROCESS started cannot be hot-reloaded — a reload re-advertises models
+    # but launches nothing. That is a built-in `--serve`, and equally a CLI seat, whose loopback
+    # server the serve loop starts at spawn. Reloading one would advertise its models against a
+    # port with nothing listening.
+    if any(not spec.get("endpoint_url") or _needs_local_process(spec) for spec in merged_specs):
         return False
     # The poll-worker pool is sized once at spawn and a reload can't resize it (remote/serve
     # `_assemble_snapshot` pins the advertised capacity to the live pool). When this update flips

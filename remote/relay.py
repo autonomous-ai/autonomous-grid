@@ -25,7 +25,11 @@ import httpx
 POLL_TIMEOUT = 35.0
 HEARTBEAT_INTERVAL = 30
 # How long to wait posting a result back. Streaming submits read indefinitely (write=None).
-_SUBMIT_TIMEOUT = 30.0
+# A CLI-seat answer can take minutes to generate and is submitted whole, so 30s was losing work
+# that had already been paid for: the seat logged 200 OK, the submit timed out, and the consumer
+# waited forever. The engine has already spent the allowance by this point — the only thing a
+# short timeout buys is throwing the result away.
+_SUBMIT_TIMEOUT = 180.0
 _REGISTER_TIMEOUT = 15.0
 
 # Bring-up's own register deadline, stated phase by phase (ADR 0022). The read phase is the one that

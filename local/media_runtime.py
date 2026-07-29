@@ -63,21 +63,34 @@ def start_api_media_server(*, port: int, api_kind: str, base_url: str, api_key: 
     return proc
 
 
-def wait_for_media_server(proc: subprocess.Popen, port: int, log_path: Path, timeout: float = 30.0) -> None:
+def wait_for_child_server(
+    proc: subprocess.Popen, port: int, log_path: Path, timeout: float = 30.0,
+    *, label: str = "Provider media server",
+) -> None:
+    """Block until a loopback child answers ``/health``, or explain why it never will.
+
+    Engine-agnostic on purpose: the media bridge and the CLI seats have the same contract (a child
+    on loopback that must be healthy before anything advertises it), and a second copy of this loop
+    is a second place for the exit-code check to be forgotten. ``label`` only names the child in the
+    two failure messages.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise SystemExit(
-                f"Provider media server exited (code {proc.returncode}) before becoming healthy. See {log_path}"
+                f"{label} exited (code {proc.returncode}) before becoming healthy. See {log_path}"
             )
         try:
-            resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=1.0)
-            if resp.status_code == 200:
+            if httpx.get(f"http://127.0.0.1:{port}/health", timeout=1.0).status_code == 200:
                 return
         except httpx.RequestError:
             pass
         time.sleep(0.25)
-    raise SystemExit(f"Provider media server did not become healthy. See {log_path}")
+    raise SystemExit(f"{label} did not become healthy. See {log_path}")
+
+
+# The pre-existing name, kept so the media call sites read unchanged.
+wait_for_media_server = wait_for_child_server
 
 
 def stop_media_server(proc: subprocess.Popen, *, timeout: float = 10.0) -> None:

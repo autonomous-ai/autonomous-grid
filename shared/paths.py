@@ -208,6 +208,16 @@ def codex_models_cache_file() -> Path:
     return grid_home() / "codex_models_cache.json"
 
 
+def seat_home(kind: str) -> Path:
+    """A CLI seat's own home for the tool it drives (e.g. CODEX_HOME).
+
+    Isolated on purpose: the operator's real home carries their hooks, skills and project trust,
+    and a seat serving strangers must run none of them. Sign-in happens INTO this directory, so the
+    seat holds its own credential and the operator's own login is never copied or disturbed.
+    """
+    return grid_home() / "seats" / kind
+
+
 def grids_dir() -> Path:
     return grid_home() / "grids"
 

@@ -1095,14 +1095,15 @@ def test_catalog_api_codex_no_seat_ignores_a_leftover_cache(monkeypatch, tmp_pat
 
 
 def test_api_whitelist_key_kinds_name_their_env_var():
-    """A kind whose credential IS an API key must name the env var it is read from — that is the
-    first step of ADR 0012 D-c's env → stored → prompt precedence. `codex` is exempt and must be:
-    ADR 0015 D-c gives an OAuth seat no env-var input path at all, precisely so a stray
-    CODEX_API_KEY can never masquerade as a signed-in subscription."""
+    """A kind whose credential IS an API key must name the env var it is read from (ADR 0012 D-c's
+    env → stored → prompt precedence). Which kinds those are is read from the catalog's own
+    `credential` field, so a new credential-free kind needs no edit here."""
     for kind, whitelist in api_catalog.WHITELISTS.items():
-        if kind == "codex":
-            continue
         assert whitelist.entries, f"{kind} whitelist must not be empty"
+        if whitelist.credential != "key":
+            # oauth seats and CLI seats hold nothing the grid reads, so an env var would be a lie
+            assert whitelist.env_var is None, f"{kind} has no key, so it must name no env var"
+            continue
         assert whitelist.env_var, f"{kind} needs the env var its key is read from"
 
 

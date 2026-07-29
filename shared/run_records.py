@@ -241,7 +241,7 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
 
     An explicit ``--max-concurrency`` (stored truthy on the record) always wins; otherwise the
     default is derived from the union: 8 when every engine spec is an API engine and the identity
-    serves no media — **unless the union contains a codex engine, which pins the default to 1**
+    serves no media — **unless the union contains a FLAT-RATE seat (codex, or a CLI seat), which pins it to 1**
     (ADR 0015 D-f: a codex seat is a flat-rate subscription; eight workers would drain the
     operator's personal monthly allowance eight-wide by default) — else 1. Like
     ``media_signature``, this is the ONE definition shared by the CLI's hot-reload-vs-respawn
@@ -252,8 +252,8 @@ def effective_max_concurrency(record: dict[str, Any]) -> int:
     if explicit:
         return int(explicit)
     engines = record.get("engines") or []
-    if any(spec.get("api_kind") == api_catalog.CODEX_KIND for spec in engines):
-        return 1  # a flat-rate seat is never hammered eight-wide by default (ADR 0015)
+    if any(api_catalog.kind_is_flat_rate(str(spec.get("api_kind") or "")) for spec in engines):
+        return 1  # a flat-rate seat is never hammered eight-wide by default (ADR 0015 D-f)
     api_only = bool(engines) and all(spec.get("api_kind") for spec in engines)
     return API_ONLY_DEFAULT_CONCURRENCY if api_only and not record.get("media") else 1
 

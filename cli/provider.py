@@ -24,6 +24,7 @@ import httpx
 from local import config
 from shared import logging_setup, paths, run_records
 from shared.handlers import HANDLERS
+from shared.models import api_catalog
 from local import runtime
 
 
@@ -49,16 +50,18 @@ def _reject_remote_only_flags(args: argparse.Namespace) -> None:
             f"{', '.join(used)} only applies in remote mode. "
             "Switch with `grid mode remote` (or pass --remote)."
         )
-    # `--api` is no longer remote-only wholesale, but it is still remote-only for TEXT kinds: a text
-    # API engine is served by the relay's poll loop, which local mode has no equivalent of. A MEDIA
-    # kind is different — the local proxy already forwards media to an engine-local URL, so the
-    # vendor bridge slots in exactly where ComfyUI does (`local/api_media_server.py`).
+    # `--api` is no longer remote-only wholesale, but it is still remote-only for TEXT kinds served
+    # over the network: such an engine is driven by the relay's poll loop, which local mode has no
+    # equivalent of. Two kinds are local-capable for the same structural reason — they are served by
+    # a process on THIS box behind a loopback URL, which is exactly the shape the local proxy already
+    # forwards to. A MEDIA kind slots in where ComfyUI does (`local/api_media_server.py`); a
+    # CLI seat slots in where llama-server does (`local/cli_seat_server.py`).
     kind = getattr(args, "api", None)
-    if kind is not None and kind not in HANDLERS:
-        supported = ", ".join(sorted(HANDLERS)) or "none"
+    local_kinds = set(api_catalog.local_seat_kinds()) | set(HANDLERS)
+    if kind is not None and kind not in local_kinds:
         raise SystemExit(
             f"`--api {kind}` only applies in remote mode. Switch with `grid mode remote` "
-            f"(or pass --remote). Locally, --api supports media gateways only: {supported}."
+            f"(or pass --remote). Locally, --api supports: {', '.join(sorted(local_kinds))}."
         )
 
 
@@ -109,6 +112,9 @@ def cmd_join(args: argparse.Namespace) -> int:
     # An API media engine is resolved before the --at/--serve branches: `--at` names the VENDOR
     # gateway here (not a local OpenAI-compatible engine), so it must not fall through to the
     # generic text-engine path below.
+    if api_catalog.local_seat_port(getattr(args, "api", None) or "") is not None:
+        return _spawn_cli_seat_engine(cfg, args)
+
     if getattr(args, "api", None):
         return _spawn_api_media_engine(cfg, args)
 
@@ -166,6 +172,139 @@ def cmd_join(args: argparse.Namespace) -> int:
     return rc
 
 
+def _seat_options(args: argparse.Namespace):
+    """The seat's options from the kind-agnostic `--seat-*` flags, defaulted per kind."""
+    from shared.agent.cli_seat import SeatOptions
+
+    kind = getattr(args, "api", None) or ""
+    return cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind))
+
+
+def _narrow_advertised(kind: str, advertised: list[str], requested: list[str]) -> list[str]:
+    """Restrict a kind's advertised models to the ones `-m` named, or all of them when `-m` is absent."""
+    if not requested:
+        return advertised
+    unknown = [model for model in requested if model not in advertised]
+    if unknown:
+        raise SystemExit(
+            f"Not {kind} models: {', '.join(unknown)}. Available: {', '.join(advertised)}"
+        )
+    return requested
+
+
+def _spawn_cli_seat_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int:
+    """`grid join --api <seat kind>` in local mode: serve a coding CLI installed on this box.
+
+    Binary and sign-in are checked in the foreground so a missing or signed-out CLI is a one-line
+    error at the prompt, not a registered engine that fails every request into a log. No credential
+    is resolved or stored — the CLI authenticates itself.
+    """
+    from shared.agent import cli_seat
+
+    kind = args.api
+    spec = seat_for(kind)
+    try:
+        cli_seat.assert_available(spec)
+    except cli_seat.SeatError as exc:
+        raise SystemExit(str(exc))
+
+    advertised = _narrow_advertised(
+        kind, cli_seat.advertised_models(kind), list(getattr(args, "models", None) or [])
+    )
+    print(
+        "Warning: the local grid is unauthenticated and LAN-reachable, so anyone who can reach "
+        f"{runtime.grid_url(cfg)} can spend this {spec.label} subscription.",
+        file=sys.stderr,
+    )
+    return _spawn_engine(
+        cfg, args, endpoint_url=None, models=advertised, media=False, api_kind=kind,
+    )
+
+
+def _run_cli_seat_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: str, node_id: str) -> int:
+    """The detached loop for `grid join --api <seat kind>` (local mode).
+
+    Brings the seat's loopback server up and advertises it as an ordinary TEXT engine — the grid
+    proxy forwards `chat/completions` to `endpoint_url` and cannot tell it from llama-server.
+    """
+    from local.cli_seat_runtime import start_seat_server, stop_seat_server
+    from shared.agent import cli_seat
+    from shared.agent.seats import seat_for
+
+    kind = args.api_kind
+    spec = seat_for(kind)
+    options = cli_seat.SeatOptions(**(getattr(args, "seat", None) or {}))
+    proc = start_seat_server(
+        kind=kind, options=options, binary=cli_seat.assert_available(spec)
+    )
+    endpoint_url = f"http://127.0.0.1:{options.port}"
+    print(f"Spawned {spec.label} seat pid={proc.pid}, url={endpoint_url}")
+
+    models = list(args.models)
+    payload = {
+        "role": "engine",
+        "models": models,
+        # Loopback on purpose: the grid proxy runs on this box and is the only thing that should
+        # reach the process that can spend the subscription.
+        "endpoint_url": endpoint_url,
+        "media_url": None,
+        "name": args.name,
+        "pricing": {},
+        "capabilities": {},
+        "load": {"active_tasks": 0},
+        "upstream": {model: model for model in models},
+    }
+    return _advertise_until_terminated(
+        args, grid_url, node_id, payload,
+        stop=lambda: stop_seat_server(proc),
+        stopped_msg=f"Stopped {spec.label} seat.",
+    )
+
+
+def _advertise_until_terminated(
+    args: SimpleNamespace, grid_url: str, node_id: str, payload: dict[str, Any],
+    *, stop, stopped_msg: str,
+) -> int:
+    """Register `payload`, heartbeat until SIGTERM, then unregister and stop the child.
+
+    Shared by every engine whose backend is a loopback child (media bridge, CLI seat): the
+    register/heartbeat/unregister dance is identical, and a second copy is a second place to forget
+    the ghost-record cleanup.
+    """
+    registered = False
+    try:
+        _register_engine(grid_url, node_id, payload)
+        registered = True
+        print(f"Engine {node_id} advertised on {grid_url}")
+        if payload.get("models"):
+            print(f"models={','.join(payload['models'])}")
+        print("Send SIGTERM (grid leave) to unregister.")
+        while True:
+            time.sleep(max(1.0, float(args.heartbeat_interval)))
+            try:
+                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
+            except httpx.RequestError as exc:
+                print(f"Heartbeat failed: {exc}", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("\nEngine unregistered.")
+        return 0
+    finally:
+        if registered:
+            try:
+                httpx.delete(f"{grid_url}/nodes/{node_id}", timeout=5)
+            except Exception as exc:
+                print(f"Unregister failed (ignoring): {exc}", file=sys.stderr)
+        stop()
+        print(stopped_msg)
+        if not registered:
+            # An engine that died before registering must not leave a ghost record for
+            # `grid leave --all`, nor unlink one a newer live child owns (issue 05's audit).
+            run_records.discard_own_record(args.grid, args.name)
+        if not registered:
+            # An engine that died before registering must not leave a ghost record behind.
+            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
+
+
 def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int:
     """`grid join --api <media kind>` in local mode: serve a vendor media gateway to this grid.
 
@@ -191,16 +330,11 @@ def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> in
     key = _resolve_api_media_key(kind, whitelist, args)
 
     # With no -m, serve the whole whitelist for this kind — same default as the remote join.
-    advertised = [api_catalog.advertised_name(kind, entry) for entry in whitelist.entries]
-    requested = list(getattr(args, "models", None) or [])
-    if requested:
-        unknown = [model for model in requested if model not in advertised]
-        if unknown:
-            raise SystemExit(
-                f"Not {kind} models: {', '.join(unknown)}. "
-                f"Available: {', '.join(advertised)}"
-            )
-        advertised = requested
+    advertised = _narrow_advertised(
+        kind,
+        [api_catalog.advertised_name(kind, entry) for entry in whitelist.entries],
+        list(getattr(args, "models", None) or []),
+    )
 
     print(
         f"Warning: the local grid is unauthenticated and LAN-reachable, so anyone who can reach "
@@ -290,6 +424,8 @@ def _spawn_engine(
         "api_kind": api_kind,
         "api_base_url": api_base_url,
         "api_media_port": getattr(args, "media_port", 8190),
+        # CLI seat (`--api <seat kind>`): one options object, not six loose keys.
+        "seat": _seat_options(args).to_dict() if api_catalog.local_seat_port(api_kind or "") else None,
         "started_at": runtime.utc_now(),
     }
     _write_record(grid_id, engine_id, record)
@@ -577,6 +713,7 @@ def run_engine_from_record(grid_id: str, engine_id: str) -> int:
         api_kind=record.get("api_kind"),
         api_base_url=record.get("api_base_url"),
         api_media_port=record.get("api_media_port", 8190),
+        seat=record.get("seat"),
     )
 
     def _on_term(_signum, _frame):  # noqa: ANN001
@@ -597,6 +734,10 @@ def _run_engine(args: SimpleNamespace) -> int:
     registered = False
     launcher = None
     try:
+        # A Claude seat short-circuits the llama-server bring-up: its "engine" is the operator's
+        # `claude` CLI behind a loopback server this loop owns.
+        if api_catalog.local_seat_port(getattr(args, "api_kind", None) or "") is not None:
+            return _run_cli_seat_engine(args, cfg, grid_url, node_id)
         # An API media engine short-circuits the text/ComfyUI bring-up entirely: its models are
         # served by the vendor bridge on loopback, and it has no local endpoint_url at all.
         if getattr(args, "api_kind", None):
@@ -797,36 +938,12 @@ def _run_api_media_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: 
         "load": {"active_tasks": 0},
         "upstream": {},
     }
-    registered = False
-    try:
-        _register_engine(grid_url, node_id, payload)
-        registered = True
-        print(f"Engine {node_id} advertised on {grid_url}")
-        print(f"models={','.join(models)}")
-        print(f"media_url={payload['media_url']} ({args.api_kind} -> {args.api_base_url})")
-        print("Send SIGTERM (grid leave) to unregister.")
-        while True:
-            time.sleep(max(1.0, float(args.heartbeat_interval)))
-            try:
-                _heartbeat(grid_url, node_id, {"active_tasks": 0}, payload)
-            except httpx.RequestError as exc:
-                print(f"Heartbeat failed: {exc}", file=sys.stderr)
-    except KeyboardInterrupt:
-        print("\nEngine unregistered.")
-        return 0
-    finally:
-        if registered:
-            try:
-                httpx.delete(f"{grid_url}/nodes/{node_id}", timeout=5)
-            except Exception as exc:
-                print(f"Unregister failed (ignoring): {exc}", file=sys.stderr)
-        media_runtime.stop_media_server(proc)
-        print(f"Stopped {args.api_kind} media bridge.")
-        if not registered:
-            # Mirrors _run_engine: an engine that died before registering must not leave a ghost
-            # record behind for `grid leave --all` to clean up — and must not unlink a record a
-            # newer live engine child owns (issue 05's audit).
-            run_records.discard_own_record(args.grid, args.name)
+    print(f"media_url={payload['media_url']} ({args.api_kind} -> {args.api_base_url})")
+    return _advertise_until_terminated(
+        args, grid_url, node_id, payload,
+        stop=lambda: media_runtime.stop_media_server(proc),
+        stopped_msg=f"Stopped {args.api_kind} media bridge.",
+    )
 
 
 def _api_media_capabilities(models: list[str]) -> dict[str, Any]:

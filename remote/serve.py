@@ -219,6 +219,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     launched: list[Any] = []
     launcher = None
     media_proc = None
+    seat_procs: list[Any] = []
     comfyui_started = False
     state = None
     registered = False
@@ -235,6 +236,9 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # whose every job would 401 upstream. Never read from the record; the record never carries
         # a key. Inside the try so this death reaps the record like any died-before-registering
         # engine (the `finally` below).
+        # CLI seats: bring each one's loopback server up before `_bring_up_engines`, which probes
+        # every spec's endpoint_url.
+        seat_procs = _start_cli_seats(record)
         bearer_by_url = _api_bearers(record)
         # Build vendor handlers for every API engine in the record. These handle
         # media endpoints (and could handle text endpoints in the future) without
@@ -304,6 +308,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         # The codex fail-fast, after the state exists and before anything advertises: a codex spec
         # with no stored seat dies HERE naming the fix (still inside the try, so the record is
         # reaped like any died-before-registering engine), never as N per-job 401s.
+        state._seat_urls = _cli_seat_urls(record)
         _prime_codex_seat(state, record)
         # Restore the last persisted quota so /grid/overview shows it immediately on respawn — and so a
         # hand-edited remote.json can inject a simulated snapshot for debugging. A response/seed refreshes it.
@@ -378,6 +383,14 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                     print(f"Stopped llama-server (pid={proc.proc.pid}).")
                 except Exception as exc:  # best-effort teardown; never mask the real exit
                     print(f"Stopping llama-server failed (ignoring): {exc}", file=sys.stderr)
+        for kind, proc in seat_procs:
+            from local.cli_seat_runtime import stop_seat_server
+
+            try:
+                stop_seat_server(proc)
+                print(f"Stopped {kind} seat.")
+            except Exception as exc:  # best-effort teardown; never mask the real exit
+                print(f"Stopping the {kind} seat failed (ignoring): {exc}", file=sys.stderr)
         if media_proc is not None:  # stop the media server we launched
             from local import media_runtime
 
@@ -578,6 +591,38 @@ def _advertised_models(models: list[str], aliases: list[str]) -> list[str]:
     return cleaned
 
 
+def _cli_seat_urls(record: dict[str, Any]) -> list[str]:
+    """Loopback URL of every CLI seat this record serves — what the heartbeat asks for quota."""
+    from shared.agent import cli_seat
+
+    return [
+        f"http://127.0.0.1:{cli_seat.options_from_spec(spec).port}"
+        for spec in (record.get("engines") or [])
+        if api_catalog.local_seat_port(str(spec.get("api_kind") or "")) is not None
+    ]
+
+
+def _start_cli_seats(record: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Start a loopback server for every CLI-seat spec in ``record``. Returns (kind, proc) pairs."""
+    from local.cli_seat_runtime import start_seat_server
+    from shared.agent import cli_seat
+    from shared.agent.seats import seat_for
+
+    started: list[tuple[str, Any]] = []
+    for spec in record.get("engines") or []:
+        kind = str(spec.get("api_kind") or "")
+        if api_catalog.local_seat_port(kind) is None:
+            continue
+        seat = seat_for(kind)
+        options = cli_seat.options_from_spec(spec)
+        proc = start_seat_server(
+            kind=kind, options=options, binary=cli_seat.assert_available(seat)
+        )
+        print(f"{seat.label} seat up on http://127.0.0.1:{options.port} (pid={proc.pid})")
+        started.append((kind, proc))
+    return started
+
+
 def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
     """{vendor base URL: Bearer} for every API spec in the record.
 
@@ -594,11 +639,10 @@ def _api_bearers(record: dict[str, Any]) -> dict[str, str]:
         kind = spec.get("api_kind")
         if not kind:
             continue
-        if str(kind) == api_catalog.CODEX_KIND:
-            # ADR 0015 D-d: the codex seat lives in `_CodexSeatHolder`, resolved at forward time —
-            # a copy in the snapshot would go stale at the first rotation. The die-before-advertise
-            # gate moves with it (`_prime_codex_seat`), so a not-signed-in respawn still dies here
-            # at startup, not per job.
+        # Only a "key" kind has a credential the grid holds. An OAuth seat resolves its own at
+        # forward time (ADR 0015 D-d) and a CLI seat has none at all — both read from the catalog
+        # rather than from a branch here, so a new kind never needs a new exemption.
+        if api_catalog.kind_credential(str(kind)) != "key":
             continue
         bearers[(spec.get("endpoint_url") or "").rstrip("/")] = api_keys.require_bearer(str(kind))
     return bearers
@@ -1379,6 +1423,9 @@ class _ServeState:
         # the start-up seed), guarded by _lock. Rides the heartbeat load so /grid/overview shows it
         # per-node. None until the first codex response/seed; a non-codex engine leaves it None.
         self._codex_quota: dict[str, Any] | None = None
+        # Loopback URLs of this identity's CLI seats, read once at startup — the heartbeat asks
+        # each for its allowance. Empty for an identity that serves no seat.
+        self._seat_urls: list[str] = []
 
     def set_codex_quota(self, quota: dict[str, Any]) -> None:
         """Record the seat's latest rate-limit snapshot; the next heartbeat carries it to the relay.
@@ -1524,7 +1571,38 @@ class _ServeState:
         # value only changes on a served response / the join seed; the heartbeat just re-ships the last.
         if codex_quota:
             load["codex_rate_limits"] = codex_quota
+        # CLI-seat allowance, for the relay's routing (`_quota_exhausted` / `_quota_headroom`).
+        # Read from the seat's own cached view, so the heartbeat costs one loopback GET rather
+        # than a probe. Best-effort: a seat that cannot answer simply reports nothing, and the
+        # relay treats absent as unknown, which routes exactly as it did before.
+        seat_quota = self._seat_quota()
+        if seat_quota:
+            load["quota"] = seat_quota
         return load
+
+    def _seat_quota(self) -> dict[str, Any] | None:
+        """The tightest allowance across this identity's CLI seats, or None when it serves none.
+
+        Tightest, not averaged: the identity stops serving as soon as ANY of its seats is spent,
+        so the relay must see the seat that runs out first.
+        """
+        tightest = None
+        for url in self._seat_urls:
+            try:
+                answer = httpx.get(f"{url}/quota", timeout=3.0).json()
+            except Exception:  # noqa: BLE001 — a seat that cannot answer reports nothing
+                continue
+            if not answer.get("known"):
+                continue
+            entry = {"serving": bool(answer.get("serving", True)),
+                     "headroom_pct": float(answer.get("headroom_pct", 100.0)),
+                     "kind": answer.get("kind")}
+            if tightest is None or entry["headroom_pct"] < tightest["headroom_pct"]:
+                tightest = entry
+            if not entry["serving"]:
+                tightest = entry
+                break
+        return tightest
 
     def enter_inference(self) -> None:
         with self._lock:

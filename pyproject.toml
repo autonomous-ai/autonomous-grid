@@ -69,4 +69,7 @@ target-version = "py311"
 extend-exclude = ["doggi"]
 
 [tool.pytest.ini_options]
+markers = [
+    "canary: runs the real CLI and spends the operator's subscription; opt in with -m canary",
+]
 pythonpath = ["."]

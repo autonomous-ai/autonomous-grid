@@ -149,7 +149,9 @@ def _add_engines(sub) -> None:
         default=None,
         help="Join a third-party API engine of this service kind (e.g. openai, codex). "
              "Remote only; -m optionally narrows the whitelist (see `grid catalog --api`), "
-             "omitted = every whitelisted model the credential can serve.",
+             "omitted = every whitelisted model the credential can serve. "
+             "A CLI-seat kind (e.g. claude) serves a coding CLI installed on this box "
+             "and works in local mode too.",
     )
     choose.add_argument(
         "--no-browser",
@@ -188,6 +190,26 @@ def _add_engines(sub) -> None:
     media = join.add_argument_group("Media")
     media.add_argument("--comfyui-port", type=int, default=8188)
     media.add_argument("--media-port", type=int, default=8190)
+
+    seat = join.add_argument_group("CLI seat (--api claude, …)")
+    seat.add_argument("--seat-port", type=int, default=None,
+                      help="Loopback port for the seat server (default: the kind's own).")
+    seat.add_argument("--seat-timeout", type=float, default=None,
+                      help="Seconds one CLI run may take before it is abandoned (default 600).")
+    seat.add_argument("--seat-concurrency", type=int, default=None,
+                      help="Concurrent CLI processes (default 1 — each request is a whole process "
+                           "racing one subscription's rate limit).")
+    seat.add_argument("--seat-session-limit", type=int, default=None, metavar="PCT",
+                      help="Stop serving once the short-window usage reaches this percent.")
+    seat.add_argument("--seat-week-limit", type=int, default=None, metavar="PCT",
+                      help="Stop serving once WEEKLY usage reaches this percent. Worth setting "
+                           "lower than the session limit: a spent week costs days.")
+    seat.add_argument("--seat-transcript", action="store_true", default=None,
+                      help="Record every message consumers send to a JSONL file on THIS machine. "
+                           "Off by default — only turn it on for traffic you own.")
+    seat.add_argument("--seat-quota-ttl", type=float, default=None, metavar="SECONDS",
+                      help="How long a quota reading is reused before re-probing (default 60). "
+                           "0 = probe every request, which adds seconds to each one.")
 
     local_only = join.add_argument_group("Local only")
     # A remote engine polls the relay outbound, so it has no inbound endpoint to advertise.

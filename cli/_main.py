@@ -96,6 +96,27 @@ def cmd_internal_api_media_server(port: int, api_kind: str, base_url: str) -> in
     return 0
 
 
+def cmd_internal_cli_seat_server(args) -> int:
+    """The CLI seat's loopback server. Binds LOOPBACK like `__api-media-server`: this process can
+    spend the operator's subscription, so only the grid proxy on this box should reach it."""
+    import uvicorn
+
+    from local.cli_seat_server import create_app
+    from shared.agent.cli_seat import SeatOptions
+    from shared.agent.seats import seat_for
+
+    spec = seat_for(args.kind)
+    options = SeatOptions(
+        port=args.port, timeout=args.timeout, concurrency=args.concurrency,
+        session_limit=args.session_limit, week_limit=args.week_limit, quota_ttl=args.quota_ttl,
+        transcript=args.transcript,
+    )
+    app = create_app(spec=spec, binary=args.binary, options=options,
+                     transcript=args.transcript_path if args.transcript else None)
+    uvicorn.run(app, host="127.0.0.1", port=options.port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     internal = _maybe_internal(raw_argv)
@@ -128,6 +149,19 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--base-url", required=True)
         args = parser.parse_args(argv[1:])
         return cmd_internal_api_media_server(args.port, args.api_kind, args.base_url)
+    if argv[0] == "__cli-seat-server":
+        parser = argparse.ArgumentParser(prog="grid __cli-seat-server")
+        parser.add_argument("--kind", required=True)
+        parser.add_argument("--binary", required=True)
+        parser.add_argument("--port", type=int, required=True)
+        parser.add_argument("--timeout", type=float, required=True)
+        parser.add_argument("--concurrency", type=int, default=1)
+        parser.add_argument("--session-limit", type=int, default=None)
+        parser.add_argument("--week-limit", type=int, default=None)
+        parser.add_argument("--quota-ttl", type=float, default=60.0)
+        parser.add_argument("--transcript", action="store_true")
+        parser.add_argument("--transcript-path", default=None)
+        return cmd_internal_cli_seat_server(parser.parse_args(argv[1:]))
     if argv[0] == "__engine":
         from .provider import run_engine_from_record
 

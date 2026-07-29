@@ -43,6 +43,21 @@ class ApiWhitelist:
     # failure (master-before-CLI rollout, ADR 0018 §11). Default False: every other API kind and every
     # hardware engine (never in this table) serves non-streaming.
     stream_only: bool = False
+    # How this kind authenticates, as DATA rather than a branch per kind. "key" = a metered API key
+    # read via `api_keys.require_bearer`; "oauth" = a subscription seat holding its own bundle
+    # (ADR 0015 D-c); "none" = a LOCAL CLI seat with no grid-held credential at all — the binary
+    # signs itself in. Every credential-shaped `if kind == …` in the serve loop reads this instead,
+    # so a new kind never needs a new exemption.
+    credential: str = "key"
+    # A flat-rate subscription seat: one operator's personal allowance, so the default poll-worker
+    # count is pinned to 1 rather than the API-engine default of 8 (ADR 0015 D-f). Draining a
+    # personal allowance eight-wide by default is the harm; it is a property of being flat-rate,
+    # not of being codex.
+    flat_rate: bool = False
+    # Non-None => this kind's "engine" is a LOCAL process on this box (a CLI seat), served behind a
+    # loopback server on this default port. Also what makes the kind joinable in local mode. Each
+    # seat needs a DIFFERENT default so two seats can run on one box without colliding.
+    local_seat_port: int | None = None
 
 # Verified against https://platform.openai.com/docs/models (which 301-redirects to
 # https://developers.openai.com/api/docs/models) on 2026-07-08.
@@ -248,6 +263,62 @@ def _codex_tier_union() -> tuple[ApiModelEntry, ...]:
             merged.setdefault(entry.vendor_name, entry)
     return tuple(merged.values())
 
+# The Claude seat (`grid join --api claude`): the operator's own Claude Code CLI, driven as an
+# engine by `shared/agent/cli_seat.py`. Unlike every other row here this kind names no vendor
+# endpoint and no credential — the seat is a subprocess and the CLI authenticates itself.
+CLAUDE_LAST_VERIFIED = "2026-07-28"
+
+# The service-kind key, named here (not in remote/) for the same reason CODEX_KIND is.
+CLAUDE_KIND = "claude"
+
+# `--model` ALIASES, not dated ids: an alias always resolves to the current model of its tier, so
+# the row cannot go stale between releases.
+#
+# `context_window` is the `0` unknown sentinel (rendered `—`) throughout. The seat has no /models
+# endpoint to probe and the repo's rule is that an un-probed number is not written down — the
+# alternative would be a fabricated figure that silently mis-sizes routing decisions.
+#
+# `supports_tools=True` describes the WIRE CONTRACT, which is what a consumer can rely on: send
+# OpenAI `tools[]`, get `tool_calls[]` back. Mechanically those are Hermes-style `<tool_call>` text
+# the adapter parses, NOT the vendor's native tool_use — see `shared/agent/cli_seat.py`.
+CLAUDE_WHITELIST: tuple[ApiModelEntry, ...] = tuple(
+    ApiModelEntry(
+        vendor_name=alias,
+        context_window=0,
+        supports_tools=True,
+        supports_vision=False,      # the adapter drops image parts; claiming vision would lie
+        supports_json_mode=False,   # `--json-schema` is not wired into the seat yet
+        supports_structured_outputs=False,
+        notes=note,
+    )
+    for alias, note in (
+        ("opus", "Claude Code CLI seat — most capable tier."),
+        ("sonnet", "Claude Code CLI seat — balanced tier."),
+        ("haiku", "Claude Code CLI seat — fastest tier."),
+        ("fable", "Claude Code CLI seat — Fable tier."),
+    )
+)
+
+# The Codex CLI seat — the `codex` binary driven locally, distinct from the `codex` kind above
+# (which is the OAuth HTTP seat, ADR 0015). Different kind key because a grid may serve both.
+# UNVERIFIED: no signed-in codex seat was available; slugs are the ones the OAuth seat reports.
+CODEX_CLI_LAST_VERIFIED = "2026-07-29"
+
+CODEX_CLI_KIND = "codex-cli"
+
+CODEX_CLI_WHITELIST: tuple[ApiModelEntry, ...] = tuple(
+    ApiModelEntry(
+        vendor_name=name,
+        context_window=0,
+        supports_tools=True,
+        supports_vision=False,
+        supports_json_mode=False,
+        supports_structured_outputs=False,
+        notes="Codex CLI seat — verify against a signed-in seat.",
+    )
+    for name in ("gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini")
+)
+
 # One structure per kind: the verified-date and the entries can't drift apart.
 WHITELISTS: dict[str, ApiWhitelist] = {
     "openai": ApiWhitelist(
@@ -286,6 +357,32 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         # ADR 0018 / issue 06c: the seat's backend is SSE-only, so it cannot serve a non-streaming
         # Responses request. The ONLY row that sets this — see `kind_is_stream_only`.
         stream_only=True,
+        credential="oauth",  # ADR 0015 D-c: an OAuth seat has no env-var input path
+        flat_rate=True,      # ADR 0015 D-f: pins the default poll-worker count to 1
+    ),
+    "claude": ApiWhitelist(
+        last_verified=CLAUDE_LAST_VERIFIED,
+        # No vendor endpoint: this kind's "engine" is a loopback server on THIS box driving the
+        # operator's own `claude` CLI, so the join computes the URL rather than reading it here.
+        base_url=None,
+        env_var=None,  # no credential of any kind — the CLI authenticates itself
+        entries=CLAUDE_WHITELIST,
+        supports_model_listing=False,  # the CLI is not an HTTP service; there is no GET /models
+        endpoints=("chat/completions",),
+        credential="none",   # the `claude` CLI authenticates itself; the grid holds nothing
+        flat_rate=True,      # a personal subscription — never polled eight-wide by default
+        local_seat_port=8099,
+    ),
+    "codex-cli": ApiWhitelist(
+        last_verified=CODEX_CLI_LAST_VERIFIED,
+        base_url=None,
+        env_var=None,
+        entries=CODEX_CLI_WHITELIST,
+        supports_model_listing=False,
+        endpoints=("chat/completions",),
+        credential="none",
+        flat_rate=True,
+        local_seat_port=8098,
     ),
     "doggi": ApiWhitelist(
         last_verified=DOGGI_LAST_VERIFIED,
@@ -389,6 +486,37 @@ def kind_honours_output_cap(kind: str) -> bool:
     if whitelist is None:
         return False
     return RESPONSES_OUTPUT_CAP_PARAM not in whitelist.unsupported_params
+
+
+def kind_credential(kind: str) -> str:
+    """How ``kind`` authenticates: "key" | "oauth" | "none". An UNKNOWN kind reads as "key", the
+    conservative answer — it makes the caller look for a credential rather than silently serving
+    without one."""
+    whitelist = WHITELISTS.get(kind)
+    return whitelist.credential if whitelist else "key"
+
+
+def kind_is_flat_rate(kind: str) -> bool:
+    """True iff ``kind`` is one operator's flat-rate allowance (a subscription seat), so the default
+    poll-worker count must be 1 rather than the API-engine default. Read by
+    ``run_records.effective_max_concurrency``; an unknown kind is not flat-rate (the pre-existing
+    default), so this can never *lower* an existing kind's concurrency by accident."""
+    whitelist = WHITELISTS.get(kind)
+    return bool(whitelist and whitelist.flat_rate)
+
+
+def local_seat_port(kind: str) -> int | None:
+    """The loopback port a CLI-seat kind's local server binds by default, or None when ``kind`` is
+    not a CLI seat. Doubles as the "is this kind a local seat?" predicate — one fact, so the two
+    can never disagree."""
+    whitelist = WHITELISTS.get(kind)
+    return whitelist.local_seat_port if whitelist else None
+
+
+def local_seat_kinds() -> tuple[str, ...]:
+    """Every kind whose engine is a local process on this box — the kinds `grid join --api <kind>`
+    accepts in LOCAL mode, alongside the media gateways."""
+    return tuple(sorted(k for k, w in WHITELISTS.items() if w.local_seat_port is not None))
 
 
 def kind_is_stream_only(kind: str) -> bool:
