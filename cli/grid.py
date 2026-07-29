@@ -4,13 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from typing import Any
 
 import httpx
 
 from local import config
 from local import runtime
-from shared import state
+from shared import run_records, state
 from shared._version import __version__
 
 
@@ -41,9 +42,64 @@ def cmd_down(args: argparse.Namespace) -> int:
     if not cfg.get("managed_server", True):
         print(f"{cfg['name']} is hosted by another box; nothing to stop here.")
         return 0
-    runtime.stop_grid(cfg)
+    outcome = runtime.stop_grid(cfg)
+    if not outcome.stopped():
+        _refuse_false_stop(cfg, outcome)
     print(f"Grid {cfg['name']} is down (config kept; `grid up {cfg['name']}` brings it back).")
     return 0
+
+
+def _refuse_false_stop(cfg: dict[str, Any], outcome: runtime.StopOutcome) -> None:
+    """Fail a `grid down` that did not stop the grid, naming what is still running and a remedy that
+    reaches it.
+
+    Three ways to get here and each needs a different next step: a server that outlived SIGKILL, a
+    grid still answering on its port, and a teardown that established nothing at all. What they share
+    is that none may print "is down" — and that the recorded identity is **kept**, because unlike a
+    run record there is no argv sweep behind it, so it is the only handle a retry has.
+    """
+    windows = sys.platform == "win32"
+    survivor = outcome.teardown.survivor
+    if survivor:
+        remedy = (
+            # `/T` as well as `/F`: the teardown that just failed was already a forced tree kill, so
+            # suggesting a retry weaker than the thing that did not work would waste the operator's
+            # next attempt.
+            f"taskkill /F /T /PID {survivor}" if windows
+            else f"kill -9 -{survivor}" if outcome.teardown.is_group
+            else f"kill -9 {survivor}"
+        )
+        raise SystemExit(
+            f"grid down: could not stop the server for {cfg['name']} "
+            f"({run_records.describe_survivor(outcome.teardown)}). It keeps serving this grid until "
+            f"it stops, and the recorded pid is kept so a retried `grid down` still reaches it "
+            f"(e.g. `{remedy}`)."
+        )
+
+    port = cfg.get("port")
+    if outcome.serving:
+        # Reachable precisely when nothing signallable was recorded, so there is no pid to name — the
+        # remedy has to start from the port instead.
+        finder = f"netstat -ano | findstr :{port}" if windows else f"lsof -ti :{port}"
+        raise SystemExit(
+            f"grid down: {cfg['name']} is still answering on port {port}, so this box is still "
+            f"serving it — nothing was stopped that the config could prove was the grid's own "
+            f"server. Find what is listening with `{finder}`, then retry `grid down {cfg['name']}`."
+        )
+
+    probe = runtime.probe_url(cfg)
+    check = (
+        # The WHOLE url quoted, because it is built from the config's `host` — config-controlled text
+        # reaching the terminal — so `repr` escapes any control byte, and the quotes also make the
+        # suggested command safe to paste into a shell.
+        f"the check by hand is `curl -s {probe + '/grid/info'!r}`" if probe
+        else f"the config's port ({port!r}) is unusable, so there is nothing to check it with"
+    )
+    raise SystemExit(
+        f"grid down: could not confirm the server for {cfg['name']} stopped, and could not reach its "
+        f"port to find out — so nothing about this box was established. The recorded pid is kept for "
+        f"a retry; {check}."
+    )
 
 
 def cmd_ls(args: argparse.Namespace) -> int:

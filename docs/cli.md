@@ -167,7 +167,7 @@ commands exit with guidance to switch — sign-in is a remote concept. See
 
 ```
 grid up [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
-grid down [name]                      # stop a grid; the grid/config persists
+grid down [name]                      # stop a grid (may fail loud); the grid/config persists
 grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
 grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
@@ -187,6 +187,15 @@ LAN IP). Those three are local-only, and `--type` is remote-only (the grid type,
 No separate `create` or `start` in the main surface — `up` is the single lifecycle verb, so
 first use feels like one operation rather than infrastructure management. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
+
+In `local` mode **`grid down` waits and can fail.** It stops the server it can prove is this grid's
+own — a recycled or corrupt `server_pid` is reported and never signalled — and then asks the grid's
+own port whether that worked. Exit is non-zero, naming a remedy, when a server outlived SIGKILL, when
+the grid is still answering on its port, or when it could neither verify the pid nor reach the port;
+the recorded pid is kept in all three so a retry still has a handle. It is therefore no longer
+instant: a wedged server can cost the shared 25s stop grace and, if its process group outlives it,
+another 25s. Healthy stops return as soon as the process exits, and a grid that is already down
+succeeds quietly. See [ADR 0026](./adr/0026-the-grid-servers-pid-is-a-claim-too.md).
 
 In `remote` mode these same verbs act on hosted **remote grids**: `grid up <name>` create-or-starts
 one — `--type` is `permissioned-public` (default) or `permissioned-providers`, set on create, and

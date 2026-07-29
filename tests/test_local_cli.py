@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tarfile
@@ -20929,3 +20930,668 @@ def test_engine_health_follows_a_hot_reload_that_repoints_a_model(monkeypatch, t
     )
 
     assert "unhealthy_models" not in state.load()
+
+
+# ---------------------------------------------------------------------------
+# `grid down` — the grid server's pid is a claim, not a handle (grid-leave issue 18, ADR 0026)
+# ---------------------------------------------------------------------------
+
+def _no_signals_anywhere(monkeypatch):
+    """Every real signal this command could send, recorded and delivered to nobody.
+
+    `_no_signals` covers the shared teardown; `os.killpg` is added because `local.runtime` used to
+    signal a process group itself, and the claim under test is that **nothing anywhere** reaches the
+    pid — not that one particular call site stopped. (`run_records.os` and `runtime.os` are the same
+    module object, so one patch serves both.) Signal 0 is not a signal: it is how `pid_alive` asks
+    whether a pid exists.
+    """
+    from shared import run_records
+
+    sent = _no_signals(monkeypatch, run_records)
+    # `if sig` for the same reason `_no_signals` guards `os.kill`: signal 0 is not a signal.
+    # `process_identity.group_alive` READS group membership with `os.killpg(pgid, 0)`, so without this
+    # a test that lets the teardown reach the group probe records a benign read as "we signalled a
+    # process group" — a guard that fires on the wrong thing is worse than no guard.
+    monkeypatch.setattr(
+        run_records.os, "killpg",
+        lambda pgid, sig: sent.append((pgid, sig)) if sig else None,
+    )
+    return sent
+
+
+def _grid_port(monkeypatch, answers: dict[str, Any] | None) -> SimpleNamespace:
+    """What the grid's own port says while a test runs, and what was asked where.
+
+    Fakes **both** layers the probe uses, because they answer different halves: the socket says
+    whether anything is listening (and only a *refusal* is proof of absence — a DNS or routing
+    failure is not), the HTTP call says whether what is listening is this grid. ``answers=None`` =
+    nothing is listening, so the socket refuses and the HTTP call is never reached.
+    """
+    seen = SimpleNamespace(targets=[], urls=[])
+
+    def _connect(address, timeout=None):
+        seen.targets.append(tuple(address))
+        if answers is None:
+            raise ConnectionRefusedError(61, "Connection refused")
+        return contextlib.nullcontext()
+
+    def _get(url, timeout=None):
+        seen.urls.append(url)
+        return SimpleNamespace(status_code=200, json=lambda: answers)
+
+    monkeypatch.setattr(runtime.socket, "create_connection", _connect)
+    monkeypatch.setattr(runtime.httpx, "get", _get)
+    return seen
+
+
+def test_grid_down_never_signals_a_recycled_server_pid(monkeypatch, tmp_path):
+    """`server_pid` is written once at `start_grid` and can be arbitrarily stale — a reboot, a crash,
+    a machine that has run something else since. `grid down` used to hand that bare number straight to
+    `os.killpg`, so a recycled pid SIGTERMed an unrelated process **group** the operator owns.
+
+    The stamped `(pid, start_time)` is what tells them apart: same number, different token ⇒
+    `RecordVerdict.NOT_OURS` ⇒ nothing is signalled.
+
+    Deliberately **only** the pid claim. The stale `pgid` beside it is a second claim needing a
+    different setup to even reach, and asserting both from one arrangement is how the group half ends
+    up pinned by a mock that is dead code — see the sibling test below.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg.update(server_pid=4242, server_pid_start_time="what-we-stamped", server_pgid=4242)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # a live process, just not ours
+    monkeypatch.setattr(process_identity, "process_facts",
+                        lambda pid: process_identity.ProcessFacts("S", "some-other-process"))
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)  # don't wait out the reap settle
+    sent = _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, None)  # the grid itself is gone; only the stale identity remains
+
+    runtime.stop_grid(cfg)
+
+    assert sent == [], "signalled a recycled server pid — that is somebody else's process"
+
+
+def test_grid_down_never_signals_the_group_stamped_beside_a_recycled_pid(monkeypatch, tmp_path):
+    """The second half, which needs its own arrangement to reach at all.
+
+    `killpg(pgid, 0)` proves a process group exists, never that it is *ours* — the only thing that
+    could vouch for the stamped `pgid` is the recorded pid beside it, and here that pid belongs to a
+    stranger. So a live group is left strictly alone.
+
+    `pid_alive` is scripted to flip because the group backstop is only consulted once the recorded pid
+    has left the process table; pinned alive (as in the sibling above) the run returns before
+    `group_alive` is ever called, and this claim would be asserted by nothing.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg.update(server_pid=4242, server_pid_start_time="what-we-stamped", server_pgid=4242)
+
+    looks = {"n": 0}
+
+    def _alive(pid):  # alive when the verdict is taken, reaped by the time the group is judged
+        looks["n"] += 1
+        return looks["n"] <= 1
+
+    monkeypatch.setattr(run_records, "pid_alive", _alive)
+    monkeypatch.setattr(process_identity, "process_facts",
+                        lambda pid: process_identity.ProcessFacts("S", "some-other-process"))
+    probed = []
+    monkeypatch.setattr(process_identity, "group_alive",
+                        lambda pgid: probed.append(pgid) or True)  # a LIVE group…
+    sent = _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, None)
+
+    runtime.stop_grid(cfg)
+
+    assert probed == [4242], "the group was never even consulted — this test asserts nothing"
+    assert sent == [], "…and signalled a process group nothing could prove was ours"
+
+
+def _fake_server_spawn(monkeypatch, pid: int):
+    """Report `pid` for the `__server` spawn and leave every other `Popen` alone.
+
+    Narrow on purpose. `runtime.subprocess` *is* the `subprocess` module, so a blanket fake also
+    replaces the `Popen` that `subprocess.run` uses internally — which breaks
+    `process_identity`'s `ps` fork, and its failure note latches a **module-global** flag for the
+    rest of the process, silently suppressing that note in every later test.
+    """
+    real_popen = runtime.subprocess.Popen
+
+    def _popen(cmd, *args, **kwargs):
+        if "__server" in cmd:
+            return SimpleNamespace(pid=pid)
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", _popen)
+
+
+@pytest.mark.parametrize("corrupt", ["abc", -1, 2**63, [], True])
+def test_grid_up_does_not_traceback_on_a_corrupt_server_pid(monkeypatch, tmp_path, corrupt):
+    """`start_grid` read `int(cfg.get("server_pid") or 0)`, so a hand-edited or corrupt config took
+    `grid up` down before it could do anything about it: `"abc"` raised `ValueError` at the `int()`,
+    and an out-of-range value reached `os.kill` inside the old `_pid_alive`, which raises
+    `OverflowError` — an `ArithmeticError`, which that function's own `except OSError` never caught.
+
+    A pid the config cannot prove anything about names nothing to reuse, so the right answer is to
+    start a server, not to crash. Parametrized over the whole class rather than the two values that
+    happen to raise today, because which shape lands where is exactly what a tolerant read is for.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = corrupt
+
+    monkeypatch.setattr(runtime, "_tcp_port_in_use", lambda host, port: False)
+    monkeypatch.setattr(runtime, "wait_for_health", lambda cfg, timeout=30: None)
+    _fake_server_spawn(monkeypatch, 4321)
+
+    assert runtime.start_grid(cfg) == 4321, "an unusable server_pid was treated as a live server"
+
+
+@pytest.mark.parametrize("corrupt", ["abc", -1, 2**63, []])
+def test_grid_down_says_when_the_recorded_server_pid_is_not_a_process_id(
+    monkeypatch, tmp_path, capsys, corrupt
+):
+    """A `server_pid` of an unusable shape correctly signals nothing — and said nothing about it.
+
+    That silence is the failure: `grid down` would print "is down" having signalled nothing, over a
+    server that may well still be running. Name what was unusable, the way the run-record reap does
+    (`run_records.discard_own_record`). Whether it *mattered* is the port probe's answer, not this
+    note's — so this is a note on stderr, not a refusal.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = corrupt
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # nothing may be signalled anyway
+    sent = _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, None)
+
+    runtime.stop_grid(cfg)
+
+    err = capsys.readouterr().err
+    assert sent == []
+    assert repr(corrupt) in err and "server_pid" in err, err
+
+
+def _server_dies_when_signalled(monkeypatch):
+    """A grid server that takes its SIGTERM and exits: `pid_alive` flips the moment a real signal
+    lands. Returns the recorded signals, so a test can assert *what* was signalled as well as that
+    the teardown converged."""
+    from shared import run_records
+
+    sent = _no_signals_anywhere(monkeypatch)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: not sent)
+    return sent
+
+
+def test_grid_down_still_stops_a_server_recorded_before_identity_tokens_existed(monkeypatch, tmp_path):
+    """Every grid config already on a user's machine carries `server_pid` and nothing beside it.
+
+    `record_verdict` calls that `LIVE_UNVERIFIED` — no token is neither a match nor a mismatch — and
+    it stays signallable, because an upgrade must never be a *new* failure (ADR 0020). Green from the
+    moment it was written, and kept because without it this change could silently stop stopping every
+    grid that predates it, with nothing in the suite noticing.
+    """
+    from shared import process_identity
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = 4242  # ...and no `server_pid_start_time`, no `server_pgid`
+
+    monkeypatch.setattr(process_identity, "process_facts", lambda pid: None)  # can't inspect it
+    sent = _server_dies_when_signalled(monkeypatch)
+    _grid_port(monkeypatch, None)
+
+    runtime.stop_grid(cfg)
+
+    assert [pid for pid, _ in sent] == [4242], "a pre-token config's server was not stopped"
+
+
+def test_grid_down_confirms_a_zombie_server_without_burning_the_stop_grace(monkeypatch, tmp_path):
+    """In a container whose PID 1 never reaps, a dead server leaves a permanent `Z` entry that
+    `os.kill(pid, 0)` reports as alive. The old teardown would SIGTERM the corpse, wait out the full
+    25s grace, SIGKILL it, and still read it as running. A corpse is already stopped: nothing to
+    signal, nothing to wait for, and not ours to reap."""
+    from shared import process_identity, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg.update(server_pid=4242, server_pid_start_time="ours", server_pgid=4242)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # a zombie never stops "existing"
+    monkeypatch.setattr(process_identity, "process_facts",
+                        lambda pid: process_identity.ProcessFacts("Z", "ours"))
+    sent = _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, None)
+    # The corpse occupies its own group forever here, so the reap settle can only ever time out; fake
+    # its clock rather than spending a real second proving a thing this test is not about.
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: None)
+
+    started = time.monotonic()
+    runtime.stop_grid(cfg)
+
+    assert sent == [], "signalled a corpse"
+    assert time.monotonic() - started < 5, "burned the stop grace on a process that had already exited"
+
+
+def test_grid_up_stamps_the_servers_identity_beside_its_pid(monkeypatch, tmp_path):
+    """A pid on its own cannot be verified later — which is the whole reason `grid down` could signal
+    a stranger. `start_grid` now writes the same `(pid, start_time, pgid)` a run record carries, under
+    `server_`-prefixed keys, in the **one** config write: that is what lets a verified pid vouch for
+    the group id stored beside it (ADR 0020).
+
+    Uses this process as the spawned server so the stamp is read from a real, live process rather
+    than a fabricated one — the round-trip through the key prefix is then the thing under test.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(runtime, "_tcp_port_in_use", lambda host, port: False)
+    monkeypatch.setattr(runtime, "wait_for_health", lambda cfg, timeout=30: None)
+    _fake_server_spawn(monkeypatch, os.getpid())
+
+    runtime.start_grid(cfg)
+
+    saved = config.load_grid_config(cfg["grid_id"])
+    identity = runtime._server_identity(saved)
+    assert identity == run_records.identity_stamp(os.getpid())
+    assert set(identity) == set(run_records.IDENTITY_FIELDS)
+    assert run_records.record_verdict(identity) is run_records.RecordVerdict.LIVE_OURS
+    assert saved["server_pid"] == os.getpid(), "server_pid must stay the config's one pid"
+
+
+def test_grid_down_fails_loud_when_the_grid_is_still_answering_on_its_port(
+    monkeypatch, tmp_path, capsys
+):
+    """The tracer bullet for the honest report: `grid down` printed "is down" unconditionally.
+
+    A config whose pid names nothing is reachable in one command — `start_grid` saves the pid *before*
+    `wait_for_health`, so a health failure leaves a live server behind — and the old teardown then
+    signalled nothing, wrote `server_pid = 0`, and claimed success. The grid's own port is the answer:
+    it is still serving, so say so, and keep the recorded pid rather than throwing away the only handle
+    a retry has.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = 4242  # a pid nobody is behind…
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    from shared import run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, {"grid_id": cfg["grid_id"], "name": "home"})  # …but the grid is up
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "8090" in str(exc.value), str(exc.value)
+    assert "down" not in capsys.readouterr().out.lower(), "claimed the grid was down while it served"
+    assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
+
+
+@pytest.mark.parametrize("host,addressed", [
+    ("0.0.0.0", "127.0.0.1"), ("::", "127.0.0.1"), ("", "127.0.0.1"), ("10.0.0.5", "10.0.0.5"),
+])
+def test_the_grid_health_probe_addresses_the_host_the_server_bound(
+    monkeypatch, tmp_path, host, addressed
+):
+    """`grid up --host 10.0.0.5` really binds only that address (`cli/_main.cmd_internal_server`), but
+    both health probes asked `127.0.0.1`. A wildcard bind is reachable on loopback so it maps there;
+    anything specific has to be addressed as itself.
+
+    It matters more here than in `wait_for_health`, where the cost is a 30s timeout: in `stop_grid`
+    "nothing answers" is promoted to *proof* the grid stopped, which clears the identity and exits 0 —
+    over a live server, if the probe was asking the wrong address all along.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090, host=host)
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    seen = _grid_port(monkeypatch, None)
+
+    runtime.stop_grid(cfg)
+
+    assert seen.targets == [(addressed, 8090)], seen.targets
+
+
+def test_grid_down_does_not_traceback_on_a_corrupt_port(monkeypatch, tmp_path):
+    """The regression this change could have introduced. `stop_grid` read no port at all before; its
+    new probe does, and a bare `int(cfg["port"])` would have added a fresh traceback to the very
+    command whose promise is that a hand-edited config no longer produces one.
+
+    An unusable port means the probe never ran, so nothing may be concluded from its silence — the
+    command says exactly that, and names the field, rather than reporting a stop it did not verify.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg.update(port="abc", server_pid=4242)
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    _no_signals_anywhere(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "'abc'" in str(exc.value), str(exc.value)
+
+
+def test_grid_down_keeps_the_pid_and_fails_loud_when_the_server_outlives_sigkill(
+    monkeypatch, tmp_path
+):
+    """The honest teardown. `grid down` wrote `server_pid = 0` unconditionally, so a server that
+    ignored SIGTERM survived *and* lost the only handle to it — after which `grid up` dead-ends on
+    "Port 8090 is already in use" with nothing left able to stop the thing holding it."""
+    from shared import process_identity, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = 4242
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # never dies, even after SIGKILL
+    monkeypatch.setattr(process_identity, "process_facts", lambda pid: None)
+    monkeypatch.setattr(run_records, "kill_group", lambda pid: None)
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: None)
+    clock = {"v": 1000.0}
+    monkeypatch.setattr(run_records.time, "time", lambda: clock["v"])
+    monkeypatch.setattr(run_records.time, "sleep", lambda s: clock.__setitem__("v", clock["v"] + 10))
+    _grid_port(monkeypatch, None)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "4242" in str(exc.value) and "kill -9 4242" in str(exc.value), str(exc.value)
+    assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
+
+
+def test_grid_down_names_a_surviving_process_group_as_a_group(monkeypatch, tmp_path):
+    """A group id printed as a pid tells the operator to `kill -9 <group leader>` — and the leader is
+    precisely the process that is already gone, so the command they are handed does nothing while the
+    server keeps running."""
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    monkeypatch.setattr(
+        cli.grid.runtime, "stop_grid",
+        lambda cfg: runtime.StopOutcome(run_records.Teardown(survivor=777, is_group=True), False),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "process group 777" in str(exc.value) and "kill -9 -777" in str(exc.value), str(exc.value)
+
+
+def test_grid_down_converges_when_the_pid_is_unprovable_but_the_port_is_dead(
+    monkeypatch, tmp_path, capsys
+):
+    """The convergence rule, and the reason the port probe exists at all.
+
+    A config whose pid cannot be verified — never stamped, recycled, long dead — classifies
+    `verified=False`, the same as every alarming case. Keyed on that alone, `grid down` would fail on
+    an already-stopped grid **forever**, and there is no `grid rm` to escape with. Nothing listening on
+    the grid's own port is positive proof it is down, whatever the pid could not tell us.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = 4242
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, None)
+
+    assert cli.main(["down", "home"]) == 0
+    assert "is down" in capsys.readouterr().out
+    saved = config.load_grid_config(cfg["grid_id"])
+    assert runtime._server_identity(saved) == {"pid": 0, "pid_start_time": None, "pgid": None}
+
+
+def test_grid_down_says_so_when_it_could_neither_verify_the_pid_nor_reach_the_port(
+    monkeypatch, tmp_path
+):
+    """Both nets blind at once — ADR 0025's rule for local leave, applied to the lifecycle verb.
+
+    Either failing alone is fine and silent: that is what the other is for. Both failing means this
+    command established nothing, so it must not print "is down". Here something *is* listening —
+    the socket connects — but it will not say what it is, which is the opposite of the refused
+    connection that would have been proof.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg["server_pid"] = 4242
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    _no_signals_anywhere(monkeypatch)
+    monkeypatch.setattr(runtime.socket, "create_connection",
+                        lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(runtime.httpx, "get", lambda url, timeout=None: (_ for _ in ()).throw(
+        httpx.ReadTimeout("timed out")))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "curl -s 'http://127.0.0.1:8090/grid/info'" in str(exc.value), str(exc.value)
+    assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
+
+
+def test_grid_down_on_an_already_stopped_grid_is_quiet(monkeypatch, tmp_path, capsys):
+    """The ordinary repeat. A `server_pid` of 0 is the config's own "nothing is running" — not a
+    corrupt value, so no note — and with nothing listening the command simply succeeds again."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    runtime.init_grid_config(name="home", port=8090)
+    sent = _no_signals_anywhere(monkeypatch)
+    _grid_port(monkeypatch, None)
+
+    assert cli.main(["down", "home"]) == 0
+
+    out, err = capsys.readouterr()
+    assert "is down" in out and sent == []
+    assert err == "", f"an already-stopped grid should say nothing on stderr: {err}"
+
+
+def test_grid_down_does_not_traceback_when_the_recorded_pid_is_not_ours_to_signal(
+    monkeypatch, tmp_path, capsys
+):
+    """`pid_alive` reports EPERM as **alive** (ADR 0024: calling another user's process dead would let
+    a teardown claim it reaped something still running), so a `server_pid` that has drifted onto a
+    process owned by another principal reaches `terminate_pid` — whose `os.kill` catches only
+    `ProcessLookupError`. Reproduced against pid 1: a raw `PermissionError` traceback out of
+    `grid down`, which is precisely what this change promises the command no longer does.
+
+    The catch belongs at this call site and **not** inside `terminate_pid`: `orphan_sweep.terminate`
+    depends on that exception escaping — it is how a swept match is classified `foreign` instead of
+    reaped — so swallowing it there would blind both modes' `grid leave` to another user's child.
+
+    Nothing is concluded from it, either. The port decides: if that pid really is this grid's server
+    under another account the port still answers and leave fails loud; if the config had merely
+    drifted onto a stranger, the port is silent and the grid is genuinely down.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090, host="127.0.0.1")
+    cfg["server_pid"] = 4242
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)  # EPERM reads as alive
+    monkeypatch.setattr(process_identity, "process_facts", lambda pid: None)
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: (_ for _ in ()).throw(
+        PermissionError(1, "Operation not permitted")))
+    _grid_port(monkeypatch, None)  # nothing is serving this grid — so it really is down
+
+    assert cli.main(["down", "home"]) == 0
+
+    assert "4242" in capsys.readouterr().err
+
+
+def test_a_pid_we_could_not_signal_never_counts_as_a_verified_teardown(monkeypatch, tmp_path):
+    """EPERM is "we did not stop it", not "there was nothing to stop".
+
+    The sibling above exits 0 only because the *port* proved the grid was down. Take that second
+    opinion away — an unusable port, so there is nothing to probe with — and the teardown's own answer
+    is all that is left: it must be `verified=False`, or `grid down` reports success over a live
+    process it was refused permission to touch.
+    """
+    from shared import process_identity, run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090)
+    cfg.update(port="abc", server_pid=4242)  # unusable port ⇒ the probe never runs
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(process_identity, "process_facts", lambda pid: None)
+    monkeypatch.setattr(run_records.os, "kill", lambda pid, sig: (_ for _ in ()).throw(
+        PermissionError(1, "Operation not permitted")))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "nothing about this box was established" in str(exc.value), str(exc.value)
+
+
+def test_a_closed_port_really_is_proof_that_nothing_is_serving(monkeypatch, tmp_path):
+    """The positive direction, against a real socket rather than a mocked exception: a port nothing
+    is listening on must still read as proof, or `grid down` never succeeds on an unverifiable pid."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    with socket.socket() as sock:  # bind then release, so the port is genuinely closed
+        sock.bind(("127.0.0.1", 0))
+        closed_port = sock.getsockname()[1]
+    cfg = runtime.init_grid_config(name="home", port=closed_port, host="127.0.0.1")
+
+    assert runtime._still_serving(cfg) is False
+
+
+def test_an_unreachable_host_is_not_proof_that_the_grid_stopped(monkeypatch, tmp_path):
+    """`httpx.ConnectError` is **not** "connection refused".
+
+    `socket.create_connection` resolves DNS *and* connects in one call, and `socket.gaierror`,
+    `ENETUNREACH` and `EHOSTUNREACH` are all plain `OSError`s — so httpcore maps every one of them to
+    the same `ConnectError` a genuine refusal produces. Reading that as proof is the exact laundering
+    ADR 0026 exists to forbid, and it is reachable through the `--host` support this change added: a
+    laptop that roams networks between `grid up --host <lan-ip>` and `grid down` would have its live
+    server reported as stopped and the recorded pid — the only handle a retry has — thrown away.
+
+    Hermetic on purpose: a real `.invalid` lookup makes the test's speed a property of the resolver.
+    The library semantics this rests on are pinned separately, below.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090, host="grid-test.invalid")
+    cfg["server_pid"] = 4242  # unverifiable on its own — so the probe decides the whole verdict
+    config.save_grid_config(cfg["grid_id"], cfg)
+
+    from shared import run_records
+
+    monkeypatch.setattr(run_records, "pid_alive", lambda pid: False)
+    _no_signals_anywhere(monkeypatch)
+    monkeypatch.setattr(runtime.socket, "create_connection", lambda *a, **k: (_ for _ in ()).throw(
+        socket.gaierror(8, "nodename nor servname provided, or not known")))
+    monkeypatch.setattr(runtime.httpx, "get", lambda url, timeout=None: (_ for _ in ()).throw(
+        httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["down", "home"])
+
+    assert "nothing about this box was established" in str(exc.value), str(exc.value)
+    assert config.load_grid_config(cfg["grid_id"])["server_pid"] == 4242, "threw away the handle"
+
+
+def test_only_a_refused_connection_counts_as_proof_of_absence():
+    """The library fact the probe rests on, pinned so a dependency bump cannot quietly rot it: DNS
+    failure and a refusal are the same `OSError` family, distinguishable only by the specific
+    subclass — which is why the probe asks a socket rather than reading httpx's exception type."""
+    assert issubclass(socket.gaierror, OSError)
+    assert issubclass(ConnectionRefusedError, OSError)
+    assert not issubclass(socket.gaierror, ConnectionRefusedError)
+
+
+@pytest.mark.parametrize("host", [
+    "evil.com/x",      # the port is demoted to a path segment -> reaches evil.com:80
+    "a@evil.com",      # userinfo hides the real host
+    "evil.com#frag", "evil.com?q", "two words", "evil.com\\x", ["not", "a", "host"], 42,
+])
+def test_the_probe_refuses_a_host_that_is_not_a_bind_address(host):
+    """A bind address is a hostname or an IP. A value carrying URL syntax is not one, and every such
+    value silently *retargets the request* — `evil.com/x` reaches evil.com:80 with the configured
+    port parsed as part of the path. Refusing them costs nothing (no bind address can contain one)
+    and turns a silent retarget into the honest "we never asked" the port already gets."""
+    assert runtime.probe_url({"port": 8090, "host": host, "grid_id": "g"}) is None
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("[::1]", "http://[::1]:8090"),   # a bracketed literal must not be double-bracketed
+    ("fe80::1", "http://[fe80::1]:8090"),
+    ("[::]", "http://127.0.0.1:8090"),  # ...and a bracketed wildcard is still a wildcard
+])
+def test_the_probe_addresses_an_ipv6_host_exactly_once(host, expected):
+    """`[::1]` came out as `http://[[::1]]:8090`, which httpx refuses to parse — so a legitimately
+    bracketed config never probed at all, and silently read as "could not tell" forever."""
+    assert runtime.probe_url({"port": 8090, "host": host, "grid_id": "g"}) == expected
+
+
+# No `None` body here: `_grid_port` spends that value on its "nothing is listening" sentinel, so it
+# cannot express "listening, and answered null" — which is the `"a string"` case's neighbour anyway.
+@pytest.mark.parametrize("body", [{}, {"grid_id": ""}, {"detail": "not found"}, "a string", []])
+def test_something_answering_that_is_not_a_grid_is_not_proof_either_way(monkeypatch, tmp_path, body):
+    """A socket that accepts and a reply that is not a `/grid/info` means we know **less**, not more:
+    something holds the port and would not say what it is. Reading that as absence would clear the
+    identity and exit 0; reading it as presence would fail a grid that really had stopped. Neither —
+    it goes to the same "could not tell" a timeout does, and the caller decides from the teardown."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090, host="127.0.0.1")
+    _grid_port(monkeypatch, body)
+
+    assert runtime._still_serving(cfg) is None
+
+
+def test_probe_url_is_quoted_before_it_reaches_the_terminal(monkeypatch, tmp_path, capsys):
+    """`host` was only ever an argument to `bind()` before this change; it now reaches the terminal,
+    in this note and in the failure message's `curl` suggestion. The bind-address guard rejects URL
+    syntax but not control bytes — an address does not need them, but nothing forbids them either —
+    so `repr` is what stops an escape sequence being *interpreted* rather than shown."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090, host="a\x1b]0;pwned\x07b")
+    monkeypatch.setattr(runtime.socket, "create_connection",
+                        lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(runtime.httpx, "get", lambda url, timeout=None: (_ for _ in ()).throw(
+        httpx.ReadTimeout("timed out")))
+
+    assert runtime._still_serving(cfg) is None
+
+    assert "\x1b" not in capsys.readouterr().err, "raw escape sequence reached the terminal"
+
+
+def test_a_foreign_grid_id_is_bounded_before_it_reaches_the_terminal(monkeypatch, tmp_path, capsys):
+    """The note names the grid answering on our port, and that string comes off the wire from
+    whatever holds it. Printing it verbatim hands an unbounded, escape-carrying payload straight to
+    the operator's terminal; `orphan_sweep._first_line` already truncates for the same reason."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    cfg = runtime.init_grid_config(name="home", port=8090, host="127.0.0.1")
+    hostile = "\x1b]0;pwned\x07" + "A" * 5000
+    _grid_port(monkeypatch, {"grid_id": hostile})
+
+    assert runtime._still_serving(cfg) is False  # it is not OUR grid, so we are not serving
+
+    err = capsys.readouterr().err
+    assert "\x1b" not in err, "raw escape sequences reached the terminal"
+    assert len(err) < 500, f"unbounded remote payload printed ({len(err)} chars)"

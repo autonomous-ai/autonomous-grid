@@ -487,6 +487,18 @@ def recorded_pid(record: dict[str, Any]) -> int | None:
     return pid if 0 <= pid <= _PID_MAX else None
 
 
+IDENTITY_FIELDS = ("pid", "pid_start_time", "pgid")
+"""The record keys that together name one process verifiably. ``identity_stamp`` is built from this
+tuple, so it is enforced rather than decorative.
+
+It exists for the **readers**, not the writer. A writer can derive the key list from
+``identity_stamp``'s returned dict and gets a fourth field for free; a reader assembling that dict
+from somewhere else (``local.runtime`` reads the grid config's ``server_``-prefixed copy) cannot —
+and the obvious substitute, a prefix sweep, would quietly swallow any future unrelated key into a
+record the teardown then signals on.
+"""
+
+
 def identity_stamp(pid: int) -> dict[str, Any]:
     """The identity fields a run record carries for its serve child: ``pid`` plus the
     ``(start_time, pgid)`` that make it verifiable. Merge into the record — never write one without
@@ -502,11 +514,13 @@ def identity_stamp(pid: int) -> dict[str, Any]:
     written before this existed read as a *mismatch* rather than as unverifiable, which is the
     verdict that withdraws trust.
     """
-    return {
-        "pid": pid,
-        "pid_start_time": process_identity.process_start_time(pid),
-        "pgid": process_identity.process_group_of(pid),
-    }
+    # `strict=True` is the enforcement: a field added to IDENTITY_FIELDS without a value here (or the
+    # reverse) raises at the first stamp instead of writing a record that is silently short one fact.
+    return dict(zip(
+        IDENTITY_FIELDS,
+        (pid, process_identity.process_start_time(pid), process_identity.process_group_of(pid)),
+        strict=True,
+    ))
 
 
 class RecordVerdict(StrEnum):
