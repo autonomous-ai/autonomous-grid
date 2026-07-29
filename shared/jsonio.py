@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from shared import paths
+
 
 def load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
@@ -38,8 +40,12 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     ``fchmod``'d before any bytes land, so it never exists world-readable. The explicit
     ``fchmod`` also defeats umask, which masks ``O_CREAT``'s mode argument — important for
     the credential store, where a restrictive umask must not drop the owner bits either.
+
+    The *containing directory* goes through ``paths.ensure_dir``, which is the other half of the
+    same guarantee: ``0o600`` decides who can read this file, but POSIX ``unlink`` consults the
+    directory's write bits and nothing about the file's own mode (`.scratch/grid-leave/` issue 19).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    paths.ensure_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:

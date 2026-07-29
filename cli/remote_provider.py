@@ -1174,7 +1174,10 @@ def _spawn_remote_engine(network_id: str, engine_id: str) -> subprocess.Popen:
     from local import runtime
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # `_join_remote` writes the run record immediately before it spawns, so this is not normally the
+    # first creator of the run directory — hardened anyway because it is a `mkdir` into that tree,
+    # and reordering those two statements must not silently reopen issue 19's hole.
+    paths.ensure_dir(log_path.parent)
     log = logging_setup.cap_and_open_append(log_path, logging_setup.engine_log_max_bytes())
     return subprocess.Popen(
         runtime.cli_command() + [run_records.REMOTE_ENGINE_MARKER, network_id, engine_id],

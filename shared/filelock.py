@@ -18,6 +18,8 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
+from shared import paths
+
 try:  # POSIX (macOS/Linux — the primary CLI target)
     import fcntl
 
@@ -30,9 +32,12 @@ except ModuleNotFoundError:  # Windows (consumer/playground scope) — msvcrt fa
 
 def _open_lock_fd(path: Path) -> int:
     """The fd the lock is taken on: a sibling ``<path>.lock``, so it never collides with the
-    atomic-rename target. Parent directories are created as needed."""
+    atomic-rename target. Parent directories are created as needed — through ``paths.ensure_dir``,
+    because this can be the first thing to build a grid's run directory (a `grid leave` or a
+    ``mutate_record`` reaching a grid no record has been written for yet), and that directory's write
+    bits are what decide who may delete the records in it (`.scratch/grid-leave/` issue 19)."""
     lock_path = path.with_suffix(path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.ensure_dir(lock_path.parent)
     return os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
 
 

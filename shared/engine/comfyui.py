@@ -517,7 +517,7 @@ def _port_from_url(url: str) -> int:
 
 
 def _write_pid_file(pid: int, port: int) -> None:
-    paths.run_dir().mkdir(parents=True, exist_ok=True)
+    paths.ensure_dir(paths.run_dir())
     comfyui_pid_file(port).write_text(f"{pid}\n{port}\n")
 
 

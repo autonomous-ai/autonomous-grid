@@ -4732,8 +4732,316 @@ def test_atomic_write_bytes_is_0600_even_under_hostile_umask(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# cross-process file lock (shared/filelock.py)
+# directory modes under GRID_HOME (shared/paths.ensure_dir) — grid-leave issue 19
 # ---------------------------------------------------------------------------
+
+def _dir_modes(*dirs):
+    """`{path: mode}` for each directory, so a failure names WHICH link of the chain is wrong.
+
+    The vararg is `dirs`, not `paths`: this module imports `shared.paths` under that name."""
+    return {directory: oct(stat.S_IMODE(directory.stat().st_mode)) for directory in dirs}
+
+
+def _run_tree_chain(grid_id: str):
+    """Every directory `run/engines/<grid_id>` needs, root-first — the whole chain one record write
+    creates, which is what a `mkdir(parents=True, mode=…)` would NOT have covered (CPython builds
+    parents with the default mode, so only the leaf would be hardened)."""
+    return (
+        paths.grid_home(),
+        paths.run_dir(),
+        paths.run_dir() / "engines",
+        paths.engines_dir(grid_id),
+    )
+
+
+def test_run_tree_is_never_group_or_other_writable(monkeypatch, tmp_path):
+    """A permissive umask must not leave the run tree writable by anyone else.
+
+    POSIX `unlink` checks write permission on the **containing directory** and consults nothing about
+    the target file, so the records' `0o600` does not protect them from deletion. Since the local argv
+    sweep (issue 17) a record-less child is exactly what a bare `grid leave` reaps, which turns
+    deleting a record into "the owner's own leave kills a healthy engine" — and the kill is issued by
+    the victim, so the EPERM boundary that stops a cross-uid kill never applies.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    old = os.umask(0o000)  # would leave every mkdir at 0o777
+    try:
+        run_records.write_record("g1", "remote", {"engine_id": "remote", "grid_id": "g1", "pid": 0})
+    finally:
+        os.umask(old)
+
+    modes = _dir_modes(*_run_tree_chain("g1"))
+    assert set(modes.values()) == {"0o755"}, modes
+
+
+def test_ensure_all_is_never_group_or_other_writable(monkeypatch, tmp_path):
+    """The tree-creating site that runs FIRST in production, and the one issue 19 names beside
+    `jsonio`.
+
+    Thirteen callers reach `ensure_all` (the engine/agent installers, model + media-bundle downloads,
+    ComfyUI, the media runtime), so on a real box `~/.grid` and `~/.grid/run` are routinely built by a
+    `grid pull` long before any `grid join` writes a record. Hardening only the record writer would
+    leave the ancestors at whatever umask that first command happened to run under — a green test over
+    a chain production never builds that way.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    old = os.umask(0o000)
+    try:
+        paths.ensure_all()
+    finally:
+        os.umask(old)
+
+    modes = _dir_modes(paths.grid_home(), paths.run_dir(), paths.grids_dir(), paths.models_dir(),
+                       paths.logs_dir(), paths.bin_dir())
+    assert set(modes.values()) == {"0o755"}, modes
+
+
+def test_ensure_base_is_never_group_or_other_writable(monkeypatch, tmp_path):
+    """`ensure_base` is `ensure_all`'s smaller sibling and creates `grids/` the same bare way."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    old = os.umask(0o000)
+    try:
+        paths.ensure_base()
+    finally:
+        os.umask(old)
+
+    assert set(_dir_modes(paths.grid_home(), paths.grids_dir()).values()) == {"0o755"}
+
+
+def test_record_lock_creates_the_run_tree_unshared(monkeypatch, tmp_path):
+    """The record's `.lock` sentinel can be the first thing to touch a grid's run directory.
+
+    `file_lock` creates the parent itself (`shared/filelock`), so a `grid leave` or a serve child's
+    `mutate_record` reaching a never-joined grid builds the tree before any record write does.
+    """
+    from shared import run_records
+    from shared.filelock import file_lock
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    old = os.umask(0o000)
+    try:
+        with file_lock(run_records.record_path("g2", "remote")):
+            pass
+    finally:
+        os.umask(old)
+
+    modes = _dir_modes(*_run_tree_chain("g2"))
+    assert set(modes.values()) == {"0o755"}, modes
+
+
+def test_comfyui_pid_file_creates_the_run_dir_unshared(monkeypatch, tmp_path):
+    """ComfyUI's pid file is a third creator of `~/.grid/run` — same tree, different subsystem."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    old = os.umask(0o000)
+    try:
+        comfyui._write_pid_file(4242, 8188)
+    finally:
+        os.umask(old)
+
+    assert set(_dir_modes(paths.grid_home(), paths.run_dir()).values()) == {"0o755"}
+
+
+def test_remote_spawn_creates_its_log_dir_unshared(monkeypatch, tmp_path):
+    """Defence in depth at the remote serve child's spawn.
+
+    `_join_remote` writes the run record immediately BEFORE it spawns, so in a real flow the record
+    writer has already built (and hardened) this directory — this site is never the first creator.
+    It is hardened anyway because it is a `mkdir` into the run tree, and a later reordering of those
+    two statements must not silently reopen the hole.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli.remote_provider.subprocess, "Popen",
+                        lambda *a, **k: SimpleNamespace(pid=4243, poll=lambda: None))
+    old = os.umask(0o000)
+    try:
+        cli.remote_provider._spawn_remote_engine("g3", "remote")
+    finally:
+        os.umask(old)
+
+    modes = _dir_modes(*_run_tree_chain("g3"))
+    assert set(modes.values()) == {"0o755"}, modes
+
+
+def test_the_umask_still_owns_the_read_bits(monkeypatch, tmp_path):
+    """We take the shared-WRITE bits and nothing else — a strict umask is still obeyed.
+
+    The counter-proposal was to force `0o700`, which is what the run records' own `0o600` suggests.
+    It was rejected because it decides the read bits *for* the operator in the one topology that
+    would notice: `remote/CONTEXT.md` documents `sudo grid join` followed by an unprivileged
+    `grid leave` over a shared `GRID_HOME`, where taking listing away makes `read_records` answer a
+    silent `{}` (`Path.glob` swallows the `PermissionError`) instead of failing loudly on the `0o600`
+    record — manufacturing the record-less-orphan fingerprint this feature reads as an alarm.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    old = os.umask(0o077)  # owner-only, by the operator's choice rather than ours
+    try:
+        run_records.write_record("g4", "remote", {"engine_id": "remote", "grid_id": "g4", "pid": 0})
+    finally:
+        os.umask(old)
+
+    modes = _dir_modes(*_run_tree_chain("g4"))
+    assert set(modes.values()) == {"0o700"}, modes
+
+
+@pytest.mark.parametrize(("existing", "expected"), [
+    (0o777, 0o755),  # world-writable: anyone could unlink a record — the bits come off
+    (0o775, 0o755),  # group-writable: same hole, one principal narrower
+    (0o755, 0o755),  # already fine — and NOT narrowed to 0o700
+    (0o700, 0o700),  # already owner-only — left exactly as the operator set it
+], ids=["world-writable", "group-writable", "already-0755", "already-0700"])
+def test_an_existing_run_dir_loses_its_shared_write_bits_and_nothing_else(
+    monkeypatch, tmp_path, existing, expected
+):
+    """Repair is idempotent, never widens, and never touches read/traverse.
+
+    Creation alone would only protect boxes joined after this ships — and a tree created under a
+    permissive umask is precisely the one that is exposed, so it is the case that needs repairing.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    paths.engines_dir("g5").mkdir(parents=True)
+    paths.engines_dir("g5").chmod(existing)
+
+    run_records.write_record("g5", "remote", {"engine_id": "remote", "grid_id": "g5", "pid": 0})
+
+    assert stat.S_IMODE(paths.engines_dir("g5").stat().st_mode) == expected
+
+
+def test_a_directory_outside_grid_home_is_created_exactly_as_before(monkeypatch, tmp_path):
+    """`ensure_dir` is inert outside `~/.grid`: it is a hardening rule about Grid's own tree, not a
+    umask policy imposed on whatever path a caller hands it."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    target = tmp_path / "elsewhere" / "deep"
+    old = os.umask(0o000)
+    try:
+        paths.ensure_dir(target)
+    finally:
+        os.umask(old)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777  # plain mkdir, mode untouched
+
+
+def test_a_traversing_path_is_refused_rather_than_hardened(monkeypatch, tmp_path, capsys):
+    """A `..` segment gets the outside-`GRID_HOME` treatment, not the walk.
+
+    `Path.relative_to` is lexical, so `<home>/a/../../elsewhere` *succeeds* and yields a `..` part —
+    and the chain walk would then create and chmod directories outside the tree, which is the exact
+    opposite of what this primitive promises. No caller can reach it today (both id sources are
+    sanitised: `cli/remote_grid._NETWORK_ID_RE`, `local/runtime.slug_name`), so this pins the
+    failure *direction* for the caller nobody has written yet.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    outside = paths.grid_home() / "a" / ".." / ".." / "elsewhere"
+    old = os.umask(0o000)
+    try:
+        paths.ensure_dir(outside)
+    finally:
+        os.umask(old)
+
+    assert (tmp_path / "elsewhere").is_dir()  # still created — this declines to harden, not to work
+    assert stat.S_IMODE((tmp_path / "elsewhere").stat().st_mode) == 0o777  # untouched, like any
+    #                                                                       path outside the tree
+    # ...and it says so. Reaching this means an upstream id sanitiser broke, and the blast radius is
+    # a superset of the other two decline-to-harden branches: created OUTSIDE the tree entirely.
+    assert "escapes GRID_HOME" in capsys.readouterr().err
+
+
+def test_a_file_where_a_run_directory_belongs_still_raises(monkeypatch, tmp_path):
+    """Repairing a *file*'s mode would be nonsense, so the `mkdir(exist_ok=True)` error stands.
+
+    The failure this rules out is quiet rather than loud: with the directory check dropped, a stray
+    file at `run/engines` would take a `chmod` and the caller would carry on and fail later, further
+    from the cause.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    paths.grid_home().mkdir(parents=True)
+    (paths.run_dir()).write_text("not a directory")
+
+    with pytest.raises(FileExistsError):
+        paths.ensure_dir(paths.engines_dir("g7"))
+
+
+def _raise_eperm(*args, **kwargs):
+    raise PermissionError(errno.EPERM, "Operation not permitted")
+
+
+def test_a_repair_we_are_not_allowed_to_make_is_not_fatal_but_says_so(monkeypatch, tmp_path, capsys):
+    """A directory owned by another account cannot be chmod'ed: don't die, but don't be silent.
+
+    The concrete shape is the shared `GRID_HOME` above: root created the tree, and the unprivileged
+    `grid leave` that follows still has to reap its own serve child. Hardening is best-effort — the
+    same disposition `remote.credentials.save_credentials` gives its own `grid_home().chmod(0o700)`.
+
+    But best-effort is not invisible. Without the note, a chain where one link could not be repaired
+    is indistinguishable from one where every link was — in exactly the topology ADR 0027 names as
+    the reason this failure mode exists at all. Asserting the surviving MODE as well as the note is
+    what makes this test able to tell "repaired" from "silently gave up"; without it a change that
+    broke the repair outright would pass unchanged.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    paths.engines_dir("g6").mkdir(parents=True)
+    paths.engines_dir("g6").chmod(0o777)
+    monkeypatch.setattr(paths.os, "chmod", _raise_eperm)
+
+    run_records.write_record("g6", "remote", {"engine_id": "remote", "grid_id": "g6", "pid": 0})
+
+    assert run_records.read_record("g6", "remote")["engine_id"] == "remote"  # the write still landed
+    assert stat.S_IMODE(paths.engines_dir("g6").stat().st_mode) == 0o777  # ...and gave up truthfully
+    err = capsys.readouterr().err
+    assert str(paths.engines_dir("g6")) in err and "writable by other accounts" in err, err
+
+
+def test_a_mode_we_cannot_even_read_is_reported_too(monkeypatch, tmp_path, capsys):
+    """The third decline-to-harden branch: the directory exists but its mode could not be read.
+
+    "The caller's own write will report it" only holds when the directory has *vanished* — then the
+    write ENOENTs loudly. A transient that hits this one `stat` on a directory that is otherwise
+    fine (a flaky network-mounted GRID_HOME) skips the hardening and the write then succeeds
+    normally, so nothing else can say it. Scoped to the one path so the rest of the write is real.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    target = paths.engines_dir("g9")
+    target.mkdir(parents=True)
+    real_stat = os.stat
+
+    def _stat(path, *args, **kwargs):
+        if str(path) == str(target):
+            raise OSError(errno.EIO, "Input/output error")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(paths.os, "stat", _stat)
+
+    run_records.write_record("g9", "remote", {"engine_id": "remote", "grid_id": "g9", "pid": 0})
+
+    err = capsys.readouterr().err
+    assert str(target) in err and "could not be read" in err, err
+
+
+def test_a_repair_that_succeeds_says_nothing(monkeypatch, tmp_path, capsys):
+    """The note must stay rare, or it is a caveat nobody reads.
+
+    A repair is only attempted when the directory is already shared-writable, and the ordinary case
+    is that it works — so the ordinary case prints nothing at all.
+    """
+    from shared import run_records
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "home"))
+    paths.engines_dir("g8").mkdir(parents=True)
+    paths.engines_dir("g8").chmod(0o777)
+
+    run_records.write_record("g8", "remote", {"engine_id": "remote", "grid_id": "g8", "pid": 0})
+
+    assert stat.S_IMODE(paths.engines_dir("g8").stat().st_mode) == 0o755
+    assert capsys.readouterr().err == ""
 
 def test_file_lock_is_mutually_exclusive_and_reusable(tmp_path):
     """`file_lock` serializes a read-merge-write across processes: while held, another holder's
