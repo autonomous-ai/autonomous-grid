@@ -9653,6 +9653,70 @@ def test_remote_leave_removes_the_heartbeat_sidecar_with_the_record(monkeypatch,
     assert not sidecar.exists(), "the heartbeat sidecar outlived the record it belonged to"
 
 
+def test_remote_leave_still_sweeps_and_backstops_over_an_unreadable_record(monkeypatch, tmp_path, capsys):
+    """A record we cannot parse must not take the sweep and the deregister down with it.
+
+    `read_records` globs the whole grid directory and `jsonio.load_json` raises `SystemExit` on a bad
+    parse, so one truncated file used to abort `cmd_remote_leave` at the top of its locked block —
+    above the `except (Exception, SystemExit)` guards that exist to keep `_full_leave_reap` and
+    `launcher_ancestors` from doing exactly this. Measured on the dev VM: exit 1, the child still
+    serving, and **zero** relay PUTs, with no `grid leave` able to converge until the file was deleted
+    by hand.
+
+    Degrading is not a widening of what we act on, it is the record-less repair path arriving at its
+    own premise: a record that cannot be read is a record that cannot be trusted, which is precisely
+    when the argv sweep and the unconditional backstop are the mechanism. The file itself is KEPT —
+    it is neither provably ours nor provably dead, and `remote/CONTEXT.md` records that a ghost record
+    is the safer failure — so the note names the path for the operator to remove."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    from shared import orphan_sweep, run_records
+    rec = run_records.record_path("n1", "remote")
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("{truncated")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  4242 /bin/grid __remote-engine n1 remote")
+    killed = []
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid",
+                        lambda pid: killed.append(pid) or True)
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.main(["leave"]) == 0
+    assert killed == [4242], "the argv sweep never ran"
+    assert puts == [("/nodes/node-jwt", "consumer", [])], "the backstop never landed"
+
+    out, err = capsys.readouterr()
+    assert "remote.json" in err and "could not be read" in err
+    assert run_records.record_path("n1", "remote").exists(), (
+        "an unparseable record is neither provably ours nor provably dead — it must be kept"
+    )
+
+
+def test_remote_leave_engine_shrink_still_fails_loud_on_an_unreadable_record(monkeypatch, tmp_path):
+    """The negative half: a `--engine` shrink may NOT degrade the way a full leave does.
+
+    A shrink's contract is that the survivors keep serving, and honouring it needs the union the
+    corrupt record holds. Guessing an empty union would respawn the identity serving nothing while
+    printing success. So this path keeps the loud read error — the one place the operator is told the
+    file is broken, which is also what makes the full-leave degrade above safe to be quiet about."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-jwt"})}], active="team")
+    from shared import run_records
+    rec = run_records.record_path("n1", "remote")
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("{truncated")
+    puts = _capture_relay_puts(monkeypatch)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["leave", "--engine", "http://h:11434/v1"])
+
+    assert "Cannot read" in str(excinfo.value)
+    assert puts == [], "a shrink must not deregister — the identity is meant to keep serving"
+
+
 def test_remote_leave_sweeps_a_child_whose_recorded_pid_is_a_string(monkeypatch, tmp_path):
     """A record whose `pid` is the decimal STRING "4242" must not stand both nets down at once.
 

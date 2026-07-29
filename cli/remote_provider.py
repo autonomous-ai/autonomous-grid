@@ -1271,6 +1271,43 @@ def _signed_out_leave_message() -> str:
     )
 
 
+def _records_for_leave(network_id: str, *, shrinking: bool) -> dict[str, dict[str, object]]:
+    """This grid's run records — or, for a full leave, an empty set when they cannot be read.
+
+    ``read_records`` globs the whole grid directory and ``jsonio.load_json`` raises ``SystemExit`` on a
+    bad parse, so one truncated file used to abort ``cmd_remote_leave`` before the argv sweep and
+    before the backstop — the two things that exist precisely for a record that cannot be trusted.
+    Measured: exit 1, the child still serving, zero deregisters, and no `grid leave` able to converge
+    until the file was removed by hand. A corrupt *sibling* did it too, since the glob is grid-wide.
+
+    Degrading is the record-less repair path arriving at its own premise rather than a widening of
+    what we act on: with no records the sweep matches by argv (marker + this exact network id + the
+    spawn arity) and the backstop is unconditional, so the box still stops serving and the grid still
+    hears about it. Nothing is signalled on the strength of a record we could not parse.
+
+    A ``--engine`` shrink is the one caller that may **not** degrade. Its contract is that the
+    survivors keep serving, and honouring that needs the union the broken file holds; an empty union
+    would respawn the identity serving nothing while printing success. So it re-raises, which is also
+    the one place the operator is told the file is broken.
+
+    The file is **kept** either way. It is neither provably ours nor provably dead, and
+    ``remote/CONTEXT.md``'s rule is that a ghost record is the safer failure — so the note names the
+    path and leaves the decision to remove it with the operator.
+    """
+    try:
+        return run_records.read_records(network_id)
+    except (Exception, SystemExit) as exc:
+        if shrinking:
+            raise
+        print(
+            f"Note: a run record for this grid could not be read ({exc}); continuing with the "
+            "argv sweep and the relay deregister, which need no record. Remove the file above once "
+            "you have looked at it — nothing here will delete a record it cannot identify.",
+            file=sys.stderr,
+        )
+        return {}
+
+
 def cmd_remote_leave(args: argparse.Namespace) -> int:
     from remote import credentials
 
@@ -1297,7 +1334,7 @@ def cmd_remote_leave(args: argparse.Namespace) -> int:
     session = str(credentials.load_credentials().get("session_token") or "")
 
     with file_lock(run_records.record_path(network_id, _REMOTE_IDENTITY)):
-        records = run_records.read_records(network_id)
+        records = _records_for_leave(network_id, shrinking=bool(args.engine and not args.all))
         # `--engine <endpoint_url|label>` shrinks the union. When survivors remain the identity is still
         # a provider, so a shrink sends NO backstop. But its last-engine sub-case (dropping the final
         # engine) IS a full identity teardown, so `_leave_one_engine` runs the same reap (record kills +
