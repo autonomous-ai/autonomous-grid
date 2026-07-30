@@ -365,8 +365,9 @@ def test_info_env_prints_openai_compat_without_real_secret(monkeypatch, tmp_path
     assert cli.cmd_info(args) == 0
 
     out = capsys.readouterr().out
-    assert 'OPENAI_BASE_URL="http://192.168.1.25:8090/v1"' in out
-    assert 'OPENAI_API_KEY="local-grid"' in out
+    # Single-quoted, matching the remote form — one quoting for both, or one of them stays wrong.
+    assert "OPENAI_BASE_URL='http://192.168.1.25:8090/v1'" in out
+    assert "OPENAI_API_KEY='local-grid'" in out
 
 
 def test_device_info_command_emits_the_contract(capsys):
@@ -19825,8 +19826,39 @@ def test_remote_info_env_prints_relay_base_and_token(monkeypatch, tmp_path, caps
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
     assert cli.main(["info", "--env"]) == 0
     out = capsys.readouterr().out
-    assert 'export OPENAI_BASE_URL="https://relay.example/relay/v1"' in out
-    assert 'export OPENAI_API_KEY="AT"' in out  # the one deliberate token-printing carve-out
+    # Single-quoted, and quoted even though neither value needs it: the block is meant to be
+    # evaluated, so it is quoted uniformly by `shared.shell.quote` (see the injection test below).
+    assert "export OPENAI_BASE_URL='https://relay.example/relay/v1'" in out
+    assert "export OPENAI_API_KEY='AT'" in out  # the one deliberate token-printing carve-out
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="POSIX shell required")
+def test_remote_info_env_block_cannot_be_broken_out_of(monkeypatch, tmp_path, capsys):
+    """`info --env` exists to be evaluated — `eval "$(grid info --env)"` is the documented recipe —
+    so its own quoting has to hold whatever the values contain.
+
+    The token is an opaque credential this repo neither mints nor validates, and the relay base
+    arrives from the control plane; assuming which characters either can hold is the assumption that
+    turns a printed block into an executed one. The value below closes the quote and appends a
+    command, which is what a double-quoted, unescaped block would run.
+    """
+    canary = tmp_path / "executed"
+    hostile = f'ab"; touch {canary}; x="cd'
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": hostile}],
+                 active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+
+    assert cli.main(["info", "--env"]) == 0
+    block = capsys.readouterr().out
+
+    proof = subprocess.run(
+        ["sh", "-c", 'eval "$1"; printf %s "$OPENAI_API_KEY"', "sh", block],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proof.returncode == 0, proof.stderr
+    assert proof.stdout == hostile, f"the shell recovered {proof.stdout!r}, not the token"
+    assert not canary.exists(), "the printed block executed an injected command"
 
 
 def test_remote_info_env_requires_access_token(monkeypatch, tmp_path):
@@ -23577,6 +23609,39 @@ def test_launch_forwarding_the_mode_override_fails_the_way_the_help_says(monkeyp
     with pytest.raises(SystemExit) as exc:
         cli.main(["launch", "claude", "--", "--local"])
     assert "remote-mode command" in str(exc.value), str(exc.value)
+
+
+def test_a_mode_override_taken_out_of_a_passthrough_says_so(monkeypatch, tmp_path, capsys):
+    """A forwarded `--local`/`--remote` is removed from the command line, and that has to be said.
+
+    This is the one substitution in the feature that a user cannot see happening. `--local` flips the
+    run's mode, so a remote-only command then refuses — reporting a *mode* problem for a flag the
+    user aimed at the app, and pointing at a fix ("switch modes") that has nothing to do with their
+    actual mistake. `--remote` is the quieter half: it changes nothing and simply disappears.
+
+    So the warning is issued where the token is taken, covering both directions and any command,
+    rather than only being reachable through the local-mode gate.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    # The harmless direction: the launch still succeeds, but the vanishing is no longer silent.
+    assert cli.main(["launch", "claude", "--", "--remote"]) == 0
+    warning = capsys.readouterr().err
+    assert "--remote" in warning and "--" in warning, warning
+    assert "mode" in warning.lower(), warning
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+
+    # The misleading direction: the refusal is now preceded by its real cause.
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude", "--", "--local"])
+    err = capsys.readouterr().err
+    assert "--local" in err, err
+    assert "remote-mode command" in str(exc.value)
+
+    # A mode override used the ordinary way is not a substitution and must stay silent.
+    assert cli.main(["--remote", "launch", "claude"]) == 0
+    assert capsys.readouterr().err.count("--remote") == 0
 
 
 def test_launch_does_not_read_a_forwarded_word_as_its_grid_argument(monkeypatch, tmp_path):

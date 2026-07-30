@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from shared import shell
+
 from . import claude_install, system
 from .claude_install import BINARY, INSTALL_URL  # noqa: F401  (re-exported: the app's own identity)
 from .target import GridSession
@@ -264,21 +266,6 @@ def _note_remapped(session: GridSession, tiers: _Tiers) -> None:
     )
 
 
-def _shell_quote(value: str) -> str:
-    """``value`` as a single, always-quoted shell word.
-
-    Not ``shlex.quote``: that leaves a value with no shell-special character bare, and this block is
-    quoted **uniformly** so that a reader copying one line out of it never has to judge which values
-    needed it — and so that a token which becomes shell-special after a credential rotation cannot
-    turn a working recipe into a silently different one.
-
-    Single quotes because a shell expands nothing inside them — no ``$``, no backtick, no backslash.
-    The only character that cannot appear between them is the quote itself, so it is closed, escaped
-    and reopened, which is the portable POSIX spelling.
-    """
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
 @dataclass(frozen=True)
 class ClaudeCode:
     """Claude Code as a launch target."""
@@ -309,7 +296,7 @@ class ClaudeCode:
         # user-requested disclosure of the caller's own token to the caller's own shell, like
         # `gh auth token`. Every other launch path stays token-free.
         for key, value in env.items():
-            print(f"export {key}={_shell_quote(value)}")
+            print(f"export {key}={shell.quote(value)}")
         return 0
 
     def run(self, session: GridSession, argv: Sequence[str] = ()) -> int:

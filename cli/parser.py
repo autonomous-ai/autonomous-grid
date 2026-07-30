@@ -626,9 +626,9 @@ def _add_launch(sub) -> None:
             "\n"
             "Two words are the exception: `--local` and `--remote` are this CLI's one-shot mode\n"
             "override and are removed from anywhere on the command line, so they cannot be\n"
-            "forwarded to the app. `-- --local` does not reach the app and instead switches this\n"
-            "command to local mode, where it refuses — so a forwarded `--local` is reported as a\n"
-            "mode error, not as a missing argument."
+            "forwarded to the app — a warning says so when one is taken. `-- --local` also\n"
+            "switches this command to local mode, where it refuses, so it is reported as a mode\n"
+            "error rather than as a missing argument."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

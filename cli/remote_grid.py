@@ -18,7 +18,7 @@ import json
 import re
 from typing import Any
 
-from shared import state
+from shared import shell, state
 
 
 # Default network type for `grid up` on create (DECISIONS D11; the other choice is
@@ -259,8 +259,12 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
         # user-requested disclosure of the caller's own token to their own shell — like
         # `gh auth token`. Every other path (ls, info without --env, all --json) stays token-free.
         base_url = base.rstrip("/") + "/relay/v1"
-        print(f'export OPENAI_BASE_URL="{base_url}"')
-        print(f'export OPENAI_API_KEY="{token}"')
+        # `shell.quote`, not an f-string in double quotes: this block exists to be evaluated, and the
+        # token is an opaque credential this repo neither mints nor validates while the base arrives
+        # from the control plane. A value holding `"`, `$`, a backtick or a backslash would break out
+        # of a double-quoted context and be *executed* by the eval this command invites.
+        print(f"export OPENAI_BASE_URL={shell.quote(base_url)}")
+        print(f"export OPENAI_API_KEY={shell.quote(token)}")
         return 0
     rec = _select(args.grid)
     # Status is creator-only; a member sees `{}` here and just gets a blank run-state (never an error).

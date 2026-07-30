@@ -16,6 +16,7 @@ mode; `None` takes the sign-in default.
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import NoReturn
 
 from shared import state
@@ -141,13 +142,31 @@ def resolve_override(argv: list[str]) -> tuple[str | None, list[str]]:
     """
     override: str | None = None
     cleaned: list[str] = []
+    past_separator = False
     for token in argv:
         if token in ("--local", "--remote"):
+            if past_separator:
+                # The one substitution on this surface a user cannot see happening. After `--` they
+                # were addressing another program (`grid launch <target> -- …`), and this took the
+                # token anyway. `--remote` then simply vanishes; `--local` flips the run's mode, so a
+                # remote-only command refuses and reports a *mode* problem — pointing at a fix that
+                # has nothing to do with what they actually did. Said here, where the token is taken,
+                # so it covers both directions and every command rather than one gate's message.
+                print(
+                    f"Warning: `{token}` after `--` is grid's own one-shot mode override, not the "
+                    f"launched app's — it has been removed from the command line and this run uses "
+                    f"{token[2:]} mode.",
+                    file=sys.stderr,
+                    flush=True,
+                )
             flag = token[2:]
             if override is not None and override != flag:
                 raise SystemExit("Pass only one of --local / --remote.")
             override = flag
         else:
+            # Only the first `--` opens the forwarded region, but re-marking on a later one is
+            # harmless: everything from the first onwards is already past it.
+            past_separator = past_separator or token == "--"
             cleaned.append(token)
     return override, cleaned
 
