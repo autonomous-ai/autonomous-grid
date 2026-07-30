@@ -1,7 +1,9 @@
-"""OpenAI API for a CLI seat: grid ──/chat/completions──▶ here ──subprocess──▶ `<cli> -p …`
+"""OpenAI and Anthropic APIs for a CLI seat: grid ──/chat/completions or /messages──▶ here
+──subprocess──▶ `<cli> -p …`
 
 Loopback-only — this process can spend the operator's subscription. CLI-agnostic: the driver
-arrives as a `SeatSpec`, so a second CLI reuses this server unchanged.
+arrives as a `SeatSpec`, so a second CLI reuses this server unchanged. Which wire a request came
+in on rides through as `wire` (`"openai"` | `"anthropic"`) so the answer goes back in the same one.
 """
 from __future__ import annotations
 
@@ -80,12 +82,17 @@ def create_app(
     @app.post("/chat/completions")
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        return await _handle(app, request)
+        return await _handle(app, request, wire="openai")
+
+    @app.post("/messages")
+    @app.post("/v1/messages")
+    async def messages(request: Request):
+        return await _handle(app, request, wire="anthropic")
 
     return app
 
 
-async def _handle(app: FastAPI, request: Request):
+async def _handle(app: FastAPI, request: Request, *, wire: str = "openai"):
     spec: SeatSpec = app.state.spec
     options: SeatOptions = app.state.options
     raw = await request.body()
@@ -97,7 +104,9 @@ async def _handle(app: FastAPI, request: Request):
         return _error(400, "Request body must be a JSON object.")
 
     try:
-        prepared = await run_in_threadpool(cli_seat.prepare, body, spec.kind, spec.tool_protocol)
+        prepared = await run_in_threadpool(
+            cli_seat.prepare, body, spec.kind, spec.tool_protocol, wire,
+        )
     except cli_seat.SeatBadRequest as exc:
         return _error(400, str(exc))
 
@@ -110,14 +119,15 @@ async def _handle(app: FastAPI, request: Request):
 
 
     if body.get("stream") and cli_seat.can_stream(spec):
-        return StreamingResponse(_stream(app, prepared), media_type="text/event-stream")
+        return StreamingResponse(_stream(app, prepared, wire=wire), media_type="text/event-stream")
 
+    answer_fn = cli_seat.answer_anthropic if wire == "anthropic" else cli_seat.answer
     async with app.state.slots:
         try:
             # A CLI run is a blocking subprocess of minutes. Off the event loop, or one request
             # would freeze health checks and every other caller.
             completion = await run_in_threadpool(
-                cli_seat.answer, spec, prepared, app.state.binary, options.timeout,
+                answer_fn, spec, prepared, app.state.binary, options.timeout,
             )
         except cli_seat.SeatBadRequest as exc:
             return _error(400, str(exc))
@@ -125,16 +135,21 @@ async def _handle(app: FastAPI, request: Request):
             return _error(502, str(exc))
 
     if body.get("stream"):
-        return StreamingResponse(_as_sse(completion), media_type="text/event-stream")
+        sse = _as_anthropic_sse(completion) if wire == "anthropic" else _as_sse(completion)
+        return StreamingResponse(sse, media_type="text/event-stream")
     return JSONResponse(completion)
 
 
-async def _stream(app: FastAPI, prepared):
+async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
     """SSE straight from the CLI's own output, chunk by chunk as it arrives.
 
     A failure mid-stream cannot re-status the response — the headers are long gone — so it is
     emitted as a terminal SSE error frame, which is what an OpenAI-shaped client understands.
     """
+    if wire == "anthropic":
+        async for frame in _stream_anthropic(app, prepared):
+            yield frame
+        return
     spec, options = app.state.spec, app.state.options
     stream = cli_seat.answer_stream(spec, prepared, app.state.binary, options.timeout)
     base = {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion.chunk",
@@ -200,6 +215,93 @@ def _next_or_none(stream):
         return None, None
 
 
+async def _stream_anthropic(app: FastAPI, prepared):
+    """Anthropic SSE: `message_start`, one block per text/tool_use in the answer, `message_delta`,
+    `message_stop`.
+
+    Same buffering rule as the OpenAI stream above: with a tool protocol in play nothing goes out
+    until the CLI stops writing, because only the parse knows which bytes were the call — emitting
+    text deltas early is what let a client print the raw tool JSON as prose AND run the tool.
+    """
+    spec, options = app.state.spec, app.state.options
+    stream = cli_seat.answer_stream_anthropic(spec, prepared, app.state.binary, options.timeout)
+    buffered = bool(prepared.tool_protocol)
+    msg_id = f"msg_{uuid.uuid4().hex}"
+
+    yield _frame({"type": "message_start", "message": {
+        "id": msg_id, "type": "message", "role": "assistant", "model": prepared.model,
+        "content": [], "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0}}})
+
+    index, text_open = 0, False
+    stop_reason, usage = "end_turn", {"output_tokens": 0}
+    async with app.state.slots:
+        try:
+            while True:
+                # next() blocks on the child's stdout, so it runs off the event loop like the
+                # non-streaming call does.
+                kind, payload = await run_in_threadpool(_next_or_none, stream)
+                if kind is None:
+                    break
+                if kind == "delta":
+                    if buffered:
+                        continue
+                    if not text_open:
+                        yield _frame({"type": "content_block_start", "index": index,
+                                     "content_block": {"type": "text", "text": ""}})
+                        text_open = True
+                    yield _frame({"type": "content_block_delta", "index": index,
+                                 "delta": {"type": "text_delta", "text": payload}})
+                else:
+                    message, quota = payload
+                    if quota is not None:
+                        # A free reading the answer carried; refresh the cache so the next
+                        # request's ceiling check costs nothing.
+                        app.state.quota_cache = (time.monotonic(), quota)
+                    usage = message.get("usage") or usage
+                    stop_reason = message.get("stop_reason") or "end_turn"
+                    if buffered:
+                        # Nothing went out above — the whole answer, text and any tool_use block
+                        # alike, is only known now that the parse has run on the complete text.
+                        frames, index = _anthropic_block_frames(message.get("content") or [], index)
+                        for frame in frames:
+                            yield frame
+                    elif text_open:
+                        yield _frame({"type": "content_block_stop", "index": index})
+        except Exception as exc:  # noqa: BLE001 — mirrors the OpenAI stream's terminal-error contract
+            yield _frame({"type": "error", "error": {
+                "type": "cli_seat_error", "message": str(exc) or type(exc).__name__}})
+            return
+    yield _frame({"type": "message_delta",
+                  "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": usage})
+    yield _frame({"type": "message_stop"})
+
+
+def _anthropic_block_frames(blocks, start_index):
+    """`content_block_start`/`delta`/`stop` for each text or tool_use block in `blocks`, indexed
+    from `start_index`. Shared by the buffered live-stream path above and the no-stream fallback
+    below, so a block is never rendered two different ways."""
+    frames, index = [], start_index
+    for block in blocks:
+        kind = block.get("type")
+        if kind == "text" and block.get("text"):
+            frames.append(_frame({"type": "content_block_start", "index": index,
+                                  "content_block": {"type": "text", "text": ""}}))
+            frames.append(_frame({"type": "content_block_delta", "index": index,
+                                  "delta": {"type": "text_delta", "text": block["text"]}}))
+        elif kind == "tool_use":
+            frames.append(_frame({"type": "content_block_start", "index": index, "content_block": {
+                "type": "tool_use", "id": block.get("id"), "name": block.get("name"), "input": {}}}))
+            frames.append(_frame({"type": "content_block_delta", "index": index, "delta": {
+                "type": "input_json_delta",
+                "partial_json": json.dumps(block.get("input") or {}, ensure_ascii=False)}}))
+        else:
+            continue
+        frames.append(_frame({"type": "content_block_stop", "index": index}))
+        index += 1
+    return frames, index
+
+
 async def _quota(app: FastAPI, *, fresh: bool = False):
     """Quota, cached for `quota_ttl`, single-flight. Caches None too — a failed probe will fail
     again a second later, and re-paying seconds to rediscover that punishes the broken case."""
@@ -251,6 +353,25 @@ def _as_sse(completion: dict):
         "usage": completion.get("usage"),
     })
     yield "data: [DONE]\n\n"
+
+
+def _as_anthropic_sse(message: dict):
+    """SSE-wrap a finished Anthropic message, for a seat that cannot stream incrementally.
+    Reuses `_anthropic_block_frames` so this renders a block identically to `_stream_anthropic`'s
+    buffered path."""
+    msg_id = message.get("id") or f"msg_{uuid.uuid4().hex}"
+    yield _frame({"type": "message_start", "message": {
+        "id": msg_id, "type": "message", "role": "assistant", "model": message.get("model"),
+        "content": [], "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": (message.get("usage") or {}).get("input_tokens", 0),
+                  "output_tokens": 0}}})
+    frames, _ = _anthropic_block_frames(message.get("content") or [], 0)
+    for frame in frames:
+        yield frame
+    yield _frame({"type": "message_delta",
+                  "delta": {"stop_reason": message.get("stop_reason"), "stop_sequence": None},
+                  "usage": message.get("usage")})
+    yield _frame({"type": "message_stop"})
 
 
 def _frame(payload: dict) -> str:

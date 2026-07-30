@@ -368,7 +368,9 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         env_var=None,  # no credential of any kind — the CLI authenticates itself
         entries=CLAUDE_WHITELIST,
         supports_model_listing=False,  # the CLI is not an HTTP service; there is no GET /models
-        endpoints=("chat/completions",),
+        # The seat speaks Anthropic natively beside OpenAI (`local/cli_seat_server.py` serves both
+        # `/chat/completions` and `/messages`), so both dialects are advertised here.
+        endpoints=("chat/completions", "messages"),
         credential="none",   # the `claude` CLI authenticates itself; the grid holds nothing
         flat_rate=True,      # a personal subscription — never polled eight-wide by default
         local_seat_port=8099,

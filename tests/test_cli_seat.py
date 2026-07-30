@@ -611,3 +611,33 @@ def test_to_anthropic_message_sets_tool_use_and_stop_reason():
     assert message["stop_reason"] == "tool_use"
     assert [b["type"] for b in message["content"]] == ["tool_use"]
     assert message["usage"] == {"input_tokens": 10, "output_tokens": 4}
+
+
+# the seat reads Anthropic requests and serves /messages (Task 11)
+
+def test_an_anthropic_request_puts_the_top_level_system_in_the_system_prompt():
+    """Anthropic sends `system` as a top-level field, not a message with role=system. Read as a
+    message list it vanishes, and the model loses the caller's whole instruction set."""
+    body = {"model": "claude:sonnet",
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [{"role": "user", "content": "hi"}]}
+    prepared = cli_seat.prepare(body, "claude", wire="anthropic")
+    assert prepared.system_prompt == "You are Claude Code."
+    assert prepared.prompt == "hi"
+
+
+def test_an_anthropic_tool_result_block_is_replayed_as_text():
+    body = {"model": "claude:sonnet", "messages": [
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu1", "name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu1", "content": "SECRET"}]},
+    ]}
+    prompt = cli_seat.prepare(body, "claude", wire="anthropic").prompt
+    assert '"type": "tool_use"' in prompt
+    assert "Tool result: SECRET" in prompt
+
+
+def test_the_claude_catalog_row_declares_messages():
+    assert "messages" in api_catalog.WHITELISTS["claude"].endpoints

@@ -496,21 +496,46 @@ def build_system_prompt(messages, tools=None, protocol=None):
     return system if system.strip() else DEFAULT_SYSTEM_PROMPT
 
 
+def _has_tool_result(content):
+    """True iff `content` is an Anthropic block list carrying a `tool_result` — the lone-user-turn
+    shortcut below must not take this path, or the result vanishes with no `User:`/`Tool result:`
+    line to carry it."""
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
+
+
 def build_prompt(messages):
     """The non-system messages as one stdin prompt. Each request is a fresh process with no
     memory, so the whole transcript is replayed. A lone user turn passes through verbatim."""
     turns = [m for m in messages if m.get("role") != "system"]
     if not turns:
         raise SeatBadRequest("messages[] must contain at least one non-system message.")
-    if len(turns) == 1 and turns[0].get("role") == "user":
+    if (len(turns) == 1 and turns[0].get("role") == "user"
+            and not _has_tool_result(turns[0].get("content"))):
         return _flatten_content(turns[0].get("content"))
 
     lines = []
     for message in turns:
         role = message.get("role")
-        text = _flatten_content(message.get("content"))
+        content = message.get("content")
+        text = _flatten_content(content)
         if role == "user":
-            lines.append(f"User: {text}" if text else "User:")
+            # Anthropic's own shape: a tool result arrives as a `tool_result` block INSIDE a user
+            # message, never as a `role: "tool"` message. Rendered with the IDENTICAL wording the
+            # OpenAI `role: "tool"` branch below uses — one convention, not two — rather than
+            # "User: Tool result: …", which would be a second spelling of the same thing.
+            results = [b for b in (content if isinstance(content, list) else [])
+                       if isinstance(b, dict) and b.get("type") == "tool_result"]
+            if results:
+                for block in results:
+                    lines.append(f"Tool result: {_flatten_content(block.get('content'))}")
+                rest = _flatten_content([b for b in content if not
+                                         (isinstance(b, dict) and b.get("type") == "tool_result")])
+                if rest:
+                    lines.append(f"User: {rest}")
+            else:
+                lines.append(f"User: {text}" if text else "User:")
         elif role == "assistant":
             rendered = [f"Assistant: {text}" if text else "Assistant:"]
             # Replayed in the SAME shape the instruction asks for. They used to be replayed as
@@ -529,6 +554,17 @@ def build_prompt(messages):
                               "function": {"name": function.get("name"), "arguments": arguments}})
             if calls:
                 rendered.append(json.dumps({"tool_calls": calls}, ensure_ascii=False))
+            # Anthropic's own shape: a `tool_use` block sits IN the content list rather than in a
+            # separate `tool_calls` field. Replayed one JSON object per call — the same convention
+            # ANTHROPIC_TOOL_TEMPLATE asks the model to write — so the history and the instruction
+            # agree from the second turn on, same as the OpenAI case above.
+            for block in (content if isinstance(content, list) else []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    rendered.append(json.dumps({
+                        "type": "tool_use",
+                        "name": block.get("name"),
+                        "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                    }, ensure_ascii=False))
             lines.append("\n".join(rendered))
         elif role == "tool":
             lines.append(f"Tool result: {text}")
@@ -550,9 +586,12 @@ class PreparedRequest:
     # None when the caller sent no `tools[]`, which is what keeps a client that brought its own
     # convention (Hermes' own `<tools>` system message) getting its text back verbatim.
     tool_protocol: object = None
+    # Which wire the caller spoke — "openai" or "anthropic". Carried on the request so the server
+    # answers in the SAME wire it was asked in without re-deriving it from the body a second time.
+    wire: str = "openai"
 
 
-def prepare(body, kind, protocol=None):
+def prepare(body, kind, protocol=None, wire="openai"):
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise SeatBadRequest("messages[] is required.")
@@ -563,16 +602,27 @@ def prepare(body, kind, protocol=None):
             f"This engine does not serve model {requested!r}. "
             f"Serves: {', '.join(advertised_models(kind))}."
         )
+    resolved_protocol = protocol or (ANTHROPIC if wire == "anthropic" else OPENAI)
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
     prompt = build_prompt(messages)
     if tools:
-        prompt = f"{prompt}\n\n{(protocol or OPENAI).render(tools)}"
+        prompt = f"{prompt}\n\n{resolved_protocol.render(tools)}"
+    if wire == "anthropic":
+        # `system` is a TOP-LEVEL field on this wire, not a `role: "system"` message — reading it
+        # off `messages` (the OpenAI shape) would silently drop the caller's whole instruction set,
+        # since Anthropic never puts one there. May be a plain string or a list of text blocks;
+        # `_flatten_content` already reads both.
+        system_prompt = _flatten_content(body.get("system"))
+        system_prompt = system_prompt if system_prompt.strip() else DEFAULT_SYSTEM_PROMPT
+    else:
+        system_prompt = build_system_prompt(messages)
     return PreparedRequest(
         model=requested or f"{kind}:{model_alias}",
         model_alias=model_alias,
         prompt=prompt,
-        system_prompt=build_system_prompt(messages),
-        tool_protocol=(protocol or OPENAI) if tools else None,
+        system_prompt=system_prompt,
+        tool_protocol=resolved_protocol if tools else None,
+        wire=wire,
     )
 
 
@@ -775,6 +825,13 @@ def answer(spec, prepared, binary, timeout):
     return to_chat_completion(result, spec.kind, prepared.model, prepared.tool_protocol)
 
 
+def answer_anthropic(spec, prepared, binary, timeout):
+    """`answer`'s Anthropic twin: the same one CLI run, decoded into the `message` shape
+    `/messages` promises rather than a chat.completion."""
+    result = run_seat(spec, prepared, binary, timeout)
+    return to_anthropic_message(result, spec.kind, prepared.model, prepared.tool_protocol)
+
+
 def answer_stream(spec, prepared, binary, timeout):
     """Yield ("delta", text) as the CLI produces it, then ("done", (completion, quota|None)).
 
@@ -790,4 +847,19 @@ def answer_stream(spec, prepared, binary, timeout):
             completion = to_chat_completion(
                 result, spec.kind, prepared.model, prepared.tool_protocol)
             yield "done", (completion, quota)
+            return
+
+
+def answer_stream_anthropic(spec, prepared, binary, timeout):
+    """`answer_stream`'s Anthropic twin: identical deltas, the final event built by
+    `to_anthropic_message` instead of `to_chat_completion`."""
+    stream = stream_seat(spec, prepared, binary, timeout)
+    while True:
+        try:
+            yield "delta", next(stream)
+        except StopIteration as stop:
+            result, quota = stop.value
+            message = to_anthropic_message(
+                result, spec.kind, prepared.model, prepared.tool_protocol)
+            yield "done", (message, quota)
             return

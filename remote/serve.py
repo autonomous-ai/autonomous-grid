@@ -1913,6 +1913,11 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
     body = job.get("body") or {}
     is_stream = bool(job.get("is_stream", False))
     read_timeout = float(job.get("inference_timeout_seconds") or _DEFAULT_INFERENCE_TIMEOUT)
+    # A caller that spoke Anthropic all the way in gets answered in Anthropic all the way out: the
+    # poll payload carries which wire the request came in on, and a seat whose catalog row
+    # declares `messages` (the claude seat) is posted to THAT route instead of `chat/completions`.
+    # Any other kind never sees this flip — nothing here changes for openai/codex.
+    wire_format = job.get("wire_format") or "openai"
 
     if endpoint in _MEDIA_ENDPOINTS:
         # Try a media API handler first (e.g. Doggi). These models are routed by
@@ -2082,10 +2087,12 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
             _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
                            headers=_forward_headers(state, target, snap), api_kind=api_kind)
         elif is_stream:
-            _forward_stream(state, txn, endpoint, forward_body, read_timeout, target,
+            _forward_stream(state, txn, "messages" if wire_format == "anthropic" else endpoint,
+                            forward_body, read_timeout, target,
                             headers=_forward_headers(state, target, snap), api_kind=api_kind)
         else:
-            _forward_whole(state, txn, endpoint, forward_body, read_timeout, target,
+            _forward_whole(state, txn, "messages" if wire_format == "anthropic" else endpoint,
+                           forward_body, read_timeout, target,
                            headers=_forward_headers(state, target, snap), api_kind=api_kind)
     except Exception as exc:  # one bad job must not kill the loop
         print(f"\nJob {txn} failed: {exc!r}", file=sys.stderr)
