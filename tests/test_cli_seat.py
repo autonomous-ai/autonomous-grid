@@ -66,23 +66,37 @@ def test_single_user_turn_passes_through_verbatim():
     assert cli_seat.build_prompt([{"role": "user", "content": "hi"}]) == "hi"
 
 
-def test_multi_turn_renders_tool_calls_in_hermes_spelling():
+def test_a_replayed_turn_uses_the_shape_the_instruction_asks_for():
+    """The history and the instruction must spell a call the same way. They did not: calls were
+    replayed as Hermes `<tool_call>` tags while the instruction asked for this JSON, so from the
+    second turn on the model saw one convention and was told another."""
     prompt = cli_seat.build_prompt([
         {"role": "user", "content": "weather?"},
         {"role": "assistant", "content": "",
          "tool_calls": [{"function": {"name": "get_weather", "arguments": '{"loc":"Hanoi"}'}}]},
         {"role": "tool", "content": '{"temp":31}'},
     ])
-    assert "<tool_call>" in prompt and '"name": "get_weather"' in prompt
-    assert "<tool_response>" in prompt
+    assert '"tool_calls"' in prompt and '"name": "get_weather"' in prompt
+    # The encoded string is decoded on the way in, so the model reads an object, as it must write one.
+    assert '"arguments": {"loc": "Hanoi"}' in prompt
+    assert "Tool result:" in prompt
+    assert "<tool_call>" not in prompt
 
 
-def test_hermes_block_injected_only_for_native_tools():
+def test_the_tool_block_goes_in_the_turn_not_the_system_prompt():
+    """Measured against Claude Code's real 27 KB system prompt: appended to it, the model answered
+    "I don't have access to a Read tool"; moved to the end of the turn — the last thing it reads —
+    it emitted the call. So the system prompt stays the caller's, verbatim."""
     messages = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}]
-    assert cli_seat.build_system_prompt(messages, None) == "be brief"
-    with_tools = cli_seat.build_system_prompt(messages, [{"type": "function"}])
-    assert with_tools.startswith("be brief")
-    assert "<tool_call>" in with_tools
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    assert cli_seat.build_system_prompt(messages) == "be brief"
+
+    body = {"model": "claude:sonnet", "messages": messages}
+    assert cli_seat.prepare(body, "claude").prompt == "hi"
+    with_tools = cli_seat.prepare({**body, "tools": tools}, "claude")
+    assert with_tools.system_prompt == "be brief", "the tool block must not reach the system prompt"
+    assert with_tools.prompt.startswith("hi")
+    assert "tool_calls" in with_tools.prompt
 
 
 def test_images_are_named_not_silently_dropped():
@@ -110,11 +124,12 @@ def test_the_answer_is_returned_verbatim():
     assert done["grid_cli_seat"]["kind"] == "claude"
 
 
-def test_a_tool_protocol_only_renders():
-    """Tools go INTO the prompt; nothing reads them back out, so a protocol is one function."""
+def test_the_protocol_asks_for_the_shape_the_model_already_knows():
+    """The model is shown the OpenAI tool_calls shape rather than a bespoke one, because that is
+    what it has seen on the wire — and it is what the relay translates without a second mapping."""
     assert cli_seat.OPENAI.name == "openai"
     rendered = cli_seat.OPENAI.render([{"type": "function", "function": {"name": "f"}}])
-    assert "<tools>" in rendered and "<tool_call>" in rendered
+    assert '"tool_calls"' in rendered and '"arguments"' in rendered
 
 
 # quota gate
@@ -474,44 +489,52 @@ def test_both_execution_models_return_the_same_pair():
 # tool calls: text back into tool_calls[]
 
 def test_a_tool_call_becomes_an_openai_tool_call():
-    """The measured shape, verbatim from a real claude answer — newlines inside the tags and
-    `arguments` BEFORE `name`, which is the order the template asks for."""
-    text = '<tool_call>\n{"arguments": {"city": "Hanoi"}, "name": "get_weather"}\n</tool_call>'
+    """The shape the instruction asks for, read back into the shape the relay translates."""
+    text = ('{"tool_calls": [{"type": "function", "function": '
+            '{"name": "get_weather", "arguments": {"city": "Hanoi"}}}]}')
     prose, calls = cli_seat.parse_openai_tool_calls(text)
     assert prose == ""
     assert calls[0]["function"]["name"] == "get_weather"
     # A STRING, because the relay calls json.loads on it to build `tool_use.input`.
-    assert calls[0]["function"]["arguments"] == '{"city": "Hanoi"}'
+    assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Hanoi"}
     assert calls[0]["type"] == "function" and calls[0]["id"].startswith("call_")
 
 
+def test_arguments_are_accepted_as_an_object_or_an_encoded_string():
+    """A model writes the object; the OpenAI wire carries it encoded. Both mean the same call."""
+    for arguments in ('{"city": "Hanoi"}', '"{\\"city\\": \\"Hanoi\\"}"'):
+        text = ('{"tool_calls": [{"function": {"name": "get_weather", "arguments": '
+                + arguments + "}}]}")
+        _, calls = cli_seat.parse_openai_tool_calls(text)
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Hanoi"}
+
+
 def test_a_nested_object_argument_is_not_truncated():
-    """Regression guard on the delimiter: matching braces instead of `</tool_call>` would cut this
-    at the first `}` and produce invalid JSON for every object-valued argument."""
-    text = ('<tool_call>{"name": "write", "arguments": {"file": {"path": "a.txt", "mode": 644}}}'
-            '</tool_call>')
+    """Why the parse scans with the JSON decoder: a brace counter or a `\\{.*?\\}` pattern cuts this
+    at the first `}` and yields invalid JSON for every object-valued argument — the common case."""
+    text = ('{"tool_calls": [{"function": {"name": "write", "arguments": '
+            '{"file": {"path": "a.txt", "mode": 644}}}}]}')
     _, calls = cli_seat.parse_openai_tool_calls(text)
     assert json.loads(calls[0]["function"]["arguments"]) == {"file": {"path": "a.txt", "mode": 644}}
 
 
 def test_prose_around_a_call_is_kept_and_several_calls_are_read():
     text = ('Let me check both.\n'
-            '<tool_call>{"name": "a", "arguments": {}}</tool_call>\n'
-            'and\n'
-            '<tool_call>{"name": "b", "arguments": {"x": 1}}</tool_call>\n'
+            '{"tool_calls": [{"function": {"name": "a", "arguments": {}}},'
+            ' {"function": {"name": "b", "arguments": {"x": 1}}}]}\n'
             'done')
     prose, calls = cli_seat.parse_openai_tool_calls(text)
     assert [c["function"]["name"] for c in calls] == ["a", "b"]
     assert "Let me check both." in prose and "done" in prose
-    assert "<tool_call>" not in prose
+    assert "tool_calls" not in prose
 
 
 def test_a_malformed_block_stays_in_the_prose():
     """Never silently dropped: a half-written call is a result worth seeing, and swallowing it
     turns a visible malformation into a model that mysteriously did nothing."""
-    for broken in ('<tool_call>{"name": "a", oops}</tool_call>',
-                   '<tool_call>{"arguments": {}}</tool_call>',
-                   '<tool_call>{"name": "a"'):
+    for broken in ('{"tool_calls": [{"function": {"name": "a", oops}}]}',
+                   '{"tool_calls": [{"function": {"arguments": {}}}]}',
+                   '{"tool_calls": "not a list"}'):
         prose, calls = cli_seat.parse_openai_tool_calls(broken)
         assert calls == []
         assert prose == broken
@@ -525,7 +548,8 @@ def test_an_answer_with_no_call_is_returned_byte_for_byte():
 def test_tools_sent_means_parsed_and_no_tools_means_verbatim():
     """The one switch: `tools[]` in the request is what turns parsing on, so a client that brought
     its own convention in a system message still gets its text back untouched."""
-    raw = '<tool_call>{"name": "get_weather", "arguments": {"city": "Hanoi"}}</tool_call>'
+    raw = ('{"tool_calls": [{"function": '
+           '{"name": "get_weather", "arguments": {"city": "Hanoi"}}}]}')
     result = cli_seat.SeatResult(text=raw)
     body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "weather?"}]}
     tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
