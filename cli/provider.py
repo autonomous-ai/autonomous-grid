@@ -174,7 +174,7 @@ def cmd_join(args: argparse.Namespace) -> int:
 
 def _seat_options(args: argparse.Namespace):
     """The seat's options from the kind-agnostic `--seat-*` flags, defaulted per kind."""
-    from shared.agent.cli_seat import SeatOptions
+    from shared.agent import cli_seat
 
     kind = getattr(args, "api", None) or ""
     return cli_seat.options_from_args(args, default_port=api_catalog.local_seat_port(kind))
@@ -200,6 +200,7 @@ def _spawn_cli_seat_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int
     is resolved or stored — the CLI authenticates itself.
     """
     from shared.agent import cli_seat
+    from shared.agent.seats import seat_for
 
     kind = args.api
     spec = seat_for(kind)
