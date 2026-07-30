@@ -22130,3 +22130,64 @@ def test_a_foreign_grid_id_is_bounded_before_it_reaches_the_terminal(monkeypatch
     err = capsys.readouterr().err
     assert "\x1b" not in err, "raw escape sequences reached the terminal"
     assert len(err) < 500, f"unbounded remote payload printed ({len(err)} chars)"
+
+
+# The literal stderr the `test-windows` CI runner produced (PowerShell 5.1.26100, FullLanguage) when
+# the process-list script threw. Pinned verbatim rather than hand-written: the whole failure being
+# guarded against is that nobody had ever seen this shape, and a paraphrase would re-introduce the
+# assumption instead of testing it. Trimmed only in the middle of the second progress record.
+_REAL_CLIXML_STDERR = (
+    '#< CLIXML\n'
+    '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+    '<Obj S="progress" RefId="0"><TN RefId="0">'
+    '<T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN>'
+    '<MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV>'
+    '<AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj>'
+    '<S S="Error">ForEach-Object : Error formatting a string: Index (zero based) must be greater '
+    'than or equal to zero and less than the _x000D__x000A_</S>'
+    '<S S="Error">size of the argument list.._x000D__x000A_</S>'
+    '<S S="Error">At line:1 char:125_x000D__x000A_</S>'
+    '<S S="Error">    + FullyQualifiedErrorId : FormatError,Microsoft.PowerShell.Commands.'
+    'ForEachObjectCommand_x000D__x000A_</S></Objs>'
+)
+
+
+def test_a_powershell_failure_note_carries_the_error_not_the_clixml_preamble():
+    """PowerShell serialises its error stream as CLIXML whenever stderr is a pipe — which is always,
+    because the caller captures it. So `_first_line` used to quote the literal `#< CLIXML` preamble
+    on *every* Windows failure, and the note's entire reason for existing (telling a stopped Winmgmt
+    service apart from a corrupt repository from access denied) never worked once.
+
+    Measured, not hypothetical: this exact payload is what hid a `FormatError` that made the Windows
+    orphan sweep inert from the day it shipped, and it cost a CI round-trip to see.
+    """
+    from shared import orphan_sweep
+
+    note = orphan_sweep._first_line(_REAL_CLIXML_STDERR)
+
+    assert "CLIXML" not in note, f"the note still quotes the preamble instead of the error: {note}"
+    assert "Error formatting a string" in note, f"the real error did not survive: {note}"
+    # The progress records live in the same document and say nothing about the failure.
+    assert "Preparing modules" not in note, f"a progress record leaked into the note: {note}"
+    # `_x000D__x000A_` is CLIXML's escaping of CRLF; leaving it in prints line noise at the operator.
+    assert "_x000D_" not in note, f"CLIXML escapes reached the terminal: {note}"
+
+
+def test_a_powershell_note_still_says_something_when_the_clixml_holds_no_error_span():
+    """A truncated or unfamiliar document must degrade to the raw text, never to silence — "couldn't
+    scan" with no reason attached is the failure mode this helper exists to prevent."""
+    from shared import orphan_sweep
+
+    assert "CLIXML" in orphan_sweep._first_line("#< CLIXML\n<Objs Version=\"1.1.0.1\"></Objs>")
+    assert orphan_sweep._first_line("") == ""
+    assert orphan_sweep._first_line(None) == ""
+
+
+def test_a_plain_stderr_is_still_quoted_verbatim_and_bounded():
+    """The POSIX path (`ps`) writes plain text, and the CLIXML branch must not touch it. The 200-char
+    bound is what keeps an unbounded tool payload off the operator's terminal."""
+    from shared import orphan_sweep
+
+    assert orphan_sweep._first_line("ps: illegal option -- w") == " (ps: illegal option -- w)"
+    assert orphan_sweep._first_line("\n\n  access is denied  \n") == " (access is denied)"
+    assert len(orphan_sweep._first_line("z" * 5000)) == 200 + len(" ()")

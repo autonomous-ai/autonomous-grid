@@ -40,7 +40,9 @@ teardown is a single forced tree kill, and a visible-but-unkillable cross-user m
 from __future__ import annotations
 
 import base64
+import html
 import os
+import re
 import subprocess
 import sys
 import time
@@ -204,6 +206,15 @@ _WIN_UNREADABLE_MARKER = "<unreadable>"
 #   * A null ``CommandLine`` becomes ``_WIN_UNREADABLE_MARKER``, never a dropped row. Filtering with
 #     ``Where-Object { $_.CommandLine }`` hid every process the caller could not open from the matcher
 #     *and* from the count, which is what let a scan of a fraction of the table report itself clean.
+#   * The ``-f`` expression carries its OWN parentheses inside ``WriteLine(...)``. Within a .NET
+#     method-call argument list PowerShell reads a comma as an argument separator, never as an array
+#     constructor — so the unparenthesised form parsed as
+#     ``WriteLine(('{0} {1} {2}' -f $_.ProcessId), $_.ParentProcessId, $line)``, handing the format
+#     string one argument for three placeholders. It threw ``FormatError`` on the FIRST row, every
+#     row, on every Windows: `catch { exit 1 }` turned that into "couldn't scan", so the sweep was
+#     inert from the day it shipped and said so only in a footnote. Nothing off-Windows can catch
+#     this — the payload is an opaque string until PowerShell parses it — which is what the
+#     ``test-windows`` CI job is for.
 _WIN_PROCESS_LIST_SCRIPT = (
     "$ErrorActionPreference = 'Stop'; "
     "try { "
@@ -212,7 +223,7 @@ _WIN_PROCESS_LIST_SCRIPT = (
     "$line = if ($_.CommandLine) { "
     "(($_.CommandLine -replace '[^\\x20-\\x7E]', '?') -replace '\\s+', ' ') } "
     "else { '<unreadable>' }; "
-    "[Console]::Out.WriteLine('{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $line) }; "
+    "[Console]::Out.WriteLine(('{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $line)) }; "
     "exit 0 } catch { exit 1 }"
 )
 
@@ -406,12 +417,46 @@ def _posix_ps_output() -> str | None:
     return proc.stdout
 
 
+# PowerShell serialises its error stream as CLIXML whenever stderr is a pipe rather than a console —
+# which is *always*, here, because the caller captures it. The real message is then never the first
+# line: line one is the literal ``#< CLIXML`` preamble and line two is one long XML document. So the
+# note this module prints said `(#< CLIXML)` and nothing else, on every Windows failure, defeating
+# the entire purpose of quoting the tool's complaint. Measured: it is what hid a `FormatError` that
+# made the sweep inert from the day it shipped.
+_CLIXML_PREAMBLE = "#< CLIXML"
+_CLIXML_ERROR_SPAN = re.compile(r'<S S="Error">(.*?)</S>', re.DOTALL)
+# CLIXML escapes control characters as `_xHHHH_`; CR/LF are the only ones that appear in practice,
+# and they are what re-splits the flattened document back into readable lines.
+_CLIXML_ESCAPE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def _clixml_error_text(stderr: str) -> str:
+    """The human-readable error text carried inside a CLIXML stderr document, or ``""``.
+
+    Only the ``Error`` spans are read: the document also carries progress records ("Preparing modules
+    for first use."), and a note that quoted those would be worse than one that quoted nothing.
+    """
+    spans = _CLIXML_ERROR_SPAN.findall(stderr)
+    if not spans:
+        return ""
+    text = _CLIXML_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), "".join(spans))
+    return html.unescape(text)
+
+
 def _first_line(stderr: str | None) -> str:
     """The tool's own first line of complaint, appended to our note. Without it an operator cannot
     tell a stopped Winmgmt service from a corrupt WMI repository from access denied — three problems
-    with three different remedies, behind one identical message."""
-    line = (stderr or "").strip().splitlines()
-    return f" ({line[0][:200]})" if line else ""
+    with three different remedies, behind one identical message.
+
+    Un-CLIXML'd first (see above), and blank lines are skipped, so what lands in the note is the
+    first line that actually says something. Falls back to the raw text whenever the document holds
+    no error span — a truncated or unfamiliar payload must still print *something*.
+    """
+    text = stderr or ""
+    if text.lstrip().startswith(_CLIXML_PREAMBLE):
+        text = _clixml_error_text(text) or text
+    lines = [stripped for line in text.splitlines() if (stripped := line.strip())]
+    return f" ({lines[0][:200]})" if lines else ""
 
 
 def _win_powershell_path() -> str:
