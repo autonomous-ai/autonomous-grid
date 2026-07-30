@@ -31,10 +31,13 @@ class LaunchTarget(Protocol):
     rather than environment variables, so only ``run`` knows how a target is configured. That
     difference stays inside the target instead of leaking into the command.
 
-    ``run`` also resolves the app itself and refuses cleanly when it is absent — one call, and no
-    window in which the app can leave ``PATH`` between a separate installed-check and its use. Issue 04
-    adds the installed-check as its own member, when the install offer that must ask *before* running
-    arrives to call it.
+    ``run`` also resolves the app itself, and offers to install it when it is absent — one call, and no
+    window in which the app can leave ``PATH`` between a separate installed-check and its use.
+
+    There is deliberately **no** ``is_installed`` member, though the feature's PRD sketched one. The
+    install offer has to happen where the binary is resolved, because only a target knows its own
+    binary, its own install locations and its own installer — so a member for it would have no caller,
+    and would reopen the check-then-run gap the single call closes.
     """
 
     name: str

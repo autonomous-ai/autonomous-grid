@@ -22264,27 +22264,84 @@ def test_launch_with_no_target_lists_the_targets_and_exits_zero(monkeypatch, tmp
     assert "claude" in capsys.readouterr().out
 
 
-def _capture_launch(monkeypatch, *, binary="/usr/local/bin/claude", exit_code=0):
+def _launch_system():
+    """The one OS-facing seam module `shared/launch` acts through."""
+    from shared.launch import system
+
+    return system
+
+
+def _repo_root() -> Path:
+    """The checkout, resolved from a package rather than from the cwd — several launch tests `chdir`
+    into a temp project, and a relative path would then read nothing and pass vacuously."""
+    import shared
+
+    return Path(shared.__file__).resolve().parent.parent
+
+
+def _install_locations(monkeypatch, tmp_path):
+    """Point the two conventional Claude Code install locations at a temp home, and return them.
+
+    The two paths are spelled out here rather than read back from `claude_install`, which is the whole
+    value of the helper: they are an **external fact** about the app — verified against the strings of
+    the installed binary and the vendor's own setup documentation — so a test that asked the code under
+    test where it looks would agree with any answer it gave, order included.
+    """
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home / ".local" / "bin" / "claude", home / ".claude" / "local" / "claude"
+
+
+def _capture_launch(monkeypatch, *, binary="/usr/local/bin/claude", exit_code=0, found=(),
+                    install_code=0, interactive=False, confirm=False):
     """Substitute the one OS-facing seam a launch acts through.
 
     Returns a dict filled with the child's ``argv`` and ``env`` — the pair that *is* this feature's
-    contract — plus ``looked_for``, the executable names resolution was asked about. Patching the
-    module attributes (not a `subprocess` global) keeps every other subprocess in the suite real.
-    """
-    from shared.launch import system
+    contract — plus ``looked_for``, every candidate resolution was asked about **in order**, and
+    ``spawns``, every (argv, env) pair in order (an install spawns twice). Patching the module
+    attributes (not a `subprocess` global) keeps every other subprocess in the suite real.
 
-    seen = {"looked_for": []}
+    ``binary`` is what `PATH` answers (``None`` = not on `PATH`); ``found`` is the set of fallback
+    install locations that exist. Stubbing the location check is **required even on the happy path**:
+    left real it would consult the developer's own `~/.local/bin/claude` and decide a test that is
+    about the grid. The TTY pair is stubbed for the same reason and one more: left real, a test that
+    reaches the install offer would read the suite's own stdin.
+    """
+    system = _launch_system()
+    # A mutable set, not a snapshot: an install test's fake installer adds to it, which is how "the
+    # binary that wasn't there is there now" is expressed without touching a real filesystem.
+    seen = {"looked_for": [], "spawns": [], "asked": [], "found": {str(path) for path in found}}
 
     def fake_find(name):
         seen["looked_for"].append(name)
         return binary
 
+    def fake_executable_at(path):
+        seen["looked_for"].append(str(path))
+        # (runnable path, why we couldn't tell) — a stub location is only ever one or the other.
+        return (str(path), None) if str(path) in seen["found"] else (None, None)
+
     def fake_spawn(argv, env):
         seen["argv"], seen["env"] = list(argv), dict(env)
-        return exit_code
+        seen["spawns"].append((list(argv), dict(env)))
+        # Which spawn is the installer is decided by whether an offer was actually *accepted*, not by
+        # whether `PATH` missed. Keying off `binary is None` would call the app's own launch an
+        # installer whenever the app was found in a fallback location — the exact path issue 04 adds —
+        # and silently hand back `install_code` in place of the app's exit code.
+        installing = bool(seen["asked"]) and confirm and len(seen["spawns"]) == 1
+        return install_code if installing else exit_code
+
+    def fake_confirm(question):
+        seen["asked"].append(question)
+        return confirm
 
     monkeypatch.setattr(system, "find_executable", fake_find)
+    monkeypatch.setattr(system, "executable_at", fake_executable_at)
     monkeypatch.setattr(system, "spawn", fake_spawn)
+    monkeypatch.setattr(system, "interactive", lambda: interactive)
+    monkeypatch.setattr(system, "confirm", fake_confirm)
     return seen
 
 
@@ -22815,18 +22872,506 @@ def test_launch_unknown_target_names_it_and_lists_the_available_ones(monkeypatch
     assert "login" not in message.lower(), f"a typo must not be reported as a sign-in problem: {message}"
 
 
-def test_launch_claude_when_the_binary_is_absent_is_a_clean_actionable_error(monkeypatch, tmp_path):
-    """No Claude Code on this machine is a clean error naming the app and where to get it — not a
-    traceback, and not a spawn of nothing. (Issue 04 turns this into an offer to install it.)"""
+def test_launch_stops_at_the_first_hit_and_prefers_path_over_the_install_locations(monkeypatch,
+                                                                                   tmp_path):
+    """`PATH` is asked first and, when it answers, nothing else is looked at.
+
+    Order is the decision, not an accident of implementation. A `PATH` entry can resolve to a
+    third-party wrapper rather than the vendor's own install, and that is **accepted**: it is what the
+    user's own `PATH` says they want, and second-guessing it would make `grid launch` disagree with
+    every other way they start the app. Searching the install locations first would silently overrule
+    them; searching them as well would spend two stat calls to reach the same answer.
+    """
     _seed_launchable_grid(monkeypatch, tmp_path)
-    seen = _capture_launch(monkeypatch, binary=None)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary="/opt/wrapper/claude")
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == ["/opt/wrapper/claude"], "the PATH answer wins, wrapper or not"
+    assert seen["looked_for"] == ["claude"], (
+        f"a PATH hit must end the search, not merely start it: {seen['looked_for']}"
+    )
+
+
+def test_launch_finds_claude_code_in_the_native_installers_location_when_path_misses(monkeypatch,
+                                                                                     tmp_path):
+    """`PATH` is not the whole answer, and the gap is the ordinary case rather than an exotic one.
+
+    The native installer puts its launcher at `~/.local/bin/claude` and adds that directory to `PATH`
+    by editing a shell rc file — which never reaches a shell that was already running. So the very
+    first `grid launch claude` after an install, in the terminal the install ran in, resolves nothing
+    on `PATH` while a perfectly good binary sits in the conventional place.
+
+    The app's own exit code must still come back through this path — it is a launch like any other.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    native, _legacy = _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, found=[native], exit_code=5)
+
+    assert cli.main(["launch", "claude"]) == 5, "the app's exit code, not an installer's"
+    assert seen["argv"] == [str(native)], f"the found binary must be the one spawned: {seen['argv']}"
+
+
+def test_launch_falls_back_to_the_legacy_install_location_only_after_the_native_one(monkeypatch,
+                                                                                    tmp_path):
+    """The older `~/.claude/local/claude` install is searched too, and searched **second**.
+
+    Both can exist at once on a machine that installed the old way and later ran the native installer,
+    and the native one is the copy that updates itself — so a box with both must get that one. This
+    asserts the order from the losing side, which the native-location test above cannot: there, an
+    implementation that checked the legacy path first would still find nothing there and pass.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    native, legacy = _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, found=[legacy])
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == [str(legacy)]
+    assert seen["looked_for"] == ["claude", str(native), str(legacy)], (
+        f"PATH, then native, then legacy — in that order: {seen['looked_for']}"
+    )
+
+
+def test_launch_with_no_binary_and_no_terminal_prints_the_command_and_never_prompts(monkeypatch,
+                                                                                    tmp_path):
+    """CI, a cron job, a script: nobody is there to answer, so asking is the one thing that must not
+    happen. A prompt written to a pipe blocks until the run's own timeout kills it, and the operator
+    reads a hang rather than the single line that would have fixed it.
+
+    So the install command is *printed* and the command exits non-zero: automation fails with an
+    instruction. (This replaces the issue-02 test that made a missing binary a plain terminal error —
+    that rule is the one this slice overturns.)
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=False)
 
     with pytest.raises(SystemExit) as exc:
         cli.main(["launch", "claude"])
+
     message = str(exc.value)
     assert "Claude Code" in message
-    assert "claude.com" in message, f"the message must say where to get it: {message}"
-    assert "argv" not in seen, "nothing may be spawned when the app was never found"
+    assert "https://claude.ai/install.sh" in message, (
+        f"the command to run must be printed in full, not described: {message}"
+    )
+    assert seen["asked"] == [], "a machine with no terminal must never be asked a question"
+    assert seen["spawns"] == [], "nothing may run when there is no app and no consent"
+
+
+def test_launch_asks_before_installing_and_a_declined_offer_exits_cleanly(monkeypatch, tmp_path):
+    """Saying no is a supported answer, not a failure to handle.
+
+    Two halves. The question must actually be asked — an install that just happens is this command
+    downloading and running a vendor script on someone's machine without consent. And the refusal must
+    be a clean non-zero exit: non-zero because nothing was launched and a script must be able to tell,
+    clean because a traceback would read as a bug in `grid` rather than as the answer the user gave.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    assert seen["asked"], "an install must be offered, never performed unasked"
+    assert "Claude Code" in seen["asked"][0], f"the question must name the app: {seen['asked'][0]}"
+    assert exc.value.code != 0, "nothing launched, so the exit code must say so"
+    assert seen["spawns"] == [], "a declined install must run nothing at all"
+
+
+def _raiser(exception):
+    def raise_it(*args, **kwargs):
+        raise exception
+
+    return raise_it
+
+
+def test_launch_treats_ctrl_d_or_ctrl_c_at_the_install_prompt_as_a_decline(monkeypatch, tmp_path):
+    """The two ways a user leaves a prompt without typing a word.
+
+    `input()` raises `EOFError` on Ctrl-D — and on the far more common accident of a stdin that looked
+    interactive but had nothing behind it — and `KeyboardInterrupt` on Ctrl-C. Both are answers, and
+    both would otherwise escape as a traceback from inside the launcher, which is exactly the shape a
+    user reports as "grid crashed" when what they did was decline.
+
+    Asserted against the real `system.confirm`, because the whole behaviour lives there; the stub the
+    other tests use would happily hide it. It has to be captured **before** `_capture_launch` installs
+    that stub — reading it back afterwards returns the stub, and restoring that over itself makes the
+    test pass while proving nothing.
+    """
+    real_confirm = _launch_system().confirm
+
+    for interrupt in (EOFError, KeyboardInterrupt):
+        _seed_launchable_grid(monkeypatch, tmp_path)
+        _install_locations(monkeypatch, tmp_path)
+        _capture_launch(monkeypatch, binary=None, interactive=True)
+        monkeypatch.setattr(_launch_system(), "confirm", real_confirm)
+        monkeypatch.setattr("builtins.input", _raiser(interrupt))
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["launch", "claude"])
+        assert exc.value.code != 0, f"{interrupt.__name__} at the prompt must not exit 0"
+        assert "Not installing" in str(exc.value), (
+            f"{interrupt.__name__} is a decline, so it must read as one: {exc.value}"
+        )
+
+
+def test_launch_installs_then_launches_in_the_same_invocation(monkeypatch, tmp_path):
+    """One confirmation, and the user is in Claude Code on their grid — the whole promise of the offer.
+
+    The load-bearing detail is *where* the re-resolve looks. The installer puts its launcher in
+    `~/.local/bin` and appends a `PATH` line to a shell rc file, and neither of those reaches a process
+    that is already running — so `PATH` is still exactly as stale after a successful install as it was
+    before, and this is the *ordinary* case, not an edge one. A re-resolve that asked `PATH` alone
+    would tell a user who just watched an install succeed that the app is not installed.
+
+    So `found` here deliberately stays empty until the installer plants the launcher.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    native, _legacy = _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
+
+    def install_then_land(argv, env):
+        seen["spawns"].append((list(argv), dict(env)))
+        seen["argv"], seen["env"] = list(argv), dict(env)
+        if len(seen["spawns"]) == 1:  # the installer: it plants the launcher, PATH untouched
+            seen["found"].add(str(native))
+        return 0
+
+    monkeypatch.setattr(_launch_system(), "spawn", install_then_land)
+
+    assert cli.main(["launch", "claude"]) == 0
+    installer, app = seen["spawns"]
+    assert installer[0][:2] == ["/bin/bash", "-c"] and len(installer[0]) == 3, installer[0]
+    script = installer[0][2]
+    assert "https://claude.ai/install.sh" in script, f"the vendor's own installer: {script}"
+    # Two guards on the vendor's line, neither of which changes which script runs. Asserted because
+    # both close a measured hole: `-L` without `--proto '=https'` can be redirected down to plain
+    # HTTP, and without `pipefail` a failed `curl` feeds `bash` an empty script that exits 0 — so the
+    # install "succeeds" having done nothing.
+    assert "--proto '=https'" in script, f"a redirect must not be able to leave HTTPS: {script}"
+    assert "set -o pipefail" in script, f"a failed download must not read as a success: {script}"
+    assert app[0] == [str(native)], f"then the freshly installed app, in one invocation: {app[0]}"
+
+
+def test_launch_hands_the_installer_no_grid_credential(monkeypatch, tmp_path):
+    """The installer pipes a script fetched over the network into a shell. Whatever else that is, it
+    must not be a thing holding the user's grid bearer token.
+
+    Nothing needs it — the installer talks to the vendor, never to the grid — so handing it over would
+    be a credential exposure bought for nothing. It holds today only because the environment block is
+    built after this point; a later reorder could give it away silently, which is what this pins.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path, access_token="SECRET-GRID-TOKEN")
+    native, _legacy = _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
+
+    def install_then_land(argv, env):
+        seen["spawns"].append((list(argv), dict(env)))
+        if len(seen["spawns"]) == 1:
+            seen["found"].add(str(native))
+        return 0
+
+    monkeypatch.setattr(_launch_system(), "spawn", install_then_land)
+
+    assert cli.main(["launch", "claude"]) == 0
+    installer_env = seen["spawns"][0][1]
+    leaked = [key for key, value in installer_env.items() if "SECRET-GRID-TOKEN" in str(value)]
+    assert leaked == [], f"the installer must carry no grid credential: {leaked}"
+    # The inherited environment and nothing else. Stated as equality rather than as "no ANTHROPIC_ key"
+    # because the launcher does not own that namespace: a developer running this suite from inside a
+    # `grid launch claude` session already has those variables, and an absence assertion would fail on
+    # their machine for a reason that has nothing to do with the code.
+    assert installer_env == dict(os.environ), "the installer gets the inherited environment, verbatim"
+    # ... while the app that follows it does get the grid's, so this is a real separation and not an
+    # assertion two empty environments would satisfy.
+    assert seen["spawns"][1][1]["ANTHROPIC_AUTH_TOKEN"] == "SECRET-GRID-TOKEN"
+
+
+def test_launch_stops_when_the_installer_fails_and_says_what_failed(monkeypatch, tmp_path):
+    """An installer that failed has left no app, so continuing would spawn nothing and report it as a
+    launch. The exit code is named because it is the only detail that separates "no network" from
+    "out of disk" from "the vendor's script rejected this platform" — the installer's own output has
+    already scrolled past by the time the user reads this line.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True, install_code=7)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    assert "7" in str(exc.value), f"the failure must be named, not summarised: {exc.value}"
+    assert len(seen["spawns"]) == 1, "the installer ran; nothing else may have"
+
+
+def test_launch_names_claude_code_when_the_installer_cannot_even_start(monkeypatch, tmp_path):
+    """A `/bin/bash` that is missing or unexecutable — a minimal container, a locked-down image — makes
+    `spawn` raise its own error, which names `argv[0]` and nothing else.
+
+    Left alone, the *worst* failure in this function gets its least useful message: "Could not start
+    /bin/bash: No such file or directory" says nothing about Claude Code, nothing about an installer,
+    and gives no next step, while every other branch here names all three.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
+
+    def cannot_exec(argv, env):
+        raise SystemExit(f"Could not start {argv[0]}: [Errno 2] No such file or directory")
+
+    monkeypatch.setattr(_launch_system(), "spawn", cannot_exec)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    message = str(exc.value)
+    assert "Claude Code" in message, f"the app must be named: {message}"
+    assert "https://claude.ai/install.sh" in message, f"and the way out given: {message}"
+    assert "/bin/bash" in message, "without losing the underlying reason"
+    assert seen["spawns"] == []
+
+
+def test_launch_says_to_open_a_new_shell_when_an_install_lands_somewhere_unsearched(monkeypatch,
+                                                                                    tmp_path):
+    """The installer reported success and still nothing resolves — a real state, not a paranoid one:
+    a package manager or a `CLAUDE_INSTALL_*` override can put the binary somewhere neither `PATH` nor
+    the two conventional locations reach.
+
+    Silence here would be the worst outcome available, because the previous line on screen says the
+    install succeeded. So it says exactly that, and names the next thing worth trying.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    message = str(exc.value)
+    assert "new shell" in message, f"the likeliest fix must be named: {message}"
+    assert len(seen["spawns"]) == 1, "the installer ran, and no app was spawned after it"
+
+
+def test_launch_never_offers_an_install_for_a_grid_that_could_not_run_the_app(monkeypatch, tmp_path):
+    """Order between the two refusals, and it only shows up on the machine that has neither.
+
+    Offering first would talk a user through downloading and installing an agent — minutes, and a
+    permanent change to their machine — and only then tell them their grid cannot run it. The grid's
+    models were already read before the target was called, so checking them first costs nothing;
+    installing first costs everything it takes to undo.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path, models=["glm-5.2"])
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    assert "claude:opus" in str(exc.value), f"the grid is what failed, so name it: {exc.value}"
+    assert seen["asked"] == [], "nobody may be offered an app their grid cannot run"
+    assert seen["spawns"] == []
+
+
+def test_launch_on_windows_prints_the_powershell_installer_instead_of_running_it(monkeypatch,
+                                                                                tmp_path):
+    """The vendor's shell installer refuses Windows itself — its own `MINGW*|MSYS*|CYGWIN*` branch says
+    "Windows is not supported by this script" — and Windows has a separate PowerShell one.
+
+    Running that is deliberately not built: it would be a second remote-script-execution path that only
+    the `test-windows` job could ever exercise end to end. Windows therefore takes the same
+    print-and-exit branch a machine with no terminal takes, so it costs no code of its own — but the
+    line it prints has to be the *PowerShell* one, or the instruction is worse than useless. The prompt
+    must not appear even though a terminal is attached: there is nothing behind a yes.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    _install_locations(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
+
+    from shared.launch import claude_install
+
+    monkeypatch.setattr(claude_install.platform, "system", lambda: "Windows")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    message = str(exc.value)
+    assert "irm https://claude.ai/install.ps1 | iex" in message, (
+        f"a Windows user needs the Windows command: {message}"
+    )
+    assert "install.sh" not in message, "the bash installer refuses Windows; naming it would misdirect"
+    assert seen["asked"] == [], "no point asking a question whose yes we cannot honour"
+    assert seen["spawns"] == []
+
+
+def test_launch_only_accepts_a_runnable_file_at_an_install_location(tmp_path):
+    """The one piece of the OS seam with logic of its own, so the one piece worth exercising directly:
+    every launch test above substitutes `executable_at`, which would leave this unproven entirely.
+
+    All three negatives are shapes a real home produces. `~/.claude/local` **is** a directory, so a
+    `claude` inside it being a directory too is a plausible accident rather than a contrived one; a
+    non-executable file is what a half-finished download leaves; and a dangling symlink is what an
+    uninstall leaves when the launcher outlives the version it pointed into. Each must read as "not
+    here" and let the next candidate be tried — never as a hit that `spawn` then fails on, and never as
+    an exception that ends a launch which had somewhere else to look.
+    """
+    system = _launch_system()
+
+    runnable = tmp_path / "claude"
+    runnable.write_text("#!/bin/sh\n")
+    runnable.chmod(0o755)
+    assert system.executable_at(runnable) == (str(runnable), None)
+
+    not_executable = tmp_path / "not-executable"
+    not_executable.write_text("#!/bin/sh\n")
+    not_executable.chmod(0o644)
+    assert system.executable_at(not_executable) == (None, None)
+
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+    directory.chmod(0o755)
+    assert system.executable_at(directory) == (None, None), "+x on a directory means traverse"
+
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "gone")
+    assert system.executable_at(dangling) == (None, None)
+
+    assert system.executable_at(tmp_path / "never-existed") == (None, None)
+
+    # ... and the one shape that is NOT "not here": an obstacle. Reported, so a caller can say the
+    # search was incomplete instead of concluding the app is missing.
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "claude").write_text("#!/bin/sh\n")
+    blocked.chmod(0o000)
+    try:
+        found, reason = system.executable_at(blocked / "claude")
+    finally:
+        blocked.chmod(0o755)
+    assert found is None and reason == "Permission denied", (found, reason)
+
+
+def test_launch_says_which_install_location_it_could_not_check(monkeypatch, tmp_path, capsys):
+    """"Couldn't look" is a different fact from "nothing there", and only one of them is "isn't
+    installed".
+
+    `Path.is_file()` hides ENOENT/ENOTDIR/ELOOP internally but **not** EACCES, so a `~/.local/bin`
+    whose traverse bit is stripped raises `PermissionError` here. Folding that into "not found" tells a
+    user who *has* Claude Code that they do not, and then offers to install it — an install that will
+    hit the same wall and fail with a vendor error about a path we never mentioned.
+
+    The search still continues to the next candidate, which is why this cannot simply raise: one
+    unreadable location must not cost the user a binary sitting in the other one.
+    """
+    real_executable_at = _launch_system().executable_at  # before the stub replaces it
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    native, legacy = _install_locations(monkeypatch, tmp_path)
+    for path in (native, legacy):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+    native.parent.chmod(0o000)  # the app is really there; we just cannot traverse to it
+    try:
+        seen = _capture_launch(monkeypatch, binary=None)
+        monkeypatch.setattr(_launch_system(), "executable_at", real_executable_at)
+
+        assert cli.main(["launch", "claude"]) == 0, "the other location still answers"
+    finally:
+        native.parent.chmod(0o755)
+
+    assert seen["spawns"], "an unreadable location must not stop a launch that had another candidate"
+    warning = capsys.readouterr().err
+    assert str(native) in warning and "Permission denied" in warning, (
+        f"the location we could not check must be named, with why: {warning}"
+    )
+
+
+def test_launch_does_not_claim_to_have_checked_locations_it_never_resolved(monkeypatch, tmp_path):
+    """A container running as a UID with no passwd entry and no `HOME` has no resolvable home, so the
+    two conventional locations cannot even be named — the same failure `claude._settings_paths` already
+    handles by reporting it.
+
+    Returning an empty list there is not merely unreported: it makes the refusal *false*. The message
+    says no `claude` turned up "in either place it installs to", when neither place was ever looked at.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None)
+
+    def no_home(cls):
+        raise RuntimeError("Could not determine home directory")
+
+    monkeypatch.setattr(Path, "home", classmethod(no_home))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    message = str(exc.value)
+    assert "home directory" in message, f"the reason the locations are unknown must be said: {message}"
+    assert seen["spawns"] == []
+
+
+def test_launch_refuses_to_search_install_locations_under_a_relative_home(monkeypatch, tmp_path):
+    """`Path.home()` returns whatever `HOME` says, and `HOME=.` makes it **relative** — verified, not
+    theorised. The two candidates would then resolve against the current directory, so a repository
+    that ships `.local/bin/claude` and any wrapper that scopes `HOME` to a relative value (a `.envrc`,
+    a Makefile target, a naive devcontainer sandbox) would get its own binary executed — with the
+    grid's `ANTHROPIC_AUTH_TOKEN` in its environment.
+
+    A relative home is never a real home, so it is refused rather than searched, and reported rather
+    than silently narrowed.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    planted = Path.cwd() / ".local" / "bin" / "claude"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\n")
+    planted.chmod(0o755)
+    real_executable_at = _launch_system().executable_at  # captured before the stub replaces it
+    seen = _capture_launch(monkeypatch, binary=None)
+    monkeypatch.setattr(_launch_system(), "executable_at", real_executable_at)
+    monkeypatch.setenv("HOME", ".")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path(".")))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    assert seen["spawns"] == [], "a binary found under a relative home must never be executed"
+    assert "home directory" in str(exc.value)
+
+
+def test_launch_pins_no_claude_code_version_and_no_checksum():
+    """ADR 0028 rejected the shape `shared/agent/codex_installer` uses — a pinned, SHA-256-verified
+    binary under the Grid home — for Claude Code specifically.
+
+    It fits Codex because Codex is a static release asset. Claude Code manages its own versions, so a
+    pin here would make this repo the owner of a number it does not control, and would quietly ship a
+    stale agent to everyone who installed through `grid launch`. The vendor's own installer already
+    verifies what it downloads; that ownership stays with the vendor.
+
+    Asserted structurally rather than by review, because the tempting way to write this feature is
+    exactly the rejected one, and it is a whole file's worth of code before anyone notices.
+    """
+    import re
+
+    for path in _repo_root().joinpath("shared/launch").glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        assert not re.search(r"[\"'][0-9a-f]{64}[\"']", source), f"a SHA-256 pin in {path}"
+        assert not re.search(r"[\"']v?\d+\.\d+\.\d+[\"']", source), f"a pinned version in {path}"
+
+
+def test_launch_left_the_providers_own_tty_helpers_alone():
+    """The install prompt needed an interactive-check and a confirm, and `cli/provider.py` already had
+    a private pair. Consolidating them is explicitly out of scope for this feature: `shared/launch`
+    cannot import `cli`, so it would mean moving the provider's pair into `shared/` and re-pointing its
+    callers — a change to the join path, made in a slice about launching an app.
+
+    So the duplication is deliberate, recorded in a comment beside the new pair, and pinned here: the
+    provider keeps its own, and this test fails if a later tidy-up quietly takes them away.
+    """
+    root = _repo_root()
+    provider = root.joinpath("cli/provider.py").read_text(encoding="utf-8")
+    assert "def _interactive()" in provider and "def _confirm(" in provider
+    launch_system = root.joinpath("shared/launch/system.py").read_text(encoding="utf-8")
+    assert "cli/provider.py" in launch_system, "the duplication must be flagged where it is duplicated"
 
 
 def test_launch_claude_prints_one_line_naming_the_grid_and_model_before_spawning(monkeypatch, tmp_path, capsys):

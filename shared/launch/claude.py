@@ -15,14 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from . import system
+from . import claude_install, system
+from .claude_install import BINARY, INSTALL_URL  # noqa: F401  (re-exported: the app's own identity)
 from .target import GridSession
-
-BINARY = "claude"
-
-# Where a user without the app is sent. The vendor's own page, never a repackaged copy — and no pinned
-# version anywhere, because Claude Code manages its own (ADR 0028).
-INSTALL_URL = "https://claude.com/claude-code"
 
 # The model each Claude Code tier resolves to on a grid. THE one constant: the single site a later
 # discovery slice replaces, so no other module may name these models (a test enforces it). The
@@ -263,14 +258,9 @@ class ClaudeCode:
         # cannot serve the required tiers is a refusal here, not an API error at the first prompt.
         tiers = _resolve_tiers(session)
         # Resolved here rather than checked by the caller first: one call, no window in which the app
-        # can leave PATH between a check and its use. Issue 04 widens this to the two conventional
-        # install locations and turns the refusal below into an offer to install.
-        binary = system.find_executable(BINARY)
-        if binary is None:
-            raise SystemExit(
-                f"{self.label} isn't installed, or isn't on your PATH (looked for {BINARY!r}). "
-                f"Install it from {INSTALL_URL}, then run `grid launch {self.name}` again."
-            )
+        # can leave PATH between a check and its use — which is also why `LaunchTarget` has no separate
+        # installed-check member for the offer below to sit behind.
+        binary = claude_install.resolve_or_install(self.label)
         # After the binary check, so a machine without the app gets one clean error rather than a
         # preamble about tiers it will never use.
         if tiers.remapped:
