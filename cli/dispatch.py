@@ -9,7 +9,9 @@ guidance when run in local mode — the mirror image of the remote stub.
 
 `AGNOSTIC`, `REMOTE_HANDLERS`, and `REMOTE_ONLY` must together classify *every* registered
 command — a test asserts this so a future command can never silently run local code in remote
-mode (nor remote code in local mode).
+mode (nor remote code in local mode). `REMOTE_ONLY` maps each of its commands to the *reason*
+its local-mode gate gives, because "sign in" is not why every remote-only command needs remote
+mode; `None` takes the sign-in default.
 """
 from __future__ import annotations
 
@@ -91,15 +93,36 @@ REMOTE_HANDLERS = {
 }
 
 
+# The purpose clause completing "Run `grid mode remote` (or pass --remote) …" for a command that
+# registers no reason of its own — every command below today, all gated because they need a
+# signed-in account.
+_DEFAULT_LOCAL_GATE_REASON = "to sign in."
+
 # Remote-only commands: they run their real handlers in remote mode and are gated with
 # guidance in local mode — the mirror image of ``remote_stub`` for the GATED commands.
-REMOTE_ONLY = frozenset({"login", "logout", "members", "sync", "price", "router"})
+#
+# command -> why switching to remote mode is what this user wants, or ``None`` for the default
+# above. Sign-in is not every command's reason: a command gated for some other reason (a local grid
+# not serving the dialect an app speaks, say) registers its own. A value completes the sentence in
+# ``local_stub``, so it reads as a purpose clause and carries its own final period; the
+# `grid mode remote` signpost stays in the fixed part, where no later command can drop it.
+REMOTE_ONLY: dict[str, str | None] = {
+    "login": None,
+    "logout": None,
+    "members": None,
+    "sync": None,
+    "price": None,
+    "router": None,
+}
 
 
 def local_stub(command: str | None) -> NoReturn:
+    # ``or``, not ``is None``: a registered reason that is empty is a coding error, and today's
+    # sentence is a better thing to print than a sentence that stops mid-air.
+    reason = REMOTE_ONLY.get(command) or _DEFAULT_LOCAL_GATE_REASON
     raise SystemExit(
         f"`grid {command}` is a remote-mode command. Run `grid mode remote` (or pass --remote) "
-        "to sign in."
+        f"{reason}"
     )
 
 

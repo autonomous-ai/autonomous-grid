@@ -10745,6 +10745,60 @@ def test_every_command_is_classified_for_dispatch():
     assert not unclassified, f"unclassified commands: {unclassified}"
 
 
+def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkeypatch, tmp_path):
+    """Every remote-only command that registers no reason of its own keeps today's sentence.
+
+    All six commands the gate guards today are gated because they need a signed-in account, so
+    "to sign in." is their reason and the message must not move by a byte. A command whose reason
+    is *not* sign-in registers its own and is covered by its own test instead.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    argvs = {
+        "login": ["login"],
+        "logout": ["logout"],
+        "sync": ["sync"],
+        "members": ["members", "list"],
+        "price": ["price", "show"],
+        "router": ["router", "status"],
+    }
+    # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
+    # *and* skipped by the `is None` filter below — the one state that is invisible in both
+    # directions, so it is refused here rather than left to be discovered in a transcript.
+    assert all(r is None or r.strip() for r in dispatch.REMOTE_ONLY.values()), \
+        f"empty gate reason(s): {[c for c, r in dispatch.REMOTE_ONLY.items() if r is not None and not r.strip()]}"
+    defaulted = {c for c, reason in dispatch.REMOTE_ONLY.items() if reason is None}
+    assert defaulted, "nothing takes the default reason any more: delete this lock, don't let it pass vacuously"
+    assert defaulted <= set(argvs), f"no argv here for defaulted command(s): {defaulted - set(argvs)}"
+
+    for command in sorted(defaulted):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argvs[command])
+        assert str(exc.value) == (
+            f"`grid {command}` is a remote-mode command. "
+            "Run `grid mode remote` (or pass --remote) to sign in."
+        )
+
+
+def test_local_gate_prints_a_commands_own_reason_when_it_registers_one(monkeypatch, tmp_path):
+    """A remote-only command can register its own reason, and that reason is what the user sees.
+
+    Driven through an existing command with a substituted registry rather than a new command: this
+    slice adds no command and changes no classification (`grid launch`, whose reason is the Anthropic
+    Messages dialect, is a later slice). The `grid mode remote` signpost lives in the fixed part of
+    the sentence, so it must survive a custom reason.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    monkeypatch.setattr(dispatch, "REMOTE_ONLY", {**dispatch.REMOTE_ONLY, "price": "to reach Mars."})
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["price", "show"])
+
+    assert str(exc.value) == (
+        "`grid price` is a remote-mode command. "
+        "Run `grid mode remote` (or pass --remote) to reach Mars."
+    )
+
+
 def test_active_selection_flows_through_select_grid(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     runtime.init_grid_config(name="home", port=8090)
