@@ -433,6 +433,50 @@ def parse_openai_tool_calls(text):
 OPENAI = ToolProtocol(name="openai", render=render_openai_tools, parse=parse_openai_tool_calls)
 
 
+# Anthropic's own shape: one `tool_use` block instead of an array of `tool_calls`. Kept as a
+# second, independent protocol rather than a translation of OPENAI's — a seat serving `/messages`
+# natively should never need a round trip through the OpenAI shape to get there.
+ANTHROPIC_TOOL_TEMPLATE = """These tools are available to you:
+{tools_json}
+
+To use one, reply with a JSON object in exactly this shape and nothing else:
+{{"type": "tool_use", "name": <tool-name>, "input": {{<input-object>}}}}
+
+Emit one object per call. Reply with plain text instead whenever no tool is needed."""
+
+
+def render_anthropic_tools(tools):
+    block = ANTHROPIC_TOOL_TEMPLATE.format(tools_json=json.dumps(tools, ensure_ascii=False))
+    return f"{block}\n\n{TOOL_DELEGATION_NOTE}"
+
+
+def parse_anthropic_tool_uses(text):
+    """Answer text -> `(prose, tool_use blocks)`. Same scan as the OpenAI parse; only the keys
+    differ. An object that is not a usable call is LEFT WHERE IT IS — a half-written call is a
+    result worth seeing, and dropping it turns a visible malformation into a model that
+    mysteriously did nothing."""
+    calls, prose_parts, cursor = [], [], 0
+    for start, end, value in _json_objects(text):
+        if not isinstance(value, dict) or value.get("type") != "tool_use":
+            continue
+        name = value.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        prose_parts.append(text[cursor:start])
+        cursor = end
+        payload = value.get("input")
+        calls.append({"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                      "name": name, "input": payload if isinstance(payload, dict) else {}})
+    if not calls:
+        return text, []
+    prose_parts.append(text[cursor:])
+    return "".join(prose_parts).strip(), calls
+
+
+ANTHROPIC = ToolProtocol(name="anthropic", render=render_anthropic_tools,
+                         parse=parse_anthropic_tool_uses)
+
+
 def build_system_prompt(messages, tools=None, protocol=None):
     """The caller's system messages, verbatim.
 
@@ -696,6 +740,28 @@ def to_chat_completion(result, kind, model, protocol=None):
             "num_turns": result.num_turns,
             "session_id": result.session_id,
         },
+    }
+
+
+def to_anthropic_message(result, kind, model, protocol=None):
+    """The Anthropic `message` shape, built directly rather than via a chat.completion the relay
+    would have to convert back."""
+    text, calls = result.text, []
+    if protocol is not None and getattr(protocol, "parse", None):
+        text, calls = protocol.parse(result.text)
+    content = ([{"type": "text", "text": text}] if text else []) + calls
+    return {
+        "id": f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": "tool_use" if calls else "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": result.input_tokens, "output_tokens": result.output_tokens},
+        "grid_cli_seat": {"kind": kind, "total_cost_usd": result.cost_usd,
+                          "duration_ms": result.duration_ms, "num_turns": result.num_turns,
+                          "session_id": result.session_id},
     }
 
 

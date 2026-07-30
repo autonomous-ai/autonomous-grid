@@ -566,3 +566,38 @@ def test_tools_sent_means_parsed_and_no_tools_means_verbatim():
     assert plain["choices"][0]["message"]["content"] == raw
     assert "tool_calls" not in plain["choices"][0]["message"]
     assert plain["choices"][0]["finish_reason"] == "stop"
+
+
+# tool calls: Anthropic's own shape, spoken beside OpenAI's
+
+def test_an_anthropic_tool_use_is_read_back():
+    """Same scan as the OpenAI parse — `_json_objects` is reused — differing only in which keys
+    carry the call."""
+    text = '{"type": "tool_use", "name": "Read", "input": {"file_path": "data.txt"}}'
+    prose, calls = cli_seat.parse_anthropic_tool_uses(text)
+    assert prose == ""
+    assert calls[0]["name"] == "Read"
+    assert calls[0]["input"] == {"file_path": "data.txt"}
+    assert calls[0]["id"].startswith("toolu_")
+
+
+def test_an_anthropic_answer_with_no_call_is_returned_byte_for_byte():
+    text = "  Just talking. Braces { } and a < sign.  "
+    assert cli_seat.parse_anthropic_tool_uses(text) == (text, [])
+
+
+def test_a_malformed_anthropic_block_stays_in_the_prose():
+    broken = '{"type": "tool_use", "input": {}}'
+    prose, calls = cli_seat.parse_anthropic_tool_uses(broken)
+    assert calls == []
+    assert prose == broken
+
+
+def test_to_anthropic_message_sets_tool_use_and_stop_reason():
+    raw = '{"type": "tool_use", "name": "Read", "input": {"file_path": "data.txt"}}'
+    result = cli_seat.SeatResult(text=raw, input_tokens=10, output_tokens=4)
+    message = cli_seat.to_anthropic_message(result, "claude", "claude:sonnet", cli_seat.ANTHROPIC)
+    assert message["type"] == "message"
+    assert message["stop_reason"] == "tool_use"
+    assert [b["type"] for b in message["content"]] == ["tool_use"]
+    assert message["usage"] == {"input_tokens": 10, "output_tokens": 4}
