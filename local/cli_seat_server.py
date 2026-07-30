@@ -228,7 +228,7 @@ async def _stream_anthropic(app: FastAPI, prepared):
     buffered = bool(prepared.tool_protocol)
     msg_id = f"msg_{uuid.uuid4().hex}"
 
-    yield _frame({"type": "message_start", "message": {
+    yield _anthropic_frame({"type": "message_start", "message": {
         "id": msg_id, "type": "message", "role": "assistant", "model": prepared.model,
         "content": [], "stop_reason": None, "stop_sequence": None,
         "usage": {"input_tokens": 0, "output_tokens": 0}}})
@@ -247,10 +247,10 @@ async def _stream_anthropic(app: FastAPI, prepared):
                     if buffered:
                         continue
                     if not text_open:
-                        yield _frame({"type": "content_block_start", "index": index,
+                        yield _anthropic_frame({"type": "content_block_start", "index": index,
                                      "content_block": {"type": "text", "text": ""}})
                         text_open = True
-                    yield _frame({"type": "content_block_delta", "index": index,
+                    yield _anthropic_frame({"type": "content_block_delta", "index": index,
                                  "delta": {"type": "text_delta", "text": payload}})
                 else:
                     message, quota = payload
@@ -267,14 +267,14 @@ async def _stream_anthropic(app: FastAPI, prepared):
                         for frame in frames:
                             yield frame
                     elif text_open:
-                        yield _frame({"type": "content_block_stop", "index": index})
+                        yield _anthropic_frame({"type": "content_block_stop", "index": index})
         except Exception as exc:  # noqa: BLE001 — mirrors the OpenAI stream's terminal-error contract
-            yield _frame({"type": "error", "error": {
+            yield _anthropic_frame({"type": "error", "error": {
                 "type": "cli_seat_error", "message": str(exc) or type(exc).__name__}})
             return
-    yield _frame({"type": "message_delta",
+    yield _anthropic_frame({"type": "message_delta",
                   "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": usage})
-    yield _frame({"type": "message_stop"})
+    yield _anthropic_frame({"type": "message_stop"})
 
 
 def _anthropic_block_frames(blocks, start_index):
@@ -285,19 +285,19 @@ def _anthropic_block_frames(blocks, start_index):
     for block in blocks:
         kind = block.get("type")
         if kind == "text" and block.get("text"):
-            frames.append(_frame({"type": "content_block_start", "index": index,
+            frames.append(_anthropic_frame({"type": "content_block_start", "index": index,
                                   "content_block": {"type": "text", "text": ""}}))
-            frames.append(_frame({"type": "content_block_delta", "index": index,
+            frames.append(_anthropic_frame({"type": "content_block_delta", "index": index,
                                   "delta": {"type": "text_delta", "text": block["text"]}}))
         elif kind == "tool_use":
-            frames.append(_frame({"type": "content_block_start", "index": index, "content_block": {
+            frames.append(_anthropic_frame({"type": "content_block_start", "index": index, "content_block": {
                 "type": "tool_use", "id": block.get("id"), "name": block.get("name"), "input": {}}}))
-            frames.append(_frame({"type": "content_block_delta", "index": index, "delta": {
+            frames.append(_anthropic_frame({"type": "content_block_delta", "index": index, "delta": {
                 "type": "input_json_delta",
                 "partial_json": json.dumps(block.get("input") or {}, ensure_ascii=False)}}))
         else:
             continue
-        frames.append(_frame({"type": "content_block_stop", "index": index}))
+        frames.append(_anthropic_frame({"type": "content_block_stop", "index": index}))
         index += 1
     return frames, index
 
@@ -360,7 +360,7 @@ def _as_anthropic_sse(message: dict):
     Reuses `_anthropic_block_frames` so this renders a block identically to `_stream_anthropic`'s
     buffered path."""
     msg_id = message.get("id") or f"msg_{uuid.uuid4().hex}"
-    yield _frame({"type": "message_start", "message": {
+    yield _anthropic_frame({"type": "message_start", "message": {
         "id": msg_id, "type": "message", "role": "assistant", "model": message.get("model"),
         "content": [], "stop_reason": None, "stop_sequence": None,
         "usage": {"input_tokens": (message.get("usage") or {}).get("input_tokens", 0),
@@ -368,14 +368,22 @@ def _as_anthropic_sse(message: dict):
     frames, _ = _anthropic_block_frames(message.get("content") or [], 0)
     for frame in frames:
         yield frame
-    yield _frame({"type": "message_delta",
+    yield _anthropic_frame({"type": "message_delta",
                   "delta": {"stop_reason": message.get("stop_reason"), "stop_sequence": None},
                   "usage": message.get("usage")})
-    yield _frame({"type": "message_stop"})
+    yield _anthropic_frame({"type": "message_stop"})
 
 
 def _frame(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _anthropic_frame(payload: dict) -> str:
+    """Anthropic SSE pairs a named `event:` line with its `data:` line, terminated by a blank
+    line — the framing a switch-on-event-name consumer and any block-regrouping code are both
+    written against. `<type>` is the event's own `type` field, so one function keeps every
+    Anthropic frame (including the terminal error frame) honest about its own name."""
+    return f"event: {payload['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 

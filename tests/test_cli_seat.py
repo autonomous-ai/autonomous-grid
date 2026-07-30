@@ -662,3 +662,66 @@ def test_an_ordinary_function_tool_is_accepted():
             "messages": [{"role": "user", "content": "read"}],
             "tools": [{"name": "Read", "input_schema": {"type": "object"}}]}
     assert cli_seat.prepare(body, "claude", wire="anthropic").tool_protocol is cli_seat.ANTHROPIC
+
+
+# SSE framing: event: + data: pairs (found live, not by a test)
+
+def test_the_anthropic_stream_pairs_a_named_event_with_each_data_line():
+    """Found by running the real seat: it emitted bare `data:` frames with no `event:` line, so
+    every frame dispatched under the SSE default event name `message` and a client switching on
+    the event name could not tell `content_block_delta` from `message_stop` apart. Anthropic's own
+    wire pairs a named `event:` line with its `data:` line before every blank-line boundary."""
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("hi")
+        return cli_seat.SeatResult(text="hi", output_tokens=1)
+
+    base = seat_for("claude")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    client = TestClient(app)
+
+    resp = client.post("/messages", json={
+        "model": "claude:sonnet", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    body = resp.text
+
+    assert 'event: message_start\ndata: {"type": "message_start"' in body
+    assert 'event: content_block_delta\ndata: {"type": "content_block_delta"' in body
+    assert 'event: message_stop\ndata: {"type": "message_stop"' in body
+    # every frame is an event: line immediately followed by its data: line, never a bare data: line
+    pairs = [ln for ln in body.split("\n\n") if ln.strip()]
+    for pair in pairs:
+        lines = pair.split("\n")
+        assert lines[0].startswith("event: "), f"frame missing event: line: {pair!r}"
+        assert lines[1].startswith("data: "), f"event: not paired with data: {pair!r}"
+
+
+def test_the_openai_stream_stays_data_only():
+    """The OpenAI `/chat/completions` stream is `data:`-only by its own convention and must stay
+    byte-identical — this pins that the Anthropic `event:` fix did not leak across wires."""
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("hi")
+        return cli_seat.SeatResult(text="hi", output_tokens=1)
+
+    base = seat_for("codex-cli")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    client = TestClient(app)
+
+    resp = client.post("/chat/completions", json={
+        "model": "codex-cli:gpt-5.6-terra", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    body = resp.text
+
+    assert "event:" not in body
+    assert "data: [DONE]" in body
