@@ -591,6 +591,19 @@ class PreparedRequest:
     wire: str = "openai"
 
 
+def _reject_server_tools(tools):
+    """A tool with a `type` is one Anthropic runs on its own servers (`web_search`, `bash`,
+    `code_execution`…), not one the caller executes. This seat has no such server, so accepting
+    one would emit a tool call nobody answers — the consumer just hangs."""
+    for tool in tools or []:
+        kind = tool.get("type") if isinstance(tool, dict) else None
+        if kind and kind != "function":
+            raise SeatBadRequest(
+                f"Unsupported tool type: {kind} ({tool.get('name', '?')}). "
+                "This seat executes nothing itself; the caller runs every tool."
+            )
+
+
 def prepare(body, kind, protocol=None, wire="openai"):
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -604,6 +617,8 @@ def prepare(body, kind, protocol=None, wire="openai"):
         )
     resolved_protocol = protocol or (ANTHROPIC if wire == "anthropic" else OPENAI)
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
+    if wire == "anthropic" and tools:
+        _reject_server_tools(tools)
     prompt = build_prompt(messages)
     if tools:
         prompt = f"{prompt}\n\n{resolved_protocol.render(tools)}"

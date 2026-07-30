@@ -641,3 +641,24 @@ def test_an_anthropic_tool_result_block_is_replayed_as_text():
 
 def test_the_claude_catalog_row_declares_messages():
     assert "messages" in api_catalog.WHITELISTS["claude"].endpoints
+
+
+# the seat refuses an Anthropic server tool (Task 12)
+
+def test_an_anthropic_server_tool_is_refused_rather_than_passed_through():
+    """`web_search`, `bash` and `code_execution` are run by Anthropic, not by the caller. The
+    seat must refuse them with 400 — letting one through produces a tool call nobody executes,
+    which reaches the user as a hang."""
+    body = {"model": "claude:sonnet",
+            "messages": [{"role": "user", "content": "search"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}]}
+    with pytest.raises(cli_seat.SeatBadRequest) as exc:
+        cli_seat.prepare(body, "claude", wire="anthropic")
+    assert "web_search" in str(exc.value)
+
+
+def test_an_ordinary_function_tool_is_accepted():
+    body = {"model": "claude:sonnet",
+            "messages": [{"role": "user", "content": "read"}],
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}]}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").tool_protocol is cli_seat.ANTHROPIC
