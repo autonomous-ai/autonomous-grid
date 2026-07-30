@@ -131,7 +131,7 @@ Notes:
 
 ```
 grid login [--no-browser] [--json]    # sign in to remote mode (device-code flow)
-grid logout [--json]                  # clear stored remote credentials
+grid logout [--force] [--json]        # stop serving, then clear stored remote credentials
 grid sync [--json]                    # refresh your remote grids without signing in again
 ```
 
@@ -139,18 +139,35 @@ grid sync [--json]                    # refresh your remote grids without signin
 flow — it prints the sign-in URL and code, and opens a browser at that URL unless you pass
 `--no-browser` (for headless machines) — and stores your credentials under `~/.grid`. Signing in does
 **not** pick an active grid: run `grid ls` to see the remote grids you can reach, then
-`grid use <name>` (or name one per command). `grid logout` clears the stored credentials and the remote mode's active grid.
+`grid use <name>` (or name one per command).
+
+`grid logout` **stops serving, then clears the stored credentials and the remote mode's active
+grid** — in that order, because a serve
+child holds its access token in memory from the moment it starts (that token lasts about a year), so
+deleting the file never stopped it: the box kept advertising models as a provider, and `grid leave`
+answered "You're not signed in" over records that were still correct. So logout tears down whatever
+this box is serving first, deregistering each grid while it still has the token to do so, and reports
+what it stopped. If it cannot confirm a child stopped on a grid whose token you still have, it **keeps
+your credentials** and exits non-zero naming the pid — they are the only handle a retried `grid leave`
+has. `--force` signs out anyway (it still tries first, and still tells you what survived). On a box
+that is serving nothing, logout is what it always was: local, offline, instant. `device.toml` and
+`api_keys.toml` are untouched either way.
+
 `grid sync` re-fetches your grids and tokens using your saved sign-in (no browser), so a grid
 created on the website or one you were just added to appears after `grid sync` — it never changes
-your active grid, and an expired session tells you to run `grid login`. In `local` mode these
+your active grid, and an expired session tells you to run `grid login`. If its refresh (or a
+`grid login` as a different account) drops a grid this box is still serving, it says so, naming the
+process and the `grid leave <grid-id>` that stops it — neither command kills an engine on your behalf,
+because a control-plane answer is not a decision to stop serving. In `local` mode these
 commands exit with guidance to switch — sign-in is a remote concept. See
-[ADR 0002](./adr/0002-remote-sign-in.md).
+[ADR 0002](./adr/0002-remote-sign-in.md) and
+[ADR 0023](./adr/0023-signing-out-with-live-serve-children.md).
 
 ## Grid Lifecycle
 
 ```
 grid up [name] [--type <t>] [--port <n>] [--host <h>] [--advertise-host <h>]
-grid down [name]                      # stop a grid; the grid/config persists
+grid down [name]                      # stop a grid (may fail loud); the grid/config persists
 grid ls [--json]                      # saved grids (local: name, id, where, url · remote: name, id, type)
 grid info [grid] [--json]             # grid, grid_url, live engine count, live models
 grid info [grid] --env                # print OPENAI_* exports (local key, or remote relay URL + token)
@@ -170,6 +187,15 @@ LAN IP). Those three are local-only, and `--type` is remote-only (the grid type,
 No separate `create` or `start` in the main surface — `up` is the single lifecycle verb, so
 first use feels like one operation rather than infrastructure management. (`grid use` only sets
 which grid is *active*; it is a selection pointer, not a lifecycle step — see Modes.)
+
+In `local` mode **`grid down` waits and can fail.** It stops the server it can prove is this grid's
+own — a recycled or corrupt `server_pid` is reported and never signalled — and then asks the grid's
+own port whether that worked. Exit is non-zero, naming a remedy, when a server outlived SIGKILL, when
+the grid is still answering on its port, or when it could neither verify the pid nor reach the port;
+the recorded pid is kept in all three so a retry still has a handle. It is therefore no longer
+instant: a wedged server can cost the shared 25s stop grace and, if its process group outlives it,
+another 25s. Healthy stops return as soon as the process exits, and a grid that is already down
+succeeds quietly. See [ADR 0026](./adr/0026-the-grid-servers-pid-is-a-claim-too.md).
 
 In `remote` mode these same verbs act on hosted **remote grids**: `grid up <name>` create-or-starts
 one — `--type` is `permissioned-public` (default) or `permissioned-providers`, set on create, and
@@ -230,10 +256,25 @@ as `:8000`. Each step must resolve to exactly one engine, or it errors listing t
 In remote mode the same verb serves your models on a remote grid: it brings the engine up the same
 way, then runs a detached loop that registers the engine's capabilities with the hosted relay,
 long-polls it for work, forwards each claimed job to the local engine, and heartbeats — `grid
-leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`). `grid
+leave` stops and unregisters it. You must be signed in and the grid must be up (`grid up`) — with one
+deliberate exception: `grid leave <grid-id>` also works **signed out**, so a serve child left running by
+an earlier sign-out can still be reaped. It stops the process but cannot tell the grid (there is no
+token), so the models drop at the node TTL (~120s) and it says so. `grid
 join --all` serves several detected engines under **one** identity: it advertises the union of their
 models and routes each job to the engine that serves the requested model (first-detected wins when
 two engines share a model name).
+
+Re-running a join that changes nothing is a **no-op** — but only when the engine is actually serving.
+The serve loop records when it registered with the relay and touches a heartbeat file beside its run
+record on every successful beat, so `grid join` can tell a working engine from a live-but-stuck one
+without any network call. When it can't vouch for the engine it says so instead — naming the pid, how
+long the process has been up, the last registration error and the log path — rather than the old
+reassuring "Already serving …; nothing to append." An engine still inside its bring-up window is
+reported as *starting*, with no suggestion to restart it (a large model can take minutes to load).
+**`grid join --respawn`** is the way out: it stops the engine already serving this grid and starts a
+fresh one, never no-ops and never hot-reloads. On its own (`grid join --respawn`, no other flags) it
+restarts whatever this box is already serving; with nothing running it is an ordinary join. See
+[ADR 0021](./adr/0021-service-truth-at-the-join-gate.md).
 
 `grid join --media [--bundle <bundle>]...` serves this box's built-in media (ComfyUI) engine to the
 relay — media-only, or alongside a text engine (`--serve`/`--at` + `--media`). The serve loop brings
@@ -378,7 +419,8 @@ The `grid join` flag set is the union of both modes, gated by mode:
   default 1, or 8 when the identity serves only API engines, pinned back to **1** when any of
   them is a `codex` seat: a flat-rate subscription is never hammered eight-wide by default).
   Match it to the engine's own batch width — llama.cpp `--parallel`, vLLM `max_num_seqs` — or the
-  extra slots queue behind a batch that was never widened to take them.
+  extra slots queue behind a batch that was never widened to take them. Finally, `--respawn` (stop
+  the engine already serving this grid and start a fresh one — see below).
 - **Deprecated:** `--engine-label` — the grid page now derives the engine kind automatically, so it is
   accepted but inert (still matched by `grid leave --engine <label>`); `--pricing-input` /
   `--pricing-output` — kept so old invocations don't hard-error, but they no longer advertise a price.

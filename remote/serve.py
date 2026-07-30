@@ -13,7 +13,6 @@ run record never carries a token.
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import signal
@@ -25,7 +24,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from remote import api_keys, control_plane, credentials, probe, relay, codex_auth, codex_oauth
+from remote import (
+    api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
+    codex_auth, codex_oauth,
+)
 from shared.handlers import HANDLERS
 from shared import run_records
 from shared.filelock import file_lock
@@ -109,16 +111,77 @@ def _debug(msg: str) -> None:
 def _warn(msg: str) -> None:
     """Always log a reload problem to stderr (unlike ``_debug``, which is opt-in tracing). A refused or
     failed hot-reload must leave a trace — the CLI has already told the operator the join/leave
-    succeeded, so a silent stale union would be invisible (ADR 0010 D4 F6)."""
-    print(f"[engine] {msg}", file=sys.stderr, flush=True)
+    succeeded, so a silent stale union would be invisible (ADR 0010 D4 F6).
+
+    Delegates to ``bringup.log`` so the child has exactly ONE narration voice: the bring-up trail and
+    every later warning land in the same file, in the same shape, and a test that captures one
+    captures the other (ADR 0022)."""
+    bringup.log(msg)
+
+
+def _bookkeep(what: str, write: Callable[..., Any], *args: Any) -> bool:
+    """Run one piece of best-effort run-record bookkeeping that must never take a serving engine down.
+
+    Every one of these runs *inside* something more important than itself — a registration, a
+    heartbeat tick, a reload's except arm. A raise there would either kill a watcher thread or
+    replace the operator's real failure reason with a disk error (Python demotes the original to
+    ``__context__``, which nothing prints). ``SystemExit`` is caught alongside ``Exception`` because
+    ``jsonio`` raises it for a corrupt record, and this is a thread, where a bare ``SystemExit`` dies
+    silently. The failure is reported, never swallowed: the child's log is where a future orphan
+    investigation starts.
+
+    Returns whether the write **landed**. Callers whose fact must not be lost (the registration
+    stamp, the error heal) key their retry off this instead of assuming one attempt is enough — a
+    swallowed failure is invisible to the operator by design, so it has to be visible to us. A writer
+    that returns nothing has simply succeeded; only an explicit ``False`` means "not settled"."""
+    try:
+        outcome = write(*args)
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not update {what} on the run record (ignoring): {exc!r}")
+        return False
+    return outcome is not False
 
 
 # ---------------------------------------------------------------------------
 # Detached entry
 # ---------------------------------------------------------------------------
 
+def _stamp_own_pid(grid_id: str, engine_id: str) -> None:
+    """Heal pid drift at the source: under the record lock, write our real ``os.getpid()`` into our
+    own run record, so the recorded pid is always this live serve process's — regardless of what the
+    spawner wrote (``proc.pid`` of a launcher whose interpreter is a group-child, the ``0`` caught in
+    the join write-race window, or a copied/older record).
+
+    Holds the SAME ``file_lock`` the CLI join-append and leave teardown take (``cli.remote_provider``),
+    so a concurrent write can't be lost and "record gone" is observed atomically. Read-checks first
+    (``update_record`` no-ops when the record is gone), so a record a concurrent full leave just
+    deleted is never resurrected. This heals drift for a leave that reads the record AFTER our stamp;
+    a leave that wins the lock BEFORE it still acts on the spawner's pid, and the true child is then
+    reaped by issue-02's argv orphan sweep (``shared.orphan_sweep``), not by this stamp. Best-effort:
+    a failed stamp warns and serves on — the engine must serve even if the disk write hiccups (the
+    reload bookkeeping's never-raise contract)."""
+    try:
+        with file_lock(run_records.record_path(grid_id, engine_id)):
+            run_records.update_record(grid_id, engine_id, **run_records.identity_stamp(os.getpid()))
+            # Declare, before any socket is opened, that this build reports service truth (issue 10).
+            # The sidecar's ABSENCE is what keeps the join gate quiet about an older build's child, so
+            # this must land here rather than at first registration: the incident regime is a child
+            # wedged in bring-up, which never reaches its first heartbeat. Its own wrapper, so a
+            # sidecar failure can neither mask nor be mistaken for the pid stamp's.
+            _bookkeep("heartbeat sidecar", service_truth.touch_heartbeat, grid_id, engine_id)
+    except (Exception, SystemExit) as exc:  # never let a disk hiccup stop the engine serving
+        _warn(f"could not stamp live pid into the run record for {engine_id}@{grid_id}: {exc}")
+
+
 def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     """Detached ``__remote-engine`` entry: serve one engine to the grid's relay until SIGTERM."""
+    # Name ourselves before anything else can fail — including the record read below, which raises
+    # `SystemExit` on a corrupt *sibling* record (`read_record` globs the whole grid directory) from
+    # outside the try, before any handler exists. From here on this child's log cannot be empty
+    # (ADR 0022): the log file is created by the spawner and the child is unbuffered, so a 0-byte log
+    # used to be positive evidence that the first line simply came too late — it came after
+    # registration, which is precisely the step a wedged child never reaches.
+    bringup.log(f"starting engine {engine_id}@{grid_id} (pid {os.getpid()})")
     record = run_records.read_record(grid_id, engine_id)
     if not record:
         raise SystemExit(f"No engine record for {engine_id} on {grid_id}.")
@@ -131,12 +194,16 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         raise SystemExit("Run `grid login` to refresh your grid tokens, then re-join.")
     # The relay binds the node to the token: it authorizes PUT /nodes/{node_id} only for the token's
     # own node (else 403 "Cannot access another node"). So node_id is read from the JWT, never invented.
-    node_id = _node_id_from_token(access_token)
+    node_id = credentials.node_id_from_token(access_token)
     if not node_id:
         raise SystemExit(
             "This grid's access token carries no node identity; run `grid login` to refresh your "
             "tokens, then re-join."
         )
+    # The intent line: what this child will serve and where it will register, from the record alone,
+    # so it lands before the first socket rather than after the last one.
+    bringup.log(bringup.describe_intent(record, signaling_url))
+
     def _on_term(_signum, _frame):  # noqa: ANN001
         raise KeyboardInterrupt
 
@@ -157,6 +224,12 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
     registered = False
     rc = 0
     try:
+        # Heal pid drift at the source before the (possibly slow) engine bring-up: once we stamp, the
+        # record's pid is THIS live process, so a later `grid leave` kills the right child instead of
+        # whatever the spawner recorded (proc.pid of a launcher, or the transient 0). A leave that wins
+        # the record lock before we stamp falls back to issue-02's argv sweep. Best-effort +
+        # read-checked (see `_stamp_own_pid`).
+        _stamp_own_pid(grid_id, engine_id)
         # API-engine keys come from the machine-local key store (env var as fallback) — resolve
         # them up front so a keyless respawn dies naming the fix instead of advertising models
         # whose every job would 401 upstream. Never read from the record; the record never carries
@@ -210,7 +283,7 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
             signaling_url=signaling_url,
             node_id=node_id,
             network_id=network_id,
-            engine_id=engine_id,
+            engine_id=engine_id,  # which record this process writes its service truth onto
             llm_url=engine_results[0][0] if engine_results else "",
             access_token=access_token,
             refresh_token=refresh_token,
@@ -234,9 +307,47 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
         _prime_codex_seat(state, record)
         # Restore the last persisted quota so /grid/overview shows it immediately on respawn — and so a
         # hand-edited remote.json can inject a simulated snapshot for debugging. A response/seed refreshes it.
+        # Ahead of the register loop below (which may block for several backoffs): the restore reads the
+        # record this process already holds, so it must not wait on the relay to become reachable.
         if record.get("codex_rate_limits"):
             state.set_codex_quota(record["codex_rate_limits"])
-        register_once(state)
+
+        def _note_register_error(message: str | None) -> None:
+            # Bounded and body-only: `RelayError` carries the response text, never the bearer.
+            #
+            # `_bookkeep`'s "did the write land" answer is deliberately NOT consumed here, unlike
+            # `mark_registered`'s. Three reasons, and the last one is why keying a retry off it would
+            # be a bug: this field fails OPEN (absent reads as "no error", never as an accusation —
+            # `registered_at` is what says "not registered"); a transient failure self-heals within
+            # one backoff *structurally*, because `mutate_record` re-reads the record under lock and
+            # compares against DISK — a write that never landed leaves the record still differing, so
+            # the next attempt writes it, with nothing to remember between them; and `mutate_record`
+            # returns False both when the record is gone AND when nothing changed
+            # — and "nothing changed" is the *normal* case here, since a relay down for an hour keeps
+            # producing the identical reason. A caller that retried on that would spin on the healthy
+            # path. `mark_registered` has to compensate for the same conflation explicitly.
+            _bookkeep("last_register_error", service_truth.note_register_error,
+                      network_id, engine_id, message)
+
+        try:
+            # Retry a relay that is merely temporarily wrong, rather than dying of it (ADR 0022).
+            # This is where the field incident lands: a master mid-respawn answers 503 (or 404), and
+            # before this loop that single answer ended the child. `state.stop` is the wait, so a
+            # SIGTERM during a backoff still unwinds inside the parent's 25s kill grace.
+            bringup.register_with_backoff(
+                lambda: register_once(state),
+                stop=state.stop,
+                log=bringup.log,
+                note_error=_note_register_error,
+            )
+        except (Exception, SystemExit) as exc:
+            # Only a TERMINAL failure reaches here now (the relay understood and refused, or
+            # something unexpected raised). Leave the reason on the record before this child dies of
+            # it: the record usually goes with it (the `finally` reaps a never-registered child), but
+            # not when ownership can't be proven — and a still-trying child's reason is written by
+            # the loop above, which is what `grid join` reports while it keeps trying.
+            _note_register_error(str(exc) or repr(exc))
+            raise
         registered = True
         _seed_codex_quota(state, record)  # best-effort: populate quota for /grid/overview before jobs
         print(f"Engine {state.node_id} serving {union_models} via the relay at {signaling_url}")
@@ -285,11 +396,12 @@ def run_remote_engine_from_record(grid_id: str, engine_id: str) -> int:
                 print(f"Stopping ComfyUI failed (ignoring): {exc}", file=sys.stderr)
         if not registered:
             # Reap the on-disk record for an engine that died before registering (e.g. a media engine
-            # whose ComfyUI never became ready), so it doesn't linger and force a `grid leave --all`.
-            try:
-                run_records.record_path(grid_id, engine_id).unlink(missing_ok=True)
-            except OSError as exc:  # best-effort teardown; never mask the real exit
-                print(f"Reaping stale record failed (ignoring): {exc}", file=sys.stderr)
+            # whose ComfyUI never became ready), so it doesn't linger and force a `grid leave --all` —
+            # but ONLY while that record still points at us. A record a newer serve child now owns is
+            # left alone: unlinking it would strand that live child untracked (issue 05's audit).
+            # No guard needed here — like every other step in this `finally`, it is best-effort and
+            # reports its own failures to stderr rather than raising over the real exit error.
+            run_records.discard_own_record(grid_id, engine_id)
     return rc
 
 
@@ -322,6 +434,11 @@ def _bring_up_engines(
     results: list[tuple[str, list[str], list[str], dict[str, Any]]] = []
     launched: list[Any] = []
     launcher_mod = None
+    # ONE clock for the whole fan-out — every spec, every model — because the wedge this bounds is the
+    # sum, not any single probe (ADR 0022). Opened here rather than inside `_probe_spec_caps` so a
+    # second engine cannot buy itself a fresh budget after the first spent it.
+    deadline = bringup.probe_deadline()
+    unprobed: list[str] = []
     try:
         for spec in specs:
             llm_url, proc, mod, advertised, upstream = _bring_up_one(spec, record, aliases)
@@ -330,17 +447,50 @@ def _bring_up_engines(
                 launcher_mod = mod
             # Probe EVERY model this spec serves (not just the first), so a multi-model `--at` advertises
             # caps for all of them — shared with the hot-reload path (`_reload_once`) so the two can't drift.
-            caps = _probe_spec_caps(
-                llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
-                model_caps=spec.get("model_caps"),
-            )
+            try:
+                caps = _probe_spec_caps(
+                    llm_url, advertised, upstream, record.get("ctx_size"), api_kind=spec.get("api_kind"),
+                    model_caps=spec.get("model_caps"), deadline=deadline,
+                )
+            except bringup.ProbeBudgetExceeded as exc:
+                # Startup's policy: keep whatever was probed and give the rest the same fail-closed
+                # entry a failed probe already produces. Correct HERE — and only here — because there
+                # is no previous verdict to keep: an unprobed model degrades to the chat-only posture
+                # rather than lying about what it can do.
+                caps = _degraded_caps(exc, record.get("ctx_size"))
+                unprobed.extend(exc.skipped)
             results.append((llm_url, advertised, upstream, caps))
     except BaseException:  # a later spec failed — don't orphan a server an earlier spec already launched
         if launcher_mod is not None:
             for proc in launched:
                 launcher_mod.stop(proc)
         raise
+    if unprobed:
+        # Never silent: a model losing its capabilities is the failure this bound exists to prevent,
+        # not an acceptable way to achieve it.
+        bringup.log(
+            f"capability probing hit its {bringup.PROBE_BUDGET:.0f}s budget — advertising "
+            f"{', '.join(unprobed)} without probed capabilities (the engine was not answering); "
+            "re-join once it is healthy to advertise them fully"
+        )
     return results, launched, launcher_mod
+
+
+def _degraded_caps(exc: bringup.ProbeBudgetExceeded, ctx_size: Any) -> dict[str, Any]:
+    """The envelope to advertise when the probe budget bit part-way through a spec.
+
+    Every model the spec serves gets an entry — the probed ones theirs, the skipped ones the
+    fail-closed all-False entry a failed probe already produces. The **key must be present** even
+    though nothing is claimed: the relay validates that ``capabilities.models``' keys equal the
+    advertised model list exactly and answers 400 otherwise, and 400 is terminal to bring-up's retry
+    loop — so omitting the skipped models would make this degrade *kill* the slow engine it exists to
+    keep serving, on every join. That mismatch was unreachable before the budget existed, because
+    ``probe.capabilities`` never omits a model, only empties it.
+    """
+    models = dict((exc.probed or {}).get("models") or {})
+    for name in exc.skipped:
+        models[name] = probe.unprobed_entry(ctx_size)
+    return {"schema_version": 1, "models": models} if models else {}
 
 
 def _flat_spec(record: dict[str, Any]) -> dict[str, Any]:
@@ -734,6 +884,7 @@ def _static_api_caps(
 def _probe_spec_caps(
     llm_url: str, advertised: list[str], upstream: list[str], ctx_size: Any,
     api_kind: str | None = None, model_caps: dict[str, dict[str, Any]] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Probe EVERY model a spec serves into one caps envelope — keyed by the advertised name, probed by
     the upstream name (Ollama/vLLM only know that). Shared by startup (`_bring_up_engines`) and the
@@ -749,6 +900,12 @@ def _probe_spec_caps(
         return _static_api_caps(api_kind, advertised, model_caps=model_caps)
     if not advertised:
         return {}  # no models → nothing to advertise; skip the route probe's network round-trip (loop was a no-op)
+    # `deadline` bounds this whole fan-out, not each call in it (ADR 0022) — the API branch above is
+    # static data and is never gated. It RAISES rather than degrading, because the two callers want
+    # opposite things: startup has no previous verdict and degrades fail-closed, while a reload holds
+    # a live registration it must not poison, so it refuses instead. Policy belongs to the caller.
+    if deadline is not None and time.monotonic() >= deadline:
+        raise bringup.ProbeBudgetExceeded({}, advertised)
     # Discover the Responses dialect ONCE per engine (issue 08 / ADR 0018): the route is a property of
     # the server, not of a model, so probe here — OUTSIDE the per-model loop — and stamp the one answer
     # onto every model. A capable engine advertises `responses` in its endpoints and (PRD §3 — every
@@ -761,7 +918,11 @@ def _probe_spec_caps(
     _debug(f"responses probe {llm_url!r}: {'serves' if serves_responses else 'does not serve'} /responses")
     endpoints = ["chat/completions", "completions"] + (["responses"] if serves_responses else [])
     caps_models: dict[str, Any] = {}
-    for advertised_model, upstream_model in zip(advertised, upstream, strict=True):
+    for index, (advertised_model, upstream_model) in enumerate(zip(advertised, upstream, strict=True)):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise bringup.ProbeBudgetExceeded(
+                {"schema_version": 1, "models": caps_models} if caps_models else {}, advertised[index:]
+            )
         env = probe.capabilities(
             llm_url, upstream_model, advertise_as=advertised_model, context_window=ctx_size,
             endpoints=endpoints, honours_output_cap=serves_responses,
@@ -917,26 +1078,6 @@ def _load_tokens(network_id: str) -> tuple[str | None, str | None]:
         if net.get("network_id") == network_id:
             return net.get("access_token"), net.get("refresh_token")
     return None, None
-
-
-def _node_id_from_token(access_token: str) -> str:
-    """The provider node_id, read from the per-grid access token's JWT ``node_id`` claim.
-
-    The relay authorizes ``PUT /nodes/{node_id}`` only for the node the token belongs to — any other
-    id is rejected with 403 "Cannot access another node". So node_id is NOT ours to invent (a random
-    ``node-<uuid>`` is exactly what the relay refuses); it must come from the token. Decode the JWT
-    payload best-effort and read the claim — no signature check (the relay verifies server-side; we
-    only need the claim to address our own node). Returns "" when the token isn't a decodable JWT
-    carrying a node_id, so the caller can surface a clean re-login error.
-    """
-    try:
-        payload = access_token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)  # restore the base64 padding a JWT strips
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (IndexError, ValueError, json.JSONDecodeError):
-        return ""
-    node_id = claims.get("node_id") if isinstance(claims, dict) else None
-    return str(node_id) if node_id else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1153,8 +1294,12 @@ class _ServeState:
         signaling_url: str,
         node_id: str,
         network_id: str,
+        # Which run record this process owns. Remote keeps one identity per grid, so it is always
+        # `run_records.REMOTE_IDENTITY` in production — but the record-writing bookkeeping below (the
+        # reload error, issue 10's service truth, and the codex quota snapshot) needs it by name, and
+        # only the entrypoint knows it.
+        engine_id: str = run_records.REMOTE_IDENTITY,
         llm_url: str,
-        engine_id: str | None = None,
         access_token: str,
         refresh_token: str | None,
         models: list[str],
@@ -1172,9 +1317,9 @@ class _ServeState:
         self.signaling_url = signaling_url
         self.node_id = node_id
         self.network_id = network_id
-        # The run record's engine id (grid_id == network_id keys the record dir). Kept so a quota
-        # update can persist back to remote.json — None in unit fixtures, which skips persistence.
-        self._engine_id = engine_id
+        # The record this process writes onto (`network_id` is the record dir's grid_id): both the
+        # service-truth bookkeeping (issue 10) and the codex quota snapshot persist through it.
+        self.engine_id = engine_id
         self.llm_url = llm_url.rstrip("/")
         # `bearer_by_url` and `api_kind_by_url` are resolved from the key store / record and live on the
         # reload-swappable snapshot built below (NOT as fixed attributes — see the `bearer_by_url`
@@ -1207,6 +1352,17 @@ class _ServeState:
         self.media_models: list[str] = []
         self.media_signature: tuple[bool, tuple[str, ...], int, int] = _media_signature({})
         self._reload_register_fails = 0  # consecutive post-swap re-register failures (bounded retry, C5)
+        # Whether THIS process has written a `last_register_error` that still needs healing. In
+        # memory so the healthy path never reads the record to discover there is nothing to clear —
+        # the heartbeat runs every 30s for the life of the engine (issue 10). Both flags track what
+        # actually LANDED on disk, not what was attempted: `_bookkeep` swallows write failures by
+        # design, so trusting the attempt is how a lost write becomes permanent.
+        self._register_error_noted = False
+        self._registration_recorded = False
+        # Local-engine reachability, folded into the heartbeat's `load` (ADR 0019). Keyed by engine
+        # URL, not model, so a hot-reload that re-points a model can't carry a stale verdict onto a
+        # different engine. Empty = nothing withheld, which is also what every failure path leaves.
+        self._sweep = engine_health.SweepResult(health=engine_health.EngineHealth())
         self.stop = threading.Event()
         self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
         self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
@@ -1231,12 +1387,13 @@ class _ServeState:
             self._codex_quota = quota
         # Persist to the engine's run record (remote.json) so the snapshot survives a respawn and can
         # be inspected — or hand-edited to simulate a tier/usage — for debugging. Best-effort and off
-        # the lock: a telemetry write must never fail a served job. network_id IS the record's grid_id.
-        if self._engine_id is not None:
-            try:
-                run_records.update_record(self.network_id, self._engine_id, codex_rate_limits=quota)
-            except Exception as exc:  # noqa: BLE001 — persistence is optional, never fatal
-                _warn(f"could not persist codex quota to the run record ({exc})")
+        # the lock: a telemetry write must never fail a served job. `network_id` IS the record's
+        # grid_id, and `update_record` is a documented no-op once the record is gone — so a child
+        # whose record was already reaped needs no guard of its own here.
+        try:
+            run_records.update_record(self.network_id, self.engine_id, codex_rate_limits=quota)
+        except Exception as exc:  # noqa: BLE001 — persistence is optional, never fatal
+            _warn(f"could not persist codex quota to the run record ({exc})")
 
     @property
     def models(self) -> list[str]:
@@ -1326,10 +1483,36 @@ class _ServeState:
         with self._lock:
             return self._access_token
 
+    def last_sweep(self) -> engine_health.SweepResult:
+        """The last probe round (ADR 0019) — its verdict, what it could not reach, and why.
+
+        One value rather than three fields: the next round needs all of it (the verdict to fold
+        into, the unchecked set to owe a probe to, and the errors already reported so a permanent
+        one is not re-logged every 30s), and binding it once keeps those three consistent."""
+        with self._lock:
+            return self._sweep
+
+    def health(self) -> engine_health.EngineHealth:
+        """This box's current local-engine reachability verdict."""
+        return self.last_sweep().health
+
+    def apply_sweep(self, result: engine_health.SweepResult) -> None:
+        """Swap in a freshly-probed round. One atomic rebind, like ``apply`` — the probing itself
+        happens with the lock RELEASED, so a slow engine never blocks ``load()`` or ``token()``."""
+        with self._lock:
+            self._sweep = result
+
     def load(self) -> dict[str, Any]:
         with self._lock:
             load = {"active_tasks": self._inflight}
+            # Bound to the SAME snapshot the health verdict is keyed against, inside one lock hold, so
+            # a concurrent reload swap can't pair one union's routes with another's verdict.
+            withheld = engine_health.unhealthy_models(self._snapshot.routes, self._sweep.health)
             codex_quota = self._codex_quota
+        # Emitted only when non-empty: absent is the wire's "nothing withheld", so a healthy box's
+        # payload stays byte-identical to a pre-ADR-0019 build (ADR 0019, the polarity corollary).
+        if withheld:
+            load[engine_health.UNHEALTHY_LOAD_KEY] = withheld
         # VRAM/GPU load for the grid page (per-provider VRAM roll-up). Probed OUTSIDE the lock — it
         # shells out to nvidia-smi / system_profiler (up to a few seconds); absent a GPU it returns {}.
         from shared.system import gpu, host
@@ -1431,6 +1614,12 @@ def register_once(state: _ServeState, *, _allow_refresh: bool = True) -> None:
         if _allow_refresh and token is not None and state.refresh(stale_token=token):
             return register_once(state, _allow_refresh=False)
         raise
+    # We are on the grid. Say so on the record, where the CLI can read it offline: "the process is
+    # running" was never evidence of that, and the join gate believed it for a year (issue 10). The
+    # outcome is remembered because this write must not be lost — see `_heartbeat_loop`'s retry.
+    state._registration_recorded = _bookkeep(
+        "registered_at", service_truth.mark_registered, state.network_id, state.engine_id
+    )
 
 
 def poll_once(state: _ServeState, *, _allow_refresh: bool = True) -> dict[str, Any] | None:
@@ -1461,21 +1650,21 @@ def heartbeat_once(state: _ServeState, *, _allow_refresh: bool = True) -> str:
 def _set_last_reload_error(state: _ServeState, engine_id: str, message: str | None) -> None:
     """Persist (``str``) or clear (``None``) a reload failure on the run record so the NEXT CLI command
     can surface it: the CLI prints success as soon as the SIGHUP is delivered, so a failure inside this
-    process would otherwise be visible only in this log. Locked read-modify-write — the CLI merges
-    joins under the same lock, so an unlocked write here could lose a concurrent join's union (ADR
-    0010 F3). Best-effort bookkeeping that never raises: a raise inside ``_reload_loop``'s except
-    would kill the watcher, and one after a successful swap would mislabel the reload as failed."""
-    try:
-        with file_lock(run_records.record_path(state.network_id, engine_id)):
-            record = run_records.read_record(state.network_id, engine_id)
-            if not record or (message is None and "last_reload_error" not in record):
-                return
-            updated = {k: v for k, v in record.items() if k != "last_reload_error"}
-            if message is not None:
-                updated["last_reload_error"] = message[:300]  # a trace, not a transcript (never the key)
-            run_records.write_record(state.network_id, engine_id, updated)
-    except (Exception, SystemExit) as exc:
-        _warn(f"could not update last_reload_error on the run record (ignoring): {exc!r}")
+    process would otherwise be visible only in this log.
+
+    ``run_records.mutate_record`` supplies the three properties this used to hand-roll — the record
+    lock the CLI's join merge also takes (so an unlocked write here cannot lose a concurrent join's
+    union, ADR 0010 F3), a no-op when a leave has already deleted the record, and no rewrite when
+    nothing changed. Best-effort and never raises: a raise inside ``_reload_loop``'s except would kill
+    the watcher, and one after a successful swap would mislabel the reload as failed."""
+
+    def _set(record: dict[str, Any]) -> None:
+        if message is None:
+            record.pop("last_reload_error", None)
+        else:
+            record["last_reload_error"] = message[:300]  # a trace, not a transcript (never the key)
+
+    _bookkeep("last_reload_error", run_records.mutate_record, state.network_id, engine_id, _set)
 
 
 def _reload_once(state: _ServeState, engine_id: str) -> None:
@@ -1508,6 +1697,16 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
 
     retained = {r[0]: r for r in state.engine_results()}  # keyed by the normalized llm_url
     reassembled: _EngineResults = []
+    # One budget for this reload's whole fan-out, and — unlike startup — NOT caught: exhausting it
+    # refuses the reload (the exception reaches `_reload_loop`, which keeps the old routing and
+    # records why). What makes that the right policy here is the state, not which spec: this node is
+    # ALREADY registered and serving, so an all-False envelope would poison a live registration the
+    # CLI has already reported as hot-reloaded, and it would stick until the next reload — the
+    # opposite of `engine_health`'s rule that what a bounded sweep could not reach keeps its previous
+    # verdict. (A spec only reaches the probe below when it is not already retained under that URL
+    # with the same first advertised model — a newly added engine, or one whose model list changed at
+    # the front; see the branch comment below, which this must not contradict.)
+    deadline = bringup.probe_deadline()
     for spec in specs:
         url = (spec.get("endpoint_url") or "").rstrip("/")
         models = list(spec.get("models") or [])
@@ -1526,7 +1725,7 @@ def _reload_once(state: _ServeState, engine_id: str) -> None:
             # (`_probe_spec_caps` is the shared site, so startup and reload can't drift — ADR 0009 C2).
             caps = (
                 _probe_spec_caps(url, advertised, upstream, record.get("ctx_size"), api_kind=api_kind,
-                                 model_caps=spec.get("model_caps"))
+                                 model_caps=spec.get("model_caps"), deadline=deadline)
                 if models else {}
             )
             reassembled.append((url, advertised, upstream, caps))
@@ -2255,6 +2454,42 @@ def _maybe_refresh_codex(state: _ServeState) -> None:
         _warn(f"codex proactive refresh failed unexpectedly (engine unaffected): {exc!r}")
 
 
+def _maybe_probe_engines(state: _ServeState) -> None:
+    """One local-engine reachability round, folded into the next heartbeat's load (ADR 0019).
+
+    Runs AFTER the heartbeat rather than before it, so a slow engine delays the *verdict* by one
+    tick instead of delaying the heartbeat itself: a late heartbeat costs the node its 120s TTL and
+    unlists everything it serves, a late verdict costs one more tick of a stale advertisement.
+
+    NEVER raises, for the same reason as `_maybe_refresh_codex`: `_heartbeat_loop` runs under
+    `_supervise`, which stops the WHOLE engine on any escaping exception — so a bug in an advisory
+    health probe must not take a working provider offline. `SystemExit` included (the house
+    clean-error idiom / daemon-thread hazard). On any fault the previous verdict stands, and the
+    safe direction of a missing verdict is "withhold nothing".
+    """
+    try:
+        snap = state.snapshot()  # bind once — route + kind must come from the SAME union
+        urls = engine_health.probe_urls(snap.routes, snap.api_kind_by_url)
+        previous = state.last_sweep()
+        # Whatever last round could not check goes first, so a fixed route order can never starve
+        # the same engine every tick and freeze its verdict (an unrestorable withdrawal).
+        ordered = engine_health.prioritize(urls, previous.unchecked)
+        result = engine_health.sweep(ordered, previous.health, should_stop=state.stop.is_set)
+        state.apply_sweep(result)
+        for line in engine_health.transitions(previous.health, result.health, snap.routes):
+            _warn(line)
+        if result.skipped:  # a partial sweep must never read as a clean one
+            _warn(f"engine health probe ran out of time; not checked: {', '.join(result.skipped)}")
+        # Errors on the CROSSING only, like `transitions`: a malformed URL never fixes itself and is
+        # re-probed first every round, so a per-tick line would bury the withdrawals that matter.
+        already = {url for url, _exc in previous.errors}
+        for url, exc in result.errors:
+            if url not in already:
+                _warn(f"engine health probe could not check {url}: {exc}")
+    except (Exception, SystemExit) as exc:
+        _warn(f"engine health probe failed unexpectedly (engine unaffected): {exc!r}")
+
+
 def _heartbeat_loop(state: _ServeState) -> None:
     while not state.stop.is_set():
         try:
@@ -2267,11 +2502,46 @@ def _heartbeat_loop(state: _ServeState) -> None:
             break
         except relay.RelayError as exc:
             print(f"\nHeartbeat error: {exc}", file=sys.stderr)
+            # That line is inside a detached child's log. Put the reason where the CLI can read it
+            # too: the operator's next move is a `grid join`, which must not answer "Already serving"
+            # while this box is off the grid (issue 10).
+            # `or` keeps the flag set when THIS write is the one that failed: an accusation an
+            # earlier beat did land still needs healing.
+            state._register_error_noted = _bookkeep(
+                "last_register_error", service_truth.note_register_error,
+                state.network_id, state.engine_id, str(exc) or repr(exc),
+            ) or state._register_error_noted
         else:
             _debug(f"heartbeat: ok ({result})")
+            # The relay heard from us — the one fact the join gate's freshness check is about. Touched
+            # only here, on success: freshening it after a failed beat would launder an unreachable
+            # engine into a healthy-looking one.
+            _bookkeep("heartbeat sidecar", service_truth.touch_heartbeat,
+                      state.network_id, state.engine_id)
+            # Retry the registration stamp until it is durable. It is the one fact here that fails
+            # CLOSED — absent reads as a confident "has not registered" — so a single swallowed write
+            # would leave this engine accused for as long as it runs, and the operator's natural
+            # response (re-running the same join) is the read-only no-op path that can never heal it.
+            if not state._registration_recorded:
+                state._registration_recorded = _bookkeep(
+                    "registered_at", service_truth.mark_registered,
+                    state.network_id, state.engine_id,
+                )
+            # Heal, without a disk read on every healthy tick — and only clear the flag once the heal
+            # actually landed, or a failed heal would strand a stale, undatable accusation forever.
+            if state._register_error_noted and _bookkeep(
+                "last_register_error", service_truth.note_register_error,
+                state.network_id, state.engine_id, None,
+            ):
+                state._register_error_noted = False
         # On EVERY surviving tick — including a failed relay call (the relay being unreachable
         # says nothing about the vendor), so an idle grid behind a flaky relay still rotates.
         _maybe_refresh_codex(state)
+        # Likewise every tick, and likewise unconditional: this loop IS the health probe's rate
+        # limit (one round per engine per HEARTBEAT_INTERVAL), so there is no second interval to
+        # keep in sync — and an idle grid, where no job failure will ever expose a dead engine, is
+        # exactly the case this exists for (ADR 0019).
+        _maybe_probe_engines(state)
         state.stop.wait(relay.HEARTBEAT_INTERVAL)
 
 
@@ -2370,6 +2640,12 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
                 f"abandoning ({', '.join(stragglers)}); their consumers may see no terminal response.",
                 file=sys.stderr,
             )
+        if heartbeat.is_alive():
+            # The heartbeat is joined BEFORE the reload thread against the same deadline, so a
+            # heartbeat that overruns is also what ate the reload thread's turn below. Name it, or
+            # an operator reading the next line has no way to know what consumed the budget.
+            print(f"\nHeartbeat thread still running after {_DRAIN_TIMEOUT}s drain — it held the "
+                  f"shared teardown budget; anything joined after it got less of one.", file=sys.stderr)
         if reload_thread is not None and reload_thread.is_alive():
             # It didn't finish within the drain budget, so its re-register (if any) may still land after the
             # caller's unregister; the relay then TTL-prunes the resurrected node. Surface it, don't hide it.

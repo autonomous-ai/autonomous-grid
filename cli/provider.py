@@ -38,6 +38,7 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     ("pricing_input", "--pricing-input"),
     ("pricing_output", "--pricing-output"),
     ("max_concurrency", "--max-concurrency"),
+    ("respawn", "--respawn"),
 )
 
 
@@ -305,7 +306,11 @@ def _spawn_engine(
         start_new_session=True,
         env=child_env,
     )
-    record["pid"] = proc.pid
+    # The identity, not just the pid (grid-leave issue 08): a local engine child is torn down by the
+    # SAME `run_records` terminator as a remote one, so without the token its record can never be
+    # proven to name our child rather than a recycled pid, and its process group can never back up a
+    # kill the recorded pid missed. Local has no self-stamp, so this is the only writer.
+    record.update(run_records.identity_stamp(proc.pid))
     _write_record(grid_id, engine_id, record)
 
     status = _await_engine_start(runtime.grid_url(cfg), record["node_id"], proc)
@@ -367,27 +372,30 @@ def _log_tail(path, lines: int = 12) -> str:
 # ---------------------------------------------------------------------------
 
 def cmd_leave(args: argparse.Namespace) -> int:
+    """Resolve which engines this leave means, then hand them to the teardown (`cli/local_leave`).
+
+    Two shapes, and the difference is not cosmetic — it decides how widely the argv sweep may reap.
+    `--engine <x>` names ONE of this grid's children (local runs one per engine), so the sweep pins
+    its engine id too. Everything else — `--all`, a bare leave, and a bare leave with no records at
+    all — means the whole grid, so the sweep pins only the grid id and can therefore also reap a
+    record-less orphan, whose engine id nobody knows. A bare leave with no records is a first-class
+    **repair** verb, not the dead end it used to be (grid-leave issue 17).
+    """
+    from . import local_leave
+
     cfg = config.select_grid(getattr(args, "grid", None))
     grid_id = cfg["grid_id"]
     records = _read_records(grid_id)
 
-    if args.all:
-        targets = list(records)
-    elif args.engine:
-        targets = [_resolve_leave_target(records, args.engine, cfg["name"])]
-    elif len(records) == 1:
-        targets = list(records)
-    elif not records:
-        print(f"No engines joined to {cfg['name']}.")
-        return 0
-    else:
+    if args.engine and not args.all:
+        engine_id = _resolve_leave_target(records, args.engine, cfg["name"])
+        return local_leave.tear_down(
+            grid_id, cfg["name"], {engine_id: records[engine_id]}, engine_id=engine_id
+        )
+    if not args.all and len(records) > 1:
         names = ", ".join(sorted(records))
         raise SystemExit(f"Several engines joined ({names}); pass --engine <id> or --all.")
-
-    for engine_id in targets:
-        _stop_engine(grid_id, engine_id, records[engine_id])
-        print(f"Left engine {engine_id} on {cfg['name']}.")
-    return 0
+    return local_leave.tear_down(grid_id, cfg["name"], records)
 
 
 def _resolve_leave_target(records: dict[str, dict[str, Any]], selector: str, grid_name: str) -> str:
@@ -421,8 +429,12 @@ def _leave_summary(records: dict[str, dict[str, Any]]) -> str:
     return "; ".join(parts)
 
 
-def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
-    run_records.stop_engine(grid_id, engine_id, record)
+def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> run_records.Teardown:
+    """Stop one engine child and reap only a ComfyUI it itself started. Returns the honest teardown
+    outcome — ``survivor`` (0 when confirmed gone) so the caller can keep the record + fail loudly
+    instead of printing "Left …" over a live process, and ``verified`` so a leave that could prove
+    nothing does not read as one that proved everything."""
+    outcome = run_records.stop_engine(grid_id, engine_id, record)
     # Reap ONLY a ComfyUI this engine itself started (`comfyui_started` persisted at bring-up) — never one
     # shared with another media engine or started by the operator — and target its specific port so a
     # co-resident engine's ComfyUI is untouched. Covers the case where the engine's own teardown was
@@ -435,6 +447,7 @@ def _stop_engine(grid_id: str, engine_id: str, record: dict[str, Any]) -> None:
             comfyui.stop_running(port)
         except OSError as exc:  # best-effort: one media engine's reap must not abort a `leave --all`
             print(f"Reaping ComfyUI on :{port} failed (ignoring): {exc}", file=sys.stderr)
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -690,8 +703,9 @@ def _run_engine(args: SimpleNamespace) -> int:
         if not registered:
             # An engine that exited before registering (e.g. a media engine whose ComfyUI never became
             # ready — it slips past the 3s spawn grace, so nothing else reaps it) must not leave a stale
-            # record, or `grid leave --all` is needed just to clear the ghost.
-            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
+            # record, or `grid leave --all` is needed just to clear the ghost. Ownership-checked: a
+            # record a newer live engine child owns is kept, never unlinked (issue 05's audit).
+            run_records.discard_own_record(args.grid, args.name)
 
 
 # ---------------------------------------------------------------------------
@@ -810,8 +824,9 @@ def _run_api_media_engine(args: SimpleNamespace, cfg: dict[str, Any], grid_url: 
         print(f"Stopped {args.api_kind} media bridge.")
         if not registered:
             # Mirrors _run_engine: an engine that died before registering must not leave a ghost
-            # record behind for `grid leave --all` to clean up.
-            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
+            # record behind for `grid leave --all` to clean up — and must not unlink a record a
+            # newer live engine child owns (issue 05's audit).
+            run_records.discard_own_record(args.grid, args.name)
 
 
 def _api_media_capabilities(models: list[str]) -> dict[str, Any]:
@@ -895,13 +910,10 @@ def _read_records(grid_id: str) -> dict[str, dict[str, Any]]:
 
 
 def _record_alive(grid_id: str, engine_id: str) -> bool:
+    """Whether this engine id is already joined and actually running. `record_alive` rather than a
+    bare `pid_alive` (grid-leave issue 08): a zombie pid — the norm in a container with no init
+    reaper — made this refuse a re-join of an engine that had already died."""
     record = run_records.read_records(grid_id).get(engine_id)
-    return bool(record and run_records.pid_alive(int(record.get("pid") or 0)))
+    return bool(record and run_records.record_alive(record))
 
 
-def _pid_alive(pid: int) -> bool:
-    return run_records.pid_alive(pid)
-
-
-def _kill_group(pid: int) -> None:
-    run_records.kill_group(pid)

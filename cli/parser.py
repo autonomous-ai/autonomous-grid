@@ -208,6 +208,12 @@ def _add_engines(sub) -> None:
                              help="Deprecated — use `grid price set`. (No longer advertises a price.)")
     remote_only.add_argument("--max-concurrency", type=int, default=None,
                              help="How many requests this engine serves at once (remote only).")
+    # `default=None`, not the `store_true` default of False: `provider._reject_remote_only_flags`
+    # decides "was this flag used" with `is not None`, so a False default would reject every LOCAL
+    # `grid join`. Every flag in this group defaults to None for that reason.
+    remote_only.add_argument("--respawn", action="store_true", default=None,
+                             help="Stop the engine already serving this grid and start a fresh one, "
+                                  "instead of no-opping an identical re-join (remote only).")
     join.set_defaults(handler=cmd_join)
 
     leave = sub.add_parser("leave", help="Stop and unregister engines from a grid")
@@ -362,6 +368,12 @@ def _add_auth(sub) -> None:
     login.set_defaults(handler=cmd_login)
 
     logout = sub.add_parser("logout", help="Sign out of remote mode")
+    logout.add_argument(
+        "--force",
+        action="store_true",
+        help="Sign out even if a serve child on this box could not be stopped (it is still stopped "
+             "first; `grid leave <grid-id>` reaps a survivor afterwards).",
+    )
     logout.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     logout.set_defaults(handler=cmd_logout)
 

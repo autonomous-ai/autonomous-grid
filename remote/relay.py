@@ -28,13 +28,39 @@ HEARTBEAT_INTERVAL = 30
 _SUBMIT_TIMEOUT = 30.0
 _REGISTER_TIMEOUT = 15.0
 
+# Bring-up's own register deadline, stated phase by phase (ADR 0022). The read phase is the one that
+# matters and the one a bare float never names: a relay that ACCEPTS the connection and then never
+# answers — a master mid-respawn behind a proxy — is not covered by a connect timeout at all, and a
+# bare float silently applies itself to all four phases *independently*, so "15s" was really up to
+# 15s connecting and then 15s reading.
+#
+# Deliberately separate from `_REGISTER_TIMEOUT`, which keeps its bare float for the three callers
+# that are NOT on the bring-up path: `unregister_node`, `deregister_node` — the CLI backstop on
+# `grid leave`'s critical path, i.e. the very seam this branch exists to protect — and
+# `_price_oneshot`. Widening a deadline is not free there, so it is not widened.
+_SERVE_REGISTER_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=5.0)
+
 
 class RelayUnauthorized(Exception):
     """The relay rejected the access token (401) — the caller should refresh and retry."""
 
 
 class RelayError(Exception):
-    """An unexpected relay status or transport failure — the caller logs and backs off."""
+    """An unexpected relay status or transport failure — the caller logs and backs off.
+
+    ``status`` is the relay's HTTP status when there was one, and ``None`` for a transport failure
+    (no answer to classify). Bring-up's retry loop decides retryable-vs-terminal from it (ADR 0022);
+    without it the only discriminator would be the message text, which is a response body.
+
+    ``terminal`` is the third category ``status`` cannot express: the request could not be *built* at
+    all, so nothing was ever asked and waiting cannot change the answer. A malformed relay address
+    fails that way — it is as fatal as a 403, but it carries no status to say so.
+    """
+
+    def __init__(self, *args: Any, status: int | None = None, terminal: bool = False) -> None:
+        super().__init__(*args)
+        self.status = status
+        self.terminal = terminal
 
 
 def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Timeout) -> httpx.Client:
@@ -45,12 +71,20 @@ def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Tim
     )
 
 
+# Only `register_node` and `deregister_node` below catch `httpx.InvalidURL`, and that scoping is
+# deliberate rather than a half-finished sweep. Unlike `remote/probe.py` — where all five guards sit
+# on ONE path with ONE degrade ("no capabilities"), so repairing a subset would be worse than
+# repairing none — the calls in this module have different error contracts: the serve loop's
+# `poll`/`heartbeat` and the teardown's `unregister_node` already run under callers that catch
+# `Exception` broadly, so a stray `InvalidURL` cannot escape uncaught there and mapping it would only
+# relabel it. These two are the ones whose CALLER classifies the exception type — bring-up's retry
+# loop and `grid leave`'s best-effort backstop — which is what makes the mapping load-bearing.
 def _guard(resp: httpx.Response, what: str) -> None:
     """Map a relay response to the shared error policy: 401 → refresh, other ≥400 → back off."""
     if resp.status_code == 401:
         raise RelayUnauthorized()
     if resp.status_code >= 400:
-        raise RelayError(f"{what} failed ({resp.status_code}): {resp.text[:200]}")
+        raise RelayError(f"{what} failed ({resp.status_code}): {resp.text[:200]}", status=resp.status_code)
 
 
 def register_node(
@@ -78,11 +112,30 @@ def register_node(
     if max_concurrency is not None:
         body["max_concurrency"] = max_concurrency
     try:
-        with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
+        with _client(signaling_url, access_token, timeout=_SERVE_REGISTER_TIMEOUT) as client:
             resp = client.put(f"/nodes/{node_id}", json=body)
+    except httpx.InvalidURL as exc:
+        # NOT an `HTTPError` subclass (the same trap as `deregister_node` below), and raised while
+        # *building* the request — so no relay was ever asked and no amount of waiting will change
+        # the answer. Typed, so it can never reach bring-up's loop as an unclassified exception, and
+        # marked terminal, so that loop kills the child instead of retrying a broken address at its
+        # 60s floor forever (ADR 0022).
+        raise RelayError(
+            f"this grid's relay address is not a usable URL ({signaling_url!r}): {exc}", terminal=True
+        ) from None
     except httpx.HTTPError as exc:
         raise RelayError(f"register transport error: {exc}") from None
     _guard(resp, "register")
+
+
+def _consumer_role_body() -> dict[str, Any]:
+    """The ``PUT /nodes/{id}`` body that flips a node to ``consumer`` (empty models, no pricing).
+
+    Shared by the serve loop's fire-and-forget ``unregister_node`` and the CLI's authoritative
+    ``deregister_node`` so the two can't drift. A fresh dict each call — httpx serialises it, but a
+    shared mutable module constant would invite an accidental in-place edit leaking across calls.
+    """
+    return {"role": "consumer", "models": [], "pricing": {}}
 
 
 def unregister_node(signaling_url: str, access_token: str, node_id: str) -> None:
@@ -90,15 +143,39 @@ def unregister_node(signaling_url: str, access_token: str, node_id: str) -> None
 
     Best-effort on shutdown: a failed drain never raises (the relay's TTL prune evicts us anyway).
     """
-    body = {"role": "consumer", "models": [], "pricing": {}}
     try:
         with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
-            resp = client.put(f"/nodes/{node_id}", json=body)
+            resp = client.put(f"/nodes/{node_id}", json=_consumer_role_body())
     except httpx.HTTPError as exc:
         print(f"unregister failed (best-effort, ignoring): {exc}", file=sys.stderr)
         return
     if resp.status_code >= 400:
         print(f"unregister returned {resp.status_code} (best-effort, ignoring).", file=sys.stderr)
+
+
+def deregister_node(signaling_url: str, access_token: str, node_id: str) -> None:
+    """The authoritative CLI backstop for ``grid leave``: flip this box's node to ``consumer``
+    (``PUT /nodes/{node_id}``, empty models) so a departed provider's model drops from the grid
+    immediately — even when the serve child's own unregister never ran (SIGKILL), was already dead, or
+    was rejected.
+
+    Same wire shape as ``unregister_node`` but the opposite error contract: this is a **one-shot CLI**
+    call, so it RAISES ``RelayUnauthorized`` (401) / ``RelayError`` (any other failure) and lets
+    ``grid leave`` degrade to a clear best-effort message (the node TTL is the fallback). Never a
+    ``DELETE`` — removing the row lets a surviving child's heartbeat-404 self-heal re-register it as a
+    provider (resurrection); the consumer flip is resurrection-proof (the row survives, heartbeats
+    return "ok", and nothing re-registers unless the row vanishes).
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
+            resp = client.put(f"/nodes/{node_id}", json=_consumer_role_body())
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # httpx.InvalidURL is NOT an HTTPError subclass, so catch it too: a malformed signaling_url or
+        # node_id must degrade to the caller's best-effort caveat, never a raw traceback — this one-shot
+        # CLI call has no outer catch (unlike the serve-loop callers, which run under remote/serve.py's
+        # top-level `except (Exception, SystemExit)`). Scoped to this function on purpose.
+        raise RelayError(f"deregister transport error: {exc}") from None
+    _guard(resp, "deregister")
 
 
 def heartbeat(signaling_url: str, access_token: str, *, load: dict[str, Any]) -> str:

@@ -21,11 +21,20 @@ import httpx
 from shared.models import api_catalog
 
 
-_PROBE_TIMEOUT = 15.0
-_PROPS_TIMEOUT = 5.0
-_SHOW_TIMEOUT = 5.0
-_BENCHMARK_TIMEOUT = 60.0
-_RESPONSES_PROBE_TIMEOUT = 5.0
+# Stated phase by phase rather than as a bare float (ADR 0022): httpx applies a bare float to all
+# four phases *independently*, so "15s" was really up to 15s connecting and then 15s reading, and
+# nothing named the read deadline — which is the only one that covers an engine that accepts the
+# connection and then never answers. The read budgets are unchanged from the bare floats they
+# replace; connect is tightened, because every engine probed here is on loopback or a LAN address
+# where a connection that has not completed in 3s is not going to.
+#
+# These bound one call each. What bounds the FAN-OUT of them — sequential, per model, per engine —
+# is `bringup.PROBE_BUDGET`, and that is the bound the 8-minute field wedge actually needed.
+_PROBE_TIMEOUT = httpx.Timeout(connect=3.0, read=15.0, write=10.0, pool=3.0)
+_PROPS_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
+_SHOW_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
+_BENCHMARK_TIMEOUT = httpx.Timeout(connect=3.0, read=60.0, write=10.0, pool=3.0)
+_RESPONSES_PROBE_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)
 
 # A minimal valid image for the live vision probe — we only test whether the engine ACCEPTS image
 # input, not the answer, so any decodable pixel works. Bump the size if a specific engine rejects
@@ -40,6 +49,11 @@ _PROBE_IMAGE_DATA_URI = (
 # probe false-negatives; 512 lets the model still emit the tool_call / JSON afterward. Non-reasoning
 # models emit and stop early, so the higher cap costs them nothing.
 _STRUCTURED_PROBE_MAX_TOKENS = 512
+
+# Every feature a live probe reports. Named once so ``probe_llama_capabilities``'s result and the
+# fail-closed entry below can never drift — ``capability_entry`` indexes these keys directly, so a
+# dict missing one is a KeyError, not a False.
+PROBED_FEATURES: tuple[str, ...] = ("vision", "json_object", "json_schema", "tools", "parallel_tool_calls")
 
 
 def capabilities(
@@ -72,7 +86,7 @@ def capabilities(
     )
 
 
-def probe_responses_endpoint(llm_url: str, *, timeout: float = _RESPONSES_PROBE_TIMEOUT) -> bool:
+def probe_responses_endpoint(llm_url: str, *, timeout: float | httpx.Timeout = _RESPONSES_PROBE_TIMEOUT) -> bool:
     """Discover whether the engine's server serves the Responses dialect at ``/responses`` (ADR 0018).
 
     A route-existence probe, NOT an inference: POST a deliberately-invalid (empty) body and read the
@@ -95,26 +109,33 @@ def probe_responses_endpoint(llm_url: str, *, timeout: float = _RESPONSES_PROBE_
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{llm_url.rstrip('/')}/responses", json={})
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return False
     return resp.status_code in (400, 422)
 
 
 # --- HTTP (routed through httpx.Client so tests can inject a MockTransport) ---
+#
+# Every guard below catches `httpx.InvalidURL` alongside `HTTPError`, because it is NOT a subclass of
+# it (the repo's third encounter with that — see `relay.deregister_node`). The URL comes from the run
+# record's `endpoint_url`, so a malformed one raised out of `_bring_up_engines`' bare re-raise and
+# killed a child that could have served; now it degrades to the same fail-closed "no capabilities"
+# answer as any other probe failure (ADR 0022). Repaired at all five sites including the currently
+# unreferenced `benchmark_tok_s`: half-repairing a uniform pattern is worse than not repairing it.
 
-def _get(url: str, *, timeout: float) -> httpx.Response | None:
+def _get(url: str, *, timeout: float | httpx.Timeout) -> httpx.Response | None:
     try:
         with httpx.Client(timeout=timeout) as client:
             return client.get(url)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
 
 
-def _post_chat(llm_url: str, payload: dict[str, Any], *, timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:
+def _post_chat(llm_url: str, payload: dict[str, Any], *, timeout: float | httpx.Timeout = _PROBE_TIMEOUT) -> dict[str, Any] | None:
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{llm_url.rstrip('/')}/chat/completions", json=payload)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     if resp.status_code != 200:
         return None
@@ -124,13 +145,13 @@ def _post_chat(llm_url: str, payload: dict[str, Any], *, timeout: float = _PROBE
         return None
 
 
-def _post_json(url: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any] | None:
+def _post_json(url: str, payload: dict[str, Any], *, timeout: float | httpx.Timeout) -> dict[str, Any] | None:
     """POST ``payload`` to an arbitrary URL and return the parsed JSON object, or ``None`` on any
     transport / non-200 / non-JSON response (used for Ollama's native ``/api/show``)."""
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, json=payload)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     if resp.status_code != 200:
         return None
@@ -199,7 +220,7 @@ def _props_url(llm_url: str) -> str:
     return f"{_server_root(llm_url)}/props"
 
 
-def _probe_props(llm_url: str, timeout: float = _PROPS_TIMEOUT) -> dict[str, bool]:
+def _probe_props(llm_url: str, timeout: float | httpx.Timeout = _PROPS_TIMEOUT) -> dict[str, bool]:
     """Read ``/props`` to learn what the chat template + model support natively (tools, vision)."""
     resp = _get(_props_url(llm_url), timeout=timeout)
     if resp is None or resp.status_code != 200:
@@ -229,7 +250,7 @@ def _probe_props(llm_url: str, timeout: float = _PROPS_TIMEOUT) -> dict[str, boo
     }
 
 
-def _probe_ollama_caps(llm_url: str, model: str, timeout: float = _SHOW_TIMEOUT) -> dict[str, bool]:
+def _probe_ollama_caps(llm_url: str, model: str, timeout: float | httpx.Timeout = _SHOW_TIMEOUT) -> dict[str, bool]:
     """Read Ollama's declared model capabilities from ``POST /api/show`` (``capabilities: [...]``).
 
     Authoritative where a live forced-tool probe stays silent: Ollama serves no ``/props``, and its
@@ -245,7 +266,7 @@ def _probe_ollama_caps(llm_url: str, model: str, timeout: float = _SHOW_TIMEOUT)
     return {"vision": "vision" in names, "tools": "tools" in names}
 
 
-def _probe_lmstudio_caps(llm_url: str, llm_model: str, timeout: float = _SHOW_TIMEOUT) -> dict[str, bool]:
+def _probe_lmstudio_caps(llm_url: str, llm_model: str, timeout: float | httpx.Timeout = _SHOW_TIMEOUT) -> dict[str, bool]:
     """Read LM Studio's native ``GET /api/v0/models`` — one GET, no inference, deterministic (unlike the
     live probes). ``type == "vlm"`` → vision, ``"tool_use" in capabilities`` → tools. Returns ``{}`` for a
     non-LM-Studio engine (404 / connection refused / a ``{"error": ...}`` 200 body with no ``data`` list)
@@ -280,7 +301,7 @@ def _probe_lmstudio_caps(llm_url: str, llm_model: str, timeout: float = _SHOW_TI
     return {}
 
 
-def _probe_models(llm_url: str, llm_model: str, timeout: float = _PROPS_TIMEOUT) -> set[str]:
+def _probe_models(llm_url: str, llm_model: str, timeout: float | httpx.Timeout = _PROPS_TIMEOUT) -> set[str]:
     resp = _get(f"{llm_url.rstrip('/')}/models", timeout=timeout)
     if resp is None or resp.status_code != 200:
         return set()
@@ -311,7 +332,7 @@ def _probe_models(llm_url: str, llm_model: str, timeout: float = _PROPS_TIMEOUT)
     return caps
 
 
-def _probe_vision_live(llm_url: str, llm_model: str, timeout: float = _PROBE_TIMEOUT) -> bool:
+def _probe_vision_live(llm_url: str, llm_model: str, timeout: float | httpx.Timeout = _PROBE_TIMEOUT) -> bool:
     """Live-test image input for engines that expose no modality metadata (vLLM, LM Studio, MLX — no
     ``/props``, no ``/api/show``, and a plain ``/v1/models``): send a tiny image and see if the engine
     accepts it. A vision model returns a normal 200 completion; a text-only model rejects the image
@@ -400,13 +421,7 @@ def probe_llama_capabilities(llm_url: str, llm_model: str) -> dict[str, bool]:
     # Structured probes bypass thinking-mode so the response is the raw tool-call / JSON payload. Some
     # engines ignore this kwarg, so the budget above still has to cover a thinking pass (see the constant).
     structured_base = {**base, "chat_template_kwargs": {"enable_thinking": False}}
-    probed = {
-        "vision": False,
-        "json_object": False,
-        "json_schema": False,
-        "tools": False,
-        "parallel_tool_calls": False,
-    }
+    probed = {key: False for key in PROBED_FEATURES}
 
     props_caps = _probe_props(llm_url)              # llama.cpp
     ollama_caps = _probe_ollama_caps(llm_url, llm_model)   # Ollama
@@ -491,6 +506,19 @@ def capability_entry(
             "max_top_logprobs": 0,
         },
     }
+
+
+def unprobed_entry(context_window: int | None = None) -> dict[str, Any]:
+    """The capability entry for a model that was never probed: every feature False, key **present**.
+
+    Identical in shape to what a *failed* probe already produces — and that shape is load-bearing
+    across the wire, not merely tidy: the relay validates that ``capabilities.models``' keys equal the
+    advertised model list **exactly** (grid-src ``registry._normalize_capabilities``), so a model
+    advertised without an entry makes the whole registration a 400. Claiming nothing is the
+    fail-closed direction (ADR 0018): under-advertising only forgoes traffic, while omitting the key
+    costs the engine its entire registration.
+    """
+    return capability_entry({key: False for key in PROBED_FEATURES}, context_window)
 
 
 def envelope(
@@ -579,7 +607,7 @@ def tok_s_from_response(data: dict[str, Any]) -> float | None:
     return None
 
 
-def benchmark_tok_s(llm_url: str, model: str, *, timeout: float = _BENCHMARK_TIMEOUT) -> float | None:
+def benchmark_tok_s(llm_url: str, model: str, *, timeout: float | httpx.Timeout = _BENCHMARK_TIMEOUT) -> float | None:
     """Run one short completion against ``llm_url`` and return eval tokens/sec, or ``None``.
 
     Prefers llama.cpp's ``timings.predicted_per_second``; falls back to wall-clock over
@@ -596,7 +624,7 @@ def benchmark_tok_s(llm_url: str, model: str, *, timeout: float = _BENCHMARK_TIM
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{llm_url.rstrip('/')}/chat/completions", json=body)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL):
         return None
     elapsed = time.monotonic() - started
     if resp.status_code != 200:
