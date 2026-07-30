@@ -441,7 +441,7 @@ def build_system_prompt(messages, tools=None, protocol=None):
     the block appended to it, the model answered `"I don't have access to a Read tool"` — a system
     prompt describing a harness where tools are native out-argues an instruction buried at its end.
     Moved to the end of the turn (`build_prompt`), which is the last thing the model reads, it
-    emitted `<tool_call>`. `tools`/`protocol` stay in the signature so existing callers still work.
+    emitted a tool call. `tools`/`protocol` stay in the signature so existing callers still work.
     """
     parts = [_flatten_content(m.get("content")) for m in messages if m.get("role") == "system"]
     system = "\n\n".join(p for p in parts if p.strip())
@@ -465,6 +465,10 @@ def build_prompt(messages):
             lines.append(f"User: {text}" if text else "User:")
         elif role == "assistant":
             rendered = [f"Assistant: {text}" if text else "Assistant:"]
+            # Replayed in the SAME shape the instruction asks for. They used to be replayed as
+            # Hermes `<tool_call>` tags while the instruction asked for this JSON, so from the
+            # second turn on the model saw one convention in the history and was told another.
+            calls = []
             for call in message.get("tool_calls") or []:
                 function = (call or {}).get("function") or {}
                 arguments = function.get("arguments")
@@ -473,11 +477,13 @@ def build_prompt(messages):
                         arguments = json.loads(arguments)
                     except (TypeError, ValueError):
                         pass  # keep the raw string rather than lose the call
-                payload = {"arguments": arguments, "name": function.get("name")}
-                rendered.append(f"<tool_call>\n{json.dumps(payload, ensure_ascii=False)}\n</tool_call>")
+                calls.append({"type": "function",
+                              "function": {"name": function.get("name"), "arguments": arguments}})
+            if calls:
+                rendered.append(json.dumps({"tool_calls": calls}, ensure_ascii=False))
             lines.append("\n".join(rendered))
         elif role == "tool":
-            lines.append(f"<tool_response>\n{text}\n</tool_response>")
+            lines.append(f"Tool result: {text}")
         else:
             lines.append(text)
     return "\n\n".join(line for line in lines if line)
@@ -702,8 +708,8 @@ def answer(spec, prepared, binary, timeout):
 def answer_stream(spec, prepared, binary, timeout):
     """Yield ("delta", text) as the CLI produces it, then ("done", (completion, quota|None)).
 
-    Tool calls ride the final ("done") event, never a delta: the closing `</tool_call>` is what
-    proves a block is whole, so nothing can be parsed until the answer ends.
+    Tool calls ride the final ("done") event, never a delta: only a whole answer can be parsed,
+    so nothing about a call is known until the CLI has finished writing it.
     """
     stream = stream_seat(spec, prepared, binary, timeout)
     while True:

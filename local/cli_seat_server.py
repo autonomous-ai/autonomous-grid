@@ -140,6 +140,11 @@ async def _stream(app: FastAPI, prepared):
     base = {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion.chunk",
             "created": int(time.time()), "model": prepared.model}
     first = True
+    # With a tool protocol in play, nothing is streamed as it arrives: the raw `{"tool_calls": …}`
+    # would go out as prose AND come back as a parsed call, so the client printed the JSON and ran
+    # the tool. Only the parse knows which bytes were the call, and it cannot run until the answer
+    # ends — so the whole thing waits, and `content` is sent once, below.
+    buffered = bool(prepared.tool_protocol)
     async with app.state.slots:
         try:
             while True:
@@ -149,6 +154,8 @@ async def _stream(app: FastAPI, prepared):
                 if kind is None:
                     break
                 if kind == "delta":
+                    if buffered:
+                        continue
                     delta = {"content": payload}
                     if first:
                         delta["role"], first = "assistant", False
@@ -162,6 +169,14 @@ async def _stream(app: FastAPI, prepared):
                         app.state.quota_cache = (time.monotonic(), quota)
                     choice = (payload.get("choices") or [{}])[0]
                     message = choice.get("message") or {}
+                    text = message.get("content") or ""
+                    if buffered and text:
+                        # The prose the parse left behind — the whole answer minus any call.
+                        delta = {"content": text}
+                        if first:
+                            delta["role"], first = "assistant", False
+                        yield _frame({**base, "choices": [
+                            {"index": 0, "delta": delta, "finish_reason": None}]})
                     # Tool calls only exist once the whole answer is parsed, so they ride the
                     # final chunk rather than being invented mid-stream.
                     tail = {"tool_calls": [{**c, "index": i} for i, c in
