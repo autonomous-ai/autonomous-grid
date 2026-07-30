@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 
 from shared import logging_setup, paths
 from shared.agent import cli_seat

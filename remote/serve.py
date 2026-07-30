@@ -1586,6 +1586,8 @@ class _ServeState:
         Tightest, not averaged: the identity stops serving as soon as ANY of its seats is spent,
         so the relay must see the seat that runs out first.
         """
+        import httpx
+
         tightest = None
         for url in self._seat_urls:
             try:
