@@ -47,7 +47,7 @@ import time
 from collections.abc import Iterable
 from typing import NamedTuple
 
-from shared import run_records, win_paths
+from shared import process_identity, run_records, win_paths
 
 
 # How many unreadable rows (see ``_WIN_UNREADABLE_MARKER``) a scan may contain and still be treated
@@ -263,6 +263,21 @@ def _match_engine_children(
         if len(parts) != 2 or not parts[0].isdecimal():
             continue  # header, blank line, or a pid-only / empty-command row
         pid = int(parts[0])
+        # The process-table boundary, mirroring the record boundary's ``recorded_pid``. ``isdecimal``
+        # accepts ``0`` and any number of digits, so ``0``, ``2**31`` and a 14-digit value all became
+        # matches — and each then reached ``terminate_pid``, which answers True for them ("nothing
+        # there, so it is gone": the right SAFETY answer, and ``is_addressable`` did stop the syscall).
+        # The sweep counts every True as reaped, so the leave announced a teardown that never happened:
+        # measured through a `ps` shim as `Reaped 3 orphaned serve child(ren) … (pid(s) 0, 2147483648,
+        # 99999999999999).` Nothing was destroyed, but a fabricated reap line is the same defect as the
+        # false `Left <grid>.` this feature exists to end — so the row is refused here, which makes the
+        # report honest by construction instead of by wording the message around it.
+        #
+        # Reachable because ``ps`` is invoked by bare name (a residual ADR 0024 records deliberately),
+        # so a PATH shim or an unusual container `ps` is the realistic source, not a kernel that
+        # suddenly lists pid 0.
+        if not process_identity.is_addressable(pid):
+            continue
         if pid in exclude_pids:
             continue
         tokens = parts[1].split()

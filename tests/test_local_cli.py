@@ -5764,6 +5764,43 @@ def test_orphan_sweep_matcher_skips_degenerate_rows_and_reads_padded_pids():
     assert orphan_sweep._match_orphan_pids(ps, "__remote-engine", "n1", exclude_pids=set()) == [777]
 
 
+def test_orphan_sweep_matcher_rejects_a_pid_that_could_not_name_a_process():
+    """A pid column that cannot name a process must not become a *match*, or the sweep announces a
+    teardown that never happened.
+
+    `is_addressable` says it is "checked before every syscall in this module and mirrored at the record
+    boundary by `recorded_pid`/`recorded_pgid`" — the **process-table** boundary was the third one and
+    was not mirrored. `isdecimal()` accepts `0` and any number of digits, so `0`, `2**31` and a
+    14-digit value all matched. Each then reached `terminate_pid`, which answers True for them
+    ("nothing there, so it is gone" — the correct *safety* answer, and the guard held), and the sweep
+    counted every True as `reaped`.
+
+    Measured end to end on the dev VM through a `ps` shim, which is the real seam because ADR 0024
+    records that `ps` is invoked by bare name:
+
+        Reaped 3 orphaned serve child(ren) on gridtest-e10 (pid(s) 0, 2147483648, 99999999999999).
+
+    Nothing was signalled — but in a feature whose whole subject is a teardown that must not lie, a
+    fabricated reap line is the same defect with a smaller blast radius. Rejecting the row makes the
+    report honest by construction rather than by special-casing the message."""
+    from shared import orphan_sweep
+    from shared.process_identity import PID_MAX
+
+    ps = "\n".join([
+        "        0 /bin/grid __remote-engine n1 remote",              # the caller's own group
+        f"{PID_MAX + 1} /bin/grid __remote-engine n1 remote",         # past PID_MAX
+        " 99999999999999 /bin/grid __remote-engine n1 remote",        # absurd, still all digits
+        "       -7 /bin/grid __remote-engine n1 remote",              # a GROUP, not a pid
+        "      abc /bin/grid __remote-engine n1 remote",              # not a number
+        f"{PID_MAX} /bin/grid __remote-engine n1 remote",             # the boundary is INCLUSIVE
+        "      777 /bin/grid __remote-engine n1 remote",              # the only ordinary one
+    ])
+
+    assert orphan_sweep._match_orphan_pids(ps, "__remote-engine", "n1", exclude_pids=set()) == [
+        PID_MAX, 777,
+    ]
+
+
 def test_sweep_orphans_reaps_killable_and_flags_survivor(monkeypatch):
     """`sweep_orphans` terminates each argv-matched child via `terminate_pid`: a killed one is
     `reaped`, a wedged one (survives SIGKILL → `terminate_pid` False) is a `survivor`."""
