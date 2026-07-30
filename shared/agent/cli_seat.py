@@ -465,6 +465,11 @@ def parse_anthropic_tool_uses(text):
         prose_parts.append(text[cursor:start])
         cursor = end
         payload = value.get("input")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = {}
         calls.append({"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}",
                       "name": name, "input": payload if isinstance(payload, dict) else {}})
     if not calls:

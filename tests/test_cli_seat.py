@@ -581,6 +581,16 @@ def test_an_anthropic_tool_use_is_read_back():
     assert calls[0]["id"].startswith("toolu_")
 
 
+def test_anthropic_input_is_accepted_as_an_object_or_an_encoded_string():
+    """A model transcribing the template has no schema enforcement and may double-encode `input`
+    the way OpenAI's `arguments` convention taught it to. Dropping that string to `{}` would call
+    the tool with its arguments silently gone; decoding it mirrors `_one_call` on the OpenAI side."""
+    for input_value in ('{"file_path": "a.txt"}', '"{\\"file_path\\": \\"a.txt\\"}"'):
+        text = '{"type": "tool_use", "name": "Read", "input": ' + input_value + "}"
+        _, calls = cli_seat.parse_anthropic_tool_uses(text)
+        assert calls[0]["input"] == {"file_path": "a.txt"}
+
+
 def test_an_anthropic_answer_with_no_call_is_returned_byte_for_byte():
     text = "  Just talking. Braces { } and a < sign.  "
     assert cli_seat.parse_anthropic_tool_uses(text) == (text, [])
