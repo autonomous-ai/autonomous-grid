@@ -91,6 +91,22 @@ def _network_id(rec: dict[str, Any]) -> str:
     return str(nid)
 
 
+def require_access_token(rec: dict[str, Any], label: str) -> str:
+    """The grid's per-grid access token, or the familiar "run `grid login`" guidance.
+
+    One source for the sentence, shared by `grid info --env` and `grid launch` — a launch that
+    proceeded with an empty bearer would surface inside the launched app as an auth error that names
+    neither the grid nor the fix. (Three older copies of this sentence live in `remote_request.py`,
+    `remote_price.py` and `remote_provider.py`; folding those in is out of scope here.)
+    """
+    token = rec.get("access_token")
+    if not token:
+        raise SystemExit(
+            f"Grid {label} has no access token locally. Run `grid login` to refresh your grids."
+        )
+    return str(token)
+
+
 def _grid_url(live: dict[str, Any], rec: dict[str, Any]) -> str:
     """The grid's relay address. Prefer the live response; fall back to the stored bundle — a
     login-fetched bundle carries it as ``lan_signaling_url`` (a create reply as ``signaling_url``)."""
@@ -235,11 +251,7 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
     if args.env:
         rec = _select(args.grid)
         label = rec.get("name") or rec.get("network_id")
-        token = rec.get("access_token")
-        if not token:
-            raise SystemExit(
-                f"Grid {label} has no access token locally. Run `grid login` to refresh your grids."
-            )
+        token = require_access_token(rec, label)
         # The relay base comes from live status for the creator, or the login bundle for a member —
         # resolve_relay_base handles both (the bundle carries the token but not the address).
         base, _status = resolve_relay_base(session, rec, _network_id(rec), label)

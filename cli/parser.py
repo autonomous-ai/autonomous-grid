@@ -34,6 +34,7 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
@@ -78,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_price(sub)
     _add_router(sub)
     _add_engine_setup(sub)
+    _add_launch(sub)
     _add_train(sub)
 
     return parser
@@ -605,6 +607,18 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Remote only: let your own engine serve this request.",
     )
+def _add_launch(sub) -> None:
+    launch = sub.add_parser("launch", help="Start an app on your grid (claude)")
+    # Two optional positionals, `target` first: argparse fills them left to right, so
+    # `grid launch claude` is target=claude/grid=None and `grid launch claude team` names both.
+    # `grid` matches info/models/engines verbatim — a name or id, omitted for the active grid.
+    launch.add_argument("target", nargs="?", default=None,
+                        help="Launch target. Omit to list what can be launched.")
+    launch.add_argument("grid", nargs="?", default=None,
+                        help="Grid name or id (ag-…). Omit for the active grid.")
+    launch.set_defaults(handler=cmd_launch)
+
+
 def _add_train(sub) -> None:
     from .train import (
         cmd_train_autopilot,

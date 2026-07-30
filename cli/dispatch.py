@@ -113,6 +113,13 @@ REMOTE_ONLY: dict[str, str | None] = {
     "sync": None,
     "price": None,
     "router": None,
+    # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
+    # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
+    # speaks. Naming the dialect is what stops this being filed as a bug.
+    "launch": (
+        "to launch an app that speaks the Anthropic Messages dialect, which a local grid "
+        "does not serve."
+    ),
 }
 
 

@@ -22245,3 +22245,713 @@ def test_a_plain_stderr_is_still_quoted_verbatim_and_bounded():
     assert orphan_sweep._first_line("ps: illegal option -- w") == " (ps: illegal option -- w)"
     assert orphan_sweep._first_line("\n\n  access is denied  \n") == " (access is denied)"
     assert len(orphan_sweep._first_line("z" * 5000)) == 200 + len(" ()")
+
+
+# ---------------------------------------------------------------------------
+# `grid launch` (cli/launch.py + shared/launch/*) — issue 02, ADR 0028
+# ---------------------------------------------------------------------------
+
+def test_launch_with_no_target_lists_the_targets_and_exits_zero(monkeypatch, tmp_path, capsys):
+    """Bare `grid launch` is discovery, not an error: it names what can be launched and exits 0.
+
+    Deliberately NOT signed in — finding out what exists must not require an account, so the listing
+    is answered before the session gate every other launch path goes through.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+
+    assert cli.main(["launch"]) == 0
+    assert "claude" in capsys.readouterr().out
+
+
+def _capture_launch(monkeypatch, *, binary="/usr/local/bin/claude", exit_code=0):
+    """Substitute the one OS-facing seam a launch acts through.
+
+    Returns a dict filled with the child's ``argv`` and ``env`` — the pair that *is* this feature's
+    contract — plus ``looked_for``, the executable names resolution was asked about. Patching the
+    module attributes (not a `subprocess` global) keeps every other subprocess in the suite real.
+    """
+    from shared.launch import system
+
+    seen = {"looked_for": []}
+
+    def fake_find(name):
+        seen["looked_for"].append(name)
+        return binary
+
+    def fake_spawn(argv, env):
+        seen["argv"], seen["env"] = list(argv), dict(env)
+        return exit_code
+
+    monkeypatch.setattr(system, "find_executable", fake_find)
+    monkeypatch.setattr(system, "spawn", fake_spawn)
+    return seen
+
+
+# Every tier `shared/launch/claude.MODEL_TIERS` names, so the default grid below passes preflight.
+_LAUNCH_TIER_MODELS = ["claude:opus", "claude:sonnet", "claude:haiku", "claude:fable"]
+
+
+def _isolate_claude_settings(monkeypatch, tmp_path):
+    """Point the two settings sources a launch reads at empty temp directories.
+
+    Both this repo's own `.claude/settings.json` and a typical `~/.claude/settings.json` carry an
+    `env` block, so without this the collision warning fires from the configuration of whoever is
+    running the suite — deciding tests that are about the grid. Returns (user config dir, project dir)
+    so a settings test can write into either.
+    """
+    config, project = tmp_path / "claude-config", tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    monkeypatch.chdir(project)
+    return config, project
+
+
+def _mock_tier_overview(monkeypatch, *, models=None, overview=None, seen=None):
+    """Serve an overview whose grid serves every Claude Code tier — or exactly `models`, or a
+    hand-built `overview` payload for the malformed cases."""
+    _mock_overview(monkeypatch, overview if overview is not None else {
+        "nodes": [{"name": "seat", "engine": "claude", "online": True,
+                   "models": list(_LAUNCH_TIER_MODELS if models is None else models)}]
+    }, seen)
+
+
+def _seed_launchable_grid(monkeypatch, tmp_path, *, models=None, overview=None, seen=None,
+                          access_token="AT"):
+    """A signed-in remote user with one running grid whose overview serves every Claude Code tier,
+    and isolated Claude Code settings. What a launch needs to get all the way to the spawn."""
+    _seed_running_remote_grid(monkeypatch, tmp_path, access_token=access_token)
+    _mock_tier_overview(monkeypatch, models=models, overview=overview, seen=seen)
+    return _isolate_claude_settings(monkeypatch, tmp_path)
+
+
+def test_launch_preflight_refuses_a_grid_that_does_not_serve_the_main_tier(monkeypatch, tmp_path):
+    """The whole risk of a hardcoded tier table lands here: a grid that does not serve it.
+
+    Unchecked, the failure surfaces *inside* Claude Code at the first prompt as an API error naming a
+    model — which a user reads as "Claude Code is broken", not "my grid has no such model". So it is a
+    refusal before any spawn, and the message has to be actionable on its own: what is missing, and
+    what the grid does serve.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:haiku", "glm-5.2"])
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    message = str(exc.value)
+    assert "claude:opus" in message, f"the missing model must be named: {message}"
+    assert "glm-5.2" in message, f"what the grid does serve must be listed: {message}"
+    assert "argv" not in seen, "refused before the spawn, never launched into a model error"
+
+
+def test_launch_preflight_refuses_a_grid_that_does_not_serve_the_small_fast_tier(monkeypatch,
+                                                                                tmp_path):
+    """The small/fast tier is required too — the subagent tier mirrors it, so every session uses it.
+
+    Its own test because a check that stopped at the first required tier would still pass the one
+    above, and the grid that serves only the main model is the likelier real-world half-configuration.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:opus"])
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    assert "claude:haiku" in str(exc.value), str(exc.value)
+    assert "argv" not in seen
+
+
+def test_launch_preflight_refuses_a_grid_with_no_live_models_cleanly(monkeypatch, tmp_path):
+    """A grid with nothing joined is the most likely first-run state of all, so it must read as a
+    grid problem with a next step — not as an empty list, and never as a traceback."""
+    _seed_launchable_grid(monkeypatch, tmp_path, overview={"nodes": []})
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "no models" in message.lower(), f"say the grid is empty, don't print an empty list: {message}"
+    assert "grid join" in message, f"the way out must be named: {message}"
+    assert "argv" not in seen
+
+
+def test_launch_preflight_degrades_cleanly_on_a_malformed_overview(monkeypatch, tmp_path):
+    """The overview body crosses a trust boundary, so preflight defends exactly as the `models` /
+    `engines` renderers do — by reading it through the same helpers.
+
+    A non-list `nodes`, a scalar in it, and a node whose `models` is not a list all read as "serves
+    nothing", which is a refusal. The failure this rules out is a TypeError escaping as a traceback.
+    """
+    for payload in ({"nodes": "nope"}, {"nodes": [7, None]}, {"nodes": [{"models": 7}]}, {}):
+        _seed_launchable_grid(monkeypatch, tmp_path, overview=payload)
+        seen = _capture_launch(monkeypatch)
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["launch", "claude"])
+        assert "claude:opus" in str(exc.value), f"{payload} -> {exc.value}"
+        assert "argv" not in seen, payload
+
+
+def test_launch_preflight_reads_the_same_public_overview_as_models_and_engines(monkeypatch, tmp_path):
+    """One read model for what a grid serves. A second source could disagree with `grid models`, and
+    then the refusal above would be arguing with the command the user ran to check it."""
+    seen_request = {}
+    _seed_launchable_grid(monkeypatch, tmp_path, seen=seen_request)
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert (seen_request["method"], seen_request["path"]) == ("GET", "/relay/v1/grid/overview")
+
+
+def test_launch_preflight_remaps_an_unserved_optional_tier_to_the_main_model(monkeypatch, tmp_path,
+                                                                            capsys):
+    """A tier nobody in the session would have picked must not block a launch — but it must not be
+    left unset either.
+
+    Unset is the trap: Claude Code then falls back to a *real Anthropic* model name that no grid
+    serves, so `/model sonnet` breaks in a way that looks like a Grid bug. Pointing it at the main
+    tier's model keeps every tier switch landing on something the grid actually serves.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:opus", "claude:haiku"])
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0, "an optional tier cannot block the launch"
+
+    assert seen["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude:opus"
+    assert seen["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "claude:opus"
+    # The tiers the grid *does* serve are untouched — a remap is per tier, not a flattening.
+    assert seen["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude:haiku"
+    assert seen["env"]["ANTHROPIC_MODEL"] == "claude:opus"
+    # Every documented variable still carries a value: "remapped" must never mean "omitted".
+    for key in [k for k in seen["env"] if k.endswith("_MODEL")]:
+        assert seen["env"][key], f"{key} was left empty by a remap"
+
+    # One line, and it names which *tiers* moved — the user thinks in `/model sonnet`, not in models.
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.strip()]
+    remap = [ln for ln in lines if "sonnet" in ln]
+    assert len(remap) == 1, f"the remap is reported once, not per tier: {lines}"
+    assert "fable" in remap[0], f"every moved tier is named in that one line: {remap[0]}"
+    assert "claude:opus" in remap[0], f"...and what they now resolve to: {remap[0]}"
+
+
+def test_launch_warns_when_claude_code_user_settings_override_the_injected_env(monkeypatch, tmp_path,
+                                                                              capsys):
+    """Claude Code's own settings carry an `env` block that outranks the environment we hand the child.
+
+    A user with an Anthropic base URL there silently defeats this command — the app starts, talks to
+    Anthropic, and the grid looks broken. So it is warned about, in one line, naming the variable and
+    the file. Never edited: the file is the user's, and guessing which value they meant is not ours
+    to do.
+    """
+    config, _project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True)
+    settings = config / "settings.json"
+    settings.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}}),
+                        encoding="utf-8")
+    before = settings.read_bytes()
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0, "a warning informs, it does not block"
+
+    warnings = [ln for ln in capsys.readouterr().err.splitlines()
+                if "ANTHROPIC_BASE_URL" in ln]
+    assert len(warnings) == 1, f"warned once, not once per key or per file: {warnings}"
+    assert str(settings) in warnings[0], f"the file to edit must be named: {warnings[0]}"
+    assert settings.read_bytes() == before, "the user's settings file is never modified"
+    # The env we hand the child is unchanged — we report the conflict, we do not try to win it.
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://relay.example/relay"
+
+
+def test_launch_is_silent_when_claude_code_settings_carry_no_overriding_value(monkeypatch, tmp_path,
+                                                                             capsys):
+    """A settings file that sets something we do not is not a conflict, and must not be mentioned —
+    a warning that fires on every launch is one users learn to scroll past."""
+    config, _project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text(
+        json.dumps({"env": {"FOO": "bar"}, "model": "sonnet"}), encoding="utf-8")
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"only the status line, nothing about settings: {lines}"
+
+
+def test_launch_warns_when_project_settings_override_the_injected_env(monkeypatch, tmp_path, capsys):
+    """`grid launch claude` is typed inside a project, and a project's `.claude/settings.local.json`
+    overrides us exactly as the user-level file does. From inside the app the two are
+    indistinguishable, so checking only one would make the warning a half-truth."""
+    _config, project = _seed_launchable_grid(monkeypatch, tmp_path)
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-4-5"}}), encoding="utf-8")
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    warnings = [ln for ln in capsys.readouterr().err.splitlines()
+                if "CLAUDE_CODE_SUBAGENT_MODEL" in ln]
+    # Not an `ANTHROPIC_*` name, but it overrides a variable this command sets just the same, so the
+    # check is "a key we inject", not a prefix.
+    assert len(warnings) == 1, f"a project-level override must warn too: {warnings}"
+    assert "settings.local.json" in warnings[0]
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs a character device")
+def test_launch_refuses_to_read_a_settings_path_that_is_not_a_regular_file(monkeypatch, tmp_path,
+                                                                          capsys):
+    """A settings path is attacker-influenced: `grid launch` is run from inside a checkout, and git
+    stores a symlink in four bytes — so a hostile repo can ship `.claude/settings.json` pointing at
+    `/dev/zero`, which never reaches EOF, or at a FIFO, whose `open()` never returns.
+
+    Reading it would hang the launch before preflight ever ran. So the *target* must be a regular
+    file. Symlinks themselves stay allowed: dotfile managers legitimately symlink these files, and
+    rejecting the link rather than its target would break them for no security gain.
+    """
+    config, _project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True)
+    (config / "settings.json").symlink_to("/dev/zero")
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0, "it must neither hang nor block the launch"
+    err = capsys.readouterr().err
+    # The reason names *why* it was skipped. Asserting the specific reason is what keeps this test
+    # from passing on the size cap alone, which would report a JSON error instead.
+    assert "regular file" in err, err
+    assert "settings.json" in err, err
+
+
+def test_launch_skips_an_absurdly_large_settings_file(monkeypatch, tmp_path, capsys):
+    """The regular-file check rules out devices and FIFOs; this bounds the case it leaves — a merely
+    enormous regular file, which would otherwise be read into memory whole before being parsed.
+
+    The file is deliberately *valid* JSON carrying a real collision, so the two outcomes are
+    distinguishable: uncapped, this warns about `ANTHROPIC_BASE_URL`; capped, it says it was skipped.
+    """
+    from shared.launch import claude as claude_target
+
+    config, _project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True)
+    padding = b" " * claude_target._MAX_SETTINGS_BYTES  # pushes it one byte past the cap
+    (config / "settings.json").write_bytes(
+        b'{"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}}' + padding)
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0, "an oversized settings file cannot block a launch"
+    err = capsys.readouterr().err
+    assert "larger than" in err, err
+    assert "ANTHROPIC_BASE_URL" not in err, "the cap fired, so the body was never parsed"
+
+
+def test_launch_survives_a_working_directory_that_no_longer_exists(monkeypatch, tmp_path, capsys):
+    """The settings check is a nicety; it must never be what stops a launch that would have worked.
+
+    A shell sitting in a directory that has since been removed — a deleted worktree, a cleaned temp
+    dir — makes `Path.cwd()` raise. That happens *after* both refusal points have passed, so without a
+    guard a launch the code has already decided would succeed dies instead on a `pathlib` traceback
+    that names neither the grid, nor Claude Code, nor `cd`.
+
+    The user-level settings are still checked: only the location that could not be resolved is
+    skipped.
+    """
+    config, project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}}), encoding="utf-8")
+    seen = _capture_launch(monkeypatch)
+    os.rmdir(project)  # the cwd is pulled out from under the process
+
+    assert cli.main(["launch", "claude"]) == 0, "a dead cwd cannot stop a launch"
+    assert seen["argv"], "the app must still have been started"
+    err = capsys.readouterr().err
+    assert "ANTHROPIC_BASE_URL" in err, f"the location that DID resolve is still checked: {err}"
+
+
+def test_launch_survives_a_process_with_no_resolvable_home_directory(monkeypatch, tmp_path, capsys):
+    """The sibling of the dead-cwd case, and the reason the two locations resolve independently.
+
+    A container running as a UID with no passwd entry and no `HOME` makes `Path.home()` raise. Only
+    the user-level settings become uncheckable; the project's are still read, and the launch still
+    happens. Simulated rather than staged, because a UID with no home cannot be created from a test.
+    """
+    _config, project = _seed_launchable_grid(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")  # so the home directory is what has to be resolved
+    monkeypatch.setattr(Path, "home", staticmethod(
+        lambda: (_ for _ in ()).throw(RuntimeError("Could not determine home directory."))))
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_MODEL": "claude-opus-4-6"}}), encoding="utf-8")
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"], "no home directory is not a reason to refuse to launch"
+    err = capsys.readouterr().err
+    assert "home directory" in err, f"say which location could not be checked: {err}"
+    assert "ANTHROPIC_MODEL" in err, f"the project's settings are still checked: {err}"
+
+
+def test_launch_says_so_when_a_settings_file_cannot_be_read(monkeypatch, tmp_path, capsys):
+    """A settings file that exists but will not parse is neither "no conflict" nor a reason to refuse.
+
+    Treating it as empty would be a swallowed read: the one check standing between the user and a
+    launch that looks like a broken grid would quietly not have run. So it says so and launches.
+    """
+    config, _project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True)
+    (config / "settings.json").write_text("{ not json", encoding="utf-8")
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0, "an unreadable settings file cannot block a launch"
+    err = capsys.readouterr().err
+    assert "settings.json" in err and "couldn't read" in err.lower(), err
+
+
+def test_launch_claude_spawns_the_binary_and_returns_the_childs_exit_code(monkeypatch, tmp_path):
+    """The app's exit code is the command's exit code, so `grid launch claude` composes in a script."""
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, exit_code=3)
+
+    assert cli.main(["launch", "claude"]) == 3  # non-zero survives, not flattened to 0 or 1
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+    assert seen["looked_for"] == ["claude"]
+
+
+def _grid_home_tree(root):
+    """Every path under a temp GRID_HOME — a snapshot to prove a launch writes nothing."""
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+def test_launch_claude_hands_the_child_exactly_the_ten_documented_keys(monkeypatch, tmp_path):
+    """The env the child is given IS this feature's contract, so it is asserted key by key.
+
+    A one-character change to any variable name or model value must not be able to ship green: the
+    dictionary below is spelled out rather than derived from the constant it is testing.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)  # relay https://relay.example, access token AT
+    monkeypatch.delenv("GRID_TOKEN", raising=False)  # so its absence below is the command's doing
+    for key in [k for k in os.environ if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))]:
+        monkeypatch.delenv(key, raising=False)  # a dev's own Anthropic env must not mask the assert
+    seen = _capture_launch(monkeypatch)
+    before = _grid_home_tree(tmp_path)
+
+    assert cli.main(["launch", "claude"]) == 0
+
+    expected = {
+        "ANTHROPIC_BASE_URL": "https://relay.example/relay",
+        "ANTHROPIC_AUTH_TOKEN": "AT",
+        "ANTHROPIC_API_KEY": "AT",
+        "ANTHROPIC_MODEL": "claude:opus",
+        "ANTHROPIC_SMALL_FAST_MODEL": "claude:haiku",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "claude:haiku",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude:opus",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude:sonnet",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude:haiku",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude:fable",
+    }
+    assert len(expected) == 10, "the documented block is ten keys; this list drifted"
+    # Inherited environment, with those keys layered over it — the child keeps the user's PATH,
+    # HOME and everything else, or Claude Code would launch into a stripped shell.
+    assert seen["env"] == {**os.environ, **expected}
+    # ... and *only* those: any variable this command added or changed is one of the ten. This is
+    # what keeps a telemetry variable (deliberately not set, ADR 0028) from creeping in unnoticed.
+    assert {k: v for k, v in seen["env"].items() if os.environ.get(k) != v} == expected
+    # `/v1` on the base is the single most likely mistake: Claude Code appends `/v1/messages` itself.
+    assert "/v1" not in seen["env"]["ANTHROPIC_BASE_URL"]
+    # A shell convenience variable from the hand-rolled recipe that the app never reads.
+    assert "GRID_TOKEN" not in seen["env"]
+
+    # The child only: the CLI's own environment is unchanged, and nothing was written to disk.
+    assert [k for k in os.environ if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))] == []
+    assert _grid_home_tree(tmp_path) == before
+
+
+def test_launch_claude_base_url_never_doubles_a_slash(monkeypatch, tmp_path):
+    """A stored relay address with a trailing slash must not produce `…//relay`, which the client
+    would send verbatim."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example/"})
+    _mock_tier_overview(monkeypatch)
+    _isolate_claude_settings(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_BASE_URL"] == "https://relay.example/relay"
+
+
+def test_launch_claude_targets_a_named_grid_and_defaults_to_the_active_one(monkeypatch, tmp_path):
+    """`grid launch claude <grid>` reaches another grid without `grid use` and back again.
+
+    The two grids are told apart by their per-grid access token: `_mock_lifecycle` answers every
+    network id with the same status, so the relay base cannot distinguish them.
+    """
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n1", "name": "team", "access_token": "AT-TEAM"},
+        {"network_id": "n2", "name": "lab", "access_token": "AT-LAB"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_tier_overview(monkeypatch)
+    _isolate_claude_settings(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "lab"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT-LAB"  # the named grid, not the active one
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT-TEAM"  # omitted → the active grid
+
+
+def test_launch_in_local_mode_refuses_naming_the_dialect_and_the_mode_switch(monkeypatch, tmp_path):
+    """A local grid serves chat/completions, never Anthropic Messages — so the refusal must name the
+    dialect (or the user files a bug) *and* the command that moves them (or it is a dead end)."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))  # default mode is local
+    _capture_launch(monkeypatch)  # if the gate leaked, the spawn below would be reached
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+
+    message = str(exc.value)
+    assert "Anthropic Messages" in message, f"the dialect is the reason and must be named: {message}"
+    assert "grid mode remote" in message, f"the way out must be named: {message}"
+    assert "`grid launch`" in message  # the gate names the command the user typed
+
+
+def test_launch_claude_without_a_stored_token_gives_the_login_guidance(monkeypatch, tmp_path):
+    """No token locally is the *familiar* failure, not a novel one: byte for byte what `info --env`
+    says. Launching with an empty bearer would fail inside Claude Code as an auth error instead."""
+    _seed_running_remote_grid(monkeypatch, tmp_path, access_token=None)
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    assert str(exc.value) == (
+        "Grid team has no access token locally. Run `grid login` to refresh your grids."
+    )
+    assert "argv" not in seen, "refused before the spawn, never launched with an empty bearer"
+
+    with pytest.raises(SystemExit) as info_exc:
+        cli.main(["info", "--env"])
+    assert str(info_exc.value) == str(exc.value)  # one sentence, one source
+
+
+def test_launch_is_wired_in_the_parser_and_classified_remote_only():
+    """The two wiring hazards ADR 0028 names, asserted directly.
+
+    A handler imported only in `cli/__init__` makes `build_parser()` raise `NameError`; a command
+    missing from the dispatch tables would silently run the wrong mode's code.
+    """
+    parser = cli.build_parser()  # would raise NameError if the handler were not imported here
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    assert "launch" in sub.choices
+
+    assert dispatch.REMOTE_ONLY["launch"], "launch must carry its own gate reason, not the default"
+    assert "launch" not in dispatch.AGNOSTIC
+    assert "launch" not in dispatch.REMOTE_HANDLERS
+
+    # Preflight always runs (ADR 0028): there is no opt-out, so any spelling of one is a parse error.
+    # A user who could skip the check would be back to diagnosing a model error inside Claude Code.
+    for flag in ("--no-preflight", "--skip-preflight", "--force"):
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["launch", "claude", flag])
+        assert exc.value.code == 2, flag
+
+
+def test_launch_tier_models_are_named_in_exactly_one_module():
+    """The tier values are the single site a later discovery slice replaces, so a second copy anywhere
+    would make that a multi-site change — and one copy would then silently go stale."""
+    from shared.launch import claude
+
+    assert set(claude.MODEL_TIERS) == {"main", "small_fast", "opus", "sonnet", "haiku", "fable"}
+    home = Path(claude.__file__).resolve()
+    root = home.parents[2]
+    for value in sorted(set(claude.MODEL_TIERS.values())):
+        hits = {
+            path.resolve()
+            for package in ("cli", "shared", "local", "remote")
+            for path in (root / package).rglob("*.py")
+            if value in path.read_text(encoding="utf-8")
+        }
+        assert hits == {home}, f"{value!r} is named outside the one constant: {sorted(hits)}"
+
+
+def test_launch_adding_a_second_target_needs_no_change_to_the_claude_target(monkeypatch, tmp_path, capsys):
+    """The protocol boundary, exercised: a target registered in the table is listed and runs, with
+    nothing in the Claude target touched — which is what makes Codex a new file and a registry line."""
+    from shared.launch import registry
+
+    ran = {}
+
+    class _FakeTarget:
+        name = "fake"
+        label = "Fake App"
+
+        def run(self, session):
+            ran["session"] = session
+            return 7
+
+    monkeypatch.setattr(registry, "TARGETS", {**registry.TARGETS, "fake": _FakeTarget()})
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch"]) == 0
+    listing = capsys.readouterr().out
+    assert "claude" in listing and "fake" in listing  # the listing is the registry, not a literal
+
+    assert cli.main(["launch", "fake"]) == 7  # the new target's own exit code, unmodified
+    assert ran["session"].relay_base == "https://relay.example"
+    assert ran["session"].access_token == "AT"
+    assert ran["session"].label == "team"
+    assert "argv" not in seen, "the Claude target must not be involved in another target's launch"
+
+
+def test_launch_unknown_target_names_it_and_lists_the_available_ones(monkeypatch, tmp_path):
+    """A typo must be a clean error that names both what was rejected and what is valid, so the fix is
+    one edit away — and it must land before any network call or auth gate."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")  # deliberately signed out: an unknown target is not an auth problem
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "vscode"])
+    message = str(exc.value)
+    assert "vscode" in message  # the name that was rejected
+    assert "claude" in message  # ... and every name that would have worked
+    assert "login" not in message.lower(), f"a typo must not be reported as a sign-in problem: {message}"
+
+
+def test_launch_claude_when_the_binary_is_absent_is_a_clean_actionable_error(monkeypatch, tmp_path):
+    """No Claude Code on this machine is a clean error naming the app and where to get it — not a
+    traceback, and not a spawn of nothing. (Issue 04 turns this into an offer to install it.)"""
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch, binary=None)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "Claude Code" in message
+    assert "claude.com" in message, f"the message must say where to get it: {message}"
+    assert "argv" not in seen, "nothing may be spawned when the app was never found"
+
+
+def test_launch_claude_prints_one_line_naming_the_grid_and_model_before_spawning(monkeypatch, tmp_path, capsys):
+    """Once Claude Code's own UI owns the terminal the user can no longer tell which grid they are on,
+    so exactly one line says it first — one, because more would scroll away under the app's banner.
+
+    Read at spawn time, not afterwards: "before" is the whole point, and output collected at the end
+    would pass just as happily if the line were printed as the app exited.
+
+    On **stderr**, because stdout belongs to the launched app — a script capturing the app's output
+    must not receive the launcher's status line mixed into it.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    from shared.launch import system
+
+    spawn = system.spawn
+
+    def spy(argv, env):
+        seen["before_spawn"] = capsys.readouterr()
+        return spawn(argv, env)
+
+    monkeypatch.setattr(system, "spawn", spy)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["before_spawn"].out == "", "stdout belongs to the app, not to the launcher"
+    lines = [line for line in seen["before_spawn"].err.splitlines() if line.strip()]
+    assert len(lines) == 1, f"one line before the app starts, not {len(lines)}: {lines}"
+    assert "team" in lines[0] and "claude:opus" in lines[0]
+
+
+def _stub_binary(monkeypatch, path="/usr/local/bin/claude"):
+    """Resolve the app, but leave the real ``spawn`` in place so its exit-code handling is exercised."""
+    from shared.launch import system
+
+    monkeypatch.setattr(system, "find_executable", lambda name: path)
+    return system
+
+
+def test_launch_reports_a_signal_killed_app_the_way_a_shell_does(monkeypatch, tmp_path, capsys):
+    """A child killed by a signal has no exit code — the OS reports ``-N``. Handing that straight to
+    the shell shows 256-N (SIGKILL → 247), which matches nothing a script author expects.
+
+    (There is no companion test for "one Ctrl-C returns 130": that was the old rule, and it was wrong —
+    a single interrupt now waits for the app's own exit. See
+    `test_launch_lets_the_app_finish_its_own_shutdown_on_ctrl_c`.)
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    system = _stub_binary(monkeypatch)
+    monkeypatch.setattr(system.subprocess, "Popen",
+                        lambda *a, **k: SimpleNamespace(wait=lambda: -9))
+
+    assert cli.main(["launch", "claude"]) == 137  # 128 + SIGKILL, what `$?` would say
+    capsys.readouterr()
+
+
+def test_launch_when_the_app_cannot_be_executed_is_a_clean_error(monkeypatch, tmp_path, capsys):
+    """A path that resolved but cannot run (deleted between resolution and exec, or not executable)
+    is a clean error naming it — never a traceback out of subprocess."""
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    system = _stub_binary(monkeypatch)
+
+    def denied(*a, **k):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(system.subprocess, "Popen", denied)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    assert "/usr/local/bin/claude" in str(exc.value) and "Permission denied" in str(exc.value)
+    capsys.readouterr()
+
+
+class _FakeChild:
+    """A child process that handles its own SIGINT: the first ``wait`` is interrupted (the terminal's
+    Ctrl-C reaches the parent too), and the app then finishes and exits on its own terms."""
+
+    def __init__(self, *args, exit_code=42, interrupts=1, **kwargs):
+        self.events = []
+        self._exit_code = exit_code
+        self._interrupts = interrupts
+
+    def __call__(self, *args, **kwargs):  # stands in for `subprocess.Popen(...)`
+        return self
+
+    def wait(self):
+        self.events.append("wait")
+        if self.events.count("wait") <= self._interrupts:
+            raise KeyboardInterrupt
+        return self._exit_code
+
+    def kill(self):
+        self.events.append("kill")
+
+
+def test_launch_lets_the_app_finish_its_own_shutdown_on_ctrl_c(monkeypatch, tmp_path, capsys):
+    """Ctrl-C must reach Claude Code the way it does when the user runs the binary themselves.
+
+    `subprocess.run` cannot be used for this: its stdlib implementation wraps the wait in a bare
+    `except:` that calls `process.kill()`, so the parent's own KeyboardInterrupt SIGKILLs the app while
+    it is still shutting down — losing whatever it does on exit, terminal restore included. Verified
+    against a real child that traps SIGINT: its "cleanup done" line never printed.
+
+    Asserting on wait/kill is asserting on the seam itself, which is the only place "we did not kill
+    the app" is observable at all.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    system = _stub_binary(monkeypatch)
+    child = _FakeChild()
+    monkeypatch.setattr(system.subprocess, "Popen", child)
+
+    assert cli.main(["launch", "claude"]) == 42  # the app's own exit code, not the interrupt's
+    assert child.events == ["wait", "wait"], f"the app must be waited for, never killed: {child.events}"
+    capsys.readouterr()
+
+
+def test_launch_gives_up_on_a_second_ctrl_c(monkeypatch, tmp_path, capsys):
+    """A user hammering Ctrl-C because the app is not going down must get their shell back, with the
+    conventional code rather than a traceback."""
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    system = _stub_binary(monkeypatch)
+    child = _FakeChild(interrupts=2)
+    monkeypatch.setattr(system.subprocess, "Popen", child)
+
+    assert cli.main(["launch", "claude"]) == 130
+    assert "kill" not in child.events  # still ours to wait for, not to kill
+    capsys.readouterr()
