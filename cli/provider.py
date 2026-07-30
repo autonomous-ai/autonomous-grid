@@ -299,10 +299,10 @@ def _advertise_until_terminated(
         if not registered:
             # An engine that died before registering must not leave a ghost record for
             # `grid leave --all`, nor unlink one a newer live child owns (issue 05's audit).
+            # `discard_own_record`, never a bare unlink: the blind version deleted the record a
+            # NEWER live child had just written, stranding it untracked — exactly the orphan the
+            # ownership check exists to prevent.
             run_records.discard_own_record(args.grid, args.name)
-        if not registered:
-            # An engine that died before registering must not leave a ghost record behind.
-            run_records.record_path(args.grid, args.name).unlink(missing_ok=True)
 
 
 def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> int:
