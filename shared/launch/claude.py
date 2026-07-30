@@ -10,7 +10,7 @@ import json
 import os
 import stat
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -246,6 +246,39 @@ def _warn_on_setting_overrides(session: GridSession, injected: Iterable[str]) ->
         )
 
 
+def _note_remapped(session: GridSession, tiers: _Tiers) -> None:
+    """Say which `/model`-only tiers this grid does not serve and where they now point.
+
+    Shared by both paths on purpose: `--print-env` hands the user the very same remapped values, so
+    a remap that were announced only on a launch would make the printed block quietly different from
+    what it claims to be.
+    """
+    if not tiers.remapped:
+        return
+    print(
+        f"Grid {session.label} doesn't serve the {', '.join(tiers.remapped)} "
+        f"tier{'s' if len(tiers.remapped) > 1 else ''} — `/model` there resolves to "
+        f"{tiers.models['main']}.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _shell_quote(value: str) -> str:
+    """``value`` as a single, always-quoted shell word.
+
+    Not ``shlex.quote``: that leaves a value with no shell-special character bare, and this block is
+    quoted **uniformly** so that a reader copying one line out of it never has to judge which values
+    needed it — and so that a token which becomes shell-special after a credential rotation cannot
+    turn a working recipe into a silently different one.
+
+    Single quotes because a shell expands nothing inside them — no ``$``, no backtick, no backslash.
+    The only character that cannot appear between them is the quote itself, so it is closed, escaped
+    and reopened, which is the portable POSIX spelling.
+    """
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 @dataclass(frozen=True)
 class ClaudeCode:
     """Claude Code as a launch target."""
@@ -253,7 +286,33 @@ class ClaudeCode:
     name: str = "claude"
     label: str = "Claude Code"
 
-    def run(self, session: GridSession) -> int:
+    def print_env(self, session: GridSession) -> int:
+        """Print what ``run`` would inject, as shell exports, and start nothing.
+
+        Preflight runs first and refuses on exactly the conditions a launch refuses on: exports for a
+        grid that cannot serve them would move the failure into the app, which is the trap preflight
+        exists to close.
+
+        The app itself is deliberately **not** resolved here. Resolving it can offer to run the
+        vendor's installer, and an installer is a spawn — this command's whole contract is that it
+        starts nothing. A user printing exports is managing their own shell, where the binary may
+        legitimately arrive later or under a name only they know.
+        """
+        tiers = _resolve_tiers(session)
+        _note_remapped(session, tiers)
+        env = _environment(session, tiers)
+        # Diagnostics on stderr, so stdout stays a block a shell can evaluate unfiltered.
+        _warn_on_setting_overrides(session, env)
+        # This prints the grid's access token, making `--print-env` the **second** deliberate
+        # exception to "no command prints a token" (ADR 0003 §6). It carries the same justification
+        # as `grid info --env` (cli/remote_grid.cmd_remote_info), the first: an explicit,
+        # user-requested disclosure of the caller's own token to the caller's own shell, like
+        # `gh auth token`. Every other launch path stays token-free.
+        for key, value in env.items():
+            print(f"export {key}={_shell_quote(value)}")
+        return 0
+
+    def run(self, session: GridSession, argv: Sequence[str] = ()) -> int:
         # First, before anything touches the machine: will this session actually work? A grid that
         # cannot serve the required tiers is a refusal here, not an API error at the first prompt.
         tiers = _resolve_tiers(session)
@@ -263,14 +322,7 @@ class ClaudeCode:
         binary = claude_install.resolve_or_install(self.label)
         # After the binary check, so a machine without the app gets one clean error rather than a
         # preamble about tiers it will never use.
-        if tiers.remapped:
-            print(
-                f"Grid {session.label} doesn't serve the {', '.join(tiers.remapped)} "
-                f"tier{'s' if len(tiers.remapped) > 1 else ''} — `/model` there resolves to "
-                f"{tiers.models['main']}.",
-                file=sys.stderr,
-                flush=True,
-            )
+        _note_remapped(session, tiers)
         env = _environment(session, tiers)
         _warn_on_setting_overrides(session, env)
         # One line, printed by the target because only it knows which model it is about to ask for.
@@ -288,7 +340,10 @@ class ClaudeCode:
         )
         # The inherited environment with this grid's keys layered over it. `os.environ` is read, never
         # assigned to, so the CLI's own environment is untouched and no file is written.
-        return system.spawn([binary], {**os.environ, **env})
+        #
+        # `argv` is appended unread (issue 05): it is the app's own command line, and the launcher
+        # interpreting any of it would be a flag the app could no longer be given.
+        return system.spawn([binary, *argv], {**os.environ, **env})
 
 
 CLAUDE = ClaudeCode()

@@ -1,6 +1,7 @@
 """What a launch target is, and what it is told about the grid it is being pointed at."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -43,6 +44,23 @@ class LaunchTarget(Protocol):
     name: str
     label: str
 
-    def run(self, session: GridSession) -> int:
-        """Start the app pointed at ``session``, and return its exit code."""
+    def run(self, session: GridSession, argv: Sequence[str] = ()) -> int:
+        """Start the app pointed at ``session`` with ``argv`` appended, and return its exit code.
+
+        ``argv`` is whatever the user typed after ``--``. It is the app's own command line and is
+        passed on unread: the launcher must never become a ceiling on the app it launches, and
+        anything it interpreted here would be a flag the app could no longer receive.
+        """
+        ...
+
+    def print_env(self, session: GridSession) -> int:
+        """Describe the same configuration ``run`` would apply, without starting anything.
+
+        On the target rather than in the command for two reasons. The preflight that decides whether
+        a grid can run this app at all already lives here, so `--print-env` inherits it instead of
+        re-implementing it — printing exports for a grid that cannot serve them would reproduce
+        exactly the trap preflight exists to close. And a target that configures itself through a
+        **file** rather than the environment (Codex, the reason this protocol exists) answers for its
+        own mechanism, instead of the command assuming every target is env-shaped.
+        """
         ...

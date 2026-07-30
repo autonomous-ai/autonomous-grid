@@ -152,6 +152,44 @@ def resolve_override(argv: list[str]) -> tuple[str | None, list[str]]:
     return override, cleaned
 
 
+# The one command whose ``--`` means "everything after this belongs to the app it launches", rather
+# than argparse's own "stop looking for options". Deliberately a single name and not a growing list:
+# a second passthrough command is a decision, not a config value.
+_PASSTHROUGH_COMMAND = "launch"
+
+
+def split_forwarded(argv: list[str]) -> tuple[list[str], tuple[str, ...]]:
+    """Split ``grid launch … -- <the app's own arguments>`` at the first bare ``--``.
+
+    Returns ``(argv for the parser, the forwarded vector)``.
+
+    Done **here, before ``parse_args``**, because argparse cannot do it. ``launch`` has two
+    ``nargs="?"`` positionals (target, grid), so a third ``nargs="*"`` positional binds the first
+    forwarded word to *grid* — ``launch claude -- -p hi`` yields ``grid="-p"`` — and
+    ``nargs=REMAINDER`` swallows the launcher's own ``--print-env`` into the forwarded vector while
+    leaving the flag False. Both verified against argparse, not assumed.
+
+    Scoped to one command on purpose. Every other command keeps argparse's own ``--`` handling, so
+    what ``grid chat -- hello`` has always meant cannot change as a side effect of this feature.
+
+    Runs **after** ``resolve_override``, which has already pulled ``--local``/``--remote`` out of any
+    position — *including* from after this separator. Those two exact tokens therefore cannot be
+    forwarded to a launched app (ADR 0028), which is why `grid launch --help` says so.
+    """
+    try:
+        # The FIRST separator only: a later ``--`` is one of the app's own arguments and is forwarded
+        # verbatim, exactly as it would be if the user had typed it into the app's own command line.
+        separator = argv.index("--")
+    except ValueError:
+        return argv, ()
+    # The command word, found the way argparse finds it: the first token that is not an option. This
+    # tolerates the global flags that may precede a subcommand (`grid --json launch …`).
+    command = next((token for token in argv[:separator] if not token.startswith("-")), None)
+    if command != _PASSTHROUGH_COMMAND:
+        return argv, ()
+    return argv[:separator], tuple(argv[separator + 1:])
+
+
 def dispatch(args: argparse.Namespace, override: str | None) -> int:
     mode = state.resolve_mode(override)
     args.mode = mode

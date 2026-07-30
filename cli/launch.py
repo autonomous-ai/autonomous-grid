@@ -24,10 +24,44 @@ def _print_targets() -> int:
     return 0
 
 
+def _list_targets_or_refuse(print_env: bool, forward: tuple[str, ...]) -> int:
+    """Bare `grid launch` — the discovery listing, unless the user asked for something it cannot do.
+
+    Both refusals exist because the listing exits **0**. Without them a user who named no app gets a
+    helpful-looking list and a success code, with nothing to tell them that the flag or the arguments
+    they typed went nowhere — the kind of failure found only by eventually wondering why.
+    """
+    choices = ", ".join(registry.names())
+    if print_env:
+        raise SystemExit(
+            "`--print-env` needs a launch target: `grid launch <target> --print-env`. "
+            f"Choose from: {choices}."
+        )
+    if forward:
+        raise SystemExit(
+            f"Nothing to pass {' '.join(forward)} to: `grid launch` on its own lists the apps it can "
+            f"start. Name one — `grid launch <target> -- …`. Choose from: {choices}."
+        )
+    return _print_targets()
+
+
 def cmd_launch(args: argparse.Namespace) -> int:
+    # Both arrive from outside the parser: `forward` from `cli.dispatch.split_forwarded` (argparse
+    # cannot hold it — see there), `print_env` from the parser itself.
+    forward = tuple(getattr(args, "forward", ()) or ())
+    print_env = bool(getattr(args, "print_env", False))
+    if print_env and forward:
+        # Before everything else, because it needs nothing else to be true: the two contradict each
+        # other whatever grid, target or account is behind them. Refused rather than ignored —
+        # printing a block that drops the arguments the user typed, and exiting 0 while doing it, is
+        # a silent failure dressed as a success.
+        raise SystemExit(
+            "`--print-env` prints the environment instead of starting the app, so the arguments "
+            "after `--` have nothing to reach. Pass one or the other."
+        )
     target_name = getattr(args, "target", None)
     if not target_name:
-        return _print_targets()
+        return _list_targets_or_refuse(print_env, forward)
     target = registry.get(target_name)
     if target is None:
         # Before the session gate on purpose: a typo is not a sign-in problem, and reporting it as
@@ -62,6 +96,10 @@ def cmd_launch(args: argparse.Namespace) -> int:
     live_models = remote_overview.live_model_names(
         remote_overview.fetch_overview(base, token, label)
     )
-    return target.run(
-        GridSession(label=label, relay_base=base, access_token=token, live_models=live_models)
+    session = GridSession(
+        label=label, relay_base=base, access_token=token, live_models=live_models
     )
+    if print_env:
+        return target.print_env(session)
+    # Whatever the user typed after `--`, already taken out of argv by `cli.dispatch.split_forwarded`.
+    return target.run(session, forward)

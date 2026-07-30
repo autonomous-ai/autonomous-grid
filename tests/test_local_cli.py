@@ -7,6 +7,7 @@ import datetime
 import errno
 import json
 import os
+import shlex
 import shutil
 import socket
 import stat
@@ -22839,9 +22840,15 @@ def test_launch_adding_a_second_target_needs_no_change_to_the_claude_target(monk
         name = "fake"
         label = "Fake App"
 
-        def run(self, session):
-            ran["session"] = session
+        def run(self, session, argv=()):
+            ran["session"], ran["argv"] = session, tuple(argv)
             return 7
+
+        def print_env(self, session):
+            # A file-configuring target is the reason this member is the target's and not the CLI's;
+            # this one simply proves the command routes to it and returns its answer unmodified.
+            ran["printed_for"] = session
+            return 4
 
     monkeypatch.setattr(registry, "TARGETS", {**registry.TARGETS, "fake": _FakeTarget()})
     _seed_launchable_grid(monkeypatch, tmp_path)
@@ -22856,6 +22863,12 @@ def test_launch_adding_a_second_target_needs_no_change_to_the_claude_target(monk
     assert ran["session"].access_token == "AT"
     assert ran["session"].label == "team"
     assert "argv" not in seen, "the Claude target must not be involved in another target's launch"
+
+    # Both protocol members reach the new target, with no Claude-shaped code in between.
+    assert cli.main(["launch", "fake", "--", "-x"]) == 7
+    assert ran["argv"] == ("-x",)
+    assert cli.main(["launch", "fake", "--print-env"]) == 4
+    assert ran["printed_for"].label == "team"
 
 
 def test_launch_unknown_target_names_it_and_lists_the_available_ones(monkeypatch, tmp_path):
@@ -23500,3 +23513,366 @@ def test_launch_gives_up_on_a_second_ctrl_c(monkeypatch, tmp_path, capsys):
     assert cli.main(["launch", "claude"]) == 130
     assert "kill" not in child.events  # still ours to wait for, not to kill
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# `grid launch` passthrough and `--print-env` — issue 05, ADR 0028
+# ---------------------------------------------------------------------------
+
+def test_launch_forwards_everything_after_the_separator_to_the_child(monkeypatch, tmp_path):
+    """Without this the launcher is a ceiling on the app: `--continue`, `-p`, every permission mode —
+    unreachable, and a user who needs one goes back to exporting by hand, which is the problem this
+    feature exists to remove.
+
+    Order and spelling are both asserted: the app parses these itself, so a reordered or rewritten
+    vector is a different command from the one the user typed.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--", "--continue", "-p", "tell me"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude", "--continue", "-p", "tell me"]
+
+
+def test_launch_cannot_forward_the_mode_override_and_says_so_where_a_user_looks(monkeypatch,
+                                                                                tmp_path, capsys):
+    """The one sharp edge in the passthrough, asserted as behaviour *and* as documentation.
+
+    `cli.dispatch.resolve_override` strips `--local`/`--remote` from **anywhere** in argv, separator
+    included, so those two exact words can never reach the app (ADR 0028). That is accepted — but a
+    limitation a user can only find by watching their flag vanish is a bug report waiting to happen,
+    so `grid launch --help` has to say it.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--", "--remote"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude"], "the override is stripped before the split"
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["launch", "--help"])
+    helptext = capsys.readouterr().out
+    assert "--local" in helptext and "--remote" in helptext, helptext
+    # The separator itself must be documented too, or the escape hatch is undiscoverable.
+    assert "--" in helptext and "claude" in helptext
+    # ...and the *consequence*, not just the fact. `--local` does not merely fail to arrive: it is
+    # taken as this CLI's own mode override, and the command then refuses as a *remote-mode command*
+    # — a message about modes, for a flag the user was aiming at the app. Documenting only "cannot be
+    # forwarded" would leave that failure to be met through a message that points somewhere else.
+    assert "--local" in helptext and "refuse" in helptext.lower(), helptext
+
+
+def test_launch_forwarding_the_mode_override_fails_the_way_the_help_says(monkeypatch, tmp_path):
+    """The `--local` direction of the sharp edge, which is the one that actually misleads.
+
+    `-- --remote` is a harmless no-op on a remote-only command. `-- --local` flips this invocation's
+    mode, so the user is told `grid launch` is a remote-mode command — about a flag they were aiming
+    at Claude Code. The behaviour is accepted (ADR 0028); this pins it so it stays the documented one
+    rather than drifting into some other confusing shape.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude", "--", "--local"])
+    assert "remote-mode command" in str(exc.value), str(exc.value)
+
+
+def test_launch_does_not_read_a_forwarded_word_as_its_grid_argument(monkeypatch, tmp_path):
+    """The mis-parse that decided the implementation, pinned.
+
+    `launch` has two optional positionals, so leaving the separator to argparse binds the first
+    forwarded word to *grid*: `launch claude -- lab` would silently launch against the wrong grid,
+    and `-- -p hi` would set `grid="-p"`. Verified against argparse, which is why the split happens
+    before the parser ever sees argv.
+    """
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n1", "name": "team", "access_token": "AT-TEAM"},
+        {"network_id": "n2", "name": "lab", "access_token": "AT-LAB"}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_tier_overview(monkeypatch)
+    _isolate_claude_settings(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--", "lab"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT-TEAM", "the active grid, not the forwarded word"
+    assert seen["argv"] == ["/usr/local/bin/claude", "lab"]
+
+
+def test_launch_does_not_act_on_its_own_flag_after_the_separator(monkeypatch, tmp_path, capsys):
+    """Past the separator the launcher stops reading: its own flags become the app's arguments.
+
+    `--print-env` is the sharpest case — the launcher's most behaviour-changing flag has to arrive at
+    the app as a plain argument, or `--` is not really a passthrough.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--", "--print-env"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude", "--print-env"]
+    assert "export " not in capsys.readouterr().out, "the flag was forwarded, not obeyed"
+
+
+def test_launch_with_an_empty_separator_is_identical_to_no_separator(monkeypatch, tmp_path):
+    """`grid launch claude --` with nothing after it must not become a different command — an empty
+    passthrough is no passthrough, not an empty string argument the app would have to parse."""
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--"]) == 0
+    with_separator = seen["argv"]
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert with_separator == seen["argv"] == ["/usr/local/bin/claude"]
+
+
+def test_launch_forwards_a_second_separator_verbatim(monkeypatch, tmp_path):
+    """Only the first `--` is the launcher's. A later one is one of the app's own arguments — apps
+    have their own separators, and swallowing it would change the command the app receives."""
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--", "-p", "--", "hi"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude", "-p", "--", "hi"]
+
+
+def test_launch_forwarding_to_no_target_at_all_is_refused(monkeypatch, tmp_path, capsys):
+    """`grid launch -- --continue` names no app, so there is nothing for the arguments to reach.
+
+    Bare `grid launch` is the discovery listing and exits 0, which is exactly what makes this a trap:
+    without the check the user gets a helpful-looking list, a zero exit code, and no hint that the
+    arguments they typed went nowhere.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "--", "--continue"])
+
+    message = str(exc.value)
+    assert "--continue" in message or "--" in message, message
+    assert "claude" in message, f"the way to fix it must be named: {message}"
+    assert "Launch targets:" not in capsys.readouterr().out, "not the discovery listing"
+
+
+def test_launch_passthrough_leaves_every_other_commands_separator_alone():
+    """The split is scoped to one command, and that scoping is the regression risk of this slice.
+
+    Every other command has always let argparse handle `--` itself, so a global split would silently
+    change what `grid chat -- hello` means. Asserted on the splitter directly: this is a property of
+    argv handling, and there is no command whose observable behaviour would show it more honestly.
+    """
+    assert dispatch.split_forwarded(["chat", "--", "hello"]) == (["chat", "--", "hello"], ())
+    assert dispatch.split_forwarded(["launch", "claude"]) == (["launch", "claude"], ())
+    assert dispatch.split_forwarded(["launch", "claude", "--", "-p"]) == (
+        ["launch", "claude"], ("-p",)
+    )
+    # A global flag may precede the subcommand, so the command word is the first non-option token.
+    assert dispatch.split_forwarded(["--json", "launch", "c", "--", "-p"]) == (
+        ["--json", "launch", "c"], ("-p",)
+    )
+
+
+def _printed_exports(text: str) -> dict[str, str]:
+    """The `export K=V` block, read back the way a shell would read it.
+
+    `shlex.split` in POSIX mode *is* the quoting contract under test: it applies the same quote and
+    escape rules a shell does, so a value this cannot recover is one a shell could not either.
+    """
+    out = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        word, verb = shlex.split(line), line.split(" ", 1)[0]
+        assert verb == "export", f"the block must be evaluable as-is, not {line!r}"
+        assert len(word) == 2, f"one shell word per export, not {word!r}"
+        key, _, value = word[1].partition("=")
+        out[key] = value
+    return out
+
+
+def test_launch_print_env_prints_the_exports_and_never_spawns(monkeypatch, tmp_path, capsys):
+    """The supported version of the hand-rolled recipe: for a user who wants to manage their own
+    shell, and for anyone debugging what a launch would have injected.
+
+    "Does not spawn" is the whole contract, so the binary is never even looked for — resolving it
+    could offer to run the vendor's installer, and an installer is a spawn.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--print-env"]) == 0
+
+    exports = _printed_exports(capsys.readouterr().out)
+    assert exports["ANTHROPIC_BASE_URL"] == "https://relay.example/relay"
+    assert exports["ANTHROPIC_AUTH_TOKEN"] == "AT"
+    assert "argv" not in seen, "nothing may be started"
+    assert seen["looked_for"] == [], "the app is not resolved, so no install can be offered"
+    assert seen["asked"] == []
+
+
+def test_launch_print_env_with_forwarded_arguments_is_refused(monkeypatch, tmp_path, capsys):
+    """The two escape hatches contradict each other: nothing is started, so arguments meant for the
+    app have nowhere to go.
+
+    Refused rather than ignored. Printing a block that silently drops what the user typed is the
+    failure they would find only by wondering why their flag did nothing — and a zero exit code would
+    tell a script it had worked.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude", "--print-env", "--", "--continue"])
+
+    message = str(exc.value)
+    assert "--print-env" in message and "--" in message, message
+    assert capsys.readouterr().out == "", "refused before anything was printed"
+    assert "argv" not in seen
+
+
+def test_launch_print_env_without_a_target_says_which_target(monkeypatch, tmp_path, capsys):
+    """Bare `grid launch` lists what can be launched, but there is no environment to print without
+    naming an app — so this is a clean instruction, not the discovery listing and not a traceback."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")  # deliberately signed out: this is a command-line error, not an auth one
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "--print-env"])
+
+    message = str(exc.value)
+    assert "--print-env" in message and "claude" in message, message
+    assert capsys.readouterr().out == "", "not the discovery listing"
+
+
+def test_launch_print_env_quotes_a_value_that_needs_no_quoting(monkeypatch, tmp_path, capsys):
+    """Every value is quoted, including the ones a shell would have accepted bare.
+
+    `shlex.quote` was rejected for exactly this: it leaves a safe value unquoted, so the block would
+    be quoted inconsistently — a reader copying one line out of it would have to judge which values
+    needed it, and a token that becomes shell-special after a rotation would silently change what a
+    working recipe means.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path, access_token="AT")
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--print-env"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "export ANTHROPIC_AUTH_TOKEN='AT'" in lines, lines
+    assert all(line.split("=", 1)[1].startswith("'") for line in lines if line), lines
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="POSIX shell required")
+def test_launch_print_env_block_survives_a_shell_hostile_token(monkeypatch, tmp_path, capsys):
+    """"Shell-evaluable as-is" is proved by a real shell, not by our own idea of quoting.
+
+    A grid token is an opaque credential this repo does not mint, so it is never safe to assume which
+    characters it can contain — and the same block is what a script author is invited to `eval`. The
+    substitution below would run a command and the quote would end the word early, so a block that
+    survives this one survives anything a value can contain.
+    """
+    hostile = "it's $(echo pwned) `echo pwned` \"q\" \\ ;|&"
+    _seed_launchable_grid(monkeypatch, tmp_path, access_token=hostile)
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--print-env"]) == 0
+    block = capsys.readouterr().out
+
+    # `eval` rather than a sourced file: it is what a user pastes, and what `$(grid launch … )` does.
+    proof = subprocess.run(
+        ["sh", "-c", 'eval "$1"; printf %s "$ANTHROPIC_AUTH_TOKEN"', "sh", block],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proof.returncode == 0, proof.stderr
+    # Equality is the whole proof, and it is two proofs at once: the value round-tripped intact, and
+    # nothing expanded — an expanded block would have yielded `it's pwned pwned …`, not this.
+    assert proof.stdout == hostile, f"the shell recovered {proof.stdout!r}, not the token"
+    assert proof.stderr == "", proof.stderr
+
+
+def test_launch_print_env_prints_exactly_what_a_launch_would_inject(monkeypatch, tmp_path, capsys):
+    """The printed block and the child's environment are compared against **each other**, in one run.
+
+    `--print-env` is only worth having if it is the truth: a user debugging a launch reads it to find
+    out what the launch did. Asserting the keys against a literal list would let both paths drift
+    together into a lie, so the two are derived independently and diffed.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    for key in [k for k in os.environ if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))]:
+        monkeypatch.delenv(key, raising=False)  # a dev's own Anthropic env must not mask the diff
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--print-env"]) == 0
+    printed = _printed_exports(capsys.readouterr().out)
+
+    assert cli.main(["launch", "claude"]) == 0
+    injected = {k: v for k, v in seen["env"].items() if os.environ.get(k) != v}
+
+    assert printed == injected, "the printed block is not what the launch hands the app"
+
+
+def test_launch_print_env_runs_preflight_and_refuses_what_a_launch_refuses(monkeypatch, tmp_path,
+                                                                           capsys):
+    """Printing exports for a grid that cannot serve them would reproduce exactly the trap preflight
+    exists to close — the user evaluates the block, starts the app themselves, and meets a model
+    error that names nothing about their grid."""
+    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:haiku", "glm-5.2"])
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude", "--print-env"])
+
+    message = str(exc.value)
+    assert "claude:opus" in message and "glm-5.2" in message, message
+    assert capsys.readouterr().out == "", "refused before a single export was printed"
+
+
+def test_launch_print_env_without_a_stored_token_gives_the_login_guidance(monkeypatch, tmp_path,
+                                                                         capsys):
+    """No token locally is the familiar failure here too, and — the point of this test — it must land
+    *before* anything is printed. A block with an empty token reads as valid and fails inside the app.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path, access_token=None)
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude", "--print-env"])
+    assert str(exc.value) == (
+        "Grid team has no access token locally. Run `grid login` to refresh your grids."
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_launch_print_env_keeps_its_warnings_off_the_evaluable_block(monkeypatch, tmp_path, capsys):
+    """Claude Code's settings outrank a shell export just as they outrank a launch, so the warning
+    still fires — but on stderr, or `eval "$(grid launch claude --print-env)"` would evaluate it."""
+    config, _project = _seed_launchable_grid(monkeypatch, tmp_path)
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "settings.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}}), encoding="utf-8"
+    )
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--print-env"]) == 0
+
+    captured = capsys.readouterr()
+    assert "ANTHROPIC_BASE_URL" in captured.err and "settings" in captured.err
+    # Every stdout line is still an export and nothing else — the block stays evaluable as-is.
+    assert set(_printed_exports(captured.out)) >= {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
+
+
+def test_launch_print_env_records_why_it_is_allowed_to_print_a_token():
+    """The second deliberate hole in "no command prints a token" (ADR 0003 §6).
+
+    A carve-out whose reasoning is not written next to it is a hole nobody can audit — the next
+    reader cannot tell a considered exception from an oversight, and the third one gets added by
+    analogy. So the justification is required at the site, exactly as `info --env` carries it.
+    """
+    from shared.launch import claude as claude_target
+
+    source = Path(claude_target.__file__).read_text(encoding="utf-8")
+    body = source.split("def print_env", 1)[1].split("\n    def ", 1)[0]
+    assert "0003" in body, "the token-printing site must name the ADR it is an exception to"
+    assert "info --env" in body, "...and the carve-out it shares its justification with"

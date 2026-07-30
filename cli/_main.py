@@ -9,7 +9,7 @@ from datetime import datetime
 from local import config
 from local import runtime
 from shared import logging_setup, paths
-from .dispatch import dispatch, resolve_override
+from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
 
 
@@ -102,8 +102,16 @@ def main(argv: list[str] | None = None) -> int:
     if internal is not None:
         return internal
     override, cleaned = resolve_override(raw_argv)
+    # After the override strip, and before the parser sees anything: the forwarded vector must never
+    # reach argparse, which would bind the app's own flags to this CLI's positionals.
+    cleaned, forwarded = split_forwarded(cleaned)
     parser = build_parser()
     args = parser.parse_args(cleaned)
+    if forwarded:
+        # Only when there is something to forward, so every other command's namespace is untouched.
+        # The parser declares `forward=()` on `launch`, so its handler always finds the attribute —
+        # `grid launch claude --` with nothing after it is therefore identical to no `--` at all.
+        args.forward = forwarded
     return dispatch(args, override)
 
 
