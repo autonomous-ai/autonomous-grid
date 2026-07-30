@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import platform
 import shutil
 import socket
+import ssl
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 from shared import logging_setup, paths
-
 
 MIN_LLAMA_SERVER_BUILD = 9240
 
@@ -24,6 +26,10 @@ class LlamaProcess:
     proc: subprocess.Popen
     port: int
     log: Path
+    host: str = "0.0.0.0"
+    scheme: str = "http"
+    probe_host: str = ""
+    tls_ca_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,18 +90,33 @@ def llama_server_path() -> str:
     on_path = shutil.which("llama-server")
     if on_path:
         return on_path
-    raise SystemExit("llama-server not found. Run `grid engine install llama.cpp` first.")
+    raise SystemExit(
+        "llama-server not found. Run `grid engine install llama.cpp` first."
+    )
 
 
-def is_port_in_use(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        return sock.connect_ex(("localhost", port)) == 0
+def is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Probe a listener through the address family used by its bind host."""
+
+    value = str(host).strip().strip("[]")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise ValueError(
+            "port probe host must be a valid IPv4 or IPv6 address"
+        ) from exc
+    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+    if address.is_unspecified:
+        value = "::1" if address.version == 6 else "127.0.0.1"
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex((value, port)) == 0
 
 
 def start_llm(
     model_file: str,
     *,
     port: int,
+    host: str = "0.0.0.0",
     ctx_size: int | None = None,
     n_predict: int | None = None,
     parallel: int | None = None,
@@ -103,8 +124,33 @@ def start_llm(
     temp: float | None = None,
     reasoning_budget: int | None = None,
     alias: str | None = None,
+    api_key_file: str | os.PathLike[str] | None = None,
+    tls_cert_file: str | os.PathLike[str] | None = None,
+    tls_key_file: str | os.PathLike[str] | None = None,
+    tls_ca_file: str | os.PathLike[str] | None = None,
+    probe_host: str | None = None,
     mmproj: str = "mmproj-BF16.gguf",
+    on_spawn: Callable[[LlamaProcess], None] | None = None,
 ) -> LlamaProcess:
+    host = str(host).strip()
+    if not host:
+        raise ValueError("llama-server bind host must not be empty")
+    api_key_path = _readable_file(
+        api_key_file,
+        "llama-server API key file",
+        owner_only=True,
+    )
+    cert_path = _readable_file(tls_cert_file, "llama-server TLS certificate")
+    key_path = _readable_file(
+        tls_key_file,
+        "llama-server TLS private key",
+        owner_only=True,
+    )
+    ca_path = _readable_file(tls_ca_file, "llama-server TLS CA file")
+    if bool(cert_path) != bool(key_path):
+        raise ValueError("llama-server TLS certificate and private key must be provided together")
+    if ca_path and not cert_path:
+        raise ValueError("llama-server TLS CA file requires TLS certificate and private key")
     paths.ensure_all()
     profile = runtime_profile()
     ctx_size = profile.ctx_size if ctx_size is None else ctx_size
@@ -112,7 +158,9 @@ def start_llm(
     parallel = profile.parallel if parallel is None else parallel
     flash_attn = profile.flash_attn if flash_attn is None else flash_attn
     temp = profile.temp if temp is None else temp
-    reasoning_budget = profile.reasoning_budget if reasoning_budget is None else reasoning_budget
+    reasoning_budget = (
+        profile.reasoning_budget if reasoning_budget is None else reasoning_budget
+    )
 
     model_path = paths.models_dir() / Path(model_file).name
     if not model_path.is_file():
@@ -125,11 +173,19 @@ def start_llm(
     log_fh = logging_setup.cap_and_open_append(
         log, logging_setup.engine_log_max_bytes(), text=True, buffering=1
     )
-    log_fh.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} grid starting llm on :{port} ===\n")
+    log_fh.write(
+        f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} grid starting llm on :{port} ===\n"
+    )
 
     cmd = [llama_server_path(), "-m", str(model_path)]
     if alias:
         cmd.extend(["--alias", alias])
+    if api_key_path:
+        # The key itself must never appear in argv or the inherited environment. llama.cpp reads
+        # one key per line from this owner-only file instead.
+        cmd.extend(["--api-key-file", api_key_path])
+    if cert_path:
+        cmd.extend(["--ssl-cert-file", cert_path, "--ssl-key-file", key_path])
     if mmproj:
         mmproj_path = paths.models_dir() / mmproj
         if mmproj_path.is_file():
@@ -142,9 +198,13 @@ def start_llm(
     cmd.extend(
         [
             "--host",
-            "0.0.0.0",
+            host,
             "--port",
             str(port),
+            # Keep llama.cpp's loopback slot-introspection endpoint enabled. The allocator uses
+            # GET /slots to observe requests that bypass Grid's central proxy before unloading a
+            # model process.
+            "--slots",
             "--jinja",
             "--ctx-size",
             str(ctx_size),
@@ -174,15 +234,66 @@ def start_llm(
         ]
     )
     if Path(model_file).name.lower().startswith("qwen3.6"):
-        cmd.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", str(profile.spec_draft_n_max)])
+        cmd.extend(
+            [
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-n-max",
+                str(profile.spec_draft_n_max),
+            ]
+        )
 
     proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
-    return LlamaProcess(proc=proc, port=port, log=log)
+    launched = LlamaProcess(
+        proc=proc,
+        port=port,
+        log=log,
+        host=host,
+        scheme="https" if cert_path else "http",
+        probe_host=str(probe_host or ""),
+        tls_ca_file=ca_path,
+    )
+    try:
+        # This hook deliberately runs in the first instructions after Popen. Allocator callers use
+        # it to durably record the PID and port before doing OS identity probes or readiness work.
+        # If durable publication fails, the new child must not escape as an untracked process.
+        if on_spawn is not None:
+            on_spawn(launched)
+    except BaseException:
+        stop(launched)
+        raise
+    finally:
+        # The child inherited/duplicated the descriptor passed to Popen; the parent does not need
+        # to retain a second handle for the lifetime of the server.
+        log_fh.close()
+    return launched
 
 
-def wait_for_models(proc: LlamaProcess, timeout: float = 120.0) -> None:
+def wait_for_models(
+    proc: LlamaProcess,
+    timeout: float = 120.0,
+    *,
+    api_key: str | None = None,
+) -> None:
     deadline = time.monotonic() + timeout
     last_exc: Exception | None = None
+    bind_host = str(getattr(proc, "host", "0.0.0.0"))
+    probe_host = str(getattr(proc, "probe_host", "") or "")
+    if not probe_host:
+        try:
+            probe_host = (
+                "[::1]"
+                if ipaddress.ip_address(bind_host).version == 6
+                else "127.0.0.1"
+            )
+        except ValueError:
+            probe_host = "localhost"
+    scheme = str(getattr(proc, "scheme", "http") or "http")
+    ca_file = str(getattr(proc, "tls_ca_file", "") or "")
+    verify: ssl.SSLContext | bool = (
+        ssl.create_default_context(cafile=ca_file) if ca_file else True
+    )
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     while time.monotonic() < deadline:
         rc = proc.proc.poll()
         if rc is not None:
@@ -191,7 +302,11 @@ def wait_for_models(proc: LlamaProcess, timeout: float = 120.0) -> None:
                 f"Last lines of {proc.log}:\n{_log_tail(proc.log)}"
             )
         try:
-            resp = httpx.get(f"http://localhost:{proc.port}/v1/models", timeout=5.0)
+            with httpx.Client(timeout=5.0, trust_env=False, verify=verify) as client:
+                resp = client.get(
+                    f"{scheme}://{_url_host(probe_host)}:{proc.port}/v1/models",
+                    headers=headers,
+                )
             if resp.status_code == 200:
                 return
         except httpx.RequestError as exc:
@@ -203,18 +318,82 @@ def wait_for_models(proc: LlamaProcess, timeout: float = 120.0) -> None:
     raise SystemExit(message)
 
 
-def stop(proc: LlamaProcess, *, timeout: float = 10.0) -> None:
+def _readable_file(
+    value: str | os.PathLike[str] | None,
+    label: str,
+    *,
+    owner_only: bool = False,
+) -> str:
+    if value is None:
+        return ""
+    raw = os.fspath(value)
+    if not raw or any(character in "\r\n\0" for character in raw):
+        raise ValueError(f"{label} path must be non-empty and single-line")
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file() or not os.access(path, os.R_OK):
+        raise ValueError(f"{label} is not a readable regular file: {path}")
+    if owner_only and os.name != "nt":
+        metadata = path.stat()
+        if metadata.st_mode & 0o077:
+            raise ValueError(f"{label} must be owner-only (chmod 600): {path}")
+        if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
+            raise ValueError(f"{label} must be owned by the current user: {path}")
+    return str(path)
+
+
+def _url_host(value: str) -> str:
+    """Return a URL authority host without changing DNS names or scoped IPv6."""
+
+    host = str(value).strip()
+    if host.startswith("[") and host.endswith("]"):
+        return host
+    decoded_host = host.replace("%25", "%")
+    candidate = decoded_host.split("%", 1)[0]
+    try:
+        if ipaddress.ip_address(candidate).version == 6:
+            return f"[{decoded_host.replace('%', '%25')}]"
+    except ValueError:
+        pass
+    return host
+
+
+def stop(
+    proc: LlamaProcess,
+    *,
+    timeout: float = 10.0,
+    kill_timeout: float = 5.0,
+) -> None:
     if proc.proc.poll() is not None:
         return
-    proc.proc.terminate()
     try:
-        proc.proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.proc.kill()
+        proc.proc.terminate()
+    except OSError:
+        # The child can race with the signal. Recheck through kill/wait below instead of masking a
+        # durability error raised by an immediate post-spawn callback.
+        pass
+    else:
         try:
-            proc.proc.wait(timeout=5)
+            proc.proc.wait(timeout=timeout)
+            return
         except subprocess.TimeoutExpired:
             pass
+    try:
+        proc.proc.kill()
+    except OSError as exc:
+        if proc.proc.poll() is None:
+            raise RuntimeError(
+                f"llama-server on port {proc.port} survived stop: {exc}"
+            ) from exc
+        return
+    try:
+        proc.proc.wait(timeout=kill_timeout)
+    except subprocess.TimeoutExpired as exc:
+        if proc.proc.poll() is None:
+            raise RuntimeError(
+                f"llama-server on port {proc.port} survived forced stop"
+            ) from exc
+    if proc.proc.poll() is None:
+        raise RuntimeError(f"llama-server on port {proc.port} did not exit")
 
 
 def parse_version(timeout: float = 5.0) -> int | None:
@@ -222,6 +401,7 @@ def parse_version(timeout: float = 5.0) -> int | None:
         out = subprocess.run(
             [llama_server_path(), "--version"],
             capture_output=True,
+            check=False,
             text=True,
             timeout=timeout,
         )

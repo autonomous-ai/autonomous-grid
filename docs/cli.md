@@ -17,6 +17,7 @@ mode      which world the CLI targets: `local` (default) or `remote`
 pack      a bundled starting point for training on business data (`grid train packs`)
 adapter   the small add-on layer a training run produces (LoRA) — what moves between machines
 gate      the check that refuses to serve a trained model unless it beat the one you serve
+allocator the local controller that places configured models across participating hosts
 ```
 
 Do not use `provider`, `consumer`, or `signaling` in CLI output or first-run docs — with one
@@ -91,10 +92,12 @@ with `grid join`, and use them with `grid chat -m <model> "…"`.
 
 ## Modes
 
-Grid runs in one of two modes. **`local`** (the default) is everything documented here: an
-unauthenticated in-memory grid on your local network. **`remote`** is a signed-in thin client to
-autonomous's hosted relay: sign in with `grid login`, then bring up and manage hosted **remote
-grids** with the same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
+Grid runs in one of two modes. **`local`** (the default) is everything documented here: a local-
+network grid whose inference, discovery, and ordinary registry are unauthenticated and whose live
+membership is in memory. Allocator mutations and managed-node control are the narrow authenticated
+exception (see [Allocator](#allocator)). **`remote`** is a signed-in thin client to autonomous's
+hosted relay: sign in with `grid login`, then bring up and manage hosted **remote grids** with the
+same `up`/`down`/`ls`/`info` verbs, serve them (`join`/`leave`), consume them
 (`chat`/`image`/`edit`/`video`), price your served models (`grid price`), and manage who may join or
 use them (`grid members`).
 
@@ -119,6 +122,10 @@ membership admin (`grid members`) all work. `grid members` is remote-only — in
 local commands (`catalog`, `pull`, `rm`/`remove`, `ctx`, `device-info`, `engine …`, `agent …`,
 `train …`) work in either mode. A machine with no state
 file behaves exactly as a `local`-only install.
+
+`grid allocator …` is mode-gated in the other direction: it runs only in `local` mode in this
+release. In `remote` mode it exits with guidance to run `grid mode local` or use `--local` for that
+one command; it never silently operates on the hosted relay.
 
 Notes:
 - `--json` goes after the subcommand (`grid info --json`); bare `grid --json` prints the
@@ -467,6 +474,78 @@ flat `models` list.
 
 See [ADR 0012](./adr/0012-api-engines.md) for the decisions behind the CLI-shipped whitelist,
 the `openai:*` namespacing, and the key-store lifecycle.
+
+## Allocator
+
+```
+grid allocator status [--grid <g>] [--json]
+
+grid allocator model set <model> --memory-mb <n>
+    [--runtime <name>]... [--backend <name>]... [--data-tier <tier>]
+    [--required-tag <tag>]... [--forbidden-tag <tag>]... [--pin <host>]...
+    [--min-replicas <n>] [--max-replicas <n>] [--target-utilization <f>]
+    [--service-seconds <s>] [--latency-slo-ms <ms>] [--priority <n>]
+    [--load-seconds <s>] [--warm-seconds <s>] [--min-residency-seconds <s>]
+    [--scale-down-cooldown-seconds <s>] [--min-failure-domains <n>]
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+grid allocator model remove|rm <model>
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+
+grid allocator mode observe|recommend|automatic
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+grid allocator tick
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http] [--json]
+
+grid allocator token write <path> [--host-id <id>] [--ttl-days <n>] [--force]
+    [--grid <g>] [--token-file <path>] [--allow-insecure-http]
+
+grid allocator node start [--grid <g>] [--token-file <path>]
+    [--heartbeat-interval <s>] [--advertise-host <h>]
+    [--engine-tls-cert <pem>] [--engine-tls-key <pem>] [--engine-tls-ca <pem>]
+    [--allow-insecure-http]
+grid allocator node stop [--grid <g>]
+grid allocator node status [--grid <g>] [--json]
+grid allocator node drain|pause|quarantine [--grid <g>]
+    [--reason <text>] [--for-seconds <s>]
+grid allocator node resume [--grid <g>]
+```
+
+The allocator dynamically places configured model replicas across participating computers. It is
+experimental and starts in **`recommend`** mode: `observe` records drift without proposing
+actions, `recommend` shows the actions it would take, and `automatic` delivers executable
+load/warm/drain/unload commands within the allocator's safety limits. For the initial managed
+runtime, `<model>` must be the exact filename of a GGUF already cached with `grid pull` on each
+eligible computer; allocation never invents a download source.
+
+`grid allocator node start` joins this computer as managed capacity and starts a detached local
+protection loop. `drain`, `pause`, and `quarantine` are durable local overrides that outrank global
+placement; `resume` clears the override. `node stop` fences routing and drains active work before
+stopping processes that Grid can prove it owns. If activity remains busy or unknowable at the
+graceful deadline, cleanup fails safe and leaves the process alive; the explicit force fallback is
+reserved for bounded, identity-checked daemon cleanup and never signals an unproven model child.
+Retry after work drains. Managed llama ports use a private engine key that Grid persists owner-only
+and gives to llama.cpp through an owner-only key file, never process argv or environment. It is
+never returned from status or discovery. A non-loopback managed engine requires the TLS certificate
+and key flags above; add the CA flag for a private intranet CA. The certificate SAN must cover the
+exact `--advertise-host`, and the private key must be owned by the current user with no group/other
+permissions. Use `token write` to mint an expiring, host-scoped credential into an owner-only file
+before provisioning another computer.
+
+If `--runtime` is omitted, model profiles default to `llama.cpp`. Supplying one or more
+`--runtime` flags replaces that default; it does not add to it. A managed node on the same machine
+as its Grid advertises the Grid's literal loopback control address by default. Remote workers need
+an explicit reachable address and end-to-end TLS.
+
+`status` is a read-only LAN status view and needs no allocator credential. Model profile changes,
+allocator mode changes, immediate ticks, and node-token minting use the operator capability from
+the managed local grid config, `GRID_ALLOCATOR_CONTROL_TOKEN`, or `--token-file`. A managed node
+uses the separate host-scoped `GRID_ALLOCATOR_NODE_TOKEN` or its own `--token-file`; never copy the
+operator capability to a worker. Operator calls retain the explicit legacy
+`--allow-insecure-http` escape hatch, but managed node and engine credentials always refuse
+non-loopback plaintext. The node-start spelling is accepted for compatibility only and does not
+relax that rule. Use HTTPS between computers. See
+[Dynamic resource allocator](allocator.md) for placement rules, safety invariants, and the wire
+contract.
 
 ## Use
 

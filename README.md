@@ -265,6 +265,13 @@ equals your grid's rather than a vendor's. The `model` field and the `X-Grid-Rou
 name whichever model actually answered.
 Contract and transparency table in [docs/cli.md](docs/cli.md#router) · [ADR 0013](docs/adr/0013-auto-routing.md).
 
+### Dynamic allocation (experimental)
+
+Grid can plan which configured models belong on which computers as demand and host availability
+change. It protects employee machines locally, preserves required replicas, drains before unload,
+and defaults to recommendation-only operation. See the [allocator architecture, safety contract,
+and local API](docs/allocator.md).
+
 ---
 
 ## Training (Experimental)

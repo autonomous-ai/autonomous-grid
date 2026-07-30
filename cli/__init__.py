@@ -9,29 +9,34 @@ from __future__ import annotations
 # Imported so tests can monkeypatch ``cli.httpx`` / ``cli.time`` and
 # have the patch apply to the per-group modules (they share the singletons).
 import time  # noqa: F401
+
 import httpx  # noqa: F401
 
-from ._main import cmd_internal_media_server, cmd_internal_server, main
-from .auth import cmd_login, cmd_logout, cmd_sync
-from .remote_grid import (
-    cmd_remote_down,
-    cmd_remote_info,
-    cmd_remote_ls,
-    cmd_remote_members,
-    cmd_remote_up,
+from ._main import (
+    cmd_internal_allocator_node,
+    cmd_internal_media_server,
+    cmd_internal_server,
+    main,
 )
-from .remote_price import cmd_remote_price
-from .remote_request import (
-    cmd_remote_chat,
-    cmd_remote_edit,
-    cmd_remote_image,
-    cmd_remote_video,
-)
-from .remote_router import cmd_remote_router
 from .agent import (
     cmd_agent_install,
     cmd_agent_status,
 )
+from .allocator import (
+    cmd_allocator_mode,
+    cmd_allocator_model_remove,
+    cmd_allocator_model_set,
+    cmd_allocator_node_override,
+    cmd_allocator_node_resume,
+    cmd_allocator_node_start,
+    cmd_allocator_node_status,
+    cmd_allocator_node_stop,
+    cmd_allocator_status,
+    cmd_allocator_tick,
+    cmd_allocator_token_write,
+)
+from .auth import cmd_login, cmd_logout, cmd_sync
+from .device import cmd_device_info
 from .engine import (
     cmd_engine_install,
     cmd_engine_list,
@@ -48,58 +53,84 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
-from .device import cmd_device_info
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
+from .remote_grid import (
+    cmd_remote_down,
+    cmd_remote_info,
+    cmd_remote_ls,
+    cmd_remote_members,
+    cmd_remote_up,
+)
+from .remote_price import cmd_remote_price
+from .remote_request import (
+    cmd_remote_chat,
+    cmd_remote_edit,
+    cmd_remote_image,
+    cmd_remote_video,
+)
+from .remote_router import cmd_remote_router
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
 
 __all__ = [
-    "main",
     "build_parser",
-    "cmd_internal_server",
-    "cmd_internal_media_server",
-    "cmd_overview",
-    "cmd_version",
-    "cmd_up",
-    "cmd_down",
-    "cmd_ls",
-    "cmd_info",
-    "cmd_join",
-    "cmd_leave",
-    "cmd_models",
-    "cmd_engines",
-    "cmd_catalog",
-    "cmd_device_info",
-    "cmd_pull",
-    "cmd_rm",
-    "cmd_mode",
-    "cmd_use",
-    "cmd_login",
-    "cmd_logout",
-    "cmd_sync",
-    "cmd_remote_up",
-    "cmd_remote_down",
-    "cmd_remote_ls",
-    "cmd_remote_info",
-    "cmd_remote_members",
-    "cmd_remote_price",
-    "cmd_remote_router",
-    "cmd_remote_chat",
-    "cmd_remote_image",
-    "cmd_remote_edit",
-    "cmd_remote_video",
-    "cmd_chat",
-    "cmd_image",
-    "cmd_edit",
-    "cmd_video",
     "cmd_agent_install",
     "cmd_agent_status",
+    "cmd_allocator_mode",
+    "cmd_allocator_model_remove",
+    "cmd_allocator_model_set",
+    "cmd_allocator_node_override",
+    "cmd_allocator_node_resume",
+    "cmd_allocator_node_start",
+    "cmd_allocator_node_status",
+    "cmd_allocator_node_stop",
+    "cmd_allocator_status",
+    "cmd_allocator_tick",
+    "cmd_allocator_token_write",
+    "cmd_catalog",
+    "cmd_chat",
+    "cmd_device_info",
+    "cmd_down",
+    "cmd_edit",
     "cmd_engine_install",
     "cmd_engine_list",
     "cmd_engine_pull",
-    "cmd_engine_status",
     "cmd_engine_start",
+    "cmd_engine_status",
     "cmd_engine_stop",
+    "cmd_engines",
+    "cmd_image",
+    "cmd_info",
+    "cmd_internal_allocator_node",
+    "cmd_internal_media_server",
+    "cmd_internal_server",
+    "cmd_join",
+    "cmd_leave",
+    "cmd_login",
+    "cmd_logout",
+    "cmd_ls",
+    "cmd_mode",
+    "cmd_models",
+    "cmd_overview",
+    "cmd_pull",
+    "cmd_remote_chat",
+    "cmd_remote_down",
+    "cmd_remote_edit",
+    "cmd_remote_image",
+    "cmd_remote_info",
+    "cmd_remote_ls",
+    "cmd_remote_members",
+    "cmd_remote_price",
+    "cmd_remote_router",
+    "cmd_remote_up",
+    "cmd_remote_video",
+    "cmd_rm",
+    "cmd_sync",
+    "cmd_up",
+    "cmd_use",
+    "cmd_version",
+    "cmd_video",
+    "main",
 ]
