@@ -12,8 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from local import config
-from local import runtime
+from local import config, runtime
 from shared import paths, run_records, shell, state
 from shared._version import __version__
 
@@ -167,6 +166,11 @@ def cmd_down(args: argparse.Namespace) -> int:
     if not cfg.get("managed_server", True):
         print(f"{cfg['name']} is hosted by another box; nothing to stop here.")
         return 0
+    # A managed allocator node may own llama.cpp children. Stop it while the signaling server is
+    # still reachable so it can unregister and release those processes before Grid goes down.
+    from .allocator import stop_allocator_node_for_grid
+
+    stop_allocator_node_for_grid(cfg)
     outcome = runtime.stop_grid(cfg)
     if not outcome.stopped():
         _refuse_false_stop(cfg, outcome)

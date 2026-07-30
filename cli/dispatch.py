@@ -80,6 +80,7 @@ GATED = (
     "image",
     "edit",
     "video",
+    "allocator",
 )
 
 

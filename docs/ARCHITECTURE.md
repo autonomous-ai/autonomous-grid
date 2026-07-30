@@ -25,12 +25,16 @@ both modes — only the wire between **grid** and **engine** changes:
 
 | Role | Brought up by | What it is |
 | --- | --- | --- |
-| **grid** | `grid up` | The endpoint apps point at. In `local`, the grid server: an OpenAI-compatible proxy + in-memory registry running on your box. In `remote`, an **remote grid** hosted on autonomous's relay. |
+| **grid** | `grid up` | The endpoint apps point at. In `local`, the grid server: an OpenAI-compatible proxy + in-memory live registry + allocator controller running on your box. In `remote`, a **remote grid** hosted on autonomous's relay. |
 | **engine** | `grid join` | Something that runs models (Ollama, vLLM, LM Studio, MLX, llama.cpp, ComfyUI). In `local` it registers into the grid and is forwarded requests; in `remote` it polls the relay for work. |
 | **app** | any OpenAI SDK | Points at the grid's `/v1` base URL (`grid info --env`). In `remote` the base is the relay and the key is a per-grid access token. |
 
-In **`local`** the grid is the only long-lived shared state and it is deliberately tiny: a dict
-of nodes in memory, no database, no auth, on the local only. In **`remote`** the long-lived state
+In **`local`**, live registry membership remains deliberately tiny: a dict of nodes in memory,
+rebuilt by heartbeats after a restart. The dynamic allocator is the narrow persistence and auth
+exception. Its control state is written atomically to
+`~/.grid/grids/<grid_id>/allocator.json`; allocator mutations require an operator capability, and
+managed-node registration/control requires a host-scoped node capability. Inference, discovery,
+and ordinary public registry traffic remain unauthenticated. In **`remote`** the long-lived state
 (grids, membership, queued work) lives on autonomous's hosted relay; this repo is only the thin
 client — the engine that serves a grid and the app that consumes it, plus local sign-in
 credentials.
@@ -58,6 +62,7 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── request.py           `grid chat` / `image` / `edit` / `video` (local).
 │   ├── engine.py            `grid engine install|pull|status|start|stop` (built-in engines).
 │   ├── models.py            `grid catalog` / `pull` / `rm`.
+│   ├── allocator.py         `grid allocator …` operator + managed-node lifecycle commands.
 │   ├── auth.py              `grid login` / `logout` (remote sign-in).
 │   ├── codex_signin.py      The `--api codex` OAuth sign-in UX (browser + `--no-browser` paste flow).
 │   ├── remote_grid.py     Remote `up` / `down` / `ls` / `info` + `members`.
@@ -75,11 +80,14 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 │   ├── engine/              Install/launch llama.cpp + ComfyUI lifecycle.
 │   ├── models/              Catalog, local GGUF store, downloads, media bundles.
 │   ├── media/               ComfyUI-driving media handler + workflow JSON (vendored).
+│   ├── allocator/           Profiles, demand forecast, placement, reconciliation, auth, and
+│   │                        the durable managed-model runtime shared by controller and node.
 │   └── system/              Detect running engines, host metrics, GPU discovery.
 ├── local/                local mode.
 │   ├── server.py            The grid server / OpenAI-compatible proxy (FastAPI `create_app`).
 │   ├── runtime.py           grid_url + endpoint resolution; grid server lifecycle.
 │   ├── config.py            Saved grids under ~/.grid/grids/; `select_grid`.
+│   ├── allocator_node.py    Managed-host telemetry, local protection, and command/ack loop.
 │   ├── media_server.py      The engine-side media API (FastAPI, exposes /media/*).
 │   └── media_runtime.py     Starts/stops the engine-local media server subprocess.
 └── remote/           Remote mode (thin client).
@@ -102,8 +110,8 @@ command surface), `shared/` (used by both modes), `local/` (local mode), and `re
 ### The registry
 
 The grid server holds `app.state.nodes`, a `{node_id: Node}` dict (`local/server.py`). A `Node`
-records its `role` (`"engine"` / `"app"` / `"both"`), advertised `models`, an `endpoint_url`
-(text) and/or `media_url` (media), plus `load` and `last_heartbeat`. Key constants:
+records its `role` (`"engine"` / `"app"` / `"both"` / `"allocator"`), advertised `models`, an
+`endpoint_url` (text) and/or `media_url` (media), plus `load` and `last_heartbeat`. Key constants:
 
 - `NODE_TTL_SECONDS = 60` — an engine that hasn't heartbeat in 60s is dropped lazily the next
   time the registry is read.
@@ -112,6 +120,13 @@ records its `role` (`"engine"` / `"app"` / `"both"`), advertised `models`, an `e
 Engine selection is **load-aware**: `_active_engines(model)` filters to fresh engines
 advertising the model and sorts by `active_tasks` (then heartbeat recency);
 `_choose_engine(model)` takes the least-loaded one.
+
+The public registry contract is still permissionless: ordinary `POST`/`PUT` registration,
+heartbeats, unregister, `/nodes/discover`, and `/v1/models` need no token. A record becomes
+allocator-managed when it uses the allocator role/envelope or a stable `host_id`; only that managed
+path requires the host-scoped node capability, including later heartbeat, acknowledgement,
+command delivery, and unregister operations. This prevents an unauthenticated registry writer from
+impersonating a managed host without changing the compatibility contract for existing engines.
 
 ### Request flow — text (`/v1/chat/completions`)
 
@@ -167,6 +182,54 @@ Media uses fixed model names (`comfyui:image_generation`, `comfyui:image_editing
    and `media_url`, and heartbeat every `--heartbeat-interval` seconds (role `"engine"`).
 4. `grid leave` SIGTERMs the detached process, which unregisters (`DELETE /nodes/{id}`) and stops
    anything it started.
+
+### Dynamic allocator (`grid allocator`)
+
+The parser exposes this as the top-level `allocator` family and `cli/dispatch.py` classifies it as
+`GATED`: its real handlers run in `local`, while `remote` routes to the explicit unavailable stub.
+The allocator controller itself runs inside the local grid server. It combines configured model
+profiles, bounded demand observations from the proxy, and fresh host snapshots; produces a
+deterministic placement plan; then reconciles it as staged `load` → `warm` → `drain` → `unload`
+actions. Its default `recommend` mode plans without delivering executable commands. `observe`
+records drift only, while explicit `automatic` mode delivers bounded commands to authenticated
+managed hosts.
+
+Unlike live registry membership, controller intent survives a server restart. The server loads and
+atomically updates `~/.grid/grids/<grid_id>/allocator.json` (or the equivalent path under
+`GRID_HOME`). That file retains the mode, profiles and retirement tombstones, bounded demand and
+mutation history, pending commands, and sequencing fences. A corrupt file is quarantined and the
+controller recovers in `recommend`; `automatic` is refused if a durable state path is unavailable.
+Fresh node heartbeats are still required after restart—durable allocator intent does not turn the
+in-memory registry into durable membership.
+
+`cli/allocator.py` owns the operator surface and starts one detached `__allocator-node` process per
+participating computer. `local/allocator_node.py` samples local resource/safety state, reports
+actual residencies, receives host-specific commands, and acknowledges outcomes. Its local
+drain/pause/quarantine decision outranks the global plan; the initial actuator manages only
+Grid-owned llama.cpp children whose identity it can prove. See [allocator.md](allocator.md) for the
+full planner, actuator, and safety contract.
+
+Each managed runtime persists an owner-only engine API key, gives it to llama.cpp through an
+owner-only `--api-key-file` (never argv or environment), enables `/slots`, and registers the key
+only over authenticated secure control transport. Cross-machine managed endpoints must be HTTPS;
+plain HTTP is accepted only when both the registration peer and upstream are literal loopback.
+Private intranet CAs ride in a bounded private allocator field, are stripped from public state, and
+feed a hostname-verifying SSL context. `local/server.py` overwrites upstream `Authorization` when
+proxying. This makes Grid `/v1/*` the admission path to a managed child, so DRAIN can fence new work
+before an authenticated slot-idle check and UNLOAD. Runtime listeners, readiness probes, and
+free-port checks use the advertised IPv4 or IPv6 address family.
+
+Authentication is deliberately scoped to this control plane:
+
+- `GET /allocator/status` remains an unauthenticated read-only LAN view. Profile mutations,
+  allocator mode changes, and manual ticks require the durable operator capability in
+  `X-Grid-Allocator-Token` (or a Bearer header).
+- Managed-node registration, heartbeat/acknowledgement/command delivery, and unregister require an
+  expiring token signed for that host ID in `X-Grid-Allocator-Node-Token`. The operator capability
+  is never copied into the node daemon or its model children.
+- Grid's `/v1/*`, discovery, and the ordinary public registry remain unauthenticated. The allocator
+  auth boundary is not general local-grid authentication. A Grid-owned llama child is the narrow
+  exception: its private hop requires the non-public engine key above.
 
 ## Remote mode
 
@@ -282,24 +345,36 @@ of `__engine`. That subprocess (`remote/serve.py:run_remote_engine_from_record`)
 
 ## Internal subcommands
 
-`grid up` and `grid join` spawn detached children via hidden CLI subcommands (dispatched in
-`cli/_main.py:_maybe_internal`) — process plumbing, not part of the user-facing surface:
+`grid up`, `grid join`, and `grid allocator node start` spawn detached children via hidden CLI
+subcommands (dispatched in `cli/_main.py:_maybe_internal`) — process plumbing, not part of the
+user-facing surface:
 
-- `__server <grid_id>` — the local grid server (`local/server.py`).
+- `__server <grid_id> --instance-id <nonce>` — the local grid server (`local/server.py`); the
+  required nonce participates in detached-process ownership and PID-reuse fencing.
+- `__allocator-node <grid_selector> --state-path <path> --instance-id <nonce> --startup-path <path>`
+  `[--heartbeat-interval <seconds>] [--advertise-host <host>] [--engine-tls-cert <pem>]`
+  `[--engine-tls-key <pem>] [--engine-tls-ca <pem>] [--allow-insecure-http]` — the managed host loop
+  (`local/allocator_node.py`). Its host-scoped credential is supplied only through
+  `GRID_ALLOCATOR_NODE_TOKEN`, then removed from the environment before model children start.
 - `__engine <grid_id> <engine_id>` — a local engine's heartbeat loop (`cli/provider.py`).
 - `__remote-engine <network_id> <engine_id>` — a remote engine's serve loop (`remote/serve.py`).
 - `__media-server` — the engine-side media API (`local/media_server.py`).
 
 `grid leave` SIGTERMs the engine child (`__engine` in local, `__remote-engine` in remote mode); the engine
 record and teardown are shared (`shared/run_records.py`).
+`grid allocator node stop` uses a cooperative, instance-scoped shutdown request first, then signals
+only a daemon whose command nonce and process-birth marker still prove ownership.
 
 ## Design constraints worth knowing
 
-- **local mode is local-only and unauthenticated.** The grid server ignores auth headers and binds
-  the local; the `OPENAI_API_KEY` apps set is only for SDK compatibility. Don't add features that
-  assume an authenticated, remote-facing deployment *to local mode*.
-- **local registry is stateless.** Node state is in memory and TTL-expired; restarting a grid
-  forgets its engines (they re-register on their next heartbeat cycle).
+- **local inference and the public registry are local-only and unauthenticated.** The
+  `OPENAI_API_KEY` apps set is only for SDK compatibility. Allocator operator mutations and managed
+  node control are the explicit capability-authenticated exception; do not mistake that narrow
+  boundary for authenticated inference or a remote-facing deployment.
+- **local registry membership is stateless; allocator intent is not.** Node state is in memory and
+  TTL-expired, so restarting a grid forgets its engines until they re-register. The allocator's
+  desired/control state is the explicit durable exception in per-grid `allocator.json`; it never
+  makes a stale node eligible without a fresh heartbeat.
 - **Remote mode is a thin client.** It authenticates (per-grid access tokens, refreshed on 401)
   and makes off-local calls to the relay, but the hosted backend — the relay service, its Postgres,
   billing — and heavy server dependencies stay out of this repo (DECISIONS D1, D14). Remote admin

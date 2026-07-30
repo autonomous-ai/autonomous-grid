@@ -1,0 +1,36 @@
+"""Dynamic model placement and host-protection primitives for Grid.
+
+The package is deliberately split between deterministic, side-effect-free planning code and the
+small integration layers that collect telemetry or execute a plan.  Nothing in the hot request path
+needs an optimizer or an LLM.
+"""
+
+from shared.allocator.models import (
+    ActionKind,
+    AllocatorMode,
+    DemandForecast,
+    ModelProfile,
+    ModelResidency,
+    MutationAction,
+    NodeSnapshot,
+    NodeState,
+    PlacementAssignment,
+    PlacementPlan,
+    ResidencyState,
+    UnsatisfiedConstraint,
+)
+
+__all__ = [
+    "ActionKind",
+    "AllocatorMode",
+    "DemandForecast",
+    "ModelProfile",
+    "ModelResidency",
+    "MutationAction",
+    "NodeSnapshot",
+    "NodeState",
+    "PlacementAssignment",
+    "PlacementPlan",
+    "ResidencyState",
+    "UnsatisfiedConstraint",
+]

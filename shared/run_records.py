@@ -15,6 +15,7 @@ the same atomic, ``0o600`` writer ``local/config`` re-exports — so local behav
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -341,7 +342,14 @@ _PID_MAX = process_identity.PID_MAX
 
 
 def pid_alive(pid: int) -> bool:
-    if not pid or pid < 0 or pid > _PID_MAX:
+    # Negative values have process-group semantics on POSIX (``kill(-1, ...)`` is especially
+    # dangerous), so they are never valid detached-child identities.
+    if (
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+        or pid > _PID_MAX
+    ):
         return False
     if _IS_WINDOWS:
         return _win_pid_alive(pid)
@@ -355,6 +363,139 @@ def pid_alive(pid: int) -> bool:
         # let a join spawn a second engine under the same token node_id and clobber it.
     except OSError:
         return False
+
+
+def process_command_args(pid: int) -> tuple[str, ...] | None:
+    """Return a live process's argv, or ``None`` when it cannot be proved safely.
+
+    This is an identity check, not a best-effort display helper: callers use it before signaling a
+    detached process.  An unavailable command line therefore fails closed instead of guessing that
+    a reused PID still belongs to Grid.
+    """
+
+    if not pid_alive(pid):
+        return None
+    if not _IS_WINDOWS:
+        proc_cmdline = Path(f"/proc/{pid}/cmdline")
+        try:
+            raw = proc_cmdline.read_bytes()
+        except OSError:
+            raw = b""
+        if raw:
+            return tuple(os.fsdecode(item) for item in raw.split(b"\0") if item)
+        try:
+            result = subprocess.run(
+                ["ps", "-ww", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        command = result.stdout.strip() if result.returncode == 0 else ""
+        if not command:
+            return None
+        try:
+            return tuple(shlex.split(command))
+        except ValueError:
+            return None
+
+    # Get-CimInstance is present on supported Windows PowerShell installations and returns the
+    # original command line, unlike tasklist.  ConvertTo-Json gives Python a dependable argv parser
+    # for quoting and spaces.
+    script = (
+        f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; "
+        "if ($null -ne $p) { $p.CommandLine | ConvertTo-Json -Compress }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        import json
+
+        command = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(command, str) or not command.strip():
+        return None
+    # ``CommandLineToArgvW`` has no stdlib wrapper. The allocator identity values are deliberately
+    # URL-safe and contain no whitespace, so shlex's non-POSIX tokenizer preserves exact tokens.
+    try:
+        return tuple(token.strip('"') for token in shlex.split(command, posix=False))
+    except ValueError:
+        return None
+
+
+def process_start_marker(pid: int) -> str | None:
+    """Stable OS process-birth marker used to reject PID reuse."""
+
+    if not pid_alive(pid):
+        return None
+    if not _IS_WINDOWS:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            # comm (field 2) is parenthesized and may itself contain spaces or parentheses. The
+            # final ')' is the only safe split point; starttime is field 22, index 19 after field 2.
+            tail = stat[stat.rfind(")") + 2 :].split()
+            if len(tail) > 19:
+                return f"proc:{tail[19]}"
+        except (OSError, ValueError):
+            pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "lstart="],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        value = " ".join(result.stdout.split()) if result.returncode == 0 else ""
+        return f"ps:{value}" if value else None
+
+    script = (
+        f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; "
+        "if ($null -ne $p) { [string]$p.CreationDate }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return f"win:{value}" if value else None
+
+
+def process_matches(
+    pid: int,
+    *,
+    required_args: tuple[str, ...],
+    start_marker: str | None = None,
+) -> bool:
+    """Whether ``pid`` is exactly the recorded Grid child, with PID-reuse fencing."""
+
+    argv = process_command_args(pid)
+    if argv is None or any(argument not in argv for argument in required_args):
+        return False
+    if start_marker is None:
+        return True
+    return process_start_marker(pid) == start_marker
 
 
 def kill_group(pid: int) -> None:
@@ -402,7 +543,7 @@ def stopped_running(pid: int) -> bool:
     return not pid_alive(pid) or process_identity.is_zombie(pid)
 
 
-def terminate_pid(pid: int) -> bool:
+def terminate_pid(pid: int, *, identity_check: Callable[[], bool] | None = None) -> bool:
     """SIGTERM a detached engine child and wait for it to exit, escalating to SIGKILL of its process
     group after the grace window. Does **not** touch any run record — the caller decides whether to
     remove it (a `grid leave` teardown) or keep it (a respawn that rewrites the record in place, so the
@@ -429,11 +570,15 @@ def terminate_pid(pid: int) -> bool:
         return True
     if process_identity.is_zombie(pid):
         return True
+    if identity_check is not None and not identity_check():
+        return False
     if _IS_WINDOWS:
         # No process groups and no deliverable SIGTERM to a detached, console-less child on Windows,
         # so a graceful term-then-escalate has nothing to escalate from — and killing only `pid`
         # would orphan the interpreter child that actually holds the callback port. `taskkill /T`
         # tears the whole tree down at once, the outcome the POSIX path reaches via SIGTERM→killpg.
+        if identity_check is not None and not identity_check():
+            return False
         kill_group(pid)
         return not pid_alive(pid)
     # SIGTERM the detached engine so it unregisters and stops anything it started.
@@ -441,10 +586,14 @@ def terminate_pid(pid: int) -> bool:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return True
-    deadline = time.time() + _STOP_GRACE_SECONDS
+    deadline = time.monotonic() + _STOP_GRACE_SECONDS
     next_corpse_probe = 0.0
-    while time.time() < deadline and pid_alive(pid):
-        now = time.time()
+    while time.monotonic() < deadline and pid_alive(pid):
+        if identity_check is not None and not identity_check():
+            # The numeric PID either changed owners or can no longer be proven. Never escalate a
+            # stale PID into an unrelated process group.
+            return False
+        now = time.monotonic()
         if now >= next_corpse_probe:
             # Rate-limited, not per-iteration: see `_ZOMBIE_PROBE_INTERVAL_SECONDS`. A child that
             # took our SIGTERM and exited into a container with no reaper stays "alive" to
@@ -454,6 +603,8 @@ def terminate_pid(pid: int) -> bool:
             next_corpse_probe = now + _ZOMBIE_PROBE_INTERVAL_SECONDS
         time.sleep(0.2)
     if not stopped_running(pid):
+        if identity_check is not None and not identity_check():
+            return False
         kill_group(pid)
     return stopped_running(pid)
 

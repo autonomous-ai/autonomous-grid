@@ -16,6 +16,19 @@ from ._constants import (
     VALID_MEDIA_BUNDLES,
 )
 from .agent import cmd_agent_install, cmd_agent_status
+from .allocator import (
+    cmd_allocator_mode,
+    cmd_allocator_model_remove,
+    cmd_allocator_model_set,
+    cmd_allocator_node_override,
+    cmd_allocator_node_resume,
+    cmd_allocator_node_start,
+    cmd_allocator_node_status,
+    cmd_allocator_node_stop,
+    cmd_allocator_status,
+    cmd_allocator_tick,
+    cmd_allocator_token_write,
+)
 from .auth import cmd_login, cmd_logout, cmd_sync
 from .device import cmd_device_info
 from .engine import (
@@ -112,11 +125,190 @@ def build_parser() -> argparse.ArgumentParser:
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
+    _add_allocator(sub)
     _add_train(sub)
     _add_credential(sub)
     _add_stt(sub)
 
     return parser
+
+
+def _add_allocator(sub) -> None:
+    allocator = sub.add_parser(
+        "allocator",
+        help="Place configured models dynamically across participating hosts",
+    )
+    allocator_sub = allocator.add_subparsers(dest="allocator_command", required=True)
+
+    status = allocator_sub.add_parser("status", help="Show demand, placement, and mutations")
+    _add_allocator_grid(status)
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_allocator_status)
+
+    model = allocator_sub.add_parser("model", help="Create or remove a model placement profile")
+    model_sub = model.add_subparsers(dest="allocator_model_command", required=True)
+    set_model = model_sub.add_parser("set", help="Create or replace a model placement profile")
+    set_model.add_argument("model", help="Advertised model id; managed llama.cpp uses a cached GGUF filename.")
+    set_model.add_argument("--memory-mb", type=int, required=True)
+    set_model.add_argument(
+        "--runtime",
+        action="append",
+        dest="runtimes",
+        default=None,
+        metavar="NAME",
+        help="Compatible runtime; repeat for multiple values (default: llama.cpp when omitted).",
+    )
+    set_model.add_argument("--backend", action="append", dest="backends", default=[])
+    set_model.add_argument("--data-tier", default="internal")
+    set_model.add_argument("--required-tag", action="append", dest="required_tags", default=[])
+    set_model.add_argument("--forbidden-tag", action="append", dest="forbidden_tags", default=[])
+    set_model.add_argument("--pin", action="append", dest="pinned_nodes", default=[])
+    set_model.add_argument("--min-replicas", type=int, default=1)
+    set_model.add_argument("--max-replicas", type=int, default=None)
+    set_model.add_argument("--target-utilization", type=float, default=0.70)
+    set_model.add_argument("--service-seconds", type=float, default=5.0)
+    set_model.add_argument("--latency-slo-ms", type=float, default=5_000.0)
+    set_model.add_argument("--priority", type=int, default=100)
+    set_model.add_argument("--load-seconds", type=float, default=30.0)
+    set_model.add_argument("--warm-seconds", type=float, default=5.0)
+    set_model.add_argument("--min-residency-seconds", type=float, default=300.0)
+    set_model.add_argument("--scale-down-cooldown-seconds", type=float, default=900.0)
+    set_model.add_argument("--min-failure-domains", type=int, default=1)
+    _add_allocator_grid(set_model, token=True)
+    set_model.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    set_model.set_defaults(handler=cmd_allocator_model_set)
+
+    for verb in ("remove", "rm"):
+        remove = model_sub.add_parser(
+            verb,
+            help="Retire a model and safely drain its managed replicas",
+        )
+        remove.add_argument("model")
+        _add_allocator_grid(remove, token=True)
+        remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+        remove.set_defaults(handler=cmd_allocator_model_remove)
+
+    mode = allocator_sub.add_parser("mode", help="Select observe, recommend, or automatic")
+    mode.add_argument("allocator_mode", choices=("observe", "recommend", "automatic"))
+    _add_allocator_grid(mode, token=True)
+    mode.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    mode.set_defaults(handler=cmd_allocator_mode)
+
+    tick = allocator_sub.add_parser("tick", help="Run an immediate allocation pass")
+    _add_allocator_grid(tick, token=True)
+    tick.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    tick.set_defaults(handler=cmd_allocator_tick)
+
+    token = allocator_sub.add_parser("token", help="Provision the node control capability")
+    token_sub = token.add_subparsers(dest="allocator_token_command", required=True)
+    token_write = token_sub.add_parser(
+        "write",
+        help="Write the control token to an owner-only file for secure node provisioning",
+    )
+    token_write.add_argument("path")
+    token_write.add_argument("--force", action="store_true")
+    token_write.add_argument(
+        "--host-id",
+        default=None,
+        help="Stable host identity to authorize (a new identity is generated if omitted).",
+    )
+    token_write.add_argument(
+        "--ttl-days",
+        type=int,
+        default=365,
+        help="Credential lifetime in days (default: 365).",
+    )
+    _add_allocator_grid(token_write, token=True)
+    token_write.set_defaults(handler=cmd_allocator_token_write)
+
+    node = allocator_sub.add_parser("node", help="Manage this machine's allocator node loop")
+    node_sub = node.add_subparsers(dest="allocator_node_command", required=True)
+    node_start = node_sub.add_parser("start", help="Join this machine as managed capacity")
+    _add_allocator_grid(node_start, node_token=True)
+    node_start.add_argument("--heartbeat-interval", type=float, default=15.0)
+    node_start.add_argument("--advertise-host", default=None)
+    node_start.add_argument(
+        "--engine-tls-cert",
+        default=None,
+        help="PEM certificate served by managed llama.cpp endpoints.",
+    )
+    node_start.add_argument(
+        "--engine-tls-key",
+        default=None,
+        help="Owner-only PEM private key paired with --engine-tls-cert.",
+    )
+    node_start.add_argument(
+        "--engine-tls-ca",
+        default=None,
+        help="PEM CA bundle Grid should trust for the managed endpoint.",
+    )
+    node_start.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help=(
+            "Accepted for compatibility only; managed node and engine credentials still require "
+            "loopback HTTP or HTTPS."
+        ),
+    )
+    node_start.set_defaults(handler=cmd_allocator_node_start)
+
+    node_stop = node_sub.add_parser("stop", help="Stop this machine's managed node loop")
+    _add_allocator_grid(node_stop)
+    node_stop.set_defaults(handler=cmd_allocator_node_stop)
+
+    node_status = node_sub.add_parser("status", help="Show this machine's managed node loop")
+    _add_allocator_grid(node_status)
+    node_status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    node_status.set_defaults(handler=cmd_allocator_node_status)
+
+    for verb in ("drain", "pause", "quarantine"):
+        override = node_sub.add_parser(
+            verb,
+            help=f"Apply a durable local {verb} override",
+        )
+        _add_allocator_grid(override)
+        override.add_argument("--reason", default=f"local {verb}")
+        override.add_argument(
+            "--for-seconds",
+            type=float,
+            default=None,
+            help="Expire the override automatically after this duration.",
+        )
+        override.set_defaults(
+            handler=cmd_allocator_node_override,
+            override_state=verb,
+        )
+
+    resume = node_sub.add_parser("resume", help="Clear the local override and resume normal policy")
+    _add_allocator_grid(resume)
+    resume.set_defaults(handler=cmd_allocator_node_resume)
+
+
+def _add_allocator_grid(
+    parser,
+    *,
+    token: bool = False,
+    node_token: bool = False,
+) -> None:
+    parser.add_argument("--grid", default=None, help="Grid name, id, or local signaling URL.")
+    if token or node_token:
+        parser.add_argument(
+            "--token-file",
+            default=None,
+            help=(
+                "Read a host-scoped node credential from this file "
+                "(or set GRID_ALLOCATOR_NODE_TOKEN)."
+                if node_token
+                else "Read the allocator operator token from this file "
+                "(or set GRID_ALLOCATOR_CONTROL_TOKEN)."
+            ),
+        )
+    if token:
+        parser.add_argument(
+            "--allow-insecure-http",
+            action="store_true",
+            help="Permit operator credentials over non-loopback HTTP (trusted LANs only).",
+        )
 
 
 def _add_credential(sub) -> None:
