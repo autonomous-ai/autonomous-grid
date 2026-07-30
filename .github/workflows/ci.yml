@@ -53,5 +53,9 @@ jobs:
       # nothing, the moment an image change or a shell wrapper resolved a non-win32 interpreter.
       - name: Fail if this runner is not actually Windows
         run: uv run --extra dev python -c "import sys; sys.exit(0 if sys.platform == 'win32' else 1)"
+      # TEMPORARY — remove with win_diag_tmp.py once the scan is fixed.
+      - name: DIAG — surface the real PowerShell error
+        continue-on-error: true
+        run: uv run --extra dev python win_diag_tmp.py
       - name: Pytest (Windows-native orphan sweep)
         run: uv run --extra dev pytest tests/test_windows_orphan_sweep.py -q
