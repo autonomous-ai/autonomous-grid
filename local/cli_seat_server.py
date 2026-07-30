@@ -19,7 +19,7 @@ from shared.agent.cli_seat import SeatOptions, SeatSpec  # noqa: F401
 
 
 def create_app(
-    *, spec: SeatSpec, binary: str, options: SeatOptions, transcript: str | None = None
+    *, spec: SeatSpec, binary: str, options: SeatOptions
 ) -> FastAPI:
     app = FastAPI(
         title=f"Grid CLI Seat ({spec.label})",
@@ -29,7 +29,6 @@ def create_app(
     app.state.spec = spec
     app.state.binary = binary
     app.state.options = options
-    app.state.transcript = transcript
     # One CLI process per in-flight request; default 1 so a single subscription is not raced.
     app.state.slots = asyncio.Semaphore(max(1, options.concurrency))
     # Single-flight: without it, N callers missing an expired cache each spawn their own probe.
@@ -97,9 +96,8 @@ async def _handle(app: FastAPI, request: Request):
     if not isinstance(body, dict):
         return _error(400, "Request body must be a JSON object.")
 
-    # Resolve once — the transcript logs the same prompt the subprocess gets.
     try:
-        prepared = await run_in_threadpool(cli_seat.prepare, body, spec.kind)
+        prepared = await run_in_threadpool(cli_seat.prepare, body, spec.kind, spec.tool_protocol)
     except cli_seat.SeatBadRequest as exc:
         return _error(400, str(exc))
 
@@ -107,26 +105,9 @@ async def _handle(app: FastAPI, request: Request):
     if options.session_limit is not None or options.week_limit is not None:
         snapshot = await _quota(app)
         refusal = cli_seat.quota_refusal(snapshot, options)
-        await _log_turn(app, "quota", {
-            "known": snapshot is not None,
-            "session_pct": snapshot.session_pct if snapshot else None,
-            "week_pct": snapshot.week_pct if snapshot else None,
-            "refused": refusal is not None,
-        })
         if refusal is not None:
             return _error(429, refusal, error_type="quota_exhausted")
 
-    await _log_turn(app, "request", {
-        "model": prepared.model,
-        "stream": bool(body.get("stream")),
-        "messages": body.get("messages"),
-        "tools": body.get("tools"),
-        # System prompt by LENGTH, not verbatim — with native tools[] it repeats the schema
-        # already logged above, three copies per request on an append-only file.
-        "prompt": prepared.prompt,
-        "system_prompt_chars": len(prepared.system_prompt),
-        "system_prompt_has_hermes_block": "<tool_call>" in prepared.system_prompt,
-    })
 
     if body.get("stream") and cli_seat.can_stream(spec):
         return StreamingResponse(_stream(app, prepared), media_type="text/event-stream")
@@ -139,14 +120,10 @@ async def _handle(app: FastAPI, request: Request):
                 cli_seat.answer, spec, prepared, app.state.binary, options.timeout,
             )
         except cli_seat.SeatBadRequest as exc:
-            await _log_turn(app, "error", {"status": 400, "message": str(exc)})
             return _error(400, str(exc))
         except cli_seat.SeatError as exc:
-            await _log_turn(app, "error", {"status": 502, "message": str(exc)})
             return _error(502, str(exc))
 
-    # Outside the slot: logging and serialising an answer costs the next caller nothing.
-    await _log_turn(app, "response", completion)
     if body.get("stream"):
         return StreamingResponse(_as_sse(completion), media_type="text/event-stream")
     return JSONResponse(completion)
@@ -193,10 +170,11 @@ async def _stream(app: FastAPI, prepared):
                         {"index": 0, "delta": tail,
                          "finish_reason": choice.get("finish_reason") or "stop"}],
                         "usage": payload.get("usage"), "grid_cli_seat": payload.get("grid_cli_seat")})
-                    await _log_turn(app, "response", payload)
-        except cli_seat.SeatError as exc:
-            await _log_turn(app, "error", {"status": 502, "message": str(exc), "streamed": True})
-            yield _frame({"error": {"message": str(exc), "type": "cli_seat_error"}})
+        except Exception as exc:  # noqa: BLE001
+            # Every exception, not just SeatError: one that escapes here kills the connection
+            # mid-body, and the consumer sees a torn stream instead of a reason.
+            yield _frame({"error": {"message": str(exc) or type(exc).__name__,
+                                    "type": "cli_seat_error"}})
     yield "data: [DONE]\n\n"
 
 
@@ -264,22 +242,6 @@ def _frame(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-async def _log_turn(app: FastAPI, kind: str, payload: dict) -> None:
-    """Append one JSONL record off the event loop. Never raises — a full disk must not cost the
-    caller their answer."""
-    path = getattr(app.state, "transcript", None)
-    if not path:
-        return
-    record = {"ts": time.time(), "kind": kind, **payload}
-    await run_in_threadpool(_append_jsonl, path, record)
-
-
-def _append_jsonl(path: str, record: dict) -> None:
-    try:
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except Exception:  # noqa: BLE001 — logging must never break serving
-        pass
 
 
 def _error(status: int, message: str, *, error_type: str = "cli_seat_error") -> JSONResponse:

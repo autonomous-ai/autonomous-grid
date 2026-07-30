@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -71,6 +72,13 @@ class SeatSpec:
     decode: object       # (proc, tmpdir) -> SeatResult
     login_argv: tuple = ()          # argv that starts an interactive sign-in
     quota_argv: tuple = ()          # argv printing a usage screen; () = this CLI has no quota API
+    read_quota: object = None       # (binary) -> QuotaSnapshot | None, for a CLI whose quota is
+                                    # not a printed screen. Wins over quota_argv when set.
+    tool_protocol: object = None    # which ToolProtocol this seat's model reads best. None = HERMES.
+    run: object = None              # (binary, prepared, timeout, on_delta) -> SeatResult, for a CLI
+                                    # driven over a protocol rather than one subprocess per request.
+                                    # `on_delta(text)` is called per streamed chunk, or None.
+                                    # Wins over invoke/decode when set.
     parse_usage: object = None      # (text) -> QuotaSnapshot | None
     parse_event: object = None      # (event) -> str to stream | QuotaSnapshot | None
     home_env: str = ""              # env var pointing the CLI at its own home; "" = shares the user's
@@ -87,9 +95,6 @@ class SeatOptions:
     session_limit: int = None
     week_limit: int = None
     quota_ttl: float = 60.0
-    # Off by default: the transcript records every message a consumer sends, verbatim, onto the
-    # provider's disk. Useful for benchmarking your own traffic, indefensible for strangers'.
-    transcript: bool = False
 
 
 def option_names():
@@ -123,12 +128,22 @@ def options_child_argv(options, kind):
         argv += ["--session-limit", str(options.session_limit)]
     if options.week_limit is not None:
         argv += ["--week-limit", str(options.week_limit)]
-    if options.transcript:
-        argv.append("--transcript")
     return argv
 
 
 # the Hermes tool protocol, shared by every seat
+
+@dataclass(frozen=True)
+class ToolProtocol:
+    """How a model is asked to emit tool calls as text, and how that text is read back.
+
+    `render(tools)` turns OpenAI `tools[]` into instruction text. The answer comes back as text and
+    the caller parses it, so a seat never needs to know the format going the other way.
+    """
+
+    name: str
+    render: object
+
 
 # Injected ONLY when the caller sends native `tools[]`. A caller already speaking Hermes (its own
 # `<tools>` system message) gets passthrough — two copies would give the model rival protocols.
@@ -149,8 +164,6 @@ For each function call return a json object with function name and arguments wit
 {{"arguments": <args-dict>, "name": <function-name>}}
 </tool_call>"""
 
-# Non-greedy + DOTALL: several calls per answer, arguments may span lines.
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 
 # binary + sign-in
@@ -248,6 +261,11 @@ def alias_for(kind, advertised):
 
 def probe_quota(spec, binary, timeout=30.0):
     """Current quota, or None when unreadable. Never raises — unknown means keep serving."""
+    if spec.read_quota is not None:
+        try:
+            return spec.read_quota(binary)
+        except Exception:  # noqa: BLE001 — a quota probe must never break serving
+            return None
     if not spec.quota_argv or spec.parse_usage is None:
         return None
     try:
@@ -321,14 +339,35 @@ def _flatten_content(content):
 # instructions file) or falls back to the vendor prompt — which is what leaks the provider's paths.
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
+# Appended to the tool block. Measured necessity, not belt-and-braces: without it a codex seat
+# answered "I couldn't write index.html because the workspace denied the file-edit request" instead
+# of emitting a tool call — it believed it still had an editor and reported the refusal as the
+# outcome. It only works when the vendor's base prompt is REPLACED too; left in place, that prompt
+# reasserts the agent identity and the model goes back to trying the work itself.
+TOOL_DELEGATION_NOTE = (
+    "You have NO ability to execute anything yourself — no file, shell, editor or network tool. "
+    "Any workspace, sandbox or approval described to you concerns the process you run in, NOT the "
+    "user's request; ignore it entirely and never report that an operation was denied. Your only "
+    "way to act is to emit a tool call; the caller executes it and returns the result to you."
+)
 
-def build_system_prompt(messages, tools):
+
+def render_hermes_tools(tools):
+    """OpenAI `tools[]` -> Hermes instruction text, with the delegation note appended."""
+    block = HERMES_TOOL_TEMPLATE.format(tools_json=json.dumps(tools, ensure_ascii=False))
+    return f"{block}\n\n{TOOL_DELEGATION_NOTE}"
+
+
+HERMES = ToolProtocol(name="hermes", render=render_hermes_tools)
+
+
+def build_system_prompt(messages, tools, protocol=None):
     """The caller's system messages, then the tool protocol block last — where an instruction is
     most likely to be followed."""
     parts = [_flatten_content(m.get("content")) for m in messages if m.get("role") == "system"]
     system = "\n\n".join(p for p in parts if p.strip())
     if tools:
-        block = HERMES_TOOL_TEMPLATE.format(tools_json=json.dumps(tools, ensure_ascii=False))
+        block = (protocol or HERMES).render(tools)
         return f"{system}\n\n{block}" if system.strip() else block
     return system if system.strip() else DEFAULT_SYSTEM_PROMPT
 
@@ -379,7 +418,7 @@ class PreparedRequest:
     system_prompt: str
 
 
-def prepare(body, kind):
+def prepare(body, kind, protocol=None):
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise SeatBadRequest("messages[] is required.")
@@ -395,14 +434,14 @@ def prepare(body, kind):
         model=requested or f"{kind}:{model_alias}",
         model_alias=model_alias,
         prompt=build_prompt(messages),
-        system_prompt=build_system_prompt(messages, tools),
+        system_prompt=build_system_prompt(messages, tools, protocol),
     )
 
 
 # the subprocess call
 
 def can_stream(spec):
-    return spec.parse_event is not None
+    return spec.parse_event is not None or spec.run is not None
 
 
 def run_seat(spec, prepared, binary, timeout):
@@ -414,6 +453,8 @@ def run_seat(spec, prepared, binary, timeout):
     `cwd` is that scratch directory too, so the CLI reports a throwaway path rather than whatever
     directory the seat server happens to have been started in.
     """
+    if spec.run is not None:
+        return spec.run(binary, prepared, timeout, None)
     with tempfile.TemporaryDirectory(prefix=f"grid-{spec.kind}-seat-") as tmp:
         tmpdir = Path(tmp)
         argv, stdin = spec.invoke(binary, prepared, tmpdir, stream=False)
@@ -436,6 +477,8 @@ def stream_seat(spec, prepared, binary, timeout):
     final answer is built by the same code the non-streaming path uses and the two cannot drift.
     Only a spec with `parse_event` gets here; `can_stream` is the gate.
     """
+    if spec.run is not None:
+        return (yield from _stream_via_run(spec, prepared, binary, timeout))
     with tempfile.TemporaryDirectory(prefix=f"grid-{spec.kind}-seat-") as tmp:
         tmpdir = Path(tmp)
         argv, stdin = spec.invoke(binary, prepared, tmpdir, stream=True)
@@ -483,6 +526,40 @@ def stream_seat(spec, prepared, binary, timeout):
         return (result, quota[-1] if quota else None)
 
 
+def _stream_via_run(spec, prepared, binary, timeout):
+    """Turn a `run` hook's delta CALLBACK into a generator, so both execution models present the
+    same interface to the server. The hook runs on its own thread and pushes chunks through a
+    queue; whatever it returns or raises comes back here.
+    """
+    chunks: queue.Queue = queue.Queue()
+    done = object()
+    outcome = []
+
+    def worker():
+        try:
+            outcome.append(spec.run(binary, prepared, timeout, chunks.put))
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's thread below
+            outcome.append(exc)
+        finally:
+            chunks.put(done)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while True:
+        item = chunks.get()
+        if item is done:
+            break
+        if item:
+            yield item
+    thread.join(timeout=5)
+    result = outcome[0] if outcome else SeatError(f"`{spec.binary}` produced no result.")
+    if isinstance(result, BaseException):
+        raise result
+    # Same (result, quota) return as the invoke/decode path — the caller unpacks one shape. A `run`
+    # hook carries no free quota reading; `read_quota` is its own call.
+    return (result, None)
+
+
 def _write_stdin(proc, text):
     try:
         proc.stdin.write(text)
@@ -493,48 +570,12 @@ def _write_stdin(proc, text):
 
 # answer -> OpenAI chat.completion
 
-def _as_openai_call(payload_json):
-    """One `<tool_call>` body -> an OpenAI tool call, or None when it is not a usable call."""
-    try:
-        payload = json.loads(payload_json)
-    except ValueError:
-        return None
-    if not isinstance(payload, dict) or not payload.get("name"):
-        return None
-    arguments = payload.get("arguments")
-    return {
-        "id": f"call_{uuid.uuid4().hex[:24]}",
-        "type": "function",
-        "function": {
-            "name": str(payload["name"]),
-            "arguments": arguments if isinstance(arguments, str)
-            else json.dumps(arguments if arguments is not None else {}, ensure_ascii=False),
-        },
-    }
-
-
-def parse_tool_calls(text):
-    """-> (remaining prose, tool calls). A malformed block stays in the prose rather than being
-    dropped — on a tool-calling benchmark it is a result worth seeing."""
-    calls, kept, cursor = [], [], 0
-    for match in _TOOL_CALL_RE.finditer(text or ""):
-        call = _as_openai_call(match.group(1))
-        if call is None:
-            continue
-        calls.append(call)
-        kept.append(text[cursor:match.start()])
-        cursor = match.end()
-    kept.append((text or "")[cursor:])
-    return "".join(kept).strip(), calls
-
-
 def to_chat_completion(result, kind, model):
-    """Standard `chat.completion`, plus `grid_cli_seat` carrying the run's real cost and kind —
-    the CLI reports actual spend, so a benchmark records it instead of estimating."""
-    content, tool_calls = parse_tool_calls(result.text)
-    message = {"role": "assistant", "content": content or None}
-    if tool_calls:
-        message["tool_calls"] = tool_calls
+    """A standard chat.completion, plus `grid_cli_seat` carrying the run's measured cost.
+
+    The answer is returned as TEXT, verbatim. The seat does not look for tool calls in it — a CLI
+    has no native tool channel, so any tool convention is the caller's own and the caller parses it.
+    """
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -542,8 +583,8 @@ def to_chat_completion(result, kind, model):
         "model": model,
         "choices": [{
             "index": 0,
-            "message": message,
-            "finish_reason": "tool_calls" if tool_calls else "stop",
+            "message": {"role": "assistant", "content": result.text},
+            "finish_reason": "stop",
         }],
         "usage": {
             "prompt_tokens": result.input_tokens,

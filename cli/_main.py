@@ -109,10 +109,8 @@ def cmd_internal_cli_seat_server(args) -> int:
     options = SeatOptions(
         port=args.port, timeout=args.timeout, concurrency=args.concurrency,
         session_limit=args.session_limit, week_limit=args.week_limit, quota_ttl=args.quota_ttl,
-        transcript=args.transcript,
     )
-    app = create_app(spec=spec, binary=args.binary, options=options,
-                     transcript=args.transcript_path if args.transcript else None)
+    app = create_app(spec=spec, binary=args.binary, options=options)
     uvicorn.run(app, host="127.0.0.1", port=options.port)
     return 0
 
@@ -159,8 +157,6 @@ def _maybe_internal(argv: list[str]) -> int | None:
         parser.add_argument("--session-limit", type=int, default=None)
         parser.add_argument("--week-limit", type=int, default=None)
         parser.add_argument("--quota-ttl", type=float, default=60.0)
-        parser.add_argument("--transcript", action="store_true")
-        parser.add_argument("--transcript-path", default=None)
         return cmd_internal_cli_seat_server(parser.parse_args(argv[1:]))
     if argv[0] == "__engine":
         from .provider import run_engine_from_record

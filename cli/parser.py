@@ -204,9 +204,6 @@ def _add_engines(sub) -> None:
     seat.add_argument("--seat-week-limit", type=int, default=None, metavar="PCT",
                       help="Stop serving once WEEKLY usage reaches this percent. Worth setting "
                            "lower than the session limit: a spent week costs days.")
-    seat.add_argument("--seat-transcript", action="store_true", default=None,
-                      help="Record every message consumers send to a JSONL file on THIS machine. "
-                           "Off by default — only turn it on for traffic you own.")
     seat.add_argument("--seat-quota-ttl", type=float, default=None, metavar="SECONDS",
                       help="How long a quota reading is reused before re-probing (default 60). "
                            "0 = probe every request, which adds seconds to each one.")

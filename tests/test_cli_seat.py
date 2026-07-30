@@ -97,33 +97,24 @@ def test_prepare_rejects_an_unserved_model():
         cli_seat.prepare({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}, "claude")
 
 
-# tool-call parsing
+# the answer is text, not parsed
 
-def test_tool_calls_are_lifted_out_of_the_prose():
-    text = 'Checking.\n<tool_call>\n{"arguments": {"a": 1}, "name": "f"}\n</tool_call>'
-    content, calls = cli_seat.parse_tool_calls(text)
-    assert content == "Checking."
-    assert calls[0]["function"]["name"] == "f"
-    assert json.loads(calls[0]["function"]["arguments"]) == {"a": 1}
-
-
-def test_a_malformed_call_stays_in_the_prose():
-    """On a tool-calling benchmark a broken call is a result worth seeing; deleting it would
-    report the run as cleaner than it was."""
-    text = "<tool_call>\nnot json\n</tool_call>"
-    content, calls = cli_seat.parse_tool_calls(text)
-    assert calls == []
-    assert "not json" in content
+def test_the_answer_is_returned_verbatim():
+    """A CLI has no native tool channel, so any tool convention is the caller's own — the seat
+    hands back the model's text untouched and the caller parses it."""
+    raw = 'Checking.\n<tool_call>\n{"name": "f", "arguments": {}}\n</tool_call>'
+    done = cli_seat.to_chat_completion(cli_seat.SeatResult(text=raw), "claude", "claude:sonnet")
+    assert done["choices"][0]["message"]["content"] == raw
+    assert done["choices"][0]["finish_reason"] == "stop"
+    assert "tool_calls" not in done["choices"][0]["message"]
+    assert done["grid_cli_seat"]["kind"] == "claude"
 
 
-def test_finish_reason_tracks_whether_a_call_was_emitted():
-    with_call = cli_seat.to_chat_completion(
-        cli_seat.SeatResult(text='<tool_call>{"name":"f","arguments":{}}</tool_call>'),
-        "claude", "claude:sonnet")
-    assert with_call["choices"][0]["finish_reason"] == "tool_calls"
-    plain = cli_seat.to_chat_completion(cli_seat.SeatResult(text="hello"), "claude", "claude:sonnet")
-    assert plain["choices"][0]["finish_reason"] == "stop"
-    assert plain["grid_cli_seat"]["kind"] == "claude"
+def test_a_tool_protocol_only_renders():
+    """Tools go INTO the prompt; nothing reads them back out, so a protocol is one function."""
+    assert cli_seat.HERMES.name == "hermes"
+    rendered = cli_seat.HERMES.render([{"type": "function", "function": {"name": "f"}}])
+    assert "<tools>" in rendered and "<tool_call>" in rendered
 
 
 # quota gate
@@ -348,15 +339,26 @@ def test_the_seat_home_is_not_the_operators_home(tmp_path, monkeypatch):
     assert env["CODEX_HOME"] != os.path.expanduser("~/.codex")
 
 
-def test_every_seat_gets_its_own_home(tmp_path, monkeypatch):
-    """Both CLIs support one, and both must use it: the operator's own config, skills, hooks and
-    chat history stay out of reach of a seat serving strangers."""
+def test_the_codex_seat_runs_in_its_own_home(tmp_path, monkeypatch):
+    """The operator's own config, skills, hooks and chat history must stay out of reach of a seat
+    serving strangers."""
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
-    for kind, env_var in (("claude", "CLAUDE_CONFIG_DIR"), ("codex-cli", "CODEX_HOME")):
-        spec = seat_for(kind)
-        assert spec.home_env == env_var
-        env = cli_seat.ensure_home(spec)
-        assert env[env_var] == str(tmp_path / "seats" / kind)
+    spec = seat_for("codex-cli")
+    assert spec.home_env == "CODEX_HOME"
+    assert cli_seat.ensure_home(spec)["CODEX_HOME"] == str(tmp_path / "seats" / "codex-cli")
+
+
+def test_the_claude_seat_shares_the_operators_home_for_now():
+    """A KNOWN GAP, not a design. CLAUDE_CONFIG_DIR is honoured and the isolated home works, but it
+    needs its own interactive sign-in and driving that is the app's job. Flip `home_env` back to
+    "CLAUDE_CONFIG_DIR" once the app can log a seat in; this test then becomes the codex one.
+
+    What it costs meanwhile: `--safe-mode` still drops CLAUDE.md, skills, plugins, hooks and MCP,
+    and `--tools ""` means the model cannot reach any of it — one layer thinner than codex, not
+    open."""
+    spec = seat_for("claude")
+    assert spec.home_env == ""
+    assert cli_seat.seat_home(spec) is None
 
 
 def test_codex_no_longer_passes_ignore_user_config(tmp_path: Path):
@@ -427,3 +429,43 @@ def test_only_cli_seat_specs_are_asked_for_quota():
     ]}
     assert serve._cli_seat_urls(record) == ["http://127.0.0.1:8098"]
     assert serve._cli_seat_urls({"engines": []}) == []
+
+
+# streaming: both execution models must present ONE shape to the server
+
+def _prepared(model="codex-cli:gpt-5.6-terra"):
+    return cli_seat.prepare({"model": model, "messages": [{"role": "user", "content": "hi"}]},
+                            model.split(":")[0])
+
+
+def test_a_run_spec_streams_deltas_then_one_done_pair():
+    """Regression: `_stream_via_run` returned a bare SeatResult while the invoke/decode path
+    returned `(result, quota)`, so `answer_stream`'s unpack raised TypeError on every codex stream.
+    The server caught only SeatError, so the answer arrived and then the connection was torn —
+    the consumer saw `incomplete chunked read`, never a reason.
+    """
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("OK")
+        return cli_seat.SeatResult(text="OK", output_tokens=1)
+
+    spec = seat_for("codex-cli").__class__(**{**seat_for("codex-cli").__dict__, "run": run})
+    events = list(cli_seat.answer_stream(spec, _prepared(), "codex", 30))
+    assert events[0] == ("delta", "OK")
+    kind, (completion, quota) = events[-1]
+    assert kind == "done"
+    assert completion["choices"][0]["message"]["content"] == "OK"
+    assert quota is None
+
+
+def test_both_execution_models_return_the_same_pair():
+    """The contract lives in one place: whichever path ran, the caller unpacks `(result, quota)`."""
+    def run(binary, prepared, timeout, on_delta):
+        return cli_seat.SeatResult(text="done")
+
+    spec = seat_for("codex-cli").__class__(**{**seat_for("codex-cli").__dict__, "run": run})
+    stream = cli_seat.stream_seat(spec, _prepared(), "codex", 30)
+    with pytest.raises(StopIteration) as stop:
+        while True:
+            next(stream)
+    result, quota = stop.value.value
+    assert isinstance(result, cli_seat.SeatResult) and quota is None

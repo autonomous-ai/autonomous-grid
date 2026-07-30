@@ -72,4 +72,7 @@ extend-exclude = ["doggi"]
 markers = [
     "canary: runs the real CLI and spends the operator's subscription; opt in with -m canary",
 ]
+# Deselected by default — registering the marker was never enough, so a plain `pytest` was
+# spending the subscription. A later `-m canary` wins over this one.
+addopts = ["-m", "not canary"]
 pythonpath = ["."]

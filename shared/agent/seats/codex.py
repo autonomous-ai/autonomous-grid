@@ -179,6 +179,32 @@ def decode(proc, tmpdir):
     )
 
 
+def run(binary, prepared, timeout, on_delta=None):
+    """Serve one request over the app-server rather than `codex exec`.
+
+    Two things `exec` could not do: stream text as it arrives (`exec --json` emits no deltas at
+    all, one whole message at the end), and answer the approval requests the server sends BACK to
+    the client — unanswered, those hang the turn, which is the likeliest explanation for a 16-minute
+    request observed on the exec path.
+
+    The caller's system prompt goes in `developerInstructions`, closer to the conversation than
+    base instructions, because the Hermes tool protocol is an instruction to obey rather than
+    background the model may drift from.
+    """
+    from shared.agent.seats import codex_appserver
+
+    return codex_appserver.serve(binary, prepared, timeout, on_delta)
+
+
+def read_quota(binary):
+    """Codex exposes no usage through `exec` — its `/usage` is TUI-only. The app-server does:
+    `account/rateLimits/read` returns usedPercent and a real resetsAt timestamp. Serving still runs
+    through `exec`; this starts a short-lived app-server just to take the reading."""
+    from shared.agent.seats import codex_appserver
+
+    return codex_appserver.read_quota(binary=binary)
+
+
 SPEC = SeatSpec(
     kind="codex-cli",  # `codex` is taken by the OAuth HTTP seat (ADR 0015)
     binary=BINARY,
@@ -192,5 +218,7 @@ SPEC = SeatSpec(
     # No usage screen — the quota gate reads None and keeps serving.
     quota_argv=(),
     parse_usage=None,
+    read_quota=read_quota,
+    run=run,
     parse_event=parse_event,
 )
