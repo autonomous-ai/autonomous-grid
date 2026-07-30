@@ -18105,6 +18105,87 @@ def test_logout_says_so_when_it_could_not_check_for_an_orphan(monkeypatch, tmp_p
     assert "grid leave" in combined                       # ...and the remedy that survives the wipe
 
 
+def test_logout_is_not_blocked_by_one_grids_unreadable_record(monkeypatch, tmp_path, capsys):
+    """One corrupt record must not abort a whole sign-out — least of all before the grid that IS
+    serving is reached.
+
+    `stop_serving` and `live_identities` each call `read_records`, and `jsonio.load_json` raises
+    SystemExit on a bad parse. Measured on the dev VM with two grids: a truncated record on a grid
+    serving **nothing** made `grid logout` exit 1, left the *other* grid's live child running, and sent
+    zero deregisters. The blocked grid is not even the one with a child.
+
+    This is the condition ADR 0023 already ruled on, in its own words about the unscannable case: it
+    "does **not** refuse — a box with several stale record directories would then be unable to sign out
+    at all, for a condition signing out cannot fix." An unreadable record is that condition, so it gets
+    the same answer: `UncheckedGrid`, the backstop sent while the token still exists, a named remedy,
+    and the sign-out completes."""
+    from shared import orphan_sweep, run_records
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team",
+                            "access_token": _jwt({"node_id": "node-a"})},
+                           {"network_id": "n2", "name": "broken",
+                            "access_token": _jwt({"node_id": "node-b"})}],
+                 active="team")
+    _seed_run_record(monkeypatch, tmp_path, "n1")          # n1: a live, tracked child
+    broken = run_records.record_path("n2", "remote")       # n2: nothing serving, record unparseable
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{truncated")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: "")
+    monkeypatch.setattr(cli.remote_provider.run_records, "terminate_pid", lambda pid: True)
+    monkeypatch.setattr(cli.remote_provider.run_records, "pid_alive", lambda pid: True)
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert not paths.credentials_file().exists(), "one broken record blocked the whole sign-out"
+    assert ("/nodes/node-a", "consumer", []) in puts, "the SERVING grid was never deregistered"
+    assert ("/nodes/node-b", "consumer", []) in puts, (
+        "the unreadable grid must still be told while we hold its token"
+    )
+    assert "broken" in combined and "grid leave" in combined
+    assert broken.exists(), "a record we cannot parse is not ours to delete"
+
+
+def test_logout_reports_an_unreadable_record_even_when_the_sweep_found_its_child(monkeypatch, tmp_path, capsys):
+    """The one case where "unreadable" and "no live record" are NOT the same condition.
+
+    Found by mutation, not by reading: dropping `unreadable or` from the outer branch survived the test
+    above, because an unparseable record yields `{}` and therefore already fails the liveness check. The
+    two only diverge when the record is unreadable **and** the argv sweep found a child for that grid —
+    then `network_id in scan.by_grid` is true, the outer branch falls through, and `_teardown_one` is
+    handed an EMPTY record set. It would stop nothing while reporting a teardown, which is the exact
+    false success this feature exists to end.
+
+    So the honest answer for that combination is the one the caveat branch gives: deregister while the
+    token exists, name the grid, and leave the child to `grid leave`."""
+    from shared import orphan_sweep, run_records
+
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n2", "name": "broken",
+                            "access_token": _jwt({"node_id": "node-b"})}],
+                 active="broken")
+    broken = run_records.record_path("n2", "remote")
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{truncated")
+    # the sweep DOES see a child for this grid — the divergent half of the condition
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  4242 /bin/grid __remote-engine n2 remote")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    puts = _capture_relay_puts(monkeypatch)
+
+    assert cli.cmd_logout(cli.build_parser().parse_args(["logout"])) == 0
+
+    combined = "".join(capsys.readouterr())
+    assert puts == [("/nodes/node-b", "consumer", [])], "the grid was never deregistered"
+    assert "run record" in combined, "the unreadable record was not named as the reason"
+    assert "grid leave n2" in combined, "no remedy for the child the sweep did find"
+    assert not paths.credentials_file().exists()
+
+
 def test_logout_says_so_when_it_could_only_see_part_of_the_process_table(monkeypatch, tmp_path, capsys):
     """The record-less half of grid-leave issue 15/B, and the one the caveat above cannot reach.
 

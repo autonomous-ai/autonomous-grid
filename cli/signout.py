@@ -57,6 +57,31 @@ def _is_remote_child(record: dict[str, Any]) -> bool:
     return bool(str(record.get("signaling_url") or "").strip())
 
 
+def records_or_unreadable(network_id: str) -> tuple[dict[str, dict[str, Any]], str]:
+    """One grid's run records, or ``({}, reason)`` when they cannot be read. Never raises.
+
+    ``run_records.read_records`` globs a grid's whole directory and ``jsonio.load_json`` raises
+    ``SystemExit`` on a bad parse, so one truncated file used to abort the entire sign-out — measured on
+    the dev VM with two grids, where a corrupt record on a grid serving **nothing** left the *other*
+    grid's live child running and sent zero deregisters. The blocked grid need not even be the one with
+    a child.
+
+    ADR 0023 already decided this class, reasoning about the unscannable case: sign-out "does **not**
+    refuse — a box with several stale record directories would then be unable to sign out at all, for a
+    condition signing out cannot fix." An unreadable record is that condition, so it gets the same
+    treatment: ``UncheckedGrid``, the backstop sent while the token still exists, a named remedy.
+
+    ``{}`` is the right degrade rather than a guess, in both callers. In ``live_identities`` it makes the
+    grid *unvouched*, so the argv sweep is asked instead of a record we could not parse. In
+    ``stop_serving`` it reaches the same no-evidence branch a missing record does — where the sweep is
+    the only evidence and the deregister is the mechanism of record.
+    """
+    try:
+        return run_records.read_records(network_id), ""
+    except (Exception, SystemExit) as exc:
+        return {}, str(exc) or repr(exc)
+
+
 def _recorded_live_pids(records: dict[str, dict[str, Any]]) -> tuple[int, ...]:
     """The pids of a grid's records that still name a running **remote** serve child of ours.
 
@@ -88,7 +113,7 @@ def live_identities(network_ids: Iterable[str]) -> LiveScan:
     by_grid: dict[str, tuple[int, ...]] = {}
     unvouched: list[str] = []
     for network_id in network_ids:
-        live = _recorded_live_pids(run_records.read_records(network_id))
+        live = _recorded_live_pids(records_or_unreadable(network_id)[0])
         if live:
             by_grid[network_id] = live
         else:
@@ -183,6 +208,9 @@ class UncheckedGrid(NamedTuple):
     deregistered: bool     # the backstop landed, so the grid stops listing this box regardless
     partial: bool = False  # the table was read but mostly hidden, rather than unreadable outright —
     #                        two different failures with two different remedies, so the warning branches
+    unreadable: str = ""   # ...and a third: the grid's own RECORD could not be parsed, so we never even
+    #                        got to ask the table. Carries the reason, because this one names a file the
+    #                        operator can act on rather than a permission they cannot.
 
 
 class SignoutResult(NamedTuple):
@@ -235,10 +263,20 @@ def stop_serving(networks: list[dict[str, Any]], *, session: str) -> SignoutResu
         rec = bundles.get(network_id) or {"network_id": network_id, "name": network_id}
         label = str(rec.get("name") or network_id)
         with file_lock(run_records.record_path(network_id, run_records.REMOTE_IDENTITY)):
-            records = run_records.read_records(network_id)
+            records, unreadable = records_or_unreadable(network_id)
             # The authoritative liveness read, inside the lock: a join that completed while we were
             # scanning is visible here even though the hint predates it.
-            if not _recorded_live_pids(records) and network_id not in scan.by_grid:
+            #
+            # `unreadable` joins the two no-evidence conditions rather than getting a branch of its own:
+            # a record we cannot parse tells us nothing about this grid, exactly like a table we cannot
+            # read, so the answer is the same — deregister while we still hold the token, name it, and
+            # keep going. Aborting here is what left another grid's live child running (D6).
+            #
+            # It is a disjunct rather than a fall-out of the empty `records` because of the ONE case
+            # where the two differ: an unreadable record whose grid the sweep DID find. Routing that to
+            # `_teardown_one` would hand it an empty record set and stop nothing, while reporting a
+            # teardown; the honest answer is the deregister and the named caveat.
+            if unreadable or (not _recorded_live_pids(records) and network_id not in scan.by_grid):
                 # No live record and no sweep hit. That is "nothing is serving" ONLY if the sweep
                 # actually ran: a record-less orphan lives exclusively in the process table, so an
                 # unreadable table makes this branch "no evidence" rather than "no child". Skipping it
@@ -248,7 +286,7 @@ def stop_serving(networks: list[dict[str, Any]], *, session: str) -> SignoutResu
                 # process we could not read has no argv to match, so it cannot reach `by_grid` at all
                 # (grid-leave issue 15/B). A read that worked is not the same as a read that saw the
                 # box, and only the second one licenses walking past a grid.
-                if not scan.scanned or scan.partial:
+                if unreadable or not scan.scanned or scan.partial:
                     # ...and still deregister while the token exists. The sweep is a diagnostic; the
                     # backstop is the mechanism of record (which is why `grid leave` sends it
                     # unconditionally) and it needs no process table. Withholding it here would leave the
@@ -258,7 +296,8 @@ def stop_serving(networks: list[dict[str, Any]], *, session: str) -> SignoutResu
                     sent = bool(bundles.get(network_id)) and remote_provider._full_leave_backstop(
                         rec, records, session, network_id, label
                     )
-                    unscanned.append(UncheckedGrid(label, network_id, sent, partial=scan.partial))
+                    unscanned.append(UncheckedGrid(label, network_id, sent,
+                                                   partial=scan.partial, unreadable=unreadable))
                 continue
             outcomes.append(
                 _teardown_one(rec, session, network_id, label, records, bundled=network_id in bundles)

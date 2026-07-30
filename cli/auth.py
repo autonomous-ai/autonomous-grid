@@ -259,15 +259,21 @@ def _warn_unscanned(unscanned: tuple[signout.UncheckedGrid, ...]) -> None:
             if grid.deregistered
             else "nothing could tell that grid, so anything left drops after the node TTL (~120s)"
         )
-        # Two ways to have no evidence, and they do not share a remedy. An unreadable table clears on
-        # its own once processes are listable; a table read but mostly hidden will look exactly the
-        # same on every retry from this account, so the only useful instruction is to elevate.
-        blind, remedy = (
-            ("couldn't see all of the process table (most command lines were hidden from this "
-             "account)", "From an elevated shell")
-            if grid.partial
-            else ("couldn't read the process table", "Once processes are listable")
-        )
+        # Three ways to have no evidence, and none of them shares a remedy. An unreadable table clears
+        # on its own once processes are listable; a table read but mostly hidden looks identical on
+        # every retry from this account, so the only useful instruction is to elevate; and an
+        # unparseable record names a FILE the operator can act on — the one case with a fix in their
+        # hands, so it says which file rather than which permission.
+        if grid.unreadable:
+            blind = f"couldn't read this grid's run record ({grid.unreadable})"
+            remedy = "Once that file is removed or repaired"
+        elif grid.partial:
+            blind = ("couldn't see all of the process table (most command lines were hidden from this "
+                     "account)")
+            remedy = "From an elevated shell"
+        else:
+            blind = "couldn't read the process table"
+            remedy = "Once processes are listable"
         print(
             f"Warning: {blind}, so an untracked serve child could not be ruled out for "
             f"{grid.label} — {told}. {remedy}, `grid leave {grid.network_id}` reaps one; "
