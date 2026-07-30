@@ -74,7 +74,7 @@ class SeatSpec:
     quota_argv: tuple = ()          # argv printing a usage screen; () = this CLI has no quota API
     read_quota: object = None       # (binary) -> QuotaSnapshot | None, for a CLI whose quota is
                                     # not a printed screen. Wins over quota_argv when set.
-    tool_protocol: object = None    # which ToolProtocol this seat's model reads best. None = HERMES.
+    tool_protocol: object = None    # which ToolProtocol this seat's model reads best. None = OPENAI.
     run: object = None              # (binary, prepared, timeout, on_delta) -> SeatResult, for a CLI
                                     # driven over a protocol rather than one subprocess per request.
                                     # `on_delta(text)` is called per streamed chunk, or None.
@@ -131,7 +131,7 @@ def options_child_argv(options, kind):
     return argv
 
 
-# the Hermes tool protocol, shared by every seat
+# the tool protocol, shared by every seat
 
 @dataclass(frozen=True)
 class ToolProtocol:
@@ -143,26 +143,21 @@ class ToolProtocol:
 
     name: str
     render: object
+    parse: object = None
 
 
-# Injected ONLY when the caller sends native `tools[]`. A caller already speaking Hermes (its own
-# `<tools>` system message) gets passthrough — two copies would give the model rival protocols.
-HERMES_TOOL_TEMPLATE = """You are a function calling AI model. You are provided with function \
-signatures within <tools></tools> XML tags. You may call one or more functions to assist with the \
-user query. Don't make assumptions about what values to plug into functions. Here are the \
-available tools:
-<tools>
+# Injected ONLY when the caller sends native `tools[]`. A caller that describes its own tool
+# convention in a system message gets passthrough — two copies would give the model rival
+# protocols. The shape asked for is the OpenAI one the model already knows from that wire.
+OPENAI_TOOL_TEMPLATE = """These tools are available to you, as OpenAI function definitions:
 {tools_json}
-</tools>
-Use the following pydantic model json schema for each tool call you will make: \
-{{"title": "FunctionCall", "type": "object", "properties": {{"arguments": {{"title": "Arguments", \
-"type": "object"}}, "name": {{"title": "Name", "type": "string"}}}}, "required": ["arguments", \
-"name"]}}
-For each function call return a json object with function name and arguments within \
-<tool_call></tool_call> XML tags as follows:
-<tool_call>
-{{"arguments": <args-dict>, "name": <function-name>}}
-</tool_call>"""
+
+To use one, reply with a JSON object in exactly this shape and nothing else:
+{{"tool_calls": [{{"type": "function", "function": {{"name": <tool-name>, \
+"arguments": {{<arguments-object>}}}}}}]}}
+
+Emit one entry per call; several calls may go in the same array. Reply with plain text instead \
+whenever no tool is needed."""
 
 
 
@@ -352,23 +347,104 @@ TOOL_DELEGATION_NOTE = (
 )
 
 
-def render_hermes_tools(tools):
-    """OpenAI `tools[]` -> Hermes instruction text, with the delegation note appended."""
-    block = HERMES_TOOL_TEMPLATE.format(tools_json=json.dumps(tools, ensure_ascii=False))
+def render_openai_tools(tools):
+    """OpenAI `tools[]` -> the instruction text, with the delegation note appended."""
+    block = OPENAI_TOOL_TEMPLATE.format(tools_json=json.dumps(tools, ensure_ascii=False))
     return f"{block}\n\n{TOOL_DELEGATION_NOTE}"
 
 
-HERMES = ToolProtocol(name="hermes", render=render_hermes_tools)
+def _json_objects(text):
+    """Every JSON object in `text`, as `(start, end, value)`.
+
+    Scans with the real JSON decoder rather than a pattern: the payload nests braces and quotes
+    them inside strings, so a `\\{.*?\\}` or a brace counter truncates any call whose argument is
+    an object — the common case.
+    """
+    decoder = json.JSONDecoder()
+    index = 0
+    while True:
+        index = text.find("{", index)
+        if index < 0:
+            return
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except ValueError:
+            index += 1
+            continue
+        yield index, end, value
+        index = end
 
 
-def build_system_prompt(messages, tools, protocol=None):
-    """The caller's system messages, then the tool protocol block last — where an instruction is
-    most likely to be followed."""
+def _one_call(entry):
+    """One element of `tool_calls[]`, normalised — or None if it is not a call.
+
+    `arguments` is emitted as a STRING because that is what the consumer expects: the relay calls
+    `json.loads` on it to build the Anthropic `tool_use.input`. Accepted as either an object (what
+    a model naturally writes) or an already-encoded string (what the OpenAI wire actually carries).
+    """
+    if not isinstance(entry, dict):
+        return None
+    function = entry.get("function") if isinstance(entry.get("function"), dict) else entry
+    name = function.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = {}
+    return {
+        "id": str(entry.get("id") or f"call_{uuid.uuid4().hex[:24]}"),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(arguments if isinstance(arguments, dict) else {},
+                                    ensure_ascii=False),
+        },
+    }
+
+
+def parse_openai_tool_calls(text):
+    """Answer text -> `(prose, tool_calls)`, ready for the relay to translate.
+
+    The model is asked for the shape it already knows from the OpenAI wire, so this looks for one
+    thing only: a JSON object carrying `tool_calls`. Everything outside it is prose, kept.
+
+    An object that carries no usable call is LEFT WHERE IT IS, deliberately: a half-written call is
+    a result worth seeing, and dropping it turns a visible malformation into a model that
+    mysteriously did nothing.
+    """
+    calls, prose_parts, cursor = [], [], 0
+    for start, end, value in _json_objects(text):
+        if not isinstance(value, dict) or not isinstance(value.get("tool_calls"), list):
+            continue
+        found = [call for call in (_one_call(c) for c in value["tool_calls"]) if call]
+        if not found:
+            continue
+        prose_parts.append(text[cursor:start])
+        cursor = end
+        calls.extend(found)
+    if not calls:
+        return text, []
+    prose_parts.append(text[cursor:])
+    return "".join(prose_parts).strip(), calls
+
+
+OPENAI = ToolProtocol(name="openai", render=render_openai_tools, parse=parse_openai_tool_calls)
+
+
+def build_system_prompt(messages, tools=None, protocol=None):
+    """The caller's system messages, verbatim.
+
+    The tool block does NOT go here. Measured against Claude Code's real 27 KB system prompt: with
+    the block appended to it, the model answered `"I don't have access to a Read tool"` — a system
+    prompt describing a harness where tools are native out-argues an instruction buried at its end.
+    Moved to the end of the turn (`build_prompt`), which is the last thing the model reads, it
+    emitted `<tool_call>`. `tools`/`protocol` stay in the signature so existing callers still work.
+    """
     parts = [_flatten_content(m.get("content")) for m in messages if m.get("role") == "system"]
     system = "\n\n".join(p for p in parts if p.strip())
-    if tools:
-        block = (protocol or HERMES).render(tools)
-        return f"{system}\n\n{block}" if system.strip() else block
     return system if system.strip() else DEFAULT_SYSTEM_PROMPT
 
 
@@ -416,6 +492,10 @@ class PreparedRequest:
     model_alias: str
     prompt: str
     system_prompt: str
+    # The protocol whose instruction went INTO the prompt, so the same one reads the answer back —
+    # None when the caller sent no `tools[]`, which is what keeps a client that brought its own
+    # convention (Hermes' own `<tools>` system message) getting its text back verbatim.
+    tool_protocol: object = None
 
 
 def prepare(body, kind, protocol=None):
@@ -430,11 +510,15 @@ def prepare(body, kind, protocol=None):
             f"Serves: {', '.join(advertised_models(kind))}."
         )
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
+    prompt = build_prompt(messages)
+    if tools:
+        prompt = f"{prompt}\n\n{(protocol or OPENAI).render(tools)}"
     return PreparedRequest(
         model=requested or f"{kind}:{model_alias}",
         model_alias=model_alias,
-        prompt=build_prompt(messages),
-        system_prompt=build_system_prompt(messages, tools, protocol),
+        prompt=prompt,
+        system_prompt=build_system_prompt(messages),
+        tool_protocol=(protocol or OPENAI) if tools else None,
     )
 
 
@@ -570,12 +654,21 @@ def _write_stdin(proc, text):
 
 # answer -> OpenAI chat.completion
 
-def to_chat_completion(result, kind, model):
+def to_chat_completion(result, kind, model, protocol=None):
     """A standard chat.completion, plus `grid_cli_seat` carrying the run's measured cost.
 
-    The answer is returned as TEXT, verbatim. The seat does not look for tool calls in it — a CLI
-    has no native tool channel, so any tool convention is the caller's own and the caller parses it.
+    A CLI has no native tool channel, so a tool call arrives as TEXT in whatever convention was put
+    into the prompt. `protocol` (set only when the caller sent `tools[]`) reads it back into
+    `tool_calls[]` — the shape every OpenAI client already understands, and the one the relay
+    translates into an Anthropic `tool_use` block. Without it the text is returned verbatim, which
+    is what a caller that brought its own convention wants.
     """
+    text, tool_calls = result.text, []
+    if protocol is not None and getattr(protocol, "parse", None):
+        text, tool_calls = protocol.parse(result.text)
+    message = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -583,8 +676,8 @@ def to_chat_completion(result, kind, model):
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": result.text},
-            "finish_reason": "stop",
+            "message": message,
+            "finish_reason": "tool_calls" if tool_calls else "stop",
         }],
         "usage": {
             "prompt_tokens": result.input_tokens,
@@ -603,16 +696,22 @@ def to_chat_completion(result, kind, model):
 
 def answer(spec, prepared, binary, timeout):
     result = run_seat(spec, prepared, binary, timeout)
-    return to_chat_completion(result, spec.kind, prepared.model)
+    return to_chat_completion(result, spec.kind, prepared.model, prepared.tool_protocol)
 
 
 def answer_stream(spec, prepared, binary, timeout):
-    """Yield ("delta", text) as the CLI produces it, then ("done", (completion, quota|None))."""
+    """Yield ("delta", text) as the CLI produces it, then ("done", (completion, quota|None)).
+
+    Tool calls ride the final ("done") event, never a delta: the closing `</tool_call>` is what
+    proves a block is whole, so nothing can be parsed until the answer ends.
+    """
     stream = stream_seat(spec, prepared, binary, timeout)
     while True:
         try:
             yield "delta", next(stream)
         except StopIteration as stop:
             result, quota = stop.value
-            yield "done", (to_chat_completion(result, spec.kind, prepared.model), quota)
+            completion = to_chat_completion(
+                result, spec.kind, prepared.model, prepared.tool_protocol)
+            yield "done", (completion, quota)
             return

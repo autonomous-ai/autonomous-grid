@@ -112,8 +112,8 @@ def test_the_answer_is_returned_verbatim():
 
 def test_a_tool_protocol_only_renders():
     """Tools go INTO the prompt; nothing reads them back out, so a protocol is one function."""
-    assert cli_seat.HERMES.name == "hermes"
-    rendered = cli_seat.HERMES.render([{"type": "function", "function": {"name": "f"}}])
+    assert cli_seat.OPENAI.name == "openai"
+    rendered = cli_seat.OPENAI.render([{"type": "function", "function": {"name": "f"}}])
     assert "<tools>" in rendered and "<tool_call>" in rendered
 
 
@@ -469,3 +469,76 @@ def test_both_execution_models_return_the_same_pair():
             next(stream)
     result, quota = stop.value.value
     assert isinstance(result, cli_seat.SeatResult) and quota is None
+
+
+# tool calls: text back into tool_calls[]
+
+def test_a_tool_call_becomes_an_openai_tool_call():
+    """The measured shape, verbatim from a real claude answer — newlines inside the tags and
+    `arguments` BEFORE `name`, which is the order the template asks for."""
+    text = '<tool_call>\n{"arguments": {"city": "Hanoi"}, "name": "get_weather"}\n</tool_call>'
+    prose, calls = cli_seat.parse_openai_tool_calls(text)
+    assert prose == ""
+    assert calls[0]["function"]["name"] == "get_weather"
+    # A STRING, because the relay calls json.loads on it to build `tool_use.input`.
+    assert calls[0]["function"]["arguments"] == '{"city": "Hanoi"}'
+    assert calls[0]["type"] == "function" and calls[0]["id"].startswith("call_")
+
+
+def test_a_nested_object_argument_is_not_truncated():
+    """Regression guard on the delimiter: matching braces instead of `</tool_call>` would cut this
+    at the first `}` and produce invalid JSON for every object-valued argument."""
+    text = ('<tool_call>{"name": "write", "arguments": {"file": {"path": "a.txt", "mode": 644}}}'
+            '</tool_call>')
+    _, calls = cli_seat.parse_openai_tool_calls(text)
+    assert json.loads(calls[0]["function"]["arguments"]) == {"file": {"path": "a.txt", "mode": 644}}
+
+
+def test_prose_around_a_call_is_kept_and_several_calls_are_read():
+    text = ('Let me check both.\n'
+            '<tool_call>{"name": "a", "arguments": {}}</tool_call>\n'
+            'and\n'
+            '<tool_call>{"name": "b", "arguments": {"x": 1}}</tool_call>\n'
+            'done')
+    prose, calls = cli_seat.parse_openai_tool_calls(text)
+    assert [c["function"]["name"] for c in calls] == ["a", "b"]
+    assert "Let me check both." in prose and "done" in prose
+    assert "<tool_call>" not in prose
+
+
+def test_a_malformed_block_stays_in_the_prose():
+    """Never silently dropped: a half-written call is a result worth seeing, and swallowing it
+    turns a visible malformation into a model that mysteriously did nothing."""
+    for broken in ('<tool_call>{"name": "a", oops}</tool_call>',
+                   '<tool_call>{"arguments": {}}</tool_call>',
+                   '<tool_call>{"name": "a"'):
+        prose, calls = cli_seat.parse_openai_tool_calls(broken)
+        assert calls == []
+        assert prose == broken
+
+
+def test_an_answer_with_no_call_is_returned_byte_for_byte():
+    text = "  Just talking. Braces { } and a < sign.  "
+    assert cli_seat.parse_openai_tool_calls(text) == (text, [])
+
+
+def test_tools_sent_means_parsed_and_no_tools_means_verbatim():
+    """The one switch: `tools[]` in the request is what turns parsing on, so a client that brought
+    its own convention in a system message still gets its text back untouched."""
+    raw = '<tool_call>{"name": "get_weather", "arguments": {"city": "Hanoi"}}</tool_call>'
+    result = cli_seat.SeatResult(text=raw)
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "weather?"}]}
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}]
+
+    with_tools = cli_seat.prepare({**body, "tools": tools}, "claude")
+    assert with_tools.tool_protocol is cli_seat.OPENAI
+    done = cli_seat.to_chat_completion(result, "claude", body["model"], with_tools.tool_protocol)
+    assert done["choices"][0]["finish_reason"] == "tool_calls"
+    assert done["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    without = cli_seat.prepare(body, "claude")
+    assert without.tool_protocol is None
+    plain = cli_seat.to_chat_completion(result, "claude", body["model"], without.tool_protocol)
+    assert plain["choices"][0]["message"]["content"] == raw
+    assert "tool_calls" not in plain["choices"][0]["message"]
+    assert plain["choices"][0]["finish_reason"] == "stop"
