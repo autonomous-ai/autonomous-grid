@@ -211,6 +211,44 @@ def test_claude_invoke_disables_tools_and_replaces_the_system_prompt(tmp_path: P
     assert written.read_text(encoding="utf-8") == "SYSTEM"
 
 
+def test_prepare_maps_the_thinking_budget_to_an_effort_level():
+    """Regression: the request's `thinking` field was read nowhere (grep confirmed zero
+    occurrences), so a caller who enabled extended thinking got an ordinary answer and was
+    charged for the turn with no sign anything was ignored."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    # absent -> no --effort at all, so today's behaviour is unchanged
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == ""
+
+    # {"type": "disabled"} -> same as absent
+    disabled = {**body, "thinking": {"type": "disabled"}}
+    assert cli_seat.prepare(disabled, "claude", wire="anthropic").effort == ""
+
+    # two different budgets must produce two different levels, rising with the budget
+    small = {**body, "thinking": {"type": "enabled", "budget_tokens": 2000}}
+    large = {**body, "thinking": {"type": "enabled", "budget_tokens": 50000}}
+    small_effort = cli_seat.prepare(small, "claude", wire="anthropic").effort
+    large_effort = cli_seat.prepare(large, "claude", wire="anthropic").effort
+    assert small_effort and large_effort
+    assert small_effort != large_effort
+
+
+def test_claude_invoke_passes_effort_only_when_the_request_asked_for_thinking(tmp_path: Path):
+    """The plumbing must reach `claude.py`'s `invoke`, which builds the argv — and an OpenAI
+    `/chat/completions` request (no `thinking` field) must produce byte-identical argv to today."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    no_thinking = cli_seat.prepare(body, "claude")  # OpenAI wire — never carries `thinking`
+    argv, _ = claude.invoke("/bin/claude", no_thinking, tmp_path)
+    assert "--effort" not in argv
+
+    enabled = {**body, "thinking": {"type": "enabled", "budget_tokens": 50000}}
+    prepared = cli_seat.prepare(enabled, "claude", wire="anthropic")
+    assert prepared.effort
+    argv, _ = claude.invoke("/bin/claude", prepared, tmp_path)
+    assert "--effort" in argv and argv[argv.index("--effort") + 1] == prepared.effort
+
+
 def test_claude_decode_reads_usage_and_folds_in_cache_tokens():
     proc = SimpleNamespace(stdout=json.dumps({
         "result": "ok", "is_error": False, "total_cost_usd": 0.5, "duration_ms": 7, "num_turns": 1,

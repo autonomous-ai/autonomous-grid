@@ -605,6 +605,37 @@ class PreparedRequest:
     # Which wire the caller spoke — "openai" or "anthropic". Carried on the request so the server
     # answers in the SAME wire it was asked in without re-deriving it from the body a second time.
     wire: str = "openai"
+    # The seat's own `--effort` level, derived from the request's `thinking` field — "" when the
+    # caller asked for no extended thinking, so today's argv is unaffected.
+    effort: str = ""
+
+
+def _effort_for_thinking(thinking):
+    """The request's Anthropic `thinking` field -> a `claude --effort` level, or "" for none.
+
+    The wire carries a token budget (`{"type": "enabled", "budget_tokens": N}`); `claude` only
+    exposes five coarse levels (low, medium, high, xhigh, max) with no token knob, so this mapping
+    is a judgement call, not a fact. Anthropic's own extended-thinking docs use 1024 tokens as the
+    documented minimum and ~10000 as the typical worked example, so the thresholds below put a
+    bare-minimum budget at `low`, put the common ~10000 case at `medium`, and reserve `xhigh`/`max`
+    for callers who explicitly asked for a large budget (the range where deeper multi-step
+    reasoning is typically wanted). `{"type": "disabled"}` or a missing/malformed field returns ""
+    so an unset request passes no flag at all — today's behaviour, unchanged.
+    """
+    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+        return ""
+    budget = thinking.get("budget_tokens")
+    if not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget <= 0:
+        return ""
+    if budget < 4000:
+        return "low"
+    if budget < 10000:
+        return "medium"
+    if budget < 32000:
+        return "high"
+    if budget < 60000:
+        return "xhigh"
+    return "max"
 
 
 def _reject_server_tools(tools):
@@ -654,6 +685,7 @@ def prepare(body, kind, protocol=None, wire="openai"):
         system_prompt=system_prompt,
         tool_protocol=resolved_protocol if tools else None,
         wire=wire,
+        effort=_effort_for_thinking(body.get("thinking")),
     )
 
 
