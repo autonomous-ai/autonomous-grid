@@ -247,6 +247,21 @@ at your grid with `grid info --env`
 with that same guidance. Jobs spend the seat's own monthly allowance.
 Walkthrough: [docs/codex-quickstart.md](docs/codex-quickstart.md) · [ADR 0015](docs/adr/0015-codex-subscription-engine.md).
 
+### Run Claude Code on your grid
+
+```bash
+grid launch claude                      # …or `-- --continue`, and any other Claude Code flag
+```
+
+`grid launch` starts an app already pointed at your grid: endpoint, credential and model names go
+into that app's own process environment and nowhere else — nothing exported to your shell, nothing
+written to a config file, nothing to undo. Remote only, because Claude Code speaks the Anthropic
+Messages dialect and only the relay translates it. This release fixes the model names
+(`claude:opus`, `claude:haiku`), so check `grid models` before your first launch — the command
+refuses up front, naming what's missing, rather than failing inside the app.
+Walkthrough: [docs/claude-code-quickstart.md](docs/claude-code-quickstart.md) ·
+[contract](docs/cli.md#launch) · [ADR 0028](docs/adr/0028-launch-hands-an-app-the-grid.md).
+
 ### Don't know which model to ask for? Send `auto`
 
 A grid's catalog shifts as engines join and leave. Rather than hardcoding a model name, an app can

@@ -14,6 +14,7 @@ kind      an engine's type (ollama, vllm, mlx, llama.cpp, comfyui) — filter au
 join      connect this machine or engine to a grid
 model     a live capability exposed by joined engines
 mode      which world the CLI targets: `local` (default) or `remote`
+launch    start an app already pointed at your grid; the app it starts is a launch target
 pack      a bundled starting point for training on business data (`grid train packs`)
 adapter   the small add-on layer a training run produces (LoRA) — what moves between machines
 gate      the check that refuses to serve a trained model unless it beat the one you serve
@@ -114,8 +115,11 @@ persisted mode > `local`. `grid use <name>` sets the persistent default grid, so
 stale selection (its grid was removed) is ignored.
 
 In `remote` mode the grid lifecycle (`up`/`down`/`ls`/`info`), live reads (`engines`/`models`),
-sign-in (`login`/`logout`), serving (`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`), and
-membership admin (`grid members`) all work. `grid members` is remote-only — in `local` mode it exits with guidance to switch. The shared
+sign-in (`login`/`logout`), serving (`join`/`leave`), consuming (`chat`/`image`/`edit`/`video`),
+handing an app the grid (`grid launch`), and
+membership admin (`grid members`) all work. `grid members` and `grid launch` are remote-only — in
+`local` mode each exits with guidance to switch, naming its own reason (sign-in for `members`, the
+dialect the launched app speaks for `launch` — see [Launch](#launch)). The shared
 local commands (`catalog`, `pull`, `rm`/`remove`, `ctx`, `device-info`, `engine …`, `agent …`,
 `train …`) work in either mode. A machine with no state
 file behaves exactly as a `local`-only install.
@@ -544,6 +548,124 @@ model the grid ranked and had free, and the `X-Grid-Routed-Model` response heade
 Codex apps; `grid chat -m codex:…` is refused client-side, before any network call, with the
 guidance to point a Codex-compatible app at the grid instead
 ([Pointing a Codex app at your grid](#pointing-a-codex-app-at-your-grid-using-codex-models)).
+
+## Launch
+
+```
+grid launch                                    # list the apps that can be launched
+grid launch <target> [grid]                    # start one, already pointed at the grid
+grid launch <target> [grid] --print-env        # print the environment instead; start nothing
+grid launch <target> [grid] -- <app args…>     # forward everything after `--` to the app
+```
+
+`grid launch` starts a **third-party app already pointed at your grid**. The endpoint, the credential
+and the model names go into that app's own process environment and nowhere else — never exported to
+your shell, never written to a config file. Closing the app is the entire cleanup, which is why there
+is no `--restore`. One **launch target** ships today: `claude` (Claude Code).
+
+Bare `grid launch` lists the targets and exits 0 — it is discovery, not an error:
+
+```text
+Launch targets:
+  claude	Claude Code
+
+Start one with `grid launch <target>`.
+```
+
+**Remote-only, and the dialect is the reason.** Claude Code speaks the Anthropic Messages dialect and
+nothing else. A local grid serves `chat/completions`, `completions`, `models` and media — there is no
+`/v1/messages` on it at all — so this is a design boundary, not a missing flag, and `local` mode says
+which one:
+
+```text
+`grid launch` is a remote-mode command. Run `grid mode remote` (or pass --remote) to launch an app
+that speaks the Anthropic Messages dialect, which a local grid does not serve.
+```
+
+A remote grid's relay translates a Messages request to `chat/completions` before it routes, which is
+why any chat model on a remote grid can back the app. Teaching the local server the same dialect
+would mean hand-carrying that translation across a seam with no code dependency — rejected in
+[ADR 0028](./adr/0028-launch-hands-an-app-the-grid.md).
+
+**`[grid]`** matches `info`/`models`/`engines` verbatim: a grid name or `ag-…` id, omitted for the
+active grid — so `grid use` stays the one place you choose where work runs.
+
+**`--`** hands everything after the **first** separator to the app, in order and unread:
+
+```bash
+grid launch claude -- --continue
+grid launch claude -- -p 'summarise this repo'
+grid launch claude research -- --continue      # …on a grid other than the active one
+```
+
+Two words are the exception. `--local` and `--remote` are this CLI's one-shot mode override and are
+stripped from **anywhere** on the line, separator included, so neither can reach the app; a warning
+says so when one is taken. `-- --local` additionally flips the run to local mode, where the command
+refuses — reported as a mode error rather than as a missing argument.
+
+**`--print-env`** prints exactly what a launch would inject, as shell exports, and starts nothing:
+
+```bash
+grid launch claude --print-env
+```
+
+```bash
+export ANTHROPIC_BASE_URL='https://relay.example/relay'
+export ANTHROPIC_AUTH_TOKEN='<your access token>'
+export ANTHROPIC_API_KEY='<your access token>'
+export ANTHROPIC_MODEL='claude:opus'
+export ANTHROPIC_SMALL_FAST_MODEL='claude:haiku'
+export CLAUDE_CODE_SUBAGENT_MODEL='claude:haiku'
+export ANTHROPIC_DEFAULT_OPUS_MODEL='claude:opus'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='claude:sonnet'
+export ANTHROPIC_DEFAULT_HAIKU_MODEL='claude:haiku'
+export ANTHROPIC_DEFAULT_FABLE_MODEL='claude:fable'
+```
+
+The base carries the relay prefix and **no** `/v1`: Claude Code appends `/v1/messages` itself, so the
+`/v1` that `grid info --env` prints for OpenAI clients would 404 every request here. This is the
+**second** command that prints your access token — `grid info --env` is the first — and carries the
+same justification: an explicit, user-requested disclosure of your own token to your own shell. Every
+warning goes to stderr, so `eval "$(grid launch claude --print-env)"` evaluates only exports.
+`--print-env` and `--` are mutually exclusive: with nothing started, the arguments after `--` have
+nothing to reach, so the combination is refused rather than silently dropped.
+
+**The model names are fixed in this release** — `claude:opus`, `claude:sonnet`, `claude:haiku`,
+`claude:fable`, one per Claude Code tier — so the grid has to serve them. `grid models` is the
+authoritative list of what a grid serves. Preflight always runs, has no off switch, and never asks a
+question. `claude:opus` (main) and `claude:haiku` (small/fast, which the subagent tier mirrors) are
+**required** — every session uses both — so a grid without them is refused before anything starts,
+naming what is missing and what the grid does serve:
+
+```text
+Grid team can't run Claude Code: it doesn't serve claude:opus.
+Models on team: claude:haiku, glm-5.2.
+Run `grid join` on an engine that serves claude:opus, then `grid launch claude` again.
+```
+
+The other two tiers are reachable only through the app's own `/model` picker, so a grid that does not
+serve one has it pointed at the main tier's model, with one line saying so — a rarely used tier never
+blocks a launch:
+
+```text
+Grid team doesn't serve the sonnet, fable tiers — `/model` there resolves to claude:opus.
+```
+
+Preflight reads the grid's **public overview**, the same read `grid models` and `grid engines`
+render, so the two can never disagree about what is live. That route ignores the bearer token, so it
+proves **model presence, not credential validity**: an absent token is caught first with the usual
+`grid login` guidance, but an expired one passes preflight and fails inside the app.
+
+Everything else is left alone. The app runs on your real configuration — MCP servers, skills,
+permissions, history — which also means Claude Code's own `settings.json` `env` block **outranks**
+what is injected; the command reads that file and warns in one line, and never edits it. A missing
+binary on an interactive run offers the **vendor's own installer**; with no terminal it prints the
+install command and exits non-zero rather than prompting where no one can answer. One line on stderr
+names the grid and the model before the app takes the screen, and the app's exit code becomes the
+command's.
+
+Step by step: [Claude Code quickstart](./claude-code-quickstart.md) ·
+[ADR 0028](./adr/0028-launch-hands-an-app-the-grid.md).
 
 ## Training
 
