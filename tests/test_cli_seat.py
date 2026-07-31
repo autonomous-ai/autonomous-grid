@@ -947,6 +947,163 @@ def test_the_openai_stream_stays_data_only():
     assert "data: [DONE]" in body
 
 
+# the seat serves /responses (OpenAI Responses API dialect)
+
+def test_the_codex_cli_catalog_row_declares_responses():
+    assert "responses" in api_catalog.WHITELISTS["codex-cli"].endpoints
+    assert "chat/completions" in api_catalog.WHITELISTS["codex-cli"].endpoints
+
+
+def test_a_responses_request_reads_string_input_as_a_user_message():
+    body = {"model": "codex-cli:gpt-5.5", "input": "hello"}
+    prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
+    assert prepared.prompt == "hello"
+
+
+def test_a_responses_request_reads_message_array_input():
+    body = {"model": "codex-cli:gpt-5.5", "input": [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "user", "content": "third"},
+    ]}
+    prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
+    assert "User: first" in prepared.prompt
+    assert "Assistant: second" in prepared.prompt
+    assert "User: third" in prepared.prompt
+
+
+def test_a_responses_request_reads_instructions_as_the_system_prompt():
+    body = {"model": "codex-cli:gpt-5.5", "instructions": "Be brief.",
+            "input": [{"role": "user", "content": "hi"}]}
+    prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
+    assert prepared.system_prompt == "Be brief."
+
+
+def test_a_responses_request_without_instructions_falls_back_to_system_role_items():
+    body = {"model": "codex-cli:gpt-5.5", "input": [
+        {"role": "system", "content": "You are a helper."},
+        {"role": "user", "content": "hi"},
+    ]}
+    prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
+    assert prepared.system_prompt == "You are a helper."
+
+
+def test_responses_input_text_content_parts_are_normalised():
+    """The Responses dialect spells text parts ``input_text``/``output_text``; the shared flattener
+    reads ``text``. The normaliser rewrites just those type tags so no dialect branch leaks in."""
+    body = {"model": "codex-cli:gpt-5.5", "input": [
+        {"role": "user", "content": [{"type": "input_text", "text": "a plain question"}]},
+    ]}
+    prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
+    assert prepared.prompt == "a plain question"
+
+
+def test_a_responses_function_call_output_item_is_replayed_as_a_tool_result():
+    body = {"model": "codex-cli:gpt-5.5", "input": [
+        {"role": "user", "content": "what is the weather?"},
+        {"type": "function_call", "call_id": "call_1", "name": "get_weather",
+         "arguments": '{"city": "Hanoi"}'},
+        {"type": "function_call_output", "call_id": "call_1", "output": "Sunny, 32C"},
+        {"role": "user", "content": "thanks"},
+    ]}
+    prompt = cli_seat.prepare(body, "codex-cli", wire="responses").prompt
+    assert '"name": "get_weather"' in prompt
+    assert "Tool result: Sunny, 32C" in prompt
+    assert "User: thanks" in prompt
+
+
+def test_to_response_builds_a_responses_object():
+    result = cli_seat.SeatResult(text="hello world", input_tokens=3, output_tokens=2)
+    resp = cli_seat.to_response(result, "codex-cli", "codex-cli:gpt-5.5")
+    assert resp["object"] == "response"
+    assert resp["status"] == "completed"
+    assert resp["model"] == "codex-cli:gpt-5.5"
+    msg = resp["output"][0]
+    assert msg["type"] == "message" and msg["role"] == "assistant"
+    assert msg["content"][0]["type"] == "output_text"
+    assert msg["content"][0]["text"] == "hello world"
+    assert resp["usage"] == {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+
+
+def test_to_response_maps_tool_calls_to_function_call_items():
+    text = ('{"tool_calls": [{"type": "function", "function": '
+            '{"name": "get_weather", "arguments": {"city": "Hanoi"}}}]}')
+    result = cli_seat.SeatResult(text=text, input_tokens=1, output_tokens=1)
+    resp = cli_seat.to_response(result, "codex-cli", "codex-cli:gpt-5.5", cli_seat.OPENAI)
+    items = resp["output"]
+    assert items[0]["type"] == "message"
+    fc = items[1]
+    assert fc["type"] == "function_call"
+    assert fc["name"] == "get_weather"
+    assert json.loads(fc["arguments"]) == {"city": "Hanoi"}
+    assert fc["call_id"].startswith("call_")
+
+
+def test_the_responses_stream_uses_event_data_pairs():
+    """The Responses SSE pairs ``event:`` + ``data:`` (like Anthropic, unlike OpenAI chat's
+    bare ``data:``) and emits the canonical lifecycle: created → delta(s) → completed."""
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("hi there")
+        return cli_seat.SeatResult(text="hi there", output_tokens=2)
+
+    base = seat_for("codex-cli")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    client = TestClient(app)
+
+    resp = client.post("/responses", json={
+        "model": "codex-cli:gpt-5.6-terra", "stream": True, "input": "hi"})
+    body = resp.text
+
+    assert 'event: response.created\n' in body
+    assert 'event: response.output_text.delta\n' in body
+    assert 'event: response.completed\n' in body
+    # every frame is an event: line immediately followed by its data: line
+    for pair in body.split("\n\n"):
+        if not pair.strip():
+            continue
+        lines = pair.split("\n")
+        assert lines[0].startswith("event: "), f"frame missing event: line: {pair!r}"
+        assert lines[1].startswith("data: "), f"event not paired with data: {pair!r}"
+
+
+def test_the_responses_non_stream_endpoint_returns_a_json_object():
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        return cli_seat.SeatResult(text="plain answer", input_tokens=1, output_tokens=2)
+
+    base = seat_for("codex-cli")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    client = TestClient(app)
+
+    resp = client.post("/responses", json={
+        "model": "codex-cli:gpt-5.6-terra", "input": "hello"})
+    obj = resp.json()
+    assert obj["object"] == "response"
+    assert obj["output"][0]["content"][0]["text"] == "plain answer"
+
+
+def test_responses_reasoning_effort_is_read_from_the_nested_field():
+    """The Responses API carries effort under ``reasoning.effort``, not the flat
+    ``reasoning_effort`` the chat wire uses."""
+    body = {"model": "codex-cli:gpt-5.5", "input": "hi",
+            "reasoning": {"effort": "high"}}
+    prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
+    assert prepared.effort == "high"
+
+
+
+
 # Streaming with tools attached.
 #
 # `buffered = bool(prepared.tool_protocol)` dropped EVERY delta whenever the request carried tools,
@@ -1094,3 +1251,36 @@ def test_the_openai_stream_shares_the_rule():
     call = post([_OPENAI_CALL_JSON])
     assert content(call) == "", "the raw call leaked into the stream as prose"
     assert any(((f.get("choices") or [{}])[0].get("delta") or {}).get("tool_calls") for f in _sse_frames(call))
+
+
+def test_the_responses_stream_shares_the_rule():
+    """The third wire, added while this fix was in flight, carried the same
+    `buffered = bool(prepared.tool_protocol)` — so it must land under the same rule or it silently
+    keeps the frozen stream for every codex-cli turn that offers tools."""
+    from fastapi.testclient import TestClient
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def app_for(pieces):
+        def run(binary, prepared, timeout, on_delta):
+            for piece in pieces:
+                if on_delta is not None:
+                    on_delta(piece)
+            return cli_seat.SeatResult(text="".join(pieces), output_tokens=len(pieces))
+        base = seat_for("codex-cli")
+        spec = base.__class__(**{**base.__dict__, "run": run})
+        return create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+
+    def deltas(pieces):
+        body = TestClient(app_for(pieces)).post("/responses", json={
+            "model": "codex-cli:gpt-5.6-terra", "stream": True, "tools": [_OPENAI_TOOL],
+            "input": "hi"}).text
+        return [f["delta"] for f in _sse_frames(body)
+                if f.get("type") == "response.output_text.delta"]
+
+    prose = deltas(["The sea ", "is wide."])
+    assert len(prose) > 1, "prose still arrives in one burst on the responses wire"
+    assert "".join(prose) == "The sea is wide."
+
+    call = deltas([_OPENAI_CALL_JSON])
+    assert "".join(call) == "", "the raw call leaked into the stream as prose"
