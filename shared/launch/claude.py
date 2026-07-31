@@ -59,6 +59,18 @@ def _environment(session: GridSession) -> dict[str, str]:
     cost is recorded where the decision is: a grid that does not serve what the app asks for now
     fails at the first prompt rather than at launch.
 
+    **Only one credential variable, and it is the bearer one.** ADR 0028 set `ANTHROPIC_API_KEY`
+    alongside it, reasoning that which one the app reads depends on how it authenticates. The app
+    itself says otherwise: with both set it prints
+
+        Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected
+
+    and tells the user to unset one. Nothing was bought for that — the relay takes either header but
+    **prefers `Authorization: Bearer` when both arrive** (`_bearer_or_api_key` in grid-src), which is
+    exactly what `ANTHROPIC_AUTH_TOKEN` produces, so `ANTHROPIC_API_KEY` never decided a request.
+    Worse, it collides with the variable a user's own Anthropic key lives in — the same collision
+    that relay function guards against by ignoring `x-api-key` whenever a Bearer is present.
+
     `GRID_TOKEN` is absent for a different reason: it appears in the hand-rolled recipe, but it is a
     shell convenience variable this app never reads. Telemetry variables are absent too — whether
     Grid should disable Claude Code's error reporting is an open product question (ADR 0028), and
@@ -68,9 +80,7 @@ def _environment(session: GridSession) -> dict[str, str]:
         # `rstrip` before the suffix: a stored relay address with a trailing slash would otherwise
         # produce a doubled slash the client sends verbatim.
         "ANTHROPIC_BASE_URL": session.relay_base.rstrip("/") + _RELAY_SUFFIX,
-        # Both, because which one Claude Code reads depends on the path it takes to authenticate.
         "ANTHROPIC_AUTH_TOKEN": session.access_token,
-        "ANTHROPIC_API_KEY": session.access_token,
     }
 
 

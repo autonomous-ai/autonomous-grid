@@ -160,7 +160,6 @@ grid launch claude --print-env
 ```bash
 export ANTHROPIC_BASE_URL='https://relay.example/relay'
 export ANTHROPIC_AUTH_TOKEN='<your access token>'
-export ANTHROPIC_API_KEY='<your access token>'
 ```
 
 Note the base URL carries **no** `/v1` — Claude Code appends `/v1/messages` itself, so the `/v1` that
