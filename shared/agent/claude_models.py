@@ -160,6 +160,14 @@ def _cache_key(path):
 
 
 def _read_cache(key):
+    """The cached ids for this executable, or None to force a rescan.
+
+    An EMPTY stored list reads as a miss, not as "this binary serves nothing". Nothing writes one
+    any more (see `discover`), but machines that ran the version which did are still carrying one,
+    and a stored `[]` was a permanent cache HIT — discovery never re-probed, so the seat advertised
+    the static fallback for the life of that executable. Treating it as a miss heals those boxes on
+    their next join rather than requiring the file be deleted by hand.
+    """
     try:
         stored = json.loads(_cache_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -167,7 +175,7 @@ def _read_cache(key):
     if not isinstance(stored, dict) or stored.get("key") != key:
         return None
     models = stored.get("models")
-    return models if isinstance(models, list) else None
+    return models if isinstance(models, list) and models else None
 
 
 def _write_cache(key, models):
@@ -232,5 +240,12 @@ def discover(binary):
     # cold discovery into 23s. They share nothing, so running them together costs one spawn.
     with ThreadPoolExecutor(max_workers=max(1, len(tiers))) as pool:
         models = [found for found in pool.map(first_callable, tiers) if found is not None]
-    _write_cache(key, models)
+    # Only a NON-EMPTY result is worth remembering. Every way this list comes back empty is
+    # transient — `accepts` reads an unparseable envelope as False, so one expired login, one rate
+    # limit, one timeout on a 266MB spawn empties it — while the cache key is the executable's
+    # identity, which does not change when the transient condition clears. Caching `[]` therefore
+    # pinned the seat to the static fallback until the binary was next upgraded. Paying for a
+    # rescan on each join is the cheaper side of that trade by a wide margin.
+    if models:
+        _write_cache(key, models)
     return models
