@@ -90,12 +90,12 @@ def _catalog_api(args: argparse.Namespace) -> int:
                     "supports_structured_outputs": entry.supports_structured_outputs,
                     "notes": entry.notes,
                 }
-                for entry in whitelist.entries
+                for entry in api_catalog.entries_for(kind)
             ],
         }, indent=2))
         return 0
 
-    if not whitelist.entries:
+    if not api_catalog.entries_for(kind):
         # A known kind with no models listed yet — not an error, and emphatically not "unknown".
         # `grid catalog` answered the question it was asked (ADR 0012 D-a: no credential, no network);
         # the answer happens to be "none". Exit 0, like `--json`'s `models: []`.
@@ -110,7 +110,7 @@ def _catalog_api(args: argparse.Namespace) -> int:
         f"Models a `grid join --api {kind}` would serve "
         f"(verified {whitelist.last_verified}):"
     )
-    for entry in whitelist.entries:
+    for entry in api_catalog.entries_for(kind):
         print(api_catalog.format_api_entry(kind, entry, whitelist.endpoints))
     print()
     print(f"No key needed to view. Requests to {kind}:* models leave the grid for the vendor.")

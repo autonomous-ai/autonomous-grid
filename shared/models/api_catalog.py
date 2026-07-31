@@ -271,6 +271,11 @@ CLAUDE_LAST_VERIFIED = "2026-07-28"
 # The service-kind key, named here (not in remote/) for the same reason CODEX_KIND is.
 CLAUDE_KIND = "claude"
 
+# The FALLBACK row. `entries_for("claude")` normally answers with concrete ids read from the
+# installed binary (`shared/agent/claude_models.py`); this list is what a box with no readable
+# `claude` falls back to, and it is also the pre-discovery behaviour verbatim, so the worst case
+# here is exactly what shipped before.
+#
 # `--model` ALIASES, not dated ids: an alias always resolves to the current model of its tier, so
 # the row cannot go stale between releases.
 #
@@ -402,6 +407,69 @@ def advertised_name(kind: str, entry: ApiModelEntry) -> str:
     return f"{kind}:{entry.vendor_name}"
 
 
+_claude_entries: tuple[ApiModelEntry, ...] | None = None
+
+
+def entries_for(kind: str) -> tuple[ApiModelEntry, ...]:
+    """The models ``kind`` serves right now — the ONE reader every surface goes through.
+
+    Every kind but ``claude`` answers from its static row, unchanged. The Claude seat is not a
+    vendor endpoint but the operator's own CLI, so the honest answer is whatever ids that binary
+    carries; they are discovered once per process (see ``shared/agent/claude_models.py``) and fall
+    back to ``CLAUDE_WHITELIST`` whenever the binary cannot be read.
+    """
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return ()
+    if kind != CLAUDE_KIND:
+        return whitelist.entries
+    global _claude_entries
+    if _claude_entries is None:
+        _claude_entries = _discovered_claude_entries() or whitelist.entries
+    return _claude_entries
+
+
+def _discovered_claude_entries() -> tuple[ApiModelEntry, ...]:
+    """Imported inside the call, not at module scope: the seat modules import this one, so a
+    top-level import would close the cycle. By the time anybody asks, both are loaded."""
+    from shared.agent import cli_seat, claude_models
+    from shared.agent.seats import claude as claude_seat
+
+    binary = cli_seat.seat_bin(claude_seat.SPEC)
+    if binary is None:
+        return ()
+    return tuple(
+        ApiModelEntry(
+            vendor_name=model_id,
+            # Still the `0` unknown sentinel: the seat has no /models endpoint to probe, and the
+            # `[1m]` alias form that would justify a real number is not verified for full ids.
+            context_window=0,
+            supports_tools=True,
+            supports_vision=False,
+            supports_json_mode=False,
+            supports_structured_outputs=False,
+            notes="Claude Code CLI seat — id read from the installed binary.",
+        )
+        for model_id in claude_models.discover(binary)
+    )
+
+
+def resolvable_entries(kind: str) -> tuple[ApiModelEntry, ...]:
+    """Every name ``kind`` will ANSWER to — what it currently advertises, plus the static row.
+
+    The two differ only for ``claude``, where discovery replaces the tier aliases with concrete
+    ids. Advertising the ids while still answering to `claude:sonnet` is deliberate: a relay
+    holding a capability envelope from before the upgrade keeps working, and the `claude` CLI
+    takes either spelling for ``--model``. Advertisement narrows; resolution does not.
+    """
+    current = entries_for(kind)
+    whitelist = WHITELISTS.get(kind)
+    if whitelist is None:
+        return current
+    seen = {entry.vendor_name for entry in current}
+    return current + tuple(e for e in whitelist.entries if e.vendor_name not in seen)
+
+
 def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
     """The whitelist entry advertised under ``advertised`` (e.g. ``openai:gpt-5.5``), or None.
 
@@ -410,7 +478,7 @@ def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:
         return None
-    for entry in whitelist.entries:
+    for entry in resolvable_entries(kind):
         if advertised_name(kind, entry) == advertised:
             return entry
     return None

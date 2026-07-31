@@ -1,0 +1,186 @@
+"""Which concrete Claude models the installed `claude` binary serves.
+
+Two local sources, neither of which calls a vendor API:
+
+  `/model`  a local slash command (measured: 7ms, 0 tokens, $0, `num_turns: 0`) whose output
+            names the tier aliases this CLI accepts.
+  the executable  carries every concrete model id as a plain string in its bundle string pool.
+
+The first says which tiers exist, the second turns a tier into a dated id. Neither list is written
+down here, so a new Claude Code release brings its new models along without an edit.
+
+Design and the measurements behind each rule:
+docs/superpowers/specs/2026-07-31-claude-seat-dynamic-models-design.md
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+
+from shared.paths import grid_home
+
+# Same shape as the seat's QUOTA_ARGV: a local slash command, no model turn, no cost.
+MODELS_ARGV = ("-p", "/model", "--output-format", "json",
+               "--safe-mode", "--tools", "", "--no-session-persistence")
+
+_AVAILABLE = re.compile(r"Available:\s*([^\n]+)")
+_BRACKET = re.compile(r"\[[^\]]*\]$")   # opus[1m] -> opus
+
+
+def available_tiers(text):
+    """The alias names `/model` lists, in the order printed.
+
+    `[1m]`-style suffixes are stripped and NOT recorded: `--model opus[1m]` is known to work, but
+    the full id carrying the suffix has never been measured, so claiming a 1M window while
+    invoking the bare id could advertise a window the request does not get.
+
+    The trailing "or a full model ID" is prose, not an alias — it is dropped by the space test,
+    which is also why no alias containing a space can ever be served.
+    """
+    found = _AVAILABLE.search(text or "")
+    if found is None:
+        return []
+    tiers = []
+    for raw in found.group(1).split(","):
+        name = _BRACKET.sub("", raw.strip().rstrip("."))
+        if name and " " not in name and name not in tiers:
+            tiers.append(name)
+    return tiers
+
+
+def _version(raw):
+    """`4-1-20250805` -> `(4, 1)`.
+
+    A trailing segment of exactly eight digits is a release date, not a version component. Left
+    in, `claude-opus-4-1-20250805` would read `(4, 1, 20250805)` and outrank `claude-opus-5`.
+    """
+    parts = [int(part) for part in raw.split("-")]
+    if len(parts) > 1 and len(str(parts[-1])) == 8:
+        parts = parts[:-1]
+    return tuple(parts)
+
+
+def newest_ids(blob, tiers):
+    """`{tier: newest id}` for whichever of `tiers` the blob carries.
+
+    One pass over the whole blob, with the tiers alternated inside a single pattern. Scanning
+    per-tier instead costs a full 266MB pass each — measured 6.5s a pass, 47s for four.
+
+    Both anchors are load-bearing. The leading `[^a-z0-9.-]` rejects the Bedrock and Vertex
+    spellings (`us.anthropic.claude-opus-5`, `anthropic.claude-opus-5`); the trailing
+    `[^a-z0-9-]` rejects the `-fast` and `-v1` builds. A tier with no id at all — `best`,
+    `opusplan`, `default` — simply never matches and is absent from the result, which is why none
+    of those three is named anywhere in this file.
+
+    Ties go to the undated spelling: `claude-haiku-4-5` and `claude-haiku-4-5-20251001` both read
+    `(4, 5)`, and the undated one is the alias that follows its tier forward.
+    """
+    if not tiers:
+        return {}
+    alternation = b"|".join(re.escape(tier.encode()) for tier in tiers)
+    pattern = re.compile(
+        rb"[^a-z0-9.-](claude-(" + alternation + rb")-(\d+(?:-\d+)*))[^a-z0-9-]"
+    )
+    found = {}
+    for match in pattern.finditer(blob):
+        tier = match.group(2).decode()
+        found.setdefault(tier, {})[match.group(1).decode()] = _version(match.group(3).decode())
+    return {
+        tier: max(ids, key=lambda ident: (ids[ident], -len(ident)))
+        for tier, ids in found.items()
+    }
+
+
+def executable(binary):
+    """The file to scan, or None.
+
+    `binary` is whatever resolved on PATH, which is not necessarily the executable: a
+    cmux-managed entry is a twenty-line bash shim and scanning it finds nothing. Ask the CLI which
+    version is running and index the native install by it — deliberately the RUNNING version and
+    not the newest installed one, since several sit side by side under `versions/` and scanning
+    the wrong one would advertise models the serving binary may not have.
+    """
+    try:
+        proc = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    version = (proc.stdout or "").strip().split(" ")[0]
+    if not version:
+        return None
+    path = Path.home() / ".local" / "share" / "claude" / "versions" / version
+    return path if path.is_file() else None
+
+
+def _cache_file():
+    return grid_home() / "claude-models.json"
+
+
+def _cache_key(path):
+    stat = path.stat()
+    return f"{path}:{stat.st_size}:{int(stat.st_mtime)}"
+
+
+def _read_cache(key):
+    try:
+        stored = json.loads(_cache_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(stored, dict) or stored.get("key") != key:
+        return None
+    models = stored.get("models")
+    return models if isinstance(models, list) else None
+
+
+def _write_cache(key, models):
+    cache = _cache_file()
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"key": key, "models": models}), encoding="utf-8")
+    except OSError:
+        pass   # an unwritable home costs a rescan, never an answer
+
+
+def _ask_tiers(binary):
+    try:
+        proc = subprocess.run([binary, *MODELS_ARGV], capture_output=True, text=True, timeout=60)
+        envelope = json.loads(proc.stdout or "")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if not isinstance(envelope, dict):
+        return []
+    return available_tiers(str(envelope.get("result") or ""))
+
+
+def discover(binary):
+    """The concrete model ids this `claude` serves, newest per tier, in `/model` order.
+
+    Returns `[]` when anything is unavailable — no binary, no native install, unparseable output.
+    A caller that gets `[]` keeps its static list, so this can never block a join.
+
+    The cache is keyed on the executable's identity, and the `/model` probe sits INSIDE the miss
+    path: a cache hit costs the one `claude --version` needed to find the executable, and no
+    second spawn. Each spawn of a 266MB binary is ~1s, so which side of the cache they fall on is
+    the difference between a join that waits and one that does not.
+    """
+    path = executable(binary)
+    if path is None:
+        return []
+    try:
+        key = _cache_key(path)
+    except OSError:
+        return []
+    cached = _read_cache(key)
+    if cached is not None:
+        return cached
+    tiers = _ask_tiers(binary)
+    if not tiers:
+        return []
+    try:
+        resolved = newest_ids(path.read_bytes(), tiers)
+    except OSError:
+        return []
+    models = [resolved[tier] for tier in tiers if tier in resolved]
+    _write_cache(key, models)
+    return models
