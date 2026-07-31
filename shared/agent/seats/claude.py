@@ -45,26 +45,50 @@ def invoke(binary, prepared, tmpdir, stream=False):
     return argv, prepared.prompt
 
 
-def decode(proc, tmpdir):
-    """The final `result` envelope, from either output format.
+def _json_lines(raw):
+    """Every line of `raw` that parses as JSON. Non-JSON lines are skipped, not errors — the CLI
+    prints plain-text notices alongside its events."""
+    for line in raw.splitlines():
+        try:
+            yield json.loads(line)
+        except ValueError:
+            continue
 
-    `--output-format json` prints that object alone; `stream-json` prints it as the last of many
-    lines. Handling both here is what lets the streaming path reuse this function, so the two
-    modes cannot produce different answers.
+
+def _last_result(events):
+    """The final `result` element of an event sequence, or None. Last, not first: a retried turn
+    emits more than one, and the last is the answer actually delivered."""
+    found = None
+    for event in events:
+        if isinstance(event, dict) and event.get("type") == "result":
+            found = event
+    return found
+
+
+def decode(proc, tmpdir):
+    """The final `result` envelope, from any of the three output shapes.
+
+    `--output-format json` prints EITHER the bare result object (older builds) or a JSON array of
+    the whole event sequence (2.1.220); `stream-json` prints those events one per line. Handling
+    all three here is what lets the streaming path reuse this function, so the modes cannot
+    produce different answers.
+
+    The array shape is why the parse and the fallback are no longer try/except partners: an array
+    parses *successfully*, so keying the event scan off a JSONDecodeError meant a valid array
+    yielded no envelope and every non-streaming request failed with the message below — while the
+    answer sat in the array unread.
     """
     raw = (proc.stdout or "").strip()
-    envelope = None
     try:
         parsed = json.loads(raw)
-        envelope = parsed if isinstance(parsed, dict) else None
     except (TypeError, ValueError):
-        for line in raw.splitlines():          # stream-json: find the terminal result line
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict) and event.get("type") == "result":
-                envelope = event
+        parsed = None
+    if isinstance(parsed, dict):
+        envelope = parsed
+    elif isinstance(parsed, list):
+        envelope = _last_result(parsed)
+    else:
+        envelope = _last_result(_json_lines(raw))   # stream-json: one event per line
     if envelope is None:
         detail = raw or (proc.stderr or "").strip() or f"exit code {proc.returncode}"
         raise SeatError(f"`claude` returned no result envelope: {detail[:400]}")

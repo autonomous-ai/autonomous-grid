@@ -480,6 +480,64 @@ def test_claude_decode_reads_the_result_line_out_of_a_jsonl_stream():
     assert result.text == "done" and result.cost_usd == 0.25 and result.input_tokens == 3
 
 
+# `--output-format json` is not one shape. Claude Code 2.1.220 prints a JSON ARRAY of events on a
+# single line, where older builds printed the bare result object. The array parses fine, so the
+# JSONL fallback below never runs and the answer — sitting right there in the array — was dropped:
+# every non-streaming request 502'd with "no result envelope".
+def _array_stdout(*events):
+    return json.dumps(list(events))
+
+
+def test_claude_decode_reads_the_result_out_of_a_json_array():
+    raw = _array_stdout(
+        {"type": "system", "subtype": "init", "cwd": "/tmp/grid-claude-seat-x"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}},
+        {"type": "rate_limit_event", "rate_limit": {"status": "allowed"}},
+        {"type": "result", "result": "ok", "is_error": False, "total_cost_usd": 0.5,
+         "duration_ms": 7, "num_turns": 1, "session_id": "s",
+         "usage": {"input_tokens": 10, "cache_read_input_tokens": 5,
+                   "cache_creation_input_tokens": 2, "output_tokens": 3}},
+    )
+    result = claude.decode(SimpleNamespace(stdout=raw, stderr="", returncode=0), Path("/tmp"))
+    assert result.text == "ok"
+    assert result.input_tokens == 17 and result.output_tokens == 3
+    assert result.cost_usd == 0.5 and result.session_id == "s"
+
+
+def test_claude_decode_ignores_non_result_elements_of_an_array():
+    """`system`/`assistant`/`rate_limit_event` carry no answer — only the `result` element does, and
+    picking any other one would return a fragment as if it were the reply."""
+    raw = _array_stdout(
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "partial"}]}},
+        {"type": "result", "result": "final", "is_error": False},
+    )
+    result = claude.decode(SimpleNamespace(stdout=raw, stderr="", returncode=0), Path("/tmp"))
+    assert result.text == "final"
+
+
+def test_claude_decode_surfaces_an_error_carried_by_an_array_result():
+    """The array shape must not become a hole the `is_error` check falls through: a failed turn has
+    to raise here, or the seat would answer 200 with the error text as the model's reply."""
+    raw = _array_stdout(
+        {"type": "system", "subtype": "init"},
+        {"type": "result", "is_error": True, "result": "Not logged in"},
+    )
+    with pytest.raises(cli_seat.SeatError) as caught:
+        claude.decode(SimpleNamespace(stdout=raw, stderr="", returncode=0), Path("/tmp"))
+    # Not just "it raised": the undecoded path ALSO raises, and its message quotes the raw stdout —
+    # which contains "Not logged in" verbatim. Pin the reason, or this passes without the fix.
+    assert "Not logged in" == str(caught.value)
+
+
+def test_claude_decode_still_refuses_an_array_with_no_result():
+    """An array that never carries a `result` is a genuine failure — it must keep raising rather
+    than silently decoding to an empty answer."""
+    raw = _array_stdout({"type": "system", "subtype": "init"})
+    with pytest.raises(cli_seat.SeatError, match="no result envelope"):
+        claude.decode(SimpleNamespace(stdout=raw, stderr="", returncode=0), Path("/tmp"))
+
+
 def test_both_seats_declare_streaming():
     for kind, spec in SEATS.items():
         assert cli_seat.can_stream(spec), f"{kind} should stream"
