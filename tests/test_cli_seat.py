@@ -945,3 +945,152 @@ def test_the_openai_stream_stays_data_only():
 
     assert "event:" not in body
     assert "data: [DONE]" in body
+
+
+# Streaming with tools attached.
+#
+# `buffered = bool(prepared.tool_protocol)` dropped EVERY delta whenever the request carried tools,
+# so the whole answer landed in one burst at the end. Claude Code always sends its tool roster, so
+# every one of its turns was silent — measured on the prod grid as a gap-to-second-chunk equal to
+# the entire request (344s of nothing on an opus turn). The guard itself is real: the parse decides
+# which bytes were the call, so a delta emitted early once let a client print raw tool JSON as prose
+# AND run the tool. The rule that satisfies both: stream up to the first `{`, hold from there.
+
+_ANTHROPIC_TOOL = {"name": "get_weather", "description": "Get weather",
+                   "input_schema": {"type": "object", "properties": {"loc": {"type": "string"}}}}
+_OPENAI_TOOL = {"type": "function", "function": {"name": "get_weather", "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"loc": {"type": "string"}}}}}
+_TOOL_JSON = '{"type": "tool_use", "name": "get_weather", "input": {"loc": "Hanoi"}}'
+_OPENAI_CALL_JSON = ('{"tool_calls": [{"type": "function", "function": '
+                     '{"name": "get_weather", "arguments": {"loc": "Hanoi"}}}]}')
+
+
+def _seat_app(pieces):
+    """An app whose seat emits `pieces` as separate deltas, then returns their concatenation."""
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        # `run_seat` passes on_delta=None on the non-streaming path — the same spec has to serve both.
+        for piece in pieces:
+            if on_delta is not None:
+                on_delta(piece)
+        return cli_seat.SeatResult(text="".join(pieces), output_tokens=len(pieces))
+
+    base = seat_for("claude")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    return create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+
+
+def _sse_frames(body):
+    """Every `data:` payload in an SSE body, decoded."""
+    out = []
+    for line in body.splitlines():
+        if line.startswith("data: ") and line[6:].strip() != "[DONE]":
+            try:
+                out.append(json.loads(line[6:]))
+            except ValueError:
+                pass
+    return out
+
+
+def _streamed_text(body):
+    return "".join(f["delta"]["text"] for f in _sse_frames(body)
+                   if f.get("type") == "content_block_delta"
+                   and (f.get("delta") or {}).get("type") == "text_delta")
+
+
+def _post_messages(app, body):
+    from fastapi.testclient import TestClient
+    return TestClient(app).post("/messages", json=body).text
+
+
+def test_a_prose_answer_streams_even_when_the_request_carries_tools():
+    """The regression this whole change is about: a turn that calls no tool must not be held back
+    just because tools were offered."""
+    pieces = ["The sea ", "is wide ", "and deep."]
+    body = _post_messages(_seat_app(pieces), {
+        "model": "claude:sonnet", "stream": True, "tools": [_ANTHROPIC_TOOL],
+        "messages": [{"role": "user", "content": "describe the sea"}]})
+
+    deltas = [f for f in _sse_frames(body) if f.get("type") == "content_block_delta"]
+    assert len(deltas) > 1, "the answer arrived in one burst — still buffered"
+    assert _streamed_text(body) == "".join(pieces)
+
+
+def test_a_tool_call_is_never_streamed_as_prose():
+    """The property the buffering existed to protect. The model was told to reply with the JSON
+    object and nothing else, so this streams no text at all — and the raw call must never reach the
+    client as text, or it prints the JSON and runs the tool."""
+    body = _post_messages(_seat_app([_TOOL_JSON]), {
+        "model": "claude:sonnet", "stream": True, "tools": [_ANTHROPIC_TOOL],
+        "messages": [{"role": "user", "content": "weather in Hanoi?"}]})
+
+    assert _streamed_text(body) == ""
+    assert "get_weather" not in _streamed_text(body)
+    kinds = [(f.get("content_block") or {}).get("type") for f in _sse_frames(body)
+             if f.get("type") == "content_block_start"]
+    assert "tool_use" in kinds, "the call must still be delivered as a tool_use block"
+
+
+def test_prose_before_a_call_streams_but_the_call_does_not():
+    pieces = ["Let me check. ", _TOOL_JSON]
+    body = _post_messages(_seat_app(pieces), {
+        "model": "claude:sonnet", "stream": True, "tools": [_ANTHROPIC_TOOL],
+        "messages": [{"role": "user", "content": "weather in Hanoi?"}]})
+
+    streamed = _streamed_text(body)
+    assert "Let me check." in streamed
+    assert "tool_use" not in streamed and "get_weather" not in streamed
+    kinds = [(f.get("content_block") or {}).get("type") for f in _sse_frames(body)
+             if f.get("type") == "content_block_start"]
+    assert "tool_use" in kinds
+
+
+def test_the_streamed_text_equals_what_the_non_streaming_answer_returns():
+    """The client must end up with exactly the same bytes either way — the streamed prefix plus
+    whatever the final frames add, never a doubled or a missing span."""
+    from fastapi.testclient import TestClient
+
+    pieces = ["The sea ", "is wide."]
+    request = {"model": "claude:sonnet", "tools": [_ANTHROPIC_TOOL],
+               "messages": [{"role": "user", "content": "describe the sea"}]}
+
+    streamed = _streamed_text(_post_messages(_seat_app(pieces), {**request, "stream": True}))
+    whole = TestClient(_seat_app(pieces)).post("/messages", json=request).json()
+    assert streamed == "".join(b.get("text", "") for b in whole["content"] if b.get("type") == "text")
+
+
+def test_the_openai_stream_shares_the_rule():
+    """One rule, both wires — `/chat/completions` buffered on the same flag and must not drift."""
+    from fastapi.testclient import TestClient
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def app_for(pieces):
+        def run(binary, prepared, timeout, on_delta):
+            for piece in pieces:
+                on_delta(piece)
+            return cli_seat.SeatResult(text="".join(pieces), output_tokens=1)
+        base = seat_for("codex-cli")
+        spec = base.__class__(**{**base.__dict__, "run": run})
+        return create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+
+    def post(pieces):
+        return TestClient(app_for(pieces)).post("/chat/completions", json={
+            "model": "codex-cli:gpt-5.6-terra", "stream": True, "tools": [_OPENAI_TOOL],
+            "messages": [{"role": "user", "content": "hi"}]}).text
+
+    def content(body):
+        return "".join((f.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+                       for f in _sse_frames(body))
+
+    prose = post(["The sea ", "is wide."])
+    prose_deltas = [f for f in _sse_frames(prose)
+                    if ((f.get("choices") or [{}])[0].get("delta") or {}).get("content")]
+    assert len(prose_deltas) > 1, "prose still arrives in one burst on the OpenAI wire"
+    assert content(prose) == "The sea is wide."
+
+    call = post([_OPENAI_CALL_JSON])
+    assert content(call) == "", "the raw call leaked into the stream as prose"
+    assert any(((f.get("choices") or [{}])[0].get("delta") or {}).get("tool_calls") for f in _sse_frames(call))
