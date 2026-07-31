@@ -249,6 +249,40 @@ def test_claude_invoke_passes_effort_only_when_the_request_asked_for_thinking(tm
     assert "--effort" in argv and argv[argv.index("--effort") + 1] == prepared.effort
 
 
+def test_prepare_reads_reasoning_effort_when_thinking_is_absent():
+    """Most traffic never reaches the seat in Anthropic's own shape — an engine that does not
+    speak Anthropic translates the request to the OpenAI wire first, and a plain OpenAI client
+    sends `reasoning_effort`, never `thinking`. Regression: grep confirmed zero occurrences of
+    `reasoning_effort` under shared/agent/, so this path discarded the caller's choice silently."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    # absent -> no effort at all, so a body carrying neither field is unaffected
+    assert cli_seat.prepare(body, "claude").effort == ""
+
+    # the OpenAI standard levels pass straight through
+    for level in ("low", "medium", "high"):
+        prepared = cli_seat.prepare({**body, "reasoning_effort": level}, "claude")
+        assert prepared.effort == level
+
+
+def test_thinking_wins_over_reasoning_effort_when_both_are_present():
+    """`thinking` carries an actual token budget; `reasoning_effort` carries one of three words.
+    The richer signal must win whenever it resolves to something, and only a `thinking` that
+    resolves to nothing (absent or disabled) should let `reasoning_effort` be read at all."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    both = {**body, "thinking": {"type": "enabled", "budget_tokens": 50000},
+            "reasoning_effort": "low"}
+    prepared = cli_seat.prepare(both, "claude", wire="anthropic")
+    assert prepared.effort != "low"
+    assert prepared.effort == cli_seat.prepare(
+        {**body, "thinking": both["thinking"]}, "claude", wire="anthropic").effort
+
+    # thinking present but disabled -> falls through to reasoning_effort
+    disabled_both = {**body, "thinking": {"type": "disabled"}, "reasoning_effort": "high"}
+    assert cli_seat.prepare(disabled_both, "claude", wire="anthropic").effort == "high"
+
+
 def test_claude_decode_reads_usage_and_folds_in_cache_tokens():
     proc = SimpleNamespace(stdout=json.dumps({
         "result": "ok", "is_error": False, "total_cost_usd": 0.5, "duration_ms": 7, "num_turns": 1,

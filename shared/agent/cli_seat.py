@@ -605,8 +605,9 @@ class PreparedRequest:
     # Which wire the caller spoke — "openai" or "anthropic". Carried on the request so the server
     # answers in the SAME wire it was asked in without re-deriving it from the body a second time.
     wire: str = "openai"
-    # The seat's own `--effort` level, derived from the request's `thinking` field — "" when the
-    # caller asked for no extended thinking, so today's argv is unaffected.
+    # The seat's own effort level, derived from the request's `thinking` field or, failing that,
+    # its `reasoning_effort` field — "" when the caller asked for neither, so today's argv/turn
+    # params are unaffected.
     effort: str = ""
 
 
@@ -636,6 +637,29 @@ def _effort_for_thinking(thinking):
     if budget < 60000:
         return "xhigh"
     return "max"
+
+
+def _effort_for_reasoning_effort(value):
+    """The OpenAI standard `reasoning_effort` field -> a CLI effort level, or "" for none."""
+    return str(value or "").strip().lower()
+
+
+def _resolve_effort(body):
+    """The request body's reasoning-effort signal -> a CLI effort level, or "" for none.
+
+    Two fields can carry this, never both meaningfully at once in practice since they belong to
+    different wires: Anthropic's own `thinking` (a token budget) reaches the seat when a client
+    speaks `/messages` natively; the OpenAI standard `reasoning_effort` reaches it once an engine
+    that does not speak Anthropic has translated the request to the OpenAI wire first. `thinking`
+    wins whenever it actually resolves to an effort — it is the richer signal, carrying a real
+    budget rather than one of three words. A request naming neither, or naming only a disabled
+    `thinking`, falls through to `reasoning_effort`; a request with neither returns "", so an
+    ordinary body's resulting argv/turn params are unaffected.
+    """
+    thinking_effort = _effort_for_thinking(body.get("thinking"))
+    if thinking_effort:
+        return thinking_effort
+    return _effort_for_reasoning_effort(body.get("reasoning_effort"))
 
 
 def _reject_server_tools(tools):
@@ -685,7 +709,7 @@ def prepare(body, kind, protocol=None, wire="openai"):
         system_prompt=system_prompt,
         tool_protocol=resolved_protocol if tools else None,
         wire=wire,
-        effort=_effort_for_thinking(body.get("thinking")),
+        effort=_resolve_effort(body),
     )
 
 
