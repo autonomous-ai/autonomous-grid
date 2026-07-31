@@ -34,7 +34,7 @@ closing the app is the whole cleanup.
 | variable | value |
 |---|---|
 | `ANTHROPIC_BASE_URL` | `resolve_relay_base(...)` + `/relay` — **no** `/v1` |
-| `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` | the grid's `access_token` |
+| `ANTHROPIC_AUTH_TOKEN` (~~`ANTHROPIC_API_KEY`~~ — see below) | the grid's `access_token` |
 | ~~`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`~~ | ~~the tier table~~ |
 | ~~`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`~~ | ~~the tier table~~ |
 
@@ -59,8 +59,25 @@ single place a later slice replaces with discovery, and it is the reason the pre
 >
 > Preflight survives only as the one model fact that holds whatever the app asks: a grid serving
 > nothing can serve nothing, so an empty grid is still refused before the app starts. Everything else
-> in this ADR — the child-process-only environment, the base URL with no `/v1`, both token variables,
-> the rejected alternatives, `--print-env`'s carve-out — stands unchanged.
+> in this ADR — the child-process-only environment, the base URL with no `/v1`, the rejected
+> alternatives, `--print-env`'s carve-out — stands unchanged.
+>
+> ### Amended again — only `ANTHROPIC_AUTH_TOKEN`, never both
+>
+> The premise above ("both, because which one Claude Code reads depends on the path it takes to
+> authenticate") is **false**, and the app is the one that says so. With both set it opens with
+>
+> > `Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected`
+>
+> and instructs the user to unset one. Observed on Claude Code 2.1.220, on the first real
+> `grid launch claude` after v0.3.11 shipped.
+>
+> Nothing was bought for that warning. grid-src's `_bearer_or_api_key` accepts either header but
+> **prefers `Authorization: Bearer` whenever both arrive** — which is precisely what
+> `ANTHROPIC_AUTH_TOKEN` produces — so `ANTHROPIC_API_KEY` never decided a single request. Its own
+> comment names the reason to prefer Bearer: when both are present, `x-api-key` *"likely holds the
+> caller's real Anthropic key, not the grid token"*. So this ADR was setting a variable the server
+> deliberately ignores, into the slot a user's own credential occupies. The env block is two keys.
 
 ## Considered options
 

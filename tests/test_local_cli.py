@@ -12469,8 +12469,11 @@ def test_serve_loop_teardown_bounded_by_drain_timeout(monkeypatch, tmp_path, cap
     # One shared 0.2s deadline → ~0.2s total; a per-worker join would be ~8 × 0.2 = 1.6s.
     assert elapsed < 1.0
     err = capsys.readouterr().err
-    # Workers still in flight at the deadline are logged, not dropped silently.
-    assert "still in flight after" in err
+    # Workers abandoned at the deadline are logged, not dropped silently. They were parked in a
+    # long-poll holding no job, so the line says exactly that — the consumer-facing "no terminal
+    # response" warning belongs to unfinished JOBS and would be a false alarm here.
+    assert "8 poll worker(s) abandoned while parked" in err
+    assert "may see no terminal response" not in err
     # So is the heartbeat, which is joined BEFORE the reload thread against the same deadline — so a
     # heartbeat that overruns (e.g. a slow engine-health sweep) is also what ate the reload thread's
     # turn. Without this line an operator sees the consequence and never the cause.
@@ -12524,8 +12527,15 @@ def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
 
     def fake_poll(state):
         state.stop.set()          # shutdown begins while this 'job' is mid-flight
-        time.sleep(0.05)          # in-flight work, well within _DRAIN_TIMEOUT
-        submitted.append("done")  # result submitted before the worker returns
+        # `enter_job`/`exit_job` is what the real `_poll_loop` brackets `handle_job` with, and what
+        # the drain waits on. This fake replaces `_poll_loop` wholesale, so it has to declare the
+        # job itself — a bare sleeping thread holds nothing the teardown could owe anyone.
+        state.enter_job()
+        try:
+            time.sleep(0.05)          # in-flight work, well within _DRAIN_TIMEOUT
+            submitted.append("done")  # result submitted before the worker returns
+        finally:
+            state.exit_job()
 
     monkeypatch.setattr(serve, "_poll_loop", fake_poll)
     monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
@@ -12534,6 +12544,74 @@ def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
     serve._serve_loop(state)
 
     assert submitted == ["done"]
+
+
+def test_serve_loop_drain_is_not_eaten_by_workers_parked_in_a_long_poll(monkeypatch, tmp_path):
+    """The drain budget belongs to real work, not to idle threads.
+
+    The sibling above passes with ONE worker, which is exactly why the starvation hid: joining
+    workers in list order against a shared deadline means the FIRST parked poller — unwakeable, a
+    long-poll runs to `relay.POLL_TIMEOUT` (35s) — consumes the whole budget, and every worker
+    after it gets `join(timeout=0.0)`. Workers are idle almost always, so the busy one is almost
+    never first. Here worker 1 parks and worker 2 holds a job: the job must still submit.
+    """
+    from remote import serve
+
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 1.0)
+    parked = threading.Event()          # never set during drain → a real long-poll
+    submitted: list[str] = []
+
+    def fake_poll(state):
+        if threading.current_thread().name == "poll-worker-1":   # joined FIRST today
+            state.stop.set()            # shutdown begins
+            parked.wait(30)
+            return
+        state.enter_job()               # poll-worker-2: genuinely holding a job
+        try:
+            time.sleep(0.1)             # work well inside _DRAIN_TIMEOUT
+            submitted.append("done")
+        finally:
+            state.exit_job()
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=2)
+
+    try:
+        serve._serve_loop(state)
+    finally:
+        parked.set()
+
+    assert submitted == ["done"], "the parked worker ate the whole drain budget"
+    assert state.jobs_held() == 0
+
+
+def test_serve_loop_teardown_reports_jobs_not_idle_threads(monkeypatch, tmp_path, capsys):
+    """Parked pollers hold no job, so abandoning them costs no consumer a response — saying they do
+    sends an operator hunting a data-loss bug that isn't there (it did, once). Report the two
+    separately: idle threads as an abandonment note, in-flight JOBS as the warning that matters."""
+    from remote import serve
+
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 0.2)
+    parked = threading.Event()
+
+    def stuck_poll(state):
+        state.stop.set()
+        parked.wait(30)
+
+    monkeypatch.setattr(serve, "_poll_loop", stuck_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=4)
+
+    try:
+        serve._serve_loop(state)
+    finally:
+        parked.set()
+
+    err = capsys.readouterr().err
+    assert "4 poll worker(s) abandoned while parked" in err
+    # No job was ever in flight, so the consumer-facing warning must NOT appear.
+    assert "may see no terminal response" not in err
 
 
 def test_relay_poll_malformed_body_raises_relay_error(monkeypatch):
@@ -21290,7 +21368,15 @@ def _poll_loop_state_and_poll(job_then_none):
     """A minimal serve state + a poll_once double that yields `job_then_none` then stops the loop."""
     from remote import serve
 
-    state = SimpleNamespace(stop=threading.Event())
+    # `enter_job`/`exit_job` bracket each claimed job so the teardown drain can wait on real work
+    # rather than on idle poll threads; this stub only has to accept the calls.
+    held: list[int] = []
+    state = SimpleNamespace(
+        stop=threading.Event(),
+        enter_job=lambda: held.append(1),
+        exit_job=lambda: held.pop(),
+        jobs_held=lambda: len(held),
+    )
     queue = list(job_then_none)
 
     def fake_poll(_state, **_kwargs):
@@ -22808,14 +22894,14 @@ def test_launch_survives_a_process_with_no_resolvable_home_directory(monkeypatch
         lambda: (_ for _ in ()).throw(RuntimeError("Could not determine home directory."))))
     (project / ".claude").mkdir(parents=True)
     (project / ".claude" / "settings.json").write_text(
-        json.dumps({"env": {"ANTHROPIC_API_KEY": "sk-the-users-own"}}), encoding="utf-8")
+        json.dumps({"env": {"ANTHROPIC_AUTH_TOKEN": "the-users-own"}}), encoding="utf-8")
     seen = _capture_launch(monkeypatch)
 
     assert cli.main(["launch", "claude"]) == 0
     assert seen["argv"], "no home directory is not a reason to refuse to launch"
     err = capsys.readouterr().err
     assert "home directory" in err, f"say which location could not be checked: {err}"
-    assert "ANTHROPIC_API_KEY" in err, f"the project's settings are still checked: {err}"
+    assert "ANTHROPIC_AUTH_TOKEN" in err, f"the project's settings are still checked: {err}"
 
 
 def test_launch_says_so_when_a_settings_file_cannot_be_read(monkeypatch, tmp_path, capsys):
@@ -22857,15 +22943,16 @@ def _grid_home_tree(root):
     )
 
 
-def test_launch_claude_hands_the_child_exactly_the_three_documented_keys(monkeypatch, tmp_path):
+def test_launch_claude_hands_the_child_exactly_the_two_documented_keys(monkeypatch, tmp_path):
     """The env the child is given IS this feature's contract, so it is asserted key by key.
 
     A one-character change to any variable name must not be able to ship green: the dictionary below
     is spelled out rather than derived from the code it is testing.
 
-    Three keys, not the ten ADR 0028 specified. The seven `*_MODEL` variables are gone: choosing which
-    model a session runs on is the user's, not this command's, and the exact-equality assertion below
-    is what keeps one from creeping back.
+    Two keys, not the ten ADR 0028 specified. The seven `*_MODEL` variables are gone because choosing
+    a session's model is the user's call, and `ANTHROPIC_API_KEY` is gone because setting it *next to*
+    `ANTHROPIC_AUTH_TOKEN` makes Claude Code warn that auth may not work — see the sibling below. The
+    exact-equality assertion is what keeps either from creeping back.
     """
     _seed_launchable_grid(monkeypatch, tmp_path)  # relay https://relay.example, access token AT
     monkeypatch.delenv("GRID_TOKEN", raising=False)  # so its absence below is the command's doing
@@ -22879,16 +22966,18 @@ def test_launch_claude_hands_the_child_exactly_the_three_documented_keys(monkeyp
     expected = {
         "ANTHROPIC_BASE_URL": "https://relay.example/relay",
         "ANTHROPIC_AUTH_TOKEN": "AT",
-        "ANTHROPIC_API_KEY": "AT",
     }
-    assert len(expected) == 3, "the documented block is three keys; this list drifted"
+    assert len(expected) == 2, "the documented block is two keys; this list drifted"
     # Inherited environment, with those keys layered over it — the child keeps the user's PATH,
     # HOME and everything else, or Claude Code would launch into a stripped shell.
     assert seen["env"] == {**os.environ, **expected}
-    # ... and *only* those: any variable this command added or changed is one of the three. This is
+    # ... and *only* those: any variable this command added or changed is one of the two. This is
     # what keeps a telemetry variable (deliberately not set, ADR 0028) — or a model variable — from
     # creeping in unnoticed.
     assert {k: v for k, v in seen["env"].items() if os.environ.get(k) != v} == expected
+    # Named rather than left to the equality above, because this one is a *user-visible* regression:
+    # with both set, Claude Code prints "auth may not work as expected" at every start-up.
+    assert "ANTHROPIC_API_KEY" not in expected, "never alongside ANTHROPIC_AUTH_TOKEN"
     # `/v1` on the base is the single most likely mistake: Claude Code appends `/v1/messages` itself.
     assert "/v1" not in seen["env"]["ANTHROPIC_BASE_URL"]
     # A shell convenience variable from the hand-rolled recipe that the app never reads.
@@ -22897,6 +22986,32 @@ def test_launch_claude_hands_the_child_exactly_the_three_documented_keys(monkeyp
     # The child only: the CLI's own environment is unchanged, and nothing was written to disk.
     assert [k for k in os.environ if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))] == []
     assert _grid_home_tree(tmp_path) == before
+
+
+def test_launch_sets_one_credential_variable_not_two(monkeypatch, tmp_path):
+    """Setting both credential variables is worse than useless, and the app says so out loud.
+
+    ADR 0028 set `ANTHROPIC_API_KEY` beside `ANTHROPIC_AUTH_TOKEN`, reasoning that which one Claude
+    Code reads depends on how it authenticates. Claude Code disagrees — with both set it opens with
+
+        Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected
+
+    and tells the user to unset one. Nothing was bought for that warning: the relay accepts either
+    header but **prefers `Authorization: Bearer` when both arrive**, which is the one
+    `ANTHROPIC_AUTH_TOKEN` produces — so `ANTHROPIC_API_KEY` never decided a single request. It only
+    collided with the variable a user's own Anthropic key lives in.
+
+    Its own test rather than a line in the exact-keys assertion, because "these two must never both
+    be set" is a different claim from "the block is these keys", and it is the one a future tier of
+    credential handling is most likely to break.
+    """
+    _seed_launchable_grid(monkeypatch, tmp_path)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    injected = {k for k, v in seen["env"].items() if os.environ.get(k) != v}
+    assert "ANTHROPIC_AUTH_TOKEN" in injected, "the bearer variable is the one the relay prefers"
+    assert "ANTHROPIC_API_KEY" not in injected, "setting both is what makes Claude Code warn"
 
 
 def test_launch_claude_base_url_never_doubles_a_slash(monkeypatch, tmp_path):
@@ -24212,7 +24327,6 @@ def test_launch_refreshes_an_expired_token_and_hands_over_the_new_one(monkeypatc
 
     assert cli.main(["launch", "claude"]) == 0
     assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT2"
-    assert seen["env"]["ANTHROPIC_API_KEY"] == "AT2"
     assert len(refreshes["calls"]) == 1
     assert refreshes["calls"][0]["refresh_token"] == "RT"
     err = capsys.readouterr().err

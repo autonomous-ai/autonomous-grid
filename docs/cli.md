@@ -612,10 +612,9 @@ grid launch claude --print-env
 ```bash
 export ANTHROPIC_BASE_URL='https://relay.example/relay'
 export ANTHROPIC_AUTH_TOKEN='<your access token>'
-export ANTHROPIC_API_KEY='<your access token>'
 ```
 
-Three keys — an endpoint and a credential, and nothing else.
+Two keys — an endpoint and a credential, and nothing else. **Only the bearer variable**: setting `ANTHROPIC_API_KEY` beside it makes Claude Code warn that auth may not work, and buys nothing — the relay prefers `Authorization: Bearer` whenever both arrive.
 
 The base carries the relay prefix and **no** `/v1`: Claude Code appends `/v1/messages` itself, so the
 `/v1` that `grid info --env` prints for OpenAI clients would 404 every request here. This is the
