@@ -170,6 +170,10 @@ def create_app(*, grid_id: str, grid_name: str) -> FastAPI:
     async def completions(request: Request):
         return await _proxy_openai(app, "completions", request)
 
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        return await _proxy_openai(app, "responses", request)
+
     @app.post("/v1/feedback")
     async def feedback(request: Request):
         """What the human did with an answer — the one signal that makes unattended training honest.
