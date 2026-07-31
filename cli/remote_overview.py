@@ -38,7 +38,7 @@ def _fetch_overview(args: argparse.Namespace) -> dict[str, Any]:
     Lighter than the consumer ``remote_request._resolve``: the overview is public, so this needs only
     a signed-in session and a resolvable relay base (no access-token gate).
     """
-    from remote import credentials, relay
+    from remote import credentials
 
     from . import remote_grid
 
@@ -48,6 +48,19 @@ def _fetch_overview(args: argparse.Namespace) -> dict[str, Any]:
     label = rec.get("name") or network_id
     base, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
     token = str(rec.get("access_token") or "")  # public route — token optional
+    return fetch_overview(base, token, str(label))
+
+
+def fetch_overview(base: str, token: str, label: str) -> dict[str, Any]:
+    """The public overview at ``base``, or a clean ``SystemExit`` naming grid ``label``.
+
+    Split out of ``_fetch_overview`` so a caller that has already resolved its grid — `grid launch`'s
+    preflight (ADR 0028) — reads the grid through *this* code path rather than a second copy that
+    could drift away from it. The guards below are the trust boundary: the body is whatever the relay
+    returned, so a non-JSON 2xx or a non-dict envelope becomes a message, never a traceback.
+    """
+    from remote import relay
+
     try:
         with relay.open_consumer_client(base, token, timeout=_OVERVIEW_TIMEOUT) as client:
             resp = client.get("/relay/v1/grid/overview")
@@ -76,6 +89,21 @@ def _nodes_from(overview: dict[str, Any]) -> list[dict[str, Any]]:
 def _nodes(args: argparse.Namespace) -> list[dict[str, Any]]:
     """The active remote grid's live engine nodes (fetches the overview)."""
     return _nodes_from(_fetch_overview(args))
+
+
+def live_model_names(overview: dict[str, Any]) -> tuple[str, ...]:
+    """Every model id the grid currently serves, first-seen order, deduped across engines.
+
+    The same reading ``cmd_remote_models`` renders, through the same defended readers — so a malformed
+    ``nodes`` or a node whose ``models`` isn't a list degrades to empty here exactly as it does there.
+
+    ``auto`` is not included even when the grid has routing enabled: it is the reserved name that
+    never matches an engine-advertised model (CONTEXT-MAP.md), so it can never be what a caller is
+    asking about when it asks which models exist.
+    """
+    return tuple(dict.fromkeys(
+        model for node in _nodes_from(overview) for model in _node_models(node)
+    ))
 
 
 def _node_models(node: dict[str, Any]) -> list[str]:
