@@ -652,9 +652,29 @@ Grid team doesn't serve the sonnet, fable tiers — `/model` there resolves to c
 ```
 
 Preflight reads the grid's **public overview**, the same read `grid models` and `grid engines`
-render, so the two can never disagree about what is live. That route ignores the bearer token, so it
-proves **model presence, not credential validity**: an absent token is caught first with the usual
-`grid login` guidance, but an expired one passes preflight and fails inside the app.
+render, so the two can never disagree about what is live.
+
+**The credential is checked first, and repaired if it can be.** The order is deliberate: a dead token
+invalidates the model advice above, while a missing model says nothing about the token. `grid launch`
+reads the token's own expiry offline, and asks the grid — `GET /relay/v1/models`, one round-trip —
+whether it will actually accept it. A token that has expired, is within a day of expiring, or is
+refused by the grid is **refreshed in place** and the launch continues, with one line on stderr:
+
+```text
+Refreshed grid team's access token (it expired 3 days ago).
+```
+
+That covers the whole family a grid rejects a token for — a passed expiry, a `member_epoch` or
+`network_epoch` bumped by a membership change, a rotated key. What it cannot repair, it refuses
+before the app starts, saying which: a dead refresh credential (`grid login`), a membership that no
+longer permits inference (`grid login` will not help — the `consumer` and `both` roles grant it), or a
+control plane that could not mint a token (nothing is wrong with your sign-in; try again).
+
+A check that could not run never costs you a launch that would have worked: a throttled, failing or
+unreachable relay warns and launches anyway, and so does a renewal that fails while the current token
+is still valid. This is the one thing `grid launch` writes — a refreshed token goes back into
+`~/.grid/credentials.toml`, the same store `grid login` and `grid sync` maintain. Nothing is written
+for the *app*. See [ADR 0029](./adr/0029-the-credential-is-checked-before-it-is-handed-over.md).
 
 Everything else is left alone. The app runs on your real configuration — MCP servers, skills,
 permissions, history — which also means Claude Code's own `settings.json` `env` block **outranks**
@@ -665,7 +685,8 @@ names the grid and the model before the app takes the screen, and the app's exit
 command's.
 
 Step by step: [Claude Code quickstart](./claude-code-quickstart.md) ·
-[ADR 0028](./adr/0028-launch-hands-an-app-the-grid.md).
+[ADR 0028](./adr/0028-launch-hands-an-app-the-grid.md) ·
+[ADR 0029](./adr/0029-the-credential-is-checked-before-it-is-handed-over.md).
 
 ## Training
 

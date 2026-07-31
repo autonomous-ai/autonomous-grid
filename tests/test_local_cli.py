@@ -8866,6 +8866,14 @@ def _jwt(claims: dict) -> str:
     return f"header.{body}.sig"
 
 
+def _jwt_payload(raw: str) -> str:
+    """A JWT-shaped token whose payload segment carries ``raw`` verbatim — the sibling of ``_jwt`` for
+    the payloads a real ``json.dumps`` cannot produce: valid JSON that isn't an object, and bytes that
+    aren't JSON at all. Both are shapes a decoder has to survive rather than assume away."""
+    body = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    return f"header.{body}.sig"
+
+
 def _capture_relay_puts(monkeypatch, *, status=200):
     """Install a relay double that records every PUT as ``(path, role, models)`` and answers
     ``status``. Returns the growing list, so a test can assert exactly which deregister(s) the leave
@@ -11124,6 +11132,55 @@ def test_control_plane_refresh_network_token_raises_on_error(monkeypatch, tmp_pa
     assert "401" in str(exc.value)
 
 
+def test_control_plane_failures_carry_the_status_and_stay_systemexit(monkeypatch, tmp_path):
+    """A caller has to be able to tell 401 from 403 from 503 — the launch credential gate says three
+    different things about them (ADR 0029), and only one of them mentions `grid login`.
+
+    Substring-matching the message was the alternative, and it is the exact anti-pattern this feature
+    exists to remove. So the status rides the exception, the way ``relay.RelayError.status`` already
+    does. The message and the type hierarchy are unchanged on purpose: every existing caller catches
+    ``SystemExit`` (``serve._ServeState.refresh``) or matches the rendered message
+    (``cli/auth._SESSION_EXPIRED_RE``), and neither may notice this.
+    """
+    from cli.auth import _SESSION_EXPIRED_RE
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    # One mock, re-aimed per iteration: `_mock_control_plane` patches the *module* attribute and reads
+    # the real client at call time, so a second call wraps the first and the first handler keeps
+    # answering (the trap `_mock_relay`'s import-bound `_real` default exists to close).
+    answer = {"status": 0}
+    _mock_control_plane(monkeypatch, lambda r: httpx.Response(answer["status"], text="nope"))
+    for status in (401, 403, 503):
+        answer["status"] = status
+        with pytest.raises(control_plane.ControlPlaneError) as exc:
+            control_plane.refresh_network_token(network_id="n1", refresh_token="RT1")
+        assert exc.value.status == status
+        assert isinstance(exc.value, SystemExit), "every existing caller catches SystemExit"
+        # Asserted against the real downstream consumer rather than a copy of its pattern: `grid sync`
+        # classifies an expired session by matching this rendering, so the message is a contract.
+        # 503 must still NOT match — that is the misclassification its anchoring exists to prevent.
+        assert bool(_SESSION_EXPIRED_RE.match(str(exc.value))) is (status in (401, 403)), str(exc.value)
+
+
+def test_control_plane_transport_failure_carries_no_status(monkeypatch, tmp_path):
+    """A request that never got an answer has no status to report, and ``None`` is the honest value —
+    the caller distinguishes "the control plane said no" from "the control plane said nothing", which
+    ADR 0029 keys a refuse-vs-warn decision on."""
+    from remote import control_plane
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    def boom(request):
+        raise httpx.ConnectError("connection refused")
+
+    _mock_control_plane(monkeypatch, boom)
+    with pytest.raises(control_plane.ControlPlaneError) as exc:
+        control_plane.refresh_network_token(network_id="n1", refresh_token="RT1")
+    assert exc.value.status is None
+    assert "control plane" in str(exc.value).lower()
+
+
 # ---------------------------------------------------------------------------
 # Remote relay client (remote/relay.py)
 # ---------------------------------------------------------------------------
@@ -11178,6 +11235,66 @@ def test_relay_register_node_raises_typed_errors(monkeypatch, tmp_path):
     _mock_relay(monkeypatch, lambda r: httpx.Response(500, text="boom"))
     with pytest.raises(relay.RelayError):
         relay.register_node("https://r", "AT", "n", models=["m"])
+
+
+def test_relay_check_credential_asks_the_authenticated_models_route(monkeypatch, tmp_path):
+    """The probe behind `grid launch`'s credential gate (issue 07, ADR 0029).
+
+    The route is load-bearing, not incidental: ``GET /relay/v1/models`` requires ``inference:models``,
+    and the control plane only ever grants the inference scopes as one bundle — so a token passes this
+    exactly when it holds the ``inference:create`` that ``/messages`` needs. Probing anything cheaper
+    would prove less than the app needs; probing ``/messages`` itself would create a billable job.
+    """
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    _mock_relay(monkeypatch, handler)
+    assert relay.check_credential("https://relay.example", "AT") is None
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/models")
+    assert seen["auth"] == "Bearer AT"
+
+
+def test_relay_check_credential_raises_typed_errors_carrying_the_status(monkeypatch, tmp_path):
+    """The caller branches on *which* rejection this was — 401 is repairable by a refresh, 403 is not,
+    and 429/5xx/transport are not verdicts about the credential at all (ADR 0029's fail-open rule). So
+    unlike the one-shot pricing calls in this module, a failure here is typed rather than a
+    ``SystemExit``: only the caller knows which of those three answers to give a user."""
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(401, text="Invalid Grid token"))
+    with pytest.raises(relay.RelayUnauthorized):
+        relay.check_credential("https://relay.example", "AT")
+
+    for status in (403, 429, 500):
+        _mock_relay(monkeypatch, lambda r, s=status: httpx.Response(s, text="detail here"))
+        with pytest.raises(relay.RelayError) as exc:
+            relay.check_credential("https://relay.example", "AT")
+        assert exc.value.status == status, status
+        assert "detail here" in str(exc.value), "the relay's own reason reaches the caller"
+
+
+def test_relay_check_credential_reports_a_transport_failure_without_a_status(monkeypatch, tmp_path):
+    """A probe that never got an answer must be distinguishable from one that was refused: the first
+    warns and launches anyway, the second refuses. ``status is None`` is what carries that."""
+    from remote import relay
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+
+    def boom(request):
+        raise httpx.ConnectError("connection refused")
+
+    _mock_relay(monkeypatch, boom)
+    with pytest.raises(relay.RelayError) as exc:
+        relay.check_credential("https://relay.example", "AT")
+    assert exc.value.status is None
 
 
 def test_relay_poll_maps_status_to_job_none_or_signal(monkeypatch, tmp_path):
@@ -12436,6 +12553,58 @@ def test_serve_node_id_comes_from_access_token_jwt():
     assert credentials.node_id_from_token(_jwt({"node_id": "node-abc", "sub": "u1"})) == "node-abc"
     assert credentials.node_id_from_token(_jwt({"sub": "u1"})) == ""   # JWT without a node_id claim
     assert credentials.node_id_from_token("opaque-not-a-jwt") == ""    # not a JWT at all
+
+
+# ---------------------------------------------------------------------------
+# The unverified claim decoder behind `node_id_from_token` and the launch
+# credential gate — issue 07, ADR 0029. (The gate's own tests live in the
+# `grid launch` credential section at the end of this file.)
+# ---------------------------------------------------------------------------
+
+def test_claims_from_token_is_total_and_never_raises():
+    """Every caller decides its own behaviour from these claims, so the decoder must have no failure
+    mode of its own: anything unusable is an empty mapping, never an exception.
+
+    The guards are the ones ``codex_auth._payload`` documents, and the four-segment case is the one a
+    naive ``split(".")[1]`` passes **silently** — segment 1 of a four-segment string decodes perfectly
+    well, so without a count check a token of the wrong shape yields real-looking claims.
+    """
+    from remote import credentials
+
+    assert credentials.claims_from_token(_jwt({"sub": "u1"})) == {"sub": "u1"}
+    assert credentials.claims_from_token(None) == {}                    # a half-written store is str|None
+    assert credentials.claims_from_token("opaque-not-a-jwt") == {}
+    assert credentials.claims_from_token(f"{_jwt({'sub': 'u1'})}.extra") == {}, "4 segments is not a JWT"
+    assert credentials.claims_from_token("header..sig") == {}           # empty payload segment
+    assert credentials.claims_from_token(_jwt_payload("[1, 2]")) == {}, "valid JSON, but not an object"
+    assert credentials.claims_from_token(_jwt_payload("not json at all")) == {}
+
+
+def test_token_expiry_reports_exp_verbatim_and_never_reads_the_clock():
+    """Whether a token is expired is the *caller's* decision — this only reports what the token says.
+
+    The split matters for the same reason ``codex_auth.decode_seat`` records: the refresh path has to
+    read claims back OUT of an already-expired token, so a decoder that rejected expired tokens would
+    brick precisely the case the refresh exists for.
+    """
+    from remote import credentials
+
+    past, future = 1_000_000_000, 2_000_000_000
+    assert credentials.token_expiry(_jwt({"exp": future})) == future
+    assert credentials.token_expiry(_jwt({"exp": past})) == past, "an expired token still decodes"
+    assert credentials.token_expiry(_jwt({"sub": "u1"})) is None, "no exp claim"
+    assert credentials.token_expiry("opaque-not-a-jwt") is None
+
+
+def test_token_expiry_refuses_a_boolean_exp():
+    """`isinstance(True, int)` is True in Python, so an unguarded check turns `exp: true` into
+    expires_at=1 — epoch 1970 — and the caller refreshes eagerly, forever. The same trap
+    `codex_auth.decode_seat` already guards."""
+    from remote import credentials
+
+    assert credentials.token_expiry(_jwt({"exp": True})) is None
+    assert credentials.token_expiry(_jwt({"exp": "soon"})) is None
+    assert credentials.token_expiry(_jwt({"exp": None})) is None
 
 
 def test_stamp_own_pid_overwrites_a_stale_spawner_value(monkeypatch, tmp_path):
@@ -22705,8 +22874,16 @@ def test_launch_claude_spawns_the_binary_and_returns_the_childs_exit_code(monkey
 
 
 def _grid_home_tree(root):
-    """Every path under a temp GRID_HOME — a snapshot to prove a launch writes nothing."""
-    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+    """Every path under a temp GRID_HOME **and its bytes** — a snapshot to prove a launch writes nothing.
+
+    Contents, not just names: since issue 07 a launch may rewrite `credentials.toml` in place to store
+    a refreshed token (ADR 0029), and a paths-only snapshot cannot see that — it would go on claiming
+    "nothing was written" through the one write this command is now capable of.
+    """
+    return sorted(
+        (str(path.relative_to(root)), path.read_bytes() if path.is_file() else None)
+        for path in root.rglob("*")
+    )
 
 
 def test_launch_claude_hands_the_child_exactly_the_ten_documented_keys(monkeypatch, tmp_path):
@@ -23941,3 +24118,481 @@ def test_launch_print_env_records_why_it_is_allowed_to_print_a_token():
     body = source.split("def print_env", 1)[1].split("\n    def ", 1)[0]
     assert "0003" in body, "the token-printing site must name the ADR it is an exception to"
     assert "info --env" in body, "...and the carve-out it shares its justification with"
+
+
+# ---------------------------------------------------------------------------
+# `grid launch` checks the credential before it hands it over — issue 07, ADR 0029
+# (The pure claim decoder behind layer 1 is tested beside `node_id_from_token`.)
+# ---------------------------------------------------------------------------
+
+# FastAPI's shape for the relay's own rejections, so a test asserts on what a real refusal renders.
+_PROBE_DETAIL = {
+    401: "Invalid Grid token: Signature has expired",
+    403: "Missing required scope: inference:models",
+    429: "Too many failed authentication attempts",
+    500: "internal error",
+}
+
+
+def _mock_launch_relay(monkeypatch, *, probe=200, probe_sequence=None, models=None, detail=None):
+    """Answer both relay reads a launch makes, **by path**.
+
+    The suite's `_mock_relay` is path-blind, which is exactly why every pre-issue-07 launch test kept
+    passing when the credential probe was added — it answered 200 to a request it had never heard of.
+    That is fine for tests about the models; it is useless for tests about the credential, which need
+    `/relay/v1/models` and `/relay/v1/grid/overview` to disagree.
+
+    `probe_sequence` gives one answer per probe, so a refresh-and-retry can be driven; an entry may be
+    a status or an exception to raise. Returns the record of every probe's `Authorization` header,
+    which is how "exactly one refresh happened" is asserted.
+    """
+    seen = {"probes": []}
+    remaining = list(probe_sequence) if probe_sequence is not None else None
+
+    def handler(request):
+        if request.url.path == "/relay/v1/models":
+            seen["probes"].append(request.headers.get("authorization"))
+            answer = remaining.pop(0) if remaining else probe
+            if isinstance(answer, Exception):
+                raise answer
+            if answer == 200:
+                return httpx.Response(200, json={"object": "list", "data": []})
+            body = detail if detail is not None else _PROBE_DETAIL.get(answer, "refused")
+            return httpx.Response(answer, json={"detail": body})
+        return httpx.Response(200, json={"nodes": [{
+            "name": "seat", "engine": "claude", "online": True,
+            "models": list(_LAUNCH_TIER_MODELS if models is None else models),
+        }]})
+
+    _mock_relay(monkeypatch, handler)
+    return seen
+
+
+def _mock_token_refresh(monkeypatch, *, access="AT2", refresh="RT2", error=None):
+    """Substitute the control-plane refresh exchange and record every call.
+
+    Patched at the function rather than the transport, so a test can assert **how many** exchanges ran
+    — "exactly one refresh per launch" is a contract (ADR 0029), and a second one would quietly rotate
+    the credential twice.
+    """
+    from remote import control_plane
+
+    seen = {"calls": []}
+
+    def _refresh(*, network_id, refresh_token, api_url=None):
+        seen["calls"].append({"network_id": network_id, "refresh_token": refresh_token})
+        if error is not None:
+            raise error
+        bundle = {}
+        if access is not None:
+            bundle["access_token"] = access
+        if refresh is not None:
+            bundle["refresh_token"] = refresh
+        return bundle
+
+    monkeypatch.setattr(control_plane, "refresh_network_token", _refresh)
+    return seen
+
+
+def _forbid_token_refresh(monkeypatch):
+    """Fail the test if a refresh is attempted at all — how "this path costs no round-trip" is proved."""
+    from remote import control_plane
+
+    def _never(**kwargs):
+        raise AssertionError(f"the control plane must not be called here (got {kwargs!r})")
+
+    monkeypatch.setattr(control_plane, "refresh_network_token", _never)
+
+
+def _seed_launch_with_token(monkeypatch, tmp_path, token, **relay):
+    """`_seed_launchable_grid`, but with a chosen access token and the path-aware relay above."""
+    _seed_running_remote_grid(monkeypatch, tmp_path, access_token=token)
+    seen = _mock_launch_relay(monkeypatch, **relay)
+    _isolate_claude_settings(monkeypatch, tmp_path)
+    return seen
+
+
+def _in(seconds):
+    """A POSIX `exp` that many seconds from now (negative for the past)."""
+    return int(time.time()) + seconds
+
+
+def _stored(tmp_path, field, network_id="n1"):
+    from remote import credentials
+
+    for net in credentials.load_credentials().get("networks") or []:
+        if net.get("network_id") == network_id:
+            return net.get(field)
+    return None
+
+
+_YEAR = 365 * 86400
+
+
+# --- layer 1: what the token says about itself ------------------------------
+
+def test_launch_with_a_healthy_token_makes_no_control_plane_call(monkeypatch, tmp_path):
+    """The offline check has to be free, or it is a tax on every launch to catch a once-a-year event.
+
+    Asserted by making a refresh *fail the test* rather than by counting calls, so this cannot rot into
+    passing because some other mock happened to absorb the request.
+    """
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(_YEAR)}))
+    _forbid_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+
+
+def test_launch_refreshes_an_expired_token_and_hands_over_the_new_one(monkeypatch, tmp_path, capsys):
+    """The whole point of the feature: the user never sees a problem.
+
+    The child must get the *refreshed* token — the stored record is a snapshot taken before the
+    exchange, so a caller that re-read it would hand over the dead one and the launch would fail inside
+    the app exactly as it does today.
+    """
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-3 * 86400)}))
+    refreshes = _mock_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT2"
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "AT2"
+    assert len(refreshes["calls"]) == 1
+    assert refreshes["calls"][0]["refresh_token"] == "RT"
+    err = capsys.readouterr().err
+    assert "Refreshed" in err and "3 days ago" in err, err
+
+
+def test_launch_refreshes_a_token_that_is_still_valid_but_inside_the_margin(monkeypatch, tmp_path,
+                                                                            capsys):
+    """The case only the offline check can see: the relay answers **200** for this token, so a probe
+    alone would hand it over and let it die at the user's third prompt."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(600)}))
+    refreshes = _mock_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT2"
+    assert len(refreshes["calls"]) == 1
+    # The exact wording is pinned by the unit test below; here only that the user is told which way
+    # the deadline runs — a clock read a tick after the token was minted makes the count itself racy.
+    assert "expires in" in capsys.readouterr().err
+
+
+def test_expiry_phrase_says_which_side_of_the_deadline_and_how_far(monkeypatch):
+    """Without the distance the user is told a token is stale but not whether it went stale a year ago
+    (a machine left alone) or is about to (a session they should not start yet) — different problems
+    with different answers. Pinned as a pure function, so no clock race can make it flaky."""
+    from cli.grid_credential import _expiry_phrase
+
+    now = 1_000_000_000
+    assert _expiry_phrase(now - 3 * 86400, now) == "expired 3 days ago"
+    assert _expiry_phrase(now - 86400, now) == "expired 1 day ago"
+    assert _expiry_phrase(now - 7200, now) == "expired 2 hours ago"
+    assert _expiry_phrase(now - 30, now) == "expired less than a minute ago"
+    assert _expiry_phrase(now, now) == "expired less than a minute ago", "the boundary is expired"
+    assert _expiry_phrase(now + 600, now) == "expires in 10 minutes"
+    assert _expiry_phrase(now + 6 * 3600, now) == "expires in 6 hours"
+
+
+def test_launch_leaves_a_token_well_clear_of_the_margin_alone(monkeypatch, tmp_path):
+    """The margin is a day, not a week: a token good for a month must not be rotated on every launch."""
+    token = _jwt({"exp": _in(30 * 86400)})
+    _seed_launch_with_token(monkeypatch, tmp_path, token)
+    _forbid_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == token, "handed over untouched"
+
+
+def test_launch_treats_an_unreadable_token_as_unknown_not_as_expired(monkeypatch, tmp_path):
+    """"We cannot tell" and "it is dead" are different answers, and only one of them may cost a launch.
+
+    An opaque token is what a future credential format looks like from here. Guessing expired would
+    rotate a working credential on every launch; the probe is one round-trip away and knows better.
+    """
+    _seed_launch_with_token(monkeypatch, tmp_path, "opaque-not-a-jwt")
+    _forbid_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "opaque-not-a-jwt"
+
+
+# --- layer 2: the repair ----------------------------------------------------
+
+def test_launch_persists_the_rotated_refresh_token_not_just_the_access_token(monkeypatch, tmp_path):
+    """The credential-destroying bug this feature could most easily have shipped.
+
+    The control plane rotates the refresh credential on **every** exchange and the old one stops
+    matching at once, while `update_network_tokens` takes `refresh_token` as an *optional* argument.
+    Persisting only the access token therefore kills this machine's refresh credential permanently —
+    silently, and while passing every assertion written about the access token, which is why this is
+    its own test.
+    """
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-60)}))
+    _mock_token_refresh(monkeypatch, access="AT2", refresh="RT2")
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert _stored(tmp_path, "access_token") == "AT2"
+    assert _stored(tmp_path, "refresh_token") == "RT2", "the rotated refresh token must be stored"
+
+
+def test_launch_keeps_the_old_refresh_token_when_the_exchange_returns_none(monkeypatch, tmp_path):
+    """A control plane that chose not to rotate must not leave us storing an empty credential — which
+    is indistinguishable from having none at all, and would send the next launch to `grid login`."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-60)}))
+    _mock_token_refresh(monkeypatch, access="AT2", refresh=None)
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert _stored(tmp_path, "refresh_token") == "RT"
+
+
+def test_print_env_prints_the_refreshed_token_and_keeps_the_note_off_stdout(monkeypatch, tmp_path,
+                                                                            capsys):
+    """`--print-env` exists so a user can drive their own shell; printing a dead token would reproduce
+    the exact trap this feature closes. The note goes to stderr so `eval "$(…)"` stays safe."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-86400)}))
+    _mock_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude", "--print-env"]) == 0
+    out = capsys.readouterr()
+    assert "export ANTHROPIC_AUTH_TOKEN='AT2'" in out.out
+    assert "Refreshed" in out.err and "Refreshed" not in out.out
+    assert seen["spawns"] == [], "--print-env still starts nothing"
+
+
+def test_launch_refusals_distinguish_a_dead_credential_from_a_broken_control_plane(monkeypatch,
+                                                                                   tmp_path):
+    """Three failures, three different things to do — which is the whole reason the status rides the
+    exception. Telling a user to `grid login` during a control-plane outage sends them to a browser to
+    fix something that is not broken; not telling them when their credential is dead strands them."""
+    from remote import control_plane
+
+    # "Run `grid login`" is the *recommendation* marker. The 403 message names `grid login` too — to
+    # say it will not help — so a bare substring check would call that a recommendation.
+    cases = {
+        401: ("Run `grid login`", "membership"),
+        403: ("not your sign-in", "Run `grid login`"),
+        503: ("Try again shortly", "Run `grid login`"),
+    }
+    for status, (expected, forbidden) in cases.items():
+        _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-86400)}))
+        _mock_token_refresh(monkeypatch, error=control_plane.ControlPlaneError(
+            f"POST https://api.example/v1/grid/tokens/n1 failed ({status}): "
+            '{"detail": "the reason"}', status=status))
+        seen = _capture_launch(monkeypatch)
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["launch", "claude"])
+        message = str(exc.value)
+        assert expected in message, (status, message)
+        assert forbidden not in message, (status, message)
+        assert "the reason" in message, "the control plane's own words reach the user"
+        assert seen["spawns"] == [], "nothing is started on a refusal"
+
+
+def test_launch_warns_and_launches_when_a_still_valid_token_cannot_be_renewed(monkeypatch, tmp_path,
+                                                                              capsys):
+    """The clause that bounds failing open: never cost the user a launch **that would have worked**.
+
+    Inside the margin the token still works, so a control-plane outage is not a reason to refuse. Past
+    `exp` it does not, which is why the sibling test above expects a refusal for the same failure.
+    """
+    from remote import control_plane
+
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(3600)}))
+    _mock_token_refresh(monkeypatch, error=control_plane.ControlPlaneError(
+        "Cannot reach the control plane (POST /v1/grid/tokens/n1): connection refused"))
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+    err = capsys.readouterr().err
+    assert "Warning" in err and "launching anyway" in err, err
+
+
+def test_launch_says_so_when_a_near_expiry_token_has_no_refresh_credential(monkeypatch, tmp_path,
+                                                                           capsys):
+    """Nothing to exchange, so nothing to repair — but silence would leave a user to discover on their
+    own that this grid stops working soon. The grid still decides whether it works *now*."""
+    _seed_remote(monkeypatch, tmp_path, networks=[
+        {"network_id": "n1", "name": "team", "access_token": _jwt({"exp": _in(3600)})}], active="team")
+    _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
+    _mock_launch_relay(monkeypatch)
+    _isolate_claude_settings(monkeypatch, tmp_path)
+    _forbid_token_refresh(monkeypatch)
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    err = capsys.readouterr().err
+    assert "no refresh credential" in err and "grid login" in err, err
+
+
+# --- layer 3: what the grid says --------------------------------------------
+
+def test_launch_probes_the_authenticated_models_route_with_the_bearer(monkeypatch, tmp_path):
+    """Only an authenticated read can see an epoch bump, a revoked membership or a missing scope —
+    none of which a token can be asked about offline, and all of which the public overview ignores."""
+    token = _jwt({"exp": _in(_YEAR)})
+    seen_relay = _seed_launch_with_token(monkeypatch, tmp_path, token)
+    _forbid_token_refresh(monkeypatch)
+    _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen_relay["probes"] == [f"Bearer {token}"], "one probe, carrying the token in question"
+
+
+def test_launch_refreshes_once_when_the_grid_rejects_a_token_that_looks_fine(monkeypatch, tmp_path,
+                                                                             capsys):
+    """A stale `member_epoch` — the likeliest rejection on an active grid, and completely invisible to
+    the offline check: the token's own `exp` is a year out and says nothing is wrong."""
+    token = _jwt({"exp": _in(_YEAR)})
+    seen_relay = _seed_launch_with_token(monkeypatch, tmp_path, token, probe_sequence=[401, 200])
+    refreshes = _mock_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_AUTH_TOKEN"] == "AT2"
+    assert len(refreshes["calls"]) == 1
+    assert seen_relay["probes"] == [f"Bearer {token}", "Bearer AT2"], "re-probed with the new token"
+    assert "Refreshed" in capsys.readouterr().err
+
+
+def test_launch_refuses_when_even_a_renewed_token_is_rejected(monkeypatch, tmp_path):
+    """One refresh per run, total. A second exchange would mint another token carrying the same
+    rejected membership — a slower way to fail, and one more rotation of a credential that is already
+    in trouble."""
+    _seed_launch_with_token(
+        monkeypatch, tmp_path, _jwt({"exp": _in(_YEAR)}), probe_sequence=[401, 401])
+    refreshes = _mock_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    assert "grid login" in str(exc.value)
+    assert len(refreshes["calls"]) == 1, "exactly one refresh, however many layers asked"
+    assert seen["spawns"] == []
+
+
+def test_launch_403_names_the_roles_when_the_token_carries_no_inference_scope(monkeypatch, tmp_path):
+    """Which 403 this is comes from the **token**, not from the relay's wording — keying user-facing
+    advice on a response body is the failure this feature exists to remove.
+
+    And the advice names roles rather than "ask the owner": the control plane's owner fallback
+    synthesises `roles=["admin"]`, whose scopes carry no inference at all, so this refusal can land in
+    front of the very person that advice would point at.
+    """
+    token = _jwt({"exp": _in(_YEAR), "scopes": ["provider:poll", "provider:heartbeat"]})
+    _seed_launch_with_token(monkeypatch, tmp_path, token, probe=403)
+    _forbid_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "`consumer` and `both` roles" in message, message
+    assert "Missing required scope" in message, "the relay's own reason survives"
+    assert seen["spawns"] == []
+
+
+def test_launch_403_names_membership_when_the_token_does_carry_the_scope(monkeypatch, tmp_path):
+    """The other 403: the scope is there, so the refusal is about who you are on this grid — and
+    `grid login` re-mints from the same membership, so recommending it would be a loop."""
+    token = _jwt({"exp": _in(_YEAR), "scopes": ["inference:create", "inference:models"]})
+    _seed_launch_with_token(monkeypatch, tmp_path, token, probe=403,
+                            detail="Grid member is not in local allowlist snapshot")
+    _forbid_token_refresh(monkeypatch)
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "not as a member who may use this grid" in message, message
+    assert "roles" not in message, "this one is not about scope"
+
+
+def test_launch_warns_and_launches_when_the_probe_is_throttled(monkeypatch, tmp_path, capsys):
+    """429 is the most likely status for the exact user this feature is for — someone re-running a
+    launch against a credential that keeps failing. It is not a verdict about the token, so it must not
+    become one."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(_YEAR)}), probe=429)
+    _forbid_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+    err = capsys.readouterr().err
+    assert "Too many failed authentication attempts" in err and "launching anyway" in err, err
+
+
+def test_launch_warns_and_launches_when_the_probe_cannot_reach_the_relay(monkeypatch, tmp_path,
+                                                                         capsys):
+    """A check that could not run says so, and never costs a launch that would have worked — the same
+    disposition `claude_install._warn_unchecked` already has for the binary search."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(_YEAR)}),
+                            probe_sequence=[httpx.ConnectError("connection refused")])
+    _forbid_token_refresh(monkeypatch)
+    seen = _capture_launch(monkeypatch)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+    assert "launching anyway" in capsys.readouterr().err
+
+
+def test_launch_reports_the_dead_credential_before_the_missing_models(monkeypatch, tmp_path):
+    """Preflight's two halves swap order, and this is why: a dead credential invalidates the model
+    advice — `grid join` cannot help while the token is rejected — whereas a missing model says nothing
+    about the credential. Both are wrong here; only one of them is worth acting on first."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(_YEAR)}),
+                            probe_sequence=[401, 401], models=["glm-5.2"])
+    _mock_token_refresh(monkeypatch)
+    _capture_launch(monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["launch", "claude"])
+    message = str(exc.value)
+    assert "rejected" in message, message
+    assert "doesn't serve" not in message, "the model refusal must not pre-empt the credential one"
+
+
+# --- the write contract -----------------------------------------------------
+
+def test_launch_writes_nothing_when_the_credential_is_healthy(monkeypatch, tmp_path):
+    """`grid launch` can now write `credentials.toml` (ADR 0029), which makes "and only when it had
+    to" a claim worth pinning — including the file's *bytes*, since a refresh rewrites in place and
+    adds no path."""
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(_YEAR)}))
+    _forbid_token_refresh(monkeypatch)
+    _capture_launch(monkeypatch)
+    before = _grid_home_tree(tmp_path)
+
+    assert cli.main(["launch", "claude"]) == 0
+    assert _grid_home_tree(tmp_path) == before
+
+
+def test_launch_that_refreshes_writes_only_the_two_token_fields(monkeypatch, tmp_path):
+    """The write is maintenance of our own credential cache, not a side effect on the user's setup:
+    the session, the api_url, the user and every other grid come through untouched."""
+    from remote import credentials
+
+    _seed_launch_with_token(monkeypatch, tmp_path, _jwt({"exp": _in(-60)}))
+    _mock_token_refresh(monkeypatch)
+    _capture_launch(monkeypatch)
+    before = credentials.load_credentials()
+
+    assert cli.main(["launch", "claude"]) == 0
+    after = credentials.load_credentials()
+    assert {k: v for k, v in after.items() if k != "networks"} == \
+           {k: v for k, v in before.items() if k != "networks"}
+    changed = {
+        key for key in set(before["networks"][0]) | set(after["networks"][0])
+        if before["networks"][0].get(key) != after["networks"][0].get(key)
+    }
+    assert changed == {"access_token", "refresh_token"}

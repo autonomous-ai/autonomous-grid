@@ -84,6 +84,9 @@ already reads it. See the consequence below.
   ignores the Bearer token. A locally-absent token is still caught (the same check and the same
   "run `grid login`" message `info --env` uses), but an *expired* one passes preflight and fails
   inside the app. Accepted knowingly; the authenticated route above is the fix if it bites.
+  **It bit — [ADR 0029](./0029-the-credential-is-checked-before-it-is-handed-over.md) takes that fix,
+  and adds the offline expiry check and the in-place refresh the authenticated route alone cannot
+  give.**
 - **`settings.json` outranks us.** Claude Code's user settings can carry an `env` block whose values
   override a shell export. A user with `ANTHROPIC_BASE_URL` there silently defeats `grid launch`, so
   the command reads that file and warns — it does not edit it.

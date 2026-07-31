@@ -73,7 +73,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     # this module while the `cli` package is still initialising (same rule as `cli/remote_overview.py`).
     from remote import credentials
 
-    from . import remote_grid, remote_overview
+    from . import grid_credential, remote_grid, remote_overview
 
     session_token = credentials.require_session()
     rec = remote_grid._select(getattr(args, "grid", None))
@@ -86,13 +86,14 @@ def cmd_launch(args: argparse.Namespace) -> int:
     base, _status = remote_grid.resolve_relay_base(
         session_token, rec, remote_grid._network_id(rec), label
     )
+    # Credential before models, and the order is not cosmetic (ADR 0029). A dead credential invalidates
+    # the model advice — the target's refusal sends the user off to `grid join` an engine, which cannot
+    # help while the token is dead — whereas a missing model says nothing about the credential. `rec` is
+    # a disk snapshot, so the possibly-refreshed token is what comes back; `rec`'s would be stale.
+    token = grid_credential.ensure_usable(rec, label, token, base)
     # Preflight's half of the read: which models the grid serves. The public overview, the same one
     # `grid models` / `grid engines` render, so preflight and those commands can never disagree about
     # what is live. Whether those models are *enough* is the target's call — it owns its model names.
-    #
-    # The route is public and ignores the bearer token, so this proves model presence, not credential
-    # validity: an expired token passes here and fails inside the app. Known and accepted (ADR 0028);
-    # the authenticated model-listing route is the recorded fix if it bites.
     live_models = remote_overview.live_model_names(
         remote_overview.fetch_overview(base, token, label)
     )

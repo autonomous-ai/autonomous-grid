@@ -193,9 +193,13 @@ Like `grid info --env`, this prints your access token; unlike it, warnings stay 
 - **Your own settings can override it.** Claude Code's `settings.json` `env` block outranks an
   injected variable, so a stray `ANTHROPIC_BASE_URL` there silently defeats the launch. The command
   reads that file and warns in one line — it never edits it.
-- **Preflight proves models, not your token.** It reads the grid's public overview (the same read
-  `grid models` renders), which ignores the bearer token. A *missing* token is caught first with the
-  usual `grid login` guidance; an *expired* one passes preflight and fails inside the app.
+- **Your credential is checked, and quietly repaired.** Before anything is handed over, `grid launch`
+  reads the token's own expiry and asks the grid whether it will accept it. An expired token — or one
+  the grid refuses because your membership changed — is **refreshed in place** and the launch carries
+  on, with one line on stderr. Nothing that cannot be repaired reaches the app: it is refused here,
+  naming which of "sign in again", "ask about your membership" or "try again shortly" applies.
+- **A check that fails open never costs you a launch.** If the grid is unreachable, rate-limiting, or
+  erroring, `grid launch` says so and starts the app anyway rather than guessing your token is bad.
 - **`auto` is not the default, and there is no `--model` flag in this release.** Claude Code issues
   many small requests per turn, so routing each one through the grid's advisor would add a hop to
   every one and let the model change turn to turn — which makes "it got worse today" unfalsifiable.
@@ -211,4 +215,5 @@ Like `grid info --env`, this prints your access token; unlike it, warnings stay 
 | "can't run Claude Code: it doesn't serve …" | Preflight. Compare against `grid models`, then serve the missing name (step 3). |
 | "Claude Code isn't installed" | Nothing on your `PATH` or in either place Claude Code installs to. On a terminal you're offered the vendor's installer; with no terminal (CI, a script) the install command is printed and the launch exits non-zero. |
 | "Warning: Claude Code's own settings set …" | An `env` block in your `settings.json` overrides what was injected. Remove the colliding key — `grid launch` never edits that file. |
-| Requests fail *inside* the app | Most likely an expired token, which preflight cannot see. `grid launch claude --print-env` shows exactly what was handed over. |
+| "couldn't check … launching anyway" | The credential check could not reach the grid, so it was skipped rather than guessed at. If the app then fails to authenticate, that warning is why. |
+| Requests fail *inside* the app | The credential is checked and renewed before hand-over, so this is more likely a model or settings problem. `grid launch claude --print-env` shows exactly what was handed over. |
