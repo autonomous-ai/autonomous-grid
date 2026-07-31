@@ -9,11 +9,14 @@ guidance when run in local mode — the mirror image of the remote stub.
 
 `AGNOSTIC`, `REMOTE_HANDLERS`, and `REMOTE_ONLY` must together classify *every* registered
 command — a test asserts this so a future command can never silently run local code in remote
-mode (nor remote code in local mode).
+mode (nor remote code in local mode). `REMOTE_ONLY` maps each of its commands to the *reason*
+its local-mode gate gives, because "sign in" is not why every remote-only command needs remote
+mode; `None` takes the sign-in default.
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import NoReturn
 
 from shared import state
@@ -91,15 +94,43 @@ REMOTE_HANDLERS = {
 }
 
 
+# The purpose clause completing "Run `grid mode remote` (or pass --remote) …" for a command that
+# registers no reason of its own — every command below today, all gated because they need a
+# signed-in account.
+_DEFAULT_LOCAL_GATE_REASON = "to sign in."
+
 # Remote-only commands: they run their real handlers in remote mode and are gated with
 # guidance in local mode — the mirror image of ``remote_stub`` for the GATED commands.
-REMOTE_ONLY = frozenset({"login", "logout", "members", "sync", "price", "router"})
+#
+# command -> why switching to remote mode is what this user wants, or ``None`` for the default
+# above. Sign-in is not every command's reason: a command gated for some other reason (a local grid
+# not serving the dialect an app speaks, say) registers its own. A value completes the sentence in
+# ``local_stub``, so it reads as a purpose clause and carries its own final period; the
+# `grid mode remote` signpost stays in the fixed part, where no later command can drop it.
+REMOTE_ONLY: dict[str, str | None] = {
+    "login": None,
+    "logout": None,
+    "members": None,
+    "sync": None,
+    "price": None,
+    "router": None,
+    # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
+    # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
+    # speaks. Naming the dialect is what stops this being filed as a bug.
+    "launch": (
+        "to launch an app that speaks the Anthropic Messages dialect, which a local grid "
+        "does not serve."
+    ),
+}
 
 
 def local_stub(command: str | None) -> NoReturn:
+    # ``or``, not ``is None``: a registered reason that is empty is a coding error, and today's
+    # sentence is a better thing to print than a sentence that stops mid-air.
+    reason = REMOTE_ONLY.get(command) or _DEFAULT_LOCAL_GATE_REASON
     raise SystemExit(
         f"`grid {command}` is a remote-mode command. Run `grid mode remote` (or pass --remote) "
-        "to sign in."
+        f"{reason}"
     )
 
 
@@ -111,15 +142,71 @@ def resolve_override(argv: list[str]) -> tuple[str | None, list[str]]:
     """
     override: str | None = None
     cleaned: list[str] = []
+    past_separator = False
     for token in argv:
         if token in ("--local", "--remote"):
+            if past_separator:
+                # The one substitution on this surface a user cannot see happening. After `--` they
+                # were addressing another program (`grid launch <target> -- …`), and this took the
+                # token anyway. `--remote` then simply vanishes; `--local` flips the run's mode, so a
+                # remote-only command refuses and reports a *mode* problem — pointing at a fix that
+                # has nothing to do with what they actually did. Said here, where the token is taken,
+                # so it covers both directions and every command rather than one gate's message.
+                print(
+                    f"Warning: `{token}` after `--` is grid's own one-shot mode override, not the "
+                    f"launched app's — it has been removed from the command line and this run uses "
+                    f"{token[2:]} mode.",
+                    file=sys.stderr,
+                    flush=True,
+                )
             flag = token[2:]
             if override is not None and override != flag:
                 raise SystemExit("Pass only one of --local / --remote.")
             override = flag
         else:
+            # Only the first `--` opens the forwarded region, but re-marking on a later one is
+            # harmless: everything from the first onwards is already past it.
+            past_separator = past_separator or token == "--"
             cleaned.append(token)
     return override, cleaned
+
+
+# The one command whose ``--`` means "everything after this belongs to the app it launches", rather
+# than argparse's own "stop looking for options". Deliberately a single name and not a growing list:
+# a second passthrough command is a decision, not a config value.
+_PASSTHROUGH_COMMAND = "launch"
+
+
+def split_forwarded(argv: list[str]) -> tuple[list[str], tuple[str, ...]]:
+    """Split ``grid launch … -- <the app's own arguments>`` at the first bare ``--``.
+
+    Returns ``(argv for the parser, the forwarded vector)``.
+
+    Done **here, before ``parse_args``**, because argparse cannot do it. ``launch`` has two
+    ``nargs="?"`` positionals (target, grid), so a third ``nargs="*"`` positional binds the first
+    forwarded word to *grid* — ``launch claude -- -p hi`` yields ``grid="-p"`` — and
+    ``nargs=REMAINDER`` swallows the launcher's own ``--print-env`` into the forwarded vector while
+    leaving the flag False. Both verified against argparse, not assumed.
+
+    Scoped to one command on purpose. Every other command keeps argparse's own ``--`` handling, so
+    what ``grid chat -- hello`` has always meant cannot change as a side effect of this feature.
+
+    Runs **after** ``resolve_override``, which has already pulled ``--local``/``--remote`` out of any
+    position — *including* from after this separator. Those two exact tokens therefore cannot be
+    forwarded to a launched app (ADR 0028), which is why `grid launch --help` says so.
+    """
+    try:
+        # The FIRST separator only: a later ``--`` is one of the app's own arguments and is forwarded
+        # verbatim, exactly as it would be if the user had typed it into the app's own command line.
+        separator = argv.index("--")
+    except ValueError:
+        return argv, ()
+    # The command word, found the way argparse finds it: the first token that is not an option. This
+    # tolerates the global flags that may precede a subcommand (`grid --json launch …`).
+    command = next((token for token in argv[:separator] if not token.startswith("-")), None)
+    if command != _PASSTHROUGH_COMMAND:
+        return argv, ()
+    return argv[:separator], tuple(argv[separator + 1:])
 
 
 def dispatch(args: argparse.Namespace, override: str | None) -> int:

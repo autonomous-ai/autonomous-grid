@@ -26,6 +26,27 @@ from . import credentials
 _TIMEOUT = float(os.getenv("GRID_CONTROL_PLANE_TIMEOUT", "30"))
 
 
+class ControlPlaneError(SystemExit):
+    """A control-plane call that failed, carrying the status when there was one.
+
+    **A ``SystemExit`` subclass, deliberately.** Every failure here has always been a ``SystemExit``
+    — this repo's clean-error idiom — and callers rely on it in two different ways: the serve loop's
+    token refresh catches ``SystemExit`` so it does not die mid-loop
+    (``remote/serve._ServeState.refresh``), and ``grid sync`` classifies an expired session by
+    matching the *rendered message* (``cli/auth._SESSION_EXPIRED_RE``). Subclassing keeps both working
+    untouched, with the same type and the same text; only a caller that wants the status reads it.
+
+    ``status`` is the HTTP status when the control plane answered, and ``None`` when it did not — a
+    request that never got an answer has no status, and the difference decides whether a caller may
+    treat the failure as a verdict about the credential or merely as "we could not ask". Same shape
+    as ``relay.RelayError.status``, for the same reason.
+    """
+
+    def __init__(self, *args: Any, status: int | None = None) -> None:
+        super().__init__(*args)
+        self.status = status
+
+
 def _client(api_url: str | None = None, token: str | None = None) -> httpx.Client:
     headers = {"User-Agent": "grid-cli"}
     if token:
@@ -199,20 +220,29 @@ def get_router_catalog(session_token: str, api_url: str | None = None) -> dict[s
 
 
 def _send(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
-    """One request with both failure modes surfaced as a clean SystemExit (never a traceback):
-    a transport/connection error before a response, and a >=400 status after one."""
+    """One request with both failure modes surfaced as a clean ``ControlPlaneError`` (never a
+    traceback): a transport/connection error before a response, and a >=400 status after one.
+
+    Both are ``SystemExit`` subclasses carrying the same messages they always did, so this is
+    transparent to every caller that does not ask for ``.status``.
+    """
     try:
         resp = client.request(method, url, **kwargs)
     except httpx.HTTPError as exc:
-        raise SystemExit(f"Cannot reach the control plane ({method} {url}): {exc}") from None
+        # No answer, so no status — `status=None` is what says "we could not ask", as distinct from
+        # "we asked and were refused".
+        raise ControlPlaneError(f"Cannot reach the control plane ({method} {url}): {exc}") from None
     _raise(resp)
     return resp
 
 
 def _raise(resp: httpx.Response) -> None:
     if resp.status_code >= 400:
-        raise SystemExit(
-            f"{resp.request.method} {resp.request.url} failed ({resp.status_code}): {resp.text[:400]}"
+        # The message is byte-for-byte what it has always been: `cli/auth._SESSION_EXPIRED_RE`
+        # anchors on this exact rendering, so the format is a contract, not a detail.
+        raise ControlPlaneError(
+            f"{resp.request.method} {resp.request.url} failed ({resp.status_code}): {resp.text[:400]}",
+            status=resp.status_code,
         )
 
 

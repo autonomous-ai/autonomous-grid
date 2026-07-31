@@ -44,6 +44,14 @@ _REGISTER_TIMEOUT = 15.0
 # `_price_oneshot`. Widening a deadline is not free there, so it is not widened.
 _SERVE_REGISTER_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=5.0)
 
+# `check_credential`'s deadline, and the tightest in this module — because of what happens when it is
+# hit. Every other call here either retries or fails the command; this one **falls open** and launches
+# the app anyway (ADR 0029), so the deadline is time a user spends staring at nothing before a launch
+# that was always going to happen. Stated per phase for the reason recorded above: a bare float
+# applies to all four independently, and the phase that actually matters here is `read` — a relay that
+# accepts the connection and then never answers is exactly the shape a connect timeout cannot see.
+_CREDENTIAL_CHECK_TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
+
 
 class RelayUnauthorized(Exception):
     """The relay rejected the access token (401) — the caller should refresh and retry."""
@@ -89,6 +97,33 @@ def _guard(resp: httpx.Response, what: str) -> None:
         raise RelayUnauthorized()
     if resp.status_code >= 400:
         raise RelayError(f"{what} failed ({resp.status_code}): {resp.text[:200]}", status=resp.status_code)
+
+
+def check_credential(signaling_url: str, access_token: str) -> None:
+    """Prove ``access_token`` end-to-end against this grid's relay, or raise saying how it failed.
+
+    Filed with the ``_guard``-mapped calls above rather than the one-shot pricing helpers below, whose
+    stated convention is that any failure is a clean ``SystemExit``. That convention is wrong for this
+    one: its caller (``cli/grid_credential``) has *three* different answers — refresh and retry (401),
+    refuse (403), warn and launch anyway (429 / 5xx / no answer at all) — and a ``SystemExit`` can
+    carry none of them (ADR 0029).
+
+    ``GET /relay/v1/models`` is chosen for what it *requires*, not for what it returns; the body is
+    discarded. It demands ``inference:models``, and the control plane grants the inference scopes only
+    as one bundle, so a token passes here exactly when it holds the ``inference:create`` that
+    ``POST /messages`` needs — no refusal this raises is one the launched app would not have hit.
+    Verification runs the full server-side gate: signature, ``exp``, network and network-type match,
+    scope, the member allowlist snapshot, the denylist, and both epoch-staleness checks.
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_CREDENTIAL_CHECK_TIMEOUT) as client:
+            resp = client.get("/relay/v1/models")
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # `InvalidURL` is not an `HTTPError` subclass (the trap `deregister_node` records). Both mean
+        # nothing was learned about the token, so both must reach the caller as a status-less
+        # `RelayError` — the value that makes it warn and launch rather than refuse.
+        raise RelayError(f"credential check transport error: {exc}") from None
+    _guard(resp, "credential check")
 
 
 def register_node(

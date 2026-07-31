@@ -18,7 +18,7 @@ import json
 import re
 from typing import Any
 
-from shared import state
+from shared import shell, state
 
 
 # Default network type for `grid up` on create (DECISIONS D11; the other choice is
@@ -89,6 +89,22 @@ def _network_id(rec: dict[str, Any]) -> str:
             "Run `grid login` to refresh your grids."
         )
     return str(nid)
+
+
+def require_access_token(rec: dict[str, Any], label: str) -> str:
+    """The grid's per-grid access token, or the familiar "run `grid login`" guidance.
+
+    One source for the sentence, shared by `grid info --env` and `grid launch` — a launch that
+    proceeded with an empty bearer would surface inside the launched app as an auth error that names
+    neither the grid nor the fix. (Three older copies of this sentence live in `remote_request.py`,
+    `remote_price.py` and `remote_provider.py`; folding those in is out of scope here.)
+    """
+    token = rec.get("access_token")
+    if not token:
+        raise SystemExit(
+            f"Grid {label} has no access token locally. Run `grid login` to refresh your grids."
+        )
+    return str(token)
 
 
 def _grid_url(live: dict[str, Any], rec: dict[str, Any]) -> str:
@@ -235,11 +251,7 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
     if args.env:
         rec = _select(args.grid)
         label = rec.get("name") or rec.get("network_id")
-        token = rec.get("access_token")
-        if not token:
-            raise SystemExit(
-                f"Grid {label} has no access token locally. Run `grid login` to refresh your grids."
-            )
+        token = require_access_token(rec, label)
         # The relay base comes from live status for the creator, or the login bundle for a member —
         # resolve_relay_base handles both (the bundle carries the token but not the address).
         base, _status = resolve_relay_base(session, rec, _network_id(rec), label)
@@ -247,8 +259,12 @@ def cmd_remote_info(args: argparse.Namespace) -> int:
         # user-requested disclosure of the caller's own token to their own shell — like
         # `gh auth token`. Every other path (ls, info without --env, all --json) stays token-free.
         base_url = base.rstrip("/") + "/relay/v1"
-        print(f'export OPENAI_BASE_URL="{base_url}"')
-        print(f'export OPENAI_API_KEY="{token}"')
+        # `shell.quote`, not an f-string in double quotes: this block exists to be evaluated, and the
+        # token is an opaque credential this repo neither mints nor validates while the base arrives
+        # from the control plane. A value holding `"`, `$`, a backtick or a backslash would break out
+        # of a double-quoted context and be *executed* by the eval this command invites.
+        print(f"export OPENAI_BASE_URL={shell.quote(base_url)}")
+        print(f"export OPENAI_API_KEY={shell.quote(token)}")
         return 0
     rec = _select(args.grid)
     # Status is creator-only; a member sees `{}` here and just gets a blank run-state (never an error).
