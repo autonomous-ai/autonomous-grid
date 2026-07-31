@@ -585,6 +585,76 @@ def build_prompt(messages):
     return "\n\n".join(line for line in lines if line)
 
 
+def _responses_content_parts(content):
+    """Normalise Responses-API content parts so the existing flattener reads them.
+
+    The Responses dialect spells text parts ``input_text`` / ``output_text`` where the chat wire
+    uses plain ``text``. This rewrites just those type tags and leaves everything else (including
+    a bare string) untouched, so ``_flatten_content`` — shared across all three wires — needs no
+    dialect branch of its own.
+    """
+    if not isinstance(content, list):
+        return content
+    normalised = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") in ("input_text", "output_text"):
+            normalised.append({"type": "text", "text": part.get("text", "")})
+        else:
+            normalised.append(part)
+    return normalised
+
+
+def _messages_from_responses_input(body):
+    """Responses API ``input`` -> chat ``messages[]`` the shared prompt builder consumes.
+
+    The ``input`` field is the Responses analogue of ``messages``: a plain string (a lone user
+    turn) or an array of items. Message items use the flat ``{role, content}`` shape; output items
+    wrap it under ``{type: "message", message: {…}}``. Function-call items (``function_call`` /
+    ``function_call_output``) are mapped to the assistant-tool-call / tool-result shapes the
+    ``build_prompt`` replayer already reads, so a multi-turn tool conversation round-trips through
+    the Responses wire exactly as it does through chat.
+    """
+    raw = body.get("input")
+    if isinstance(raw, str):
+        return [{"role": "user", "content": raw}]
+    if not isinstance(raw, list):
+        return []
+    messages = []
+    for item in raw:
+        if isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type")
+        if itype == "message":
+            inner = item.get("message") if isinstance(item.get("message"), dict) else item
+            messages.append({
+                "role": inner.get("role") or "assistant",
+                "content": _responses_content_parts(inner.get("content")),
+            })
+        elif itype == "function_call":
+            messages.append({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name") or "",
+                        "arguments": item.get("arguments") or "{}",
+                    },
+                }],
+            })
+        elif itype == "function_call_output":
+            messages.append({"role": "tool", "content": str(item.get("output") or "")})
+        elif "role" in item:
+            messages.append({
+                "role": item.get("role") or "user",
+                "content": _responses_content_parts(item.get("content")),
+            })
+    return messages
+
+
 @dataclass(frozen=True)
 class PreparedRequest:
     """Built once per request — the server logs it too, and recomputing would re-serialise the
@@ -598,12 +668,13 @@ class PreparedRequest:
     # None when the caller sent no `tools[]`, which is what keeps a client that brought its own
     # convention (Hermes' own `<tools>` system message) getting its text back verbatim.
     tool_protocol: object = None
-    # Which wire the caller spoke — "openai" or "anthropic". Carried on the request so the server
-    # answers in the SAME wire it was asked in without re-deriving it from the body a second time.
+    # Which wire the caller spoke — "openai", "anthropic", or "responses". Carried on the request
+    # so the server answers in the SAME wire it was asked in without re-deriving it from the body
+    # a second time.
     wire: str = "openai"
-    # The seat's own effort level, derived from the request's `thinking` field or, failing that,
-    # its `reasoning_effort` field — "" when the caller asked for neither, so today's argv/turn
-    # params are unaffected.
+    # The seat's own effort level, derived from the request's `thinking` field, the Responses
+    # `reasoning.effort` field, or the chat `reasoning_effort` field — "" when the caller asked for
+    # none, so today's argv/turn params are unaffected.
     effort: str = ""
 
 
@@ -677,18 +748,23 @@ def _effort_for_reasoning_effort(value):
 def _resolve_effort(body):
     """The request body's reasoning-effort signal -> a CLI effort level, or "" for none.
 
-    Two fields can carry this, never both meaningfully at once in practice since they belong to
+    Three fields can carry this, never more than one meaningfully at once since they belong to
     different wires: Anthropic's own `thinking` (a token budget) reaches the seat when a client
-    speaks `/messages` natively; the OpenAI standard `reasoning_effort` reaches it once an engine
-    that does not speak Anthropic has translated the request to the OpenAI wire first. `thinking`
-    wins whenever it actually resolves to an effort — it is the richer signal, carrying a real
-    budget rather than one of three words. A request naming neither, or naming only a disabled
-    `thinking`, falls through to `reasoning_effort`; a request with neither returns "", so an
-    ordinary body's resulting argv/turn params are unaffected.
+    speaks `/messages` natively; the Responses API's `reasoning.effort` reaches it when a client
+    speaks `/responses` natively; the OpenAI Chat standard `reasoning_effort` reaches it once an
+    engine that speaks neither has translated the request to the chat wire first. `thinking` wins
+    whenever it actually resolves to an effort — it is the richer signal, carrying a real budget
+    rather than one of three words. A request naming none of the three returns "", so an ordinary
+    body's resulting argv/turn params are unaffected.
     """
     thinking_effort = _effort_for_thinking(body.get("thinking"))
     if thinking_effort:
         return thinking_effort
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = _effort_for_reasoning_effort(reasoning.get("effort"))
+        if effort:
+            return effort
     return _effort_for_reasoning_effort(body.get("reasoning_effort"))
 
 
@@ -706,9 +782,14 @@ def _reject_server_tools(tools):
 
 
 def prepare(body, kind, protocol=None, wire="openai"):
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise SeatBadRequest("messages[] is required.")
+    if wire == "responses":
+        messages = _messages_from_responses_input(body)
+        if not messages:
+            raise SeatBadRequest("input is required.")
+    else:
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise SeatBadRequest("messages[] is required.")
     requested = str(body.get("model") or "")
     model_alias = alias_for(kind, requested)
     if model_alias is None:
@@ -730,6 +811,14 @@ def prepare(body, kind, protocol=None, wire="openai"):
         # `_flatten_content` already reads both.
         system_prompt = _flatten_content(body.get("system"))
         system_prompt = system_prompt if system_prompt.strip() else DEFAULT_SYSTEM_PROMPT
+    elif wire == "responses":
+        # `instructions` is the TOP-LEVEL developer/system prompt on this wire — the analogue of
+        # Anthropic's `system`, not a message. A `role: "system"` item in `input` is also honoured
+        # (build_system_prompt extracts those), but `instructions` wins when both are present
+        # because it is the canonical Responses spelling and the one a native caller sets.
+        system_prompt = _flatten_content(body.get("instructions"))
+        if not system_prompt.strip():
+            system_prompt = build_system_prompt(messages)
     else:
         system_prompt = build_system_prompt(messages)
     return PreparedRequest(
@@ -979,4 +1068,77 @@ def answer_stream_anthropic(spec, prepared, binary, timeout):
             message = to_anthropic_message(
                 result, spec.kind, prepared.model, prepared.tool_protocol)
             yield "done", (message, quota)
+            return
+
+
+# answer -> OpenAI Responses API object
+
+def to_response(result, kind, model, protocol=None):
+    """A Responses API ``response`` object, built directly rather than via a chat.completion.
+
+    Tool calls become ``function_call`` output items (the Responses dialect's native shape), not
+    ``tool_calls`` on a message — the same parse that extracts them for chat feeds this instead, so
+    a tool conversation round-trips identically on every wire the seat speaks.
+    """
+    text, tool_calls = result.text, []
+    if protocol is not None and getattr(protocol, "parse", None):
+        text, tool_calls = protocol.parse(result.text)
+    output = [{
+        "id": f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}] if text else [],
+    }]
+    for call in tool_calls:
+        function = call.get("function") or {}
+        output.append({
+            "id": f"fc_{uuid.uuid4().hex[:24]}",
+            "type": "function_call",
+            "status": "completed",
+            "call_id": call.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+            "name": function.get("name") or "",
+            "arguments": function.get("arguments") or "{}",
+        })
+    return {
+        "id": f"resp_{uuid.uuid4().hex}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "usage": {
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "total_tokens": result.input_tokens + result.output_tokens,
+        },
+        "grid_cli_seat": {
+            "kind": kind,
+            "total_cost_usd": result.cost_usd,
+            "duration_ms": result.duration_ms,
+            "num_turns": result.num_turns,
+            "session_id": result.session_id,
+        },
+    }
+
+
+def answer_response(spec, prepared, binary, timeout):
+    """`answer`'s Responses twin: the same one CLI run, decoded into the ``response`` object
+    ``/responses`` promises rather than a chat.completion."""
+    result = run_seat(spec, prepared, binary, timeout)
+    return to_response(result, spec.kind, prepared.model, prepared.tool_protocol)
+
+
+def answer_stream_response(spec, prepared, binary, timeout):
+    """`answer_stream`'s Responses twin: identical deltas, the final event built by
+    `to_response` instead of `to_chat_completion`."""
+    stream = stream_seat(spec, prepared, binary, timeout)
+    while True:
+        try:
+            yield "delta", next(stream)
+        except StopIteration as stop:
+            result, quota = stop.value
+            response = to_response(
+                result, spec.kind, prepared.model, prepared.tool_protocol)
+            yield "done", (response, quota)
             return

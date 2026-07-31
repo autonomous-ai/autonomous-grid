@@ -344,7 +344,12 @@ CLAUDE_TIER_ALIASES: tuple[ApiModelEntry, ...] = tuple(
 # The Codex CLI seat — the `codex` binary driven locally, distinct from the `codex` kind above
 # (which is the OAuth HTTP seat, ADR 0015). Different kind key because a grid may serve both.
 # UNVERIFIED: no signed-in codex seat was available; slugs are the ones the OAuth seat reports.
-CODEX_CLI_LAST_VERIFIED = "2026-07-29"
+# The seat translates BOTH dialects (`chat/completions` and `responses`) through the CLI's own
+# subprocess, so a grid-src caller that speaks the Responses API natively is served without the
+# relay needing to convert — the seat server (`local/cli_seat_server.py`) answers `/responses`
+# directly. Unlike the OAuth `codex` kind (responses-only, stream-only), this seat serves chat too
+# and honours a non-streaming responses request, because the subprocess is not an SSE-only pipe.
+CODEX_CLI_LAST_VERIFIED = "2026-07-31"
 
 CODEX_CLI_KIND = "codex-cli"
 
@@ -423,7 +428,7 @@ WHITELISTS: dict[str, ApiWhitelist] = {
         env_var=None,
         entries=CODEX_CLI_WHITELIST,
         supports_model_listing=False,
-        endpoints=("chat/completions",),
+        endpoints=("chat/completions", "responses"),
         credential="none",
         flat_rate=True,
         local_seat_port=8098,

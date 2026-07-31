@@ -84,6 +84,11 @@ def create_app(
     async def chat_completions(request: Request):
         return await _handle(app, request, wire="openai")
 
+    @app.post("/responses")
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        return await _handle(app, request, wire="responses")
+
     @app.post("/messages")
     @app.post("/v1/messages")
     async def messages(request: Request):
@@ -121,7 +126,12 @@ async def _handle(app: FastAPI, request: Request, *, wire: str = "openai"):
     if body.get("stream") and cli_seat.can_stream(spec):
         return StreamingResponse(_stream(app, prepared, wire=wire), media_type="text/event-stream")
 
-    answer_fn = cli_seat.answer_anthropic if wire == "anthropic" else cli_seat.answer
+    if wire == "responses":
+        answer_fn = cli_seat.answer_response
+    elif wire == "anthropic":
+        answer_fn = cli_seat.answer_anthropic
+    else:
+        answer_fn = cli_seat.answer
     async with app.state.slots:
         try:
             # A CLI run is a blocking subprocess of minutes. Off the event loop, or one request
@@ -135,7 +145,12 @@ async def _handle(app: FastAPI, request: Request, *, wire: str = "openai"):
             return _error(502, str(exc))
 
     if body.get("stream"):
-        sse = _as_anthropic_sse(completion) if wire == "anthropic" else _as_sse(completion)
+        if wire == "responses":
+            sse = _as_responses_sse(completion)
+        elif wire == "anthropic":
+            sse = _as_anthropic_sse(completion)
+        else:
+            sse = _as_sse(completion)
         return StreamingResponse(sse, media_type="text/event-stream")
     return JSONResponse(completion)
 
@@ -148,6 +163,10 @@ async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
     """
     if wire == "anthropic":
         async for frame in _stream_anthropic(app, prepared):
+            yield frame
+        return
+    if wire == "responses":
+        async for frame in _stream_responses(app, prepared):
             yield frame
         return
     spec, options = app.state.spec, app.state.options
@@ -277,6 +296,115 @@ async def _stream_anthropic(app: FastAPI, prepared):
     yield _anthropic_frame({"type": "message_stop"})
 
 
+async def _stream_responses(app, prepared):
+    """OpenAI Responses SSE: ``response.created``, ``output_text`` delta(s), ``response.completed``.
+
+    Same buffering rule as the OpenAI/Anthropic streams: with a tool protocol in play nothing goes
+    out until the CLI stops writing, because only the parse knows which bytes were the call —
+    emitting text deltas early is what let a client print the raw tool JSON as prose AND run the
+    tool. Tool-call items ride the terminal ``response.completed`` event's ``output[]``, never a
+    delta (they cannot be known until the answer is whole).
+
+    Reuses ``_anthropic_frame`` — the SSE framing (``event: <type>\\ndata: <json>``) is identical
+    across the Anthropic and Responses dialects; only the event names differ.
+    """
+    spec, options = app.state.spec, app.state.options
+    stream = cli_seat.answer_stream_response(spec, prepared, app.state.binary, options.timeout)
+    buffered = bool(prepared.tool_protocol)
+    resp_id = f"resp_{uuid.uuid4().hex}"
+    msg_id = f"msg_{uuid.uuid4().hex}"
+
+    yield _anthropic_frame({"type": "response.created", "response": {
+        "id": resp_id, "object": "response", "status": "in_progress",
+        "model": prepared.model, "output": []}})
+
+    def _open_text():
+        return (
+            _anthropic_frame({"type": "response.output_item.added", "output_index": 0,
+                "item": {"id": msg_id, "type": "message", "status": "in_progress",
+                         "role": "assistant", "content": []}}),
+            _anthropic_frame({"type": "response.content_part.added",
+                "output_index": 0, "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []}}),
+        )
+
+    text_open = False
+    full_text = ""
+    response_obj = None
+    async with app.state.slots:
+        try:
+            while True:
+                # next() blocks on the child's stdout, so it runs off the event loop like the
+                # non-streaming call does.
+                kind, payload = await run_in_threadpool(_next_or_none, stream)
+                if kind is None:
+                    break
+                if kind == "delta":
+                    if buffered:
+                        continue
+                    if not text_open:
+                        for frame in _open_text():
+                            yield frame
+                        text_open = True
+                    full_text += payload
+                    yield _anthropic_frame({"type": "response.output_text.delta",
+                        "output_index": 0, "content_index": 0, "delta": payload})
+                else:
+                    response_obj, quota = payload
+                    if quota is not None:
+                        # A free reading the answer carried; refresh the cache so the next
+                        # request's ceiling check costs nothing.
+                        app.state.quota_cache = (time.monotonic(), quota)
+                    if buffered:
+                        # Nothing went out above — the whole answer, text included, is only known
+                        # now that the parse has run. Emit the text-item lifecycle and one delta
+                        # carrying the complete prose the parse left behind.
+                        text = _responses_output_text(response_obj)
+                        if text:
+                            for frame in _open_text():
+                                yield frame
+                            text_open = True
+                            full_text = text
+                            yield _anthropic_frame({"type": "response.output_text.delta",
+                                "output_index": 0, "content_index": 0, "delta": text})
+                    elif not text_open:
+                        full_text = _responses_output_text(response_obj)
+        except Exception as exc:  # noqa: BLE001 — mirrors the OpenAI stream's terminal-error contract
+            yield _anthropic_frame({"type": "response.failed", "response": {
+                "id": resp_id, "object": "response", "status": "failed",
+                "model": prepared.model, "output": [],
+                "error": {"message": str(exc) or type(exc).__name__,
+                          "code": "cli_seat_error"}}})
+            return
+
+    if text_open:
+        yield _anthropic_frame({"type": "response.output_text.done",
+            "output_index": 0, "content_index": 0, "text": full_text})
+        yield _anthropic_frame({"type": "response.content_part.done",
+            "output_index": 0, "content_index": 0,
+            "part": {"type": "output_text", "text": full_text, "annotations": []}})
+        yield _anthropic_frame({"type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"id": msg_id, "type": "message", "status": "completed",
+                     "role": "assistant",
+                     "content": [{"type": "output_text", "text": full_text, "annotations": []}]}})
+
+    completed = response_obj or {"id": resp_id, "object": "response", "status": "completed",
+                                  "model": prepared.model, "output": [], "usage": {}}
+    yield _anthropic_frame({"type": "response.completed", "response": completed})
+
+
+def _responses_output_text(response_obj):
+    """The assistant's text from a ``to_response`` object — the first ``output_text`` part on the
+    message item, or "" when there is none (a tool-call-only answer)."""
+    for item in (response_obj.get("output") or []) if isinstance(response_obj, dict) else []:
+        if isinstance(item, dict) and item.get("type") == "message":
+            for part in item.get("content") or []:
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    return part.get("text") or ""
+    return ""
+
+
 def _anthropic_block_frames(blocks, start_index):
     """`content_block_start`/`delta`/`stop` for each text or tool_use block in `blocks`, indexed
     from `start_index`. Shared by the buffered live-stream path above and the no-stream fallback
@@ -369,9 +497,20 @@ def _as_anthropic_sse(message: dict):
     for frame in frames:
         yield frame
     yield _anthropic_frame({"type": "message_delta",
-                  "delta": {"stop_reason": message.get("stop_reason"), "stop_sequence": None},
-                  "usage": message.get("usage")})
+                   "delta": {"stop_reason": message.get("stop_reason"), "stop_sequence": None},
+                   "usage": message.get("usage")})
     yield _anthropic_frame({"type": "message_stop"})
+
+
+def _as_responses_sse(response_obj):
+    """SSE-wrap a finished Responses object, for a seat that cannot stream incrementally.
+    Sends ``response.created`` then ``response.completed`` — the minimum a Responses SSE consumer
+    needs, the complete output (text and any function-call items) riding the terminal event."""
+    resp_id = response_obj.get("id") or f"resp_{uuid.uuid4().hex}"
+    yield _anthropic_frame({"type": "response.created", "response": {
+        "id": resp_id, "object": "response", "status": "in_progress",
+        "model": response_obj.get("model"), "output": []}})
+    yield _anthropic_frame({"type": "response.completed", "response": response_obj})
 
 
 def _frame(payload: dict) -> str:
