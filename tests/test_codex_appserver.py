@@ -216,10 +216,30 @@ def test_start_thread_returns_the_nested_id():
 
 
 def test_start_turn_sends_the_input_block():
+    """No `effort` argument (today's call shape): the params carry no `effort` key at all, not
+    even a null one — a request naming neither `thinking` nor `reasoning_effort` must produce
+    byte-identical `turn/start` params to before this field existed."""
     proc = FakeProc({"turn/start": {"result": {}}})
     _server(proc).start_turn("th_123", "hello")
     assert proc.written[0]["params"] == {"threadId": "th_123",
                                          "input": [{"type": "text", "text": "hello"}]}
+
+
+def test_start_turn_carries_effort_when_one_was_resolved():
+    """Regression: the codex seat read reasoning token counts back out but never set effort going
+    in (grep confirmed no caller passed `effort` to `turn/start`). It rides this per-turn request,
+    not config.toml — a session setting would apply to every turn, not just this request."""
+    proc = FakeProc({"turn/start": {"result": {}}})
+    _server(proc).start_turn("th_123", "hello", effort="high")
+    assert proc.written[0]["params"] == {"threadId": "th_123",
+                                         "input": [{"type": "text", "text": "hello"}],
+                                         "effort": "high"}
+
+
+def test_start_turn_treats_a_falsy_effort_the_same_as_none():
+    proc = FakeProc({"turn/start": {"result": {}}})
+    _server(proc).start_turn("th_123", "hello", effort="")
+    assert "effort" not in proc.written[0]["params"]
 
 
 def test_notifications_are_collected_not_mistaken_for_replies():
