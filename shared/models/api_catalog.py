@@ -271,28 +271,65 @@ CLAUDE_LAST_VERIFIED = "2026-07-28"
 # The service-kind key, named here (not in remote/) for the same reason CODEX_KIND is.
 CLAUDE_KIND = "claude"
 
-# The FALLBACK row. `entries_for("claude")` normally answers with concrete ids read from the
-# installed binary (`shared/agent/claude_models.py`); this list is what a box with no readable
-# `claude` falls back to, and it is also the pre-discovery behaviour verbatim, so the worst case
-# here is exactly what shipped before.
+# The FALLBACK row — what a box ADVERTISES when discovery cannot read its `claude`.
+# `entries_for("claude")` normally answers with concrete ids read from the installed binary
+# (`shared/agent/claude_models.py`); this list is the answer when that returns nothing.
 #
-# `--model` ALIASES, not dated ids: an alias always resolves to the current model of its tier, so
-# the row cannot go stale between releases.
+# CONCRETE IDS, not `--model` tier aliases, and the trade is deliberate. An alias can never go
+# stale, which is why this row held `opus`/`sonnet`/`haiku`/`fable` before — but a tier alias is a
+# name no client ever ASKS for. Claude Code sends `claude-opus-5`; the relay's bare-name matcher
+# compares suffixes exactly (`alias_targets_for_endpoint`, cli internal), so a grid whose only seat
+# fell back to aliases advertises four names and matches none of them. Measured on the `gmail.com`
+# grid 2026-07-31: 193 × 503 in one day, every one of them a bare concrete id against a
+# tier-alias-only node. A stale id is a bug we can see and fix; a name nobody requests is a seat
+# that silently serves nothing.
+#
+# Staleness is bounded by where this row is even reachable: discovery is the normal path, and it
+# only falls through here when the binary cannot be read at all. Keep these in step with the
+# newest tier ids when the seat is re-verified (`CLAUDE_LAST_VERIFIED`).
+#
+# The tier aliases are NOT dropped — they move to `CLAUDE_TIER_ALIASES` below and stay resolvable.
 #
 # `context_window` is the `0` unknown sentinel (rendered `—`) throughout. The seat has no /models
 # endpoint to probe and the repo's rule is that an un-probed number is not written down — the
 # alternative would be a fabricated figure that silently mis-sizes routing decisions.
 #
 # `supports_tools=True` describes the WIRE CONTRACT, which is what a consumer can rely on: send
-# OpenAI `tools[]`, get `tool_calls[]` back. Mechanically those are Hermes-style `<tool_call>` text
-# the adapter parses, NOT the vendor's native tool_use — see `shared/agent/cli_seat.py`.
+# OpenAI `tools[]`, get `tool_calls[]` back. Mechanically the seat teaches the CLI a JSON reply
+# shape in the prompt and parses it back out — NOT the vendor's native tool_use — see
+# `shared/agent/cli_seat.py`.
 CLAUDE_WHITELIST: tuple[ApiModelEntry, ...] = tuple(
     ApiModelEntry(
-        vendor_name=alias,
+        vendor_name=model_id,
         context_window=0,
         supports_tools=True,
         supports_vision=False,      # the adapter drops image parts; claiming vision would lie
         supports_json_mode=False,   # `--json-schema` is not wired into the seat yet
+        supports_structured_outputs=False,
+        notes=note,
+    )
+    for model_id, note in (
+        ("claude-opus-5", "Claude Code CLI seat — most capable tier."),
+        ("claude-sonnet-5", "Claude Code CLI seat — balanced tier."),
+        ("claude-haiku-4-5", "Claude Code CLI seat — fastest tier."),
+        ("claude-fable-5", "Claude Code CLI seat — Fable tier."),
+    )
+)
+
+# Resolvable-only: names the seat still ANSWERS to but no longer advertises.
+#
+# Load-bearing during the rollout, not politeness. A relay holding a capability envelope written
+# before this change routes `claude:sonnet` to a seat that has since upgraded; without this the
+# seat would reject a name it had itself advertised an hour earlier. The `claude` CLI takes either
+# spelling for `--model`, so answering to both costs nothing. Advertisement narrows; resolution
+# does not — the same rule `resolvable_entries` already states.
+CLAUDE_TIER_ALIASES: tuple[ApiModelEntry, ...] = tuple(
+    ApiModelEntry(
+        vendor_name=alias,
+        context_window=0,
+        supports_tools=True,
+        supports_vision=False,
+        supports_json_mode=False,
         supports_structured_outputs=False,
         notes=note,
     )
@@ -459,17 +496,29 @@ def _discovered_claude_entries() -> tuple[ApiModelEntry, ...]:
 def resolvable_entries(kind: str) -> tuple[ApiModelEntry, ...]:
     """Every name ``kind`` will ANSWER to — what it currently advertises, plus the static row.
 
-    The two differ only for ``claude``, where discovery replaces the tier aliases with concrete
-    ids. Advertising the ids while still answering to `claude:sonnet` is deliberate: a relay
-    holding a capability envelope from before the upgrade keeps working, and the `claude` CLI
-    takes either spelling for ``--model``. Advertisement narrows; resolution does not.
+    The two differ only for ``claude``, where the advertised set is concrete ids (discovered from
+    the binary, or `CLAUDE_WHITELIST`) while `claude:sonnet` and the other tier aliases must keep
+    resolving: a relay holding a capability envelope from before an upgrade routes the old name,
+    and the `claude` CLI takes either spelling for ``--model``. Advertisement narrows; resolution
+    does not.
+
+    The aliases come from `CLAUDE_TIER_ALIASES` rather than from the whitelist, because the
+    whitelist no longer holds them — it is the concrete-id fallback now, and on a box where that
+    fallback IS what got advertised, `current` and `whitelist.entries` are the same four names.
     """
     current = entries_for(kind)
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:
         return current
+    extra = whitelist.entries + (CLAUDE_TIER_ALIASES if kind == CLAUDE_KIND else ())
     seen = {entry.vendor_name for entry in current}
-    return current + tuple(e for e in whitelist.entries if e.vendor_name not in seen)
+    out: list[ApiModelEntry] = list(current)
+    for entry in extra:
+        if entry.vendor_name in seen:
+            continue
+        seen.add(entry.vendor_name)   # `extra` may repeat a name across its two halves
+        out.append(entry)
+    return tuple(out)
 
 
 def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
