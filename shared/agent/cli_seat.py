@@ -640,8 +640,19 @@ def _effort_for_thinking(thinking):
 
 
 def _effort_for_reasoning_effort(value):
-    """The OpenAI standard `reasoning_effort` field -> a CLI effort level, or "" for none."""
-    return str(value or "").strip().lower()
+    """The OpenAI standard `reasoning_effort` field -> a CLI effort level, or "" for none.
+
+    Passed straight through 1:1 (`low`/`medium`/`high`) rather than climbed onto a higher rung,
+    even though both CLIs accept a wider ladder (claude adds xhigh/max; codex adds
+    none/minimal/xhigh/ultra). Unlike `thinking.budget_tokens`, this field is not a measurement a
+    mapping has to interpret — `low`/`medium`/`high` IS OpenAI's own vocabulary for how hard the
+    model should think, and both CLIs use the identical words for the identical idea. A caller who
+    asked for "high" asked for OpenAI's high; assuming they meant the CLI's most extreme setting
+    would be inventing intent the wire never carried. Anything outside those three words (or a
+    missing field) reads as no effort at all, the same as an absent `thinking`.
+    """
+    level = str(value or "").strip().lower()
+    return level if level in ("low", "medium", "high") else ""
 
 
 def _resolve_effort(body):

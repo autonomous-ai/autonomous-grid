@@ -259,10 +259,14 @@ def test_prepare_reads_reasoning_effort_when_thinking_is_absent():
     # absent -> no effort at all, so a body carrying neither field is unaffected
     assert cli_seat.prepare(body, "claude").effort == ""
 
-    # the OpenAI standard levels pass straight through
+    # the OpenAI standard levels pass straight through 1:1 — not climbed to a higher rung either
+    # CLI also accepts, since "high" names OpenAI's own vocabulary, not a budget to interpret
     for level in ("low", "medium", "high"):
         prepared = cli_seat.prepare({**body, "reasoning_effort": level}, "claude")
         assert prepared.effort == level
+
+    # an unrecognised value reads as no effort, same as an absent field
+    assert cli_seat.prepare({**body, "reasoning_effort": "extreme"}, "claude").effort == ""
 
 
 def test_thinking_wins_over_reasoning_effort_when_both_are_present():
