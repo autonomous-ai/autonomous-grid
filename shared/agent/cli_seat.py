@@ -620,23 +620,46 @@ def _effort_for_thinking(thinking):
     documented minimum and ~10000 as the typical worked example, so the thresholds below put a
     bare-minimum budget at `low`, put the common ~10000 case at `medium`, and reserve `xhigh`/`max`
     for callers who explicitly asked for a large budget (the range where deeper multi-step
-    reasoning is typically wanted). `{"type": "disabled"}` or a missing/malformed field returns ""
-    so an unset request passes no flag at all — today's behaviour, unchanged.
+    reasoning is typically wanted).
+
+    A live, unmodified Claude Code run sends neither of the two values this function used to know:
+    it sends `{"type": "adaptive", "display": "omitted"}` — the model decides its own budget, no
+    number to map. Treating that as "no effort" (its old behaviour) silently downgraded the CLI's
+    own default request shape: thinking is on, the turn is billed, and `claude` is never told to
+    think. There is no budget to derive a rung from, so `adaptive` is pinned to `"medium"` — a
+    judgement call, not a computed value, but a deliberate one: it is the same middle rung an
+    `enabled` request with no usable `budget_tokens` now also gets (below), so "the caller turned
+    thinking on but gave no number" reads the same way regardless of which of the two shapes for
+    saying that arrives.
+
+    Every OTHER type value — a future one none of us has seen yet, or a typo — is treated the same
+    way rather than falling through to "no effort": the client sent a non-empty `type` that is not
+    the explicit `"disabled"` off-switch, so it asked for *something*, and silence is the exact
+    failure mode this function exists to close. Only a genuinely absent/malformed field (no dict,
+    no `type`, or `type: "disabled"`) returns "" — that is the one case where nothing was asked for,
+    so an unset request still passes no flag at all, today's behaviour for that case unchanged.
     """
-    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+    if not isinstance(thinking, dict):
+        return ""
+    kind = thinking.get("type")
+    if not kind or kind == "disabled":
         return ""
     budget = thinking.get("budget_tokens")
-    if not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget <= 0:
-        return ""
-    if budget < 4000:
-        return "low"
-    if budget < 10000:
-        return "medium"
-    if budget < 32000:
-        return "high"
-    if budget < 60000:
-        return "xhigh"
-    return "max"
+    if kind == "enabled" and isinstance(budget, (int, float)) and not isinstance(budget, bool) \
+            and budget > 0:
+        if budget < 4000:
+            return "low"
+        if budget < 10000:
+            return "medium"
+        if budget < 32000:
+            return "high"
+        if budget < 60000:
+            return "xhigh"
+        return "max"
+    # "enabled" with no usable budget, "adaptive", or any unrecognised type: all mean the caller
+    # turned thinking on without handing us a number to grade. See the docstring above for why
+    # "medium" and not "".
+    return "medium"
 
 
 def _effort_for_reasoning_effort(value):

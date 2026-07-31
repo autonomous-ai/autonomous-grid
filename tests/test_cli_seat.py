@@ -233,6 +233,65 @@ def test_prepare_maps_the_thinking_budget_to_an_effort_level():
     assert small_effort != large_effort
 
 
+def test_adaptive_thinking_gets_a_middle_effort_not_silence():
+    """Regression: captured from a live, unmodified Claude Code run — no env overrides at all —
+    the DEFAULT request shape is `{"type": "adaptive", "display": "omitted"}`, not `enabled` or
+    `disabled`. `_effort_for_thinking` knew only those two and treated `adaptive` exactly like
+    `disabled`: no `--effort` flag. That silently downgraded every ordinary Claude Code turn —
+    thinking on, turn billed, `claude` never told to think — with no error and no warning."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "adaptive", "display": "omitted"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == "medium"
+
+
+def test_an_unrecognised_thinking_type_also_gets_a_middle_effort():
+    """The same class of gap `adaptive` was: a `type` value none of us has seen yet must not fall
+    through to "no effort" the way `adaptive` used to. The client sent a non-empty `type` that is
+    not the explicit `"disabled"` off-switch, so it asked for something — silence is the failure
+    mode this whole function exists to close."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "some_future_mode"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == "medium"
+
+
+def test_enabled_without_a_budget_also_gets_a_middle_effort():
+    """`{"type": "enabled"}` with no `budget_tokens` is still an enabled state, just one carrying
+    no number to grade — the same situation `adaptive` is in. It must resolve the same way
+    `adaptive` does rather than being the one enabled shape left silent."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == "medium"
+
+
+def test_enabled_with_a_budget_still_grades_by_size():
+    """The one case that DOES carry a number must keep climbing the ladder with it, not collapse
+    to the same flat "medium" the budget-less shapes above get."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+    small = cli_seat.prepare(
+        {**body, "thinking": {"type": "enabled", "budget_tokens": 2000}}, "claude",
+        wire="anthropic")
+    large = cli_seat.prepare(
+        {**body, "thinking": {"type": "enabled", "budget_tokens": 50000}}, "claude",
+        wire="anthropic")
+    assert small.effort == "low"
+    assert large.effort == "xhigh"
+
+
+def test_disabled_thinking_still_passes_no_effort():
+    """The one explicit off-switch must stay off: `disabled` is the caller actively saying "do not
+    think", not "gave no number" — it must not be swept into the new middle-effort default."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "disabled"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == ""
+
+
+def test_absent_thinking_still_passes_no_effort():
+    """A request naming no `thinking` field at all must remain today's baseline: no signal was
+    sent, so none should be invented."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == ""
+
+
 def test_claude_invoke_passes_effort_only_when_the_request_asked_for_thinking(tmp_path: Path):
     """The plumbing must reach `claude.py`'s `invoke`, which builds the argv — and an OpenAI
     `/chat/completions` request (no `thinking` field) must produce byte-identical argv to today."""
