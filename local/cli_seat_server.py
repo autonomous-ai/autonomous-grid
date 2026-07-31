@@ -174,11 +174,9 @@ async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
     base = {"id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion.chunk",
             "created": int(time.time()), "model": prepared.model}
     first = True
-    # With a tool protocol in play, nothing is streamed as it arrives: the raw `{"tool_calls": …}`
-    # would go out as prose AND come back as a parsed call, so the client printed the JSON and ran
-    # the tool. Only the parse knows which bytes were the call, and it cannot run until the answer
-    # ends — so the whole thing waits, and `content` is sent once, below.
-    buffered = bool(prepared.tool_protocol)
+    # Text before the first `{` cannot be part of a call, so it streams; the rest waits for the
+    # parse. See `_SafeText` — this used to hold the WHOLE answer whenever tools were present.
+    safe = _SafeText(bool(prepared.tool_protocol))
     async with app.state.slots:
         try:
             while True:
@@ -188,7 +186,8 @@ async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
                 if kind is None:
                     break
                 if kind == "delta":
-                    if buffered:
+                    payload = safe.feed(payload)
+                    if not payload:
                         continue
                     delta = {"content": payload}
                     if first:
@@ -203,9 +202,10 @@ async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
                         app.state.quota_cache = (time.monotonic(), quota)
                     choice = (payload.get("choices") or [{}])[0]
                     message = choice.get("message") or {}
-                    text = message.get("content") or ""
-                    if buffered and text:
-                        # The prose the parse left behind — the whole answer minus any call.
+                    # Only what the stream did not already send — the prose the parse left behind,
+                    # minus the span emitted before the first `{`.
+                    text = safe.remainder(message.get("content") or "")
+                    if text:
                         delta = {"content": text}
                         if first:
                             delta["role"], first = "assistant", False
@@ -238,13 +238,14 @@ async def _stream_anthropic(app: FastAPI, prepared):
     """Anthropic SSE: `message_start`, one block per text/tool_use in the answer, `message_delta`,
     `message_stop`.
 
-    Same buffering rule as the OpenAI stream above: with a tool protocol in play nothing goes out
-    until the CLI stops writing, because only the parse knows which bytes were the call — emitting
-    text deltas early is what let a client print the raw tool JSON as prose AND run the tool.
+    Same streaming rule as the OpenAI stream above, via the same `_SafeText`: text before the first
+    `{` goes out as it arrives, the rest waits for the parse — because only the parse knows which
+    bytes were the call, and emitting those early is what let a client print raw tool JSON as prose
+    AND run the tool.
     """
     spec, options = app.state.spec, app.state.options
     stream = cli_seat.answer_stream_anthropic(spec, prepared, app.state.binary, options.timeout)
-    buffered = bool(prepared.tool_protocol)
+    safe = _SafeText(bool(prepared.tool_protocol))
     msg_id = f"msg_{uuid.uuid4().hex}"
 
     yield _anthropic_frame({"type": "message_start", "message": {
@@ -263,7 +264,8 @@ async def _stream_anthropic(app: FastAPI, prepared):
                 if kind is None:
                     break
                 if kind == "delta":
-                    if buffered:
+                    payload = safe.feed(payload)
+                    if not payload:
                         continue
                     if not text_open:
                         yield _anthropic_frame({"type": "content_block_start", "index": index,
@@ -279,14 +281,27 @@ async def _stream_anthropic(app: FastAPI, prepared):
                         app.state.quota_cache = (time.monotonic(), quota)
                     usage = message.get("usage") or usage
                     stop_reason = message.get("stop_reason") or "end_turn"
-                    if buffered:
-                        # Nothing went out above — the whole answer, text and any tool_use block
-                        # alike, is only known now that the parse has run on the complete text.
-                        frames, index = _anthropic_block_frames(message.get("content") or [], index)
-                        for frame in frames:
-                            yield frame
-                    elif text_open:
+                    # One path, whatever was streamed. Finish the text the stream started (nothing,
+                    # a prefix, or all of it), close it, then render the tool_use blocks — which
+                    # only exist now that the parse has run on the complete answer. With nothing
+                    # streamed this emits exactly the frames the fully-buffered path used to.
+                    content = message.get("content") or []
+                    tail = safe.remainder("".join(
+                        b.get("text") or "" for b in content if b.get("type") == "text"))
+                    if tail:
+                        if not text_open:
+                            yield _anthropic_frame({"type": "content_block_start", "index": index,
+                                         "content_block": {"type": "text", "text": ""}})
+                            text_open = True
+                        yield _anthropic_frame({"type": "content_block_delta", "index": index,
+                                     "delta": {"type": "text_delta", "text": tail}})
+                    if text_open:
                         yield _anthropic_frame({"type": "content_block_stop", "index": index})
+                        index, text_open = index + 1, False
+                    frames, index = _anthropic_block_frames(
+                        [b for b in content if b.get("type") == "tool_use"], index)
+                    for frame in frames:
+                        yield frame
         except Exception as exc:  # noqa: BLE001 — mirrors the OpenAI stream's terminal-error contract
             yield _anthropic_frame({"type": "error", "error": {
                 "type": "cli_seat_error", "message": str(exc) or type(exc).__name__}})
@@ -296,21 +311,70 @@ async def _stream_anthropic(app: FastAPI, prepared):
     yield _anthropic_frame({"type": "message_stop"})
 
 
+class _SafeText:
+    """Answer text provably outside any tool call, so it can go out as it arrives.
+
+    Both protocols ask the model to reply with a JSON object "and nothing else", and the parse
+    (`cli_seat._json_objects`) finds a call ANYWHERE in the text — so from the first `{` on, nothing
+    can be called prose until the answer ends and the parse has run. Everything before it can: no
+    byte there can end up inside a call. That is the whole rule, and it is what lets a turn stream
+    while still never printing raw tool JSON as prose.
+
+    What this replaced keyed on the mere PRESENCE of tools, so a client that always sends a tool
+    roster — Claude Code does — never saw a token until the turn was over. Measured on the prod
+    grid: the gap to the second chunk equalled the whole request, 344s on an opus turn.
+
+    Prose that legitimately contains `{` (a code block) stops streaming there and finishes in one
+    burst. That is the old behaviour for that turn, never worse — safety before coverage.
+
+    One class, both wires, because the rule must not drift between them (the same reason
+    `_anthropic_block_frames` is shared).
+    """
+
+    def __init__(self, guarded: bool) -> None:
+        self._guarded = guarded
+        self._sent = ""
+        self._stopped = False
+
+    def feed(self, delta: str) -> str:
+        """The part of `delta` safe to emit now — `""` once the rest must be held."""
+        if self._stopped:
+            return ""
+        safe = delta
+        if self._guarded:
+            brace = delta.find("{")
+            if brace >= 0:
+                safe, self._stopped = delta[:brace], True
+        self._sent += safe
+        return safe
+
+    def remainder(self, text: str) -> str:
+        """What still needs emitting once the parse has run.
+
+        The `startswith` guard is what keeps the client's total byte-for-byte equal to the final
+        answer: it holds whenever the parse returned the text unchanged (the no-call case, which
+        `parse_openai_tool_calls` returns UNSTRIPPED), and fails only on the whitespace `.strip()`
+        removes when a call WAS found — where what already went out covers the prose and re-sending
+        a recomputed span would double it.
+        """
+        return text[len(self._sent):] if text.startswith(self._sent) else ""
+
+
 async def _stream_responses(app, prepared):
     """OpenAI Responses SSE: ``response.created``, ``output_text`` delta(s), ``response.completed``.
 
-    Same buffering rule as the OpenAI/Anthropic streams: with a tool protocol in play nothing goes
-    out until the CLI stops writing, because only the parse knows which bytes were the call —
-    emitting text deltas early is what let a client print the raw tool JSON as prose AND run the
-    tool. Tool-call items ride the terminal ``response.completed`` event's ``output[]``, never a
-    delta (they cannot be known until the answer is whole).
+    Same streaming rule as the OpenAI/Anthropic streams, via the same ``_SafeText``: text before the
+    first ``{`` goes out as it arrives, the rest waits for the parse — because only the parse knows
+    which bytes were the call, and emitting those early is what let a client print raw tool JSON as
+    prose AND run the tool. Tool-call items ride the terminal ``response.completed`` event's
+    ``output[]``, never a delta (they cannot be known until the answer is whole).
 
     Reuses ``_anthropic_frame`` — the SSE framing (``event: <type>\\ndata: <json>``) is identical
     across the Anthropic and Responses dialects; only the event names differ.
     """
     spec, options = app.state.spec, app.state.options
     stream = cli_seat.answer_stream_response(spec, prepared, app.state.binary, options.timeout)
-    buffered = bool(prepared.tool_protocol)
+    safe = _SafeText(bool(prepared.tool_protocol))
     resp_id = f"resp_{uuid.uuid4().hex}"
     msg_id = f"msg_{uuid.uuid4().hex}"
 
@@ -340,7 +404,8 @@ async def _stream_responses(app, prepared):
                 if kind is None:
                     break
                 if kind == "delta":
-                    if buffered:
+                    payload = safe.feed(payload)
+                    if not payload:
                         continue
                     if not text_open:
                         for frame in _open_text():
@@ -355,20 +420,18 @@ async def _stream_responses(app, prepared):
                         # A free reading the answer carried; refresh the cache so the next
                         # request's ceiling check costs nothing.
                         app.state.quota_cache = (time.monotonic(), quota)
-                    if buffered:
-                        # Nothing went out above — the whole answer, text included, is only known
-                        # now that the parse has run. Emit the text-item lifecycle and one delta
-                        # carrying the complete prose the parse left behind.
-                        text = _responses_output_text(response_obj)
-                        if text:
+                    # One path, whatever was streamed: emit only what the stream did not already
+                    # send — nothing when it streamed the lot, the whole prose when it streamed
+                    # none (a call-only answer leaves this empty and the text item never opens).
+                    tail = safe.remainder(_responses_output_text(response_obj))
+                    if tail:
+                        if not text_open:
                             for frame in _open_text():
                                 yield frame
                             text_open = True
-                            full_text = text
-                            yield _anthropic_frame({"type": "response.output_text.delta",
-                                "output_index": 0, "content_index": 0, "delta": text})
-                    elif not text_open:
-                        full_text = _responses_output_text(response_obj)
+                        full_text += tail
+                        yield _anthropic_frame({"type": "response.output_text.delta",
+                            "output_index": 0, "content_index": 0, "delta": tail})
         except Exception as exc:  # noqa: BLE001 — mirrors the OpenAI stream's terminal-error contract
             yield _anthropic_frame({"type": "response.failed", "response": {
                 "id": resp_id, "object": "response", "status": "failed",
@@ -407,8 +470,9 @@ def _responses_output_text(response_obj):
 
 def _anthropic_block_frames(blocks, start_index):
     """`content_block_start`/`delta`/`stop` for each text or tool_use block in `blocks`, indexed
-    from `start_index`. Shared by the buffered live-stream path above and the no-stream fallback
-    below, so a block is never rendered two different ways."""
+    from `start_index`. Shared by the live-stream path above — which passes only the `tool_use`
+    blocks, having already streamed the text — and the no-stream fallback below, which passes the
+    whole answer, so a block is never rendered two different ways."""
     frames, index = [], start_index
     for block in blocks:
         kind = block.get("type")
