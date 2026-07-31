@@ -1415,6 +1415,7 @@ class _ServeState:
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._inflight = 0
+        self._jobs_held = 0   # claimed-but-unfinished jobs; the drain's signal (see `jobs_held`)
         # The codex seat's credential holder — OUTSIDE the snapshot (ADR 0015 D-d): a token
         # rotation must not rebuild routing. Unconditional; primed only when the record has a
         # codex spec (startup + reload), unprimed otherwise and inert.
@@ -1613,6 +1614,28 @@ class _ServeState:
     def exit_inference(self) -> None:
         with self._lock:
             self._inflight = max(0, self._inflight - 1)
+
+    def enter_job(self) -> None:
+        with self._lock:
+            self._jobs_held += 1
+
+    def exit_job(self) -> None:
+        with self._lock:
+            self._jobs_held = max(0, self._jobs_held - 1)
+
+    def jobs_held(self) -> int:
+        """Claimed jobs a worker has not finished with — what the teardown drain waits on.
+
+        Deliberately NOT ``_inflight``. That one brackets the forward only and is published as
+        ``active_tasks`` for the relay's busy accounting, so widening it would change routing. This
+        brackets the whole of ``handle_job``, which is the real answer-owing window: routing, the
+        endpoint gate and every ``_try_submit_error`` run BEFORE the forward, and each of those
+        still owes the consumer a terminal response.
+
+        And not the worker threads either: one parked in a long-poll holds no job and cannot be
+        woken by ``stop``, so joining it only burns the shared budget."""
+        with self._lock:
+            return self._jobs_held
 
     def refresh(self, stale_token: str | None = None) -> bool:
         """Get a fresh access token after a 401: adopt one another worker already stored, else
@@ -2519,6 +2542,10 @@ def _poll_loop(state: _ServeState) -> None:
             _debug("poll: no job (204), re-polling")
             continue
         started = time.monotonic()
+        # Mark the job held for the WHOLE of handle_job, not just its forward: everything before the
+        # forward — routing, the endpoint gate, each `_try_submit_error` — still owes this consumer a
+        # terminal response, and the teardown drain waits on this counter (see `_ServeState.jobs_held`).
+        state.enter_job()
         try:
             handle_job(state, job)
         except Exception as exc:  # defence in depth: handle_job already guards, but never die here
@@ -2528,6 +2555,10 @@ def _poll_loop(state: _ServeState) -> None:
                 txn = job.get("transaction_id")
                 model = (job.get("body") or {}).get("model")
                 _debug(f"poll: job txn={txn} model={model!r} handled in {time.monotonic() - started:.2f}s")
+        finally:
+            # `finally`, not the `else`: a job that raised is finished with too, and leaking the
+            # count would make every later drain spend its whole budget waiting on a ghost.
+            state.exit_job()
 
 
 def _maybe_refresh_codex(state: _ServeState) -> None:
@@ -2696,8 +2727,14 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
     finally:
         state.stop.set()
         deadline = time.monotonic() + _DRAIN_TIMEOUT
-        for worker in workers:
-            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Wait on in-flight JOBS, never on the worker threads. A worker parked in a long-poll cannot
+        # be woken by `state.stop` and does not return for up to `relay.POLL_TIMEOUT` (35s) — far past
+        # this whole budget — so joining workers in list order let the first parked one (workers are
+        # idle almost always) spend the entire deadline, leaving `join(timeout=0.0)` for a worker
+        # genuinely mid-`handle_job` and for the heartbeat/reload joins below. The counter is the
+        # honest signal: it covers exactly the window from claim to submit.
+        while state.jobs_held() and time.monotonic() < deadline:
+            time.sleep(0.02)
         heartbeat.join(timeout=max(0.0, deadline - time.monotonic()))
         # Join the reload daemon too, against the SAME deadline — like the heartbeat, it can `register_once`
         # (re-advertise), so it must finish before the caller's `unregister_node`, or a reload's PUT could
@@ -2720,11 +2757,25 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
             if state.codex_seat.exchange_in_flight():
                 _warn("codex token exchange still unfinished at exit — if the next refresh "
                       "fails, re-run `grid join --api codex` to sign in again")
-        stragglers = [worker.name for worker in workers if worker.is_alive()]
-        if stragglers:
+        # Two different facts, deliberately two different lines. An abandoned PARKED poller costs
+        # nobody an answer; only a job still unsubmitted does. Reporting every live thread as the
+        # latter (what this used to do) reads as fleet-wide data loss on every ordinary restart and
+        # sends an operator hunting a bug that isn't there.
+        unfinished = state.jobs_held()
+        if unfinished:
             print(
-                f"\n{len(stragglers)} poll worker(s) still in flight after {_DRAIN_TIMEOUT}s drain — "
-                f"abandoning ({', '.join(stragglers)}); their consumers may see no terminal response.",
+                f"\n{unfinished} job(s) still in flight after {_DRAIN_TIMEOUT}s drain — "
+                f"abandoning; their consumers may see no terminal response.",
+                file=sys.stderr,
+            )
+        # Subtract the job holders: they are alive too, and calling them "parked, holding no job"
+        # would be the same overstatement in miniature. Counted, not named — pollers are
+        # interchangeable, so twenty thread names are a wall of text with no diagnostic value
+        # (unlike the heartbeat/reload lines below, where the name IS the finding).
+        parked = max(0, sum(1 for worker in workers if worker.is_alive()) - unfinished)
+        if parked:
+            print(
+                f"\n{parked} poll worker(s) abandoned while parked in a long-poll — they hold no job.",
                 file=sys.stderr,
             )
         if heartbeat.is_alive():

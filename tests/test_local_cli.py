@@ -12469,8 +12469,11 @@ def test_serve_loop_teardown_bounded_by_drain_timeout(monkeypatch, tmp_path, cap
     # One shared 0.2s deadline → ~0.2s total; a per-worker join would be ~8 × 0.2 = 1.6s.
     assert elapsed < 1.0
     err = capsys.readouterr().err
-    # Workers still in flight at the deadline are logged, not dropped silently.
-    assert "still in flight after" in err
+    # Workers abandoned at the deadline are logged, not dropped silently. They were parked in a
+    # long-poll holding no job, so the line says exactly that — the consumer-facing "no terminal
+    # response" warning belongs to unfinished JOBS and would be a false alarm here.
+    assert "8 poll worker(s) abandoned while parked" in err
+    assert "may see no terminal response" not in err
     # So is the heartbeat, which is joined BEFORE the reload thread against the same deadline — so a
     # heartbeat that overruns (e.g. a slow engine-health sweep) is also what ate the reload thread's
     # turn. Without this line an operator sees the consequence and never the cause.
@@ -12524,8 +12527,15 @@ def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
 
     def fake_poll(state):
         state.stop.set()          # shutdown begins while this 'job' is mid-flight
-        time.sleep(0.05)          # in-flight work, well within _DRAIN_TIMEOUT
-        submitted.append("done")  # result submitted before the worker returns
+        # `enter_job`/`exit_job` is what the real `_poll_loop` brackets `handle_job` with, and what
+        # the drain waits on. This fake replaces `_poll_loop` wholesale, so it has to declare the
+        # job itself — a bare sleeping thread holds nothing the teardown could owe anyone.
+        state.enter_job()
+        try:
+            time.sleep(0.05)          # in-flight work, well within _DRAIN_TIMEOUT
+            submitted.append("done")  # result submitted before the worker returns
+        finally:
+            state.exit_job()
 
     monkeypatch.setattr(serve, "_poll_loop", fake_poll)
     monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
@@ -12534,6 +12544,74 @@ def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
     serve._serve_loop(state)
 
     assert submitted == ["done"]
+
+
+def test_serve_loop_drain_is_not_eaten_by_workers_parked_in_a_long_poll(monkeypatch, tmp_path):
+    """The drain budget belongs to real work, not to idle threads.
+
+    The sibling above passes with ONE worker, which is exactly why the starvation hid: joining
+    workers in list order against a shared deadline means the FIRST parked poller — unwakeable, a
+    long-poll runs to `relay.POLL_TIMEOUT` (35s) — consumes the whole budget, and every worker
+    after it gets `join(timeout=0.0)`. Workers are idle almost always, so the busy one is almost
+    never first. Here worker 1 parks and worker 2 holds a job: the job must still submit.
+    """
+    from remote import serve
+
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 1.0)
+    parked = threading.Event()          # never set during drain → a real long-poll
+    submitted: list[str] = []
+
+    def fake_poll(state):
+        if threading.current_thread().name == "poll-worker-1":   # joined FIRST today
+            state.stop.set()            # shutdown begins
+            parked.wait(30)
+            return
+        state.enter_job()               # poll-worker-2: genuinely holding a job
+        try:
+            time.sleep(0.1)             # work well inside _DRAIN_TIMEOUT
+            submitted.append("done")
+        finally:
+            state.exit_job()
+
+    monkeypatch.setattr(serve, "_poll_loop", fake_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=2)
+
+    try:
+        serve._serve_loop(state)
+    finally:
+        parked.set()
+
+    assert submitted == ["done"], "the parked worker ate the whole drain budget"
+    assert state.jobs_held() == 0
+
+
+def test_serve_loop_teardown_reports_jobs_not_idle_threads(monkeypatch, tmp_path, capsys):
+    """Parked pollers hold no job, so abandoning them costs no consumer a response — saying they do
+    sends an operator hunting a data-loss bug that isn't there (it did, once). Report the two
+    separately: idle threads as an abandonment note, in-flight JOBS as the warning that matters."""
+    from remote import serve
+
+    monkeypatch.setattr(serve, "_DRAIN_TIMEOUT", 0.2)
+    parked = threading.Event()
+
+    def stuck_poll(state):
+        state.stop.set()
+        parked.wait(30)
+
+    monkeypatch.setattr(serve, "_poll_loop", stuck_poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path, max_concurrency=4)
+
+    try:
+        serve._serve_loop(state)
+    finally:
+        parked.set()
+
+    err = capsys.readouterr().err
+    assert "4 poll worker(s) abandoned while parked" in err
+    # No job was ever in flight, so the consumer-facing warning must NOT appear.
+    assert "may see no terminal response" not in err
 
 
 def test_relay_poll_malformed_body_raises_relay_error(monkeypatch):
@@ -21290,7 +21368,15 @@ def _poll_loop_state_and_poll(job_then_none):
     """A minimal serve state + a poll_once double that yields `job_then_none` then stops the loop."""
     from remote import serve
 
-    state = SimpleNamespace(stop=threading.Event())
+    # `enter_job`/`exit_job` bracket each claimed job so the teardown drain can wait on real work
+    # rather than on idle poll threads; this stub only has to accept the calls.
+    held: list[int] = []
+    state = SimpleNamespace(
+        stop=threading.Event(),
+        enter_job=lambda: held.append(1),
+        exit_job=lambda: held.pop(),
+        jobs_held=lambda: len(held),
+    )
     queue = list(job_then_none)
 
     def fake_poll(_state, **_kwargs):
