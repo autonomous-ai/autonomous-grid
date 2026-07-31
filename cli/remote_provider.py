@@ -341,7 +341,7 @@ def _resolve_api_targets(
     if getattr(args, "advertise_as", None):
         # Defence in depth: inline `-m real=alias` desugars into advertise_as after the early guard.
         raise SystemExit("--advertise-as aliasing doesn't apply with --api.")
-    valid = {api_catalog.advertised_name(kind, entry): entry for entry in whitelist.entries}
+    valid = {api_catalog.advertised_name(kind, entry): entry for entry in api_catalog.entries_for(kind)}
     # No -m = the whole whitelist (zero-config default); `valid` preserves whitelist order.
     requested = list(dict.fromkeys(args.models or []))  # dedupe so errors don't repeat
     chosen = requested or list(valid)
@@ -645,7 +645,7 @@ def _resolve_key_api_targets(
     else:
         # Media APIs (e.g. Doggi) don't expose GET /models — probe the endpoint to validate the key.
         _probe_media_api(kind, endpoint_url, key)
-        visible = {entry.vendor_name for entry in whitelist.entries}
+        visible = {entry.vendor_name for entry in api_catalog.entries_for(kind)}
         served = list(chosen)
     # The validation call above proved the key valid — only now persist it to the machine-local key
     # store, so a mistyped/revoked key is never stored for later joins (and the detached serve

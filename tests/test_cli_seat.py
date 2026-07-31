@@ -48,7 +48,7 @@ def test_seat_for_names_what_is_available():
 
 def test_advertised_models_come_from_the_catalog():
     assert cli_seat.advertised_models("claude") == [
-        api_catalog.advertised_name("claude", e) for e in api_catalog.WHITELISTS["claude"].entries
+        api_catalog.advertised_name("claude", e) for e in api_catalog.entries_for("claude")
     ]
 
 

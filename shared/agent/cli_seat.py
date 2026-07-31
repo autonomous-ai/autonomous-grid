@@ -232,10 +232,7 @@ def assert_available(spec):
 
 def advertised_models(kind):
     """What this seat serves, from the ONE catalog row the join also validates against."""
-    whitelist = api_catalog.WHITELISTS.get(kind)
-    if whitelist is None:
-        return []
-    return [api_catalog.advertised_name(kind, entry) for entry in whitelist.entries]
+    return [api_catalog.advertised_name(kind, entry) for entry in api_catalog.entries_for(kind)]
 
 
 def alias_for(kind, advertised):
@@ -245,8 +242,7 @@ def alias_for(kind, advertised):
     entry = api_catalog.find_advertised(kind, name)
     if entry is not None:
         return entry.vendor_name
-    whitelist = api_catalog.WHITELISTS.get(kind)
-    if whitelist and any(e.vendor_name == name for e in whitelist.entries):
+    if any(e.vendor_name == name for e in api_catalog.resolvable_entries(kind)):
         return name
     return None
 

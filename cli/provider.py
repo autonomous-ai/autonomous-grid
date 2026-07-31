@@ -333,7 +333,7 @@ def _spawn_api_media_engine(cfg: dict[str, Any], args: argparse.Namespace) -> in
     # With no -m, serve the whole whitelist for this kind — same default as the remote join.
     advertised = _narrow_advertised(
         kind,
-        [api_catalog.advertised_name(kind, entry) for entry in whitelist.entries],
+        [api_catalog.advertised_name(kind, entry) for entry in api_catalog.entries_for(kind)],
         list(getattr(args, "models", None) or []),
     )
 
