@@ -153,6 +153,62 @@ def require_session() -> str:
     return str(token)
 
 
+def claims_from_token(access_token: object) -> dict[str, Any]:
+    """A per-grid access token's JWT payload claims, or ``{}`` for anything unusable.
+
+    **No signature check, ever.** The relay verifies server-side; every caller here reads these claims
+    only to decide *our own* behaviour — which node to address, whether to refresh before handing the
+    token to an app — never to grant anything. That is what makes an unverified read safe: a forged
+    claim can only make this CLI do more work, never let it past a gate.
+
+    Total by contract: unusable input is an empty mapping, not an exception, so a caller can decide
+    what "we could not tell" means for it. Three shapes are guarded, all of which a naive
+    ``split(".")[1]`` handles wrongly rather than loudly:
+
+    - **A value that isn't a string.** The store's loader is ``str | None``-shaped, so a half-written
+      bundle lands here and ``None.split`` would be an ``AttributeError`` escaping this contract.
+    - **A segment count that isn't 3.** ``split(".")[1]`` decodes segment 1 of a *four*-segment string
+      perfectly happily, so without this a token of the wrong shape yields real-looking claims.
+    - **A payload that is valid JSON but not an object.** ``json.loads`` returns an int/list/None and
+      the caller's ``.get`` then explodes far from here.
+
+    (``remote/codex_auth._payload`` guards the same three for the codex seat and is deliberately not
+    shared with this: the two have opposite error contracts — that one *raises* a typed error, because
+    a seat that cannot be identified must fail a join, while an unreadable grid token here has to
+    degrade so the caller can fall through to the network check that knows better. Merging them would
+    force one contract to carry the other's.)
+    """
+    if not isinstance(access_token, str):
+        return {}
+    segments = access_token.split(".")
+    if len(segments) != 3:
+        return {}
+    payload = segments[1]
+    payload += "=" * (-len(payload) % 4)  # restore the base64 padding a JWT strips
+    try:
+        # binascii.Error, json.JSONDecodeError and UnicodeDecodeError all subclass ValueError;
+        # RecursionError covers a deeply-nested payload. Between them the decode is total.
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (ValueError, RecursionError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def token_expiry(access_token: object) -> int | None:
+    """The token's ``exp`` claim as POSIX seconds, or ``None`` when it does not say.
+
+    **Never reads the clock.** Whether that instant has passed is the caller's decision, and it has to
+    be: the refresh path reads claims back out of an already-expired token, so a helper that rejected
+    expired tokens would brick precisely the case refresh exists for (the discipline
+    ``codex_auth.decode_seat`` records for the same reason).
+
+    ``isinstance(True, int)`` is True in Python, so ``bool`` is excluded explicitly — otherwise
+    ``exp: true`` becomes ``1``, epoch 1970, and every caller refreshes eagerly forever.
+    """
+    exp = claims_from_token(access_token).get("exp")
+    return exp if isinstance(exp, int) and not isinstance(exp, bool) else None
+
+
 def node_id_from_token(access_token: str) -> str:
     """The provider node_id, read from a per-grid access token's JWT ``node_id`` claim.
 
@@ -160,16 +216,8 @@ def node_id_from_token(access_token: str) -> str:
     id is rejected with 403 "Cannot access another node". So node_id is NOT ours to invent (a random
     ``node-<uuid>`` is exactly what the relay refuses, and the run record's ``node_id`` field is a
     junk display value); it must come from the token. The serve loop (``remote/serve.py``) registers
-    under it; ``grid leave`` addresses its backstop deregister to it. Decode the JWT payload
-    best-effort and read the claim — no signature check (the relay verifies server-side; we only need
-    the claim to address our own node). Returns "" when the token isn't a decodable JWT carrying a
-    node_id, so the caller can surface a clean re-login error.
+    under it; ``grid leave`` addresses its backstop deregister to it. Returns "" when the token isn't
+    a decodable JWT carrying a node_id, so the caller can surface a clean re-login error.
     """
-    try:
-        payload = access_token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)  # restore the base64 padding a JWT strips
-        claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (IndexError, ValueError, json.JSONDecodeError):
-        return ""
-    node_id = claims.get("node_id") if isinstance(claims, dict) else None
+    node_id = claims_from_token(access_token).get("node_id")
     return str(node_id) if node_id else ""

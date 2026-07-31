@@ -34,6 +34,7 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
@@ -56,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Use --local/--remote before any command to override the active mode for that one run."
         ),
     )
+    # ⚠ Every global flag here must be **valueless** (`store_true`/`version`). `cli.dispatch.
+    # split_forwarded` finds the subcommand as the first non-option token, so a global flag that took
+    # a separate value would make that value look like the command word — `grid launch claude -- -p`
+    # would stop being recognised as a passthrough and argparse would bind `-p` to the `grid`
+    # positional again, which is the exact bug that function exists to prevent. A global flag that
+    # needs a value must be spelled `--flag=value`, or `split_forwarded` must learn about it.
     parser.add_argument("--version", action="version", version=f"grid {__version__}")
     parser.add_argument(
         "--json",
@@ -78,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_price(sub)
     _add_router(sub)
     _add_engine_setup(sub)
+    _add_launch(sub)
     _add_train(sub)
 
     return parser
@@ -624,6 +632,45 @@ def _add_remote_use_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Remote only: let your own engine serve this request.",
     )
+def _add_launch(sub) -> None:
+    launch = sub.add_parser(
+        "launch",
+        help="Start an app on your grid (claude)",
+        # The separator is invisible in a usage line, and the one thing it cannot carry is invisible
+        # everywhere — so both are spelled out here, which is the only place a user goes looking.
+        epilog=(
+            "Anything after `--` is passed to the app unchanged:\n"
+            "  grid launch claude -- --continue\n"
+            "  grid launch claude -- -p 'summarise this repo'\n"
+            "\n"
+            "Two words are the exception: `--local` and `--remote` are this CLI's one-shot mode\n"
+            "override and are removed from anywhere on the command line, so they cannot be\n"
+            "forwarded to the app — a warning says so when one is taken. `-- --local` also\n"
+            "switches this command to local mode, where it refuses, so it is reported as a mode\n"
+            "error rather than as a missing argument."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Two optional positionals, `target` first: argparse fills them left to right, so
+    # `grid launch claude` is target=claude/grid=None and `grid launch claude team` names both.
+    # `grid` matches info/models/engines verbatim — a name or id, omitted for the active grid.
+    launch.add_argument("target", nargs="?", default=None,
+                        help="Launch target. Omit to list what can be launched.")
+    launch.add_argument("grid", nargs="?", default=None,
+                        help="Grid name or id (ag-…). Omit for the active grid.")
+    launch.add_argument(
+        "--print-env",
+        action="store_true",
+        help="Print the environment as shell exports instead of starting the app. "
+             "Prints your grid's access token.",
+    )
+    # `forward` is never parsed from here — `cli.dispatch.split_forwarded` takes everything after the
+    # first `--` out of argv before this parser runs (argparse would bind the app's own flags to the
+    # two positionals above). The default is what makes `grid launch claude --`, with nothing after
+    # it, identical to no `--` at all.
+    launch.set_defaults(handler=cmd_launch, forward=())
+
+
 def _add_train(sub) -> None:
     from .train import (
         cmd_train_autopilot,

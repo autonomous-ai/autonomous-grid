@@ -11,7 +11,7 @@ import httpx
 
 from local import config
 from local import runtime
-from shared import run_records, state
+from shared import run_records, shell, state
 from shared._version import __version__
 
 
@@ -129,8 +129,11 @@ def cmd_info(args: argparse.Namespace) -> int:
     grid_url = runtime.grid_url(cfg)
 
     if args.env:
-        print(f'export OPENAI_BASE_URL="{grid_url}/v1"')
-        print('export OPENAI_API_KEY="local-grid"')
+        # Quoted the same way as the remote form, though the local token is a constant and the URL
+        # is built from this machine's own config: two commands printing the same block in two
+        # different quoting styles is how one of them stays wrong after the other is fixed.
+        print(f"export OPENAI_BASE_URL={shell.quote(f'{grid_url}/v1')}")
+        print(f"export OPENAI_API_KEY={shell.quote('local-grid')}")
         return 0
 
     engines, reachable = _live_engines(grid_url)
