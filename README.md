@@ -256,9 +256,9 @@ grid launch claude                      # …or `-- --continue`, and any other C
 `grid launch` starts an app already pointed at your grid: endpoint, credential and model names go
 into that app's own process environment and nowhere else — nothing exported to your shell, nothing
 written to a config file, nothing to undo. Remote only, because Claude Code speaks the Anthropic
-Messages dialect and only the relay translates it. This release fixes the model names
-(`claude:opus`, `claude:haiku`), so check `grid models` before your first launch — the command
-refuses up front, naming what's missing, rather than failing inside the app.
+Messages dialect and only the relay translates it. It chooses **no model for you** — your own Claude
+Code configuration and `/model` still decide, so check `grid models` and point the app at a name the
+grid serves.
 Walkthrough: [docs/claude-code-quickstart.md](docs/claude-code-quickstart.md) ·
 [contract](docs/cli.md#launch) · [ADR 0028](docs/adr/0028-launch-hands-an-app-the-grid.md).
 

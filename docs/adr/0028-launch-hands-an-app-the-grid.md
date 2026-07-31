@@ -35,11 +35,32 @@ closing the app is the whole cleanup.
 |---|---|
 | `ANTHROPIC_BASE_URL` | `resolve_relay_base(...)` + `/relay` — **no** `/v1` |
 | `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` | the grid's `access_token` |
-| `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` | the tier table |
-| `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` | the tier table |
+| ~~`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`~~ | ~~the tier table~~ |
+| ~~`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`~~ | ~~the tier table~~ |
 
 The tier table is **one hardcoded constant** in this slice, not discovered from the grid. It is the
 single place a later slice replaces with discovery, and it is the reason the preflight below exists.
+
+> ### Amended — the seven model variables are no longer set
+>
+> The env block is now **three keys**: the base URL and the two token variables. The tier table, the
+> required/optional split, the remap, and the preflight that checked those names are all gone.
+>
+> The decision above was made to stop Claude Code asking a grid for a real Anthropic model name no
+> grid serves. It bought that by making this command decide which model a user's session runs on —
+> a choice it has no standing to make, and one that silently overrode the user's own `settings.json`,
+> their `/model` default and any `ANTHROPIC_MODEL` already in their shell. Handing an app the grid is
+> the feature; choosing their model for them was never part of it.
+>
+> **What this costs, stated plainly:** a model the grid does not serve now fails at the user's first
+> prompt instead of at launch, and Grid cannot warn about it in advance, because it no longer knows
+> what the app is going to ask for. That is the trade — the launcher stops being wrong about the
+> model, and stops being able to be right about it.
+>
+> Preflight survives only as the one model fact that holds whatever the app asks: a grid serving
+> nothing can serve nothing, so an empty grid is still refused before the app starts. Everything else
+> in this ADR — the child-process-only environment, the base URL with no `/v1`, both token variables,
+> the rejected alternatives, `--print-env`'s carve-out — stands unchanged.
 
 ## Considered options
 
@@ -94,11 +115,14 @@ already reads it. See the consequence below.
   ([ADR 0003](./0003-remote-grid-lifecycle.md) §6). It carries the same justification as
   `info --env`: an explicit, user-requested disclosure of the caller's own token to the caller's own
   shell. Every other path stays token-free.
-- **A missing tier model fails at launch, loudly, not at request time.** With the tier table
+- ~~**A missing tier model fails at launch, loudly, not at request time.** With the tier table
   hardcoded, a grid that does not serve it is a launch-time refusal naming what is missing and what
   the grid does serve. The two tiers every session uses are required; the `/model`-only tiers fall
   back to the main model rather than blocking the launch or being left unset — unset would send
-  Claude Code asking for a real Anthropic model name that no grid serves.
+  Claude Code asking for a real Anthropic model name that no grid serves.~~
+  **Reversed by the amendment above.** No model variable is set, so a model the grid does not serve
+  fails at the first request — the launcher no longer knows what will be asked for. Only an empty
+  grid is still a launch-time refusal.
 - **`--local` / `--remote` are stripped from anywhere in argv** by `cli.dispatch.resolve_override`,
   including after the `--` separator, so those two exact tokens cannot be passed through to the
   launched app.

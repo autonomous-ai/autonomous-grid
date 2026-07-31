@@ -13,7 +13,6 @@ import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
 
 from shared import shell
 
@@ -21,95 +20,50 @@ from . import claude_install, system
 from .claude_install import BINARY, INSTALL_URL  # noqa: F401  (re-exported: the app's own identity)
 from .target import GridSession
 
-# The model each Claude Code tier resolves to on a grid. THE one constant: the single site a later
-# discovery slice replaces, so no other module may name these models (a test enforces it). The
-# `claude:*` family because those names map 1:1 onto Claude Code's own tiers — `/model haiku` inside
-# the app then resolves to a model the grid actually serves, rather than to a real Anthropic model
-# name no grid has ever heard of.
-MODEL_TIERS = {
-    "main": "claude:opus",
-    "small_fast": "claude:haiku",
-    "opus": "claude:opus",
-    "sonnet": "claude:sonnet",
-    "haiku": "claude:haiku",
-    "fable": "claude:fable",
-}
-
-# The tiers every session uses: the main model, and the small/fast one the subagent tier mirrors. A
-# grid that does not serve these cannot run a session at all, so their absence is a refusal. Every
-# other tier is reachable only through `/model`, so its absence is a remap (below), not a blocker.
-REQUIRED_TIERS = ("main", "small_fast")
-
 # Claude Code appends `/v1/messages` itself, so the base carries the relay prefix and **no** `/v1`.
 # Leave `/v1` on — as `grid info --env` prints it for OpenAI clients — and every request 404s.
 _RELAY_SUFFIX = "/relay"
 
 
-def _refuse_missing_required(session: GridSession, missing: list[str]) -> NoReturn:
-    """Refuse a grid that cannot run a session, in a message that is actionable on its own.
+def _require_live_models(session: GridSession) -> None:
+    """Refuse a grid that is serving nothing at all — the whole of preflight now.
 
-    Both halves are load-bearing. Without the missing names the user cannot tell which tier failed;
-    without what the grid *does* serve they cannot tell whether they mistyped a grid, joined the wrong
-    engine, or never joined one — and they would have to run a second command to find out.
+    ADR 0028 checked something much narrower: it injected a fixed model per Claude Code tier and
+    refused a grid that did not serve those exact names. That table is gone (see ``_environment``),
+    and with it any basis for this command to have an opinion about *which* model the app should ask
+    for — so the only model fact still worth checking is the one that is true whatever the app asks:
+    a grid with no live engines can serve nothing, and the launch would fail at the first prompt with
+    an error naming a model rather than an empty grid.
+
+    Still no off switch and still no question: the alternative is finding out inside Claude Code,
+    where the error names neither the grid nor the way out.
     """
-    # Deduped: two tiers may want the same model, and naming it twice reads as two problems.
-    wanted = ", ".join(dict.fromkeys(MODEL_TIERS[tier] for tier in missing))
-    served = ", ".join(session.live_models)
+    if session.live_models:
+        return
     raise SystemExit(
-        f"Grid {session.label} can't run Claude Code: it doesn't serve {wanted}.\n"
-        + (f"Models on {session.label}: {served}.\n" if served
-           else f"Grid {session.label} serves no models yet.\n")
-        # Both commands named, because neither alone is the whole way out: `grid join` runs on the
-        # machine that will serve the models, and the launch is retried here.
-        + f"Run `grid join` on an engine that serves {wanted}, "
-        f"then `grid launch {BINARY}` again."
+        f"Grid {session.label} serves no models yet, so Claude Code has nothing to talk to.\n"
+        # `grid join` runs on the machine that will serve the model, and the launch is retried here —
+        # neither command alone is the whole way out.
+        f"Run `grid join` on a machine with an engine, then `grid launch {BINARY}` again."
     )
 
 
-@dataclass(frozen=True)
-class _Tiers:
-    """What each Claude Code tier resolves to on one particular grid."""
-
-    #: Every tier in ``MODEL_TIERS``, mapped to the model this grid will actually be asked for. Always
-    #: complete — a remapped tier carries the main tier's model, never an empty string.
-    models: dict[str, str]
-    #: The optional tiers this grid does not serve, which now point at the main tier's model.
-    remapped: tuple[str, ...]
-
-
-def _resolve_tiers(session: GridSession) -> _Tiers:
-    """What each tier will actually resolve to on this grid — or a refusal (ADR 0028).
-
-    Preflight always runs: there is no flag that skips it and it never asks a question, because the
-    alternative is discovering the answer inside Claude Code, where the error names a model and
-    nothing else.
-    """
-    live = set(session.live_models)
-    missing_required = [tier for tier in REQUIRED_TIERS if MODEL_TIERS[tier] not in live]
-    if missing_required:
-        _refuse_missing_required(session, missing_required)
-    # Past the refusal, so the main tier's model is known to be live and is a safe destination for
-    # every `/model`-only tier this grid happens not to serve.
-    main = MODEL_TIERS["main"]
-    models = {tier: (model if model in live else main) for tier, model in MODEL_TIERS.items()}
-    return _Tiers(
-        models=models,
-        remapped=tuple(tier for tier, model in MODEL_TIERS.items() if model not in live),
-    )
-
-
-def _environment(session: GridSession, tiers: _Tiers) -> dict[str, str]:
+def _environment(session: GridSession) -> dict[str, str]:
     """The keys Claude Code is handed, layered over the inherited environment by ``run``.
 
-    Every tier variable is always present, remapped or not: leaving one unset would send Claude Code
-    back to a real Anthropic model name that no grid serves.
+    **No model variable is set, deliberately.** ADR 0028 injected seven — one per Claude Code tier,
+    from a hardcoded table — so that the app would ask the grid for names the grid served. That put
+    this command in charge of a choice it has no standing to make: which model a user's session runs
+    on. Left unset, Claude Code resolves models the way it does everywhere else — its own defaults,
+    the user's `settings.json`, and `/model` — and the grid answers for whatever it is asked. The
+    cost is recorded where the decision is: a grid that does not serve what the app asks for now
+    fails at the first prompt rather than at launch.
 
-    `GRID_TOKEN` is absent deliberately: it appears in the hand-rolled recipe, but it is a shell
-    convenience variable this app never reads. Telemetry variables are absent too — whether Grid
-    should disable Claude Code's error reporting is an open product question (ADR 0028), and leaving
-    it out is how that stays a question instead of a silent default.
+    `GRID_TOKEN` is absent for a different reason: it appears in the hand-rolled recipe, but it is a
+    shell convenience variable this app never reads. Telemetry variables are absent too — whether
+    Grid should disable Claude Code's error reporting is an open product question (ADR 0028), and
+    leaving it out is how that stays a question instead of a silent default.
     """
-    model = tiers.models
     return {
         # `rstrip` before the suffix: a stored relay address with a trailing slash would otherwise
         # produce a doubled slash the client sends verbatim.
@@ -117,13 +71,6 @@ def _environment(session: GridSession, tiers: _Tiers) -> dict[str, str]:
         # Both, because which one Claude Code reads depends on the path it takes to authenticate.
         "ANTHROPIC_AUTH_TOKEN": session.access_token,
         "ANTHROPIC_API_KEY": session.access_token,
-        "ANTHROPIC_MODEL": model["main"],
-        "ANTHROPIC_SMALL_FAST_MODEL": model["small_fast"],
-        "CLAUDE_CODE_SUBAGENT_MODEL": model["small_fast"],
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": model["opus"],
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": model["sonnet"],
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": model["haiku"],
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": model["fable"],
     }
 
 
@@ -248,24 +195,6 @@ def _warn_on_setting_overrides(session: GridSession, injected: Iterable[str]) ->
         )
 
 
-def _note_remapped(session: GridSession, tiers: _Tiers) -> None:
-    """Say which `/model`-only tiers this grid does not serve and where they now point.
-
-    Shared by both paths on purpose: `--print-env` hands the user the very same remapped values, so
-    a remap that were announced only on a launch would make the printed block quietly different from
-    what it claims to be.
-    """
-    if not tiers.remapped:
-        return
-    print(
-        f"Grid {session.label} doesn't serve the {', '.join(tiers.remapped)} "
-        f"tier{'s' if len(tiers.remapped) > 1 else ''} — `/model` there resolves to "
-        f"{tiers.models['main']}.",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
 @dataclass(frozen=True)
 class ClaudeCode:
     """Claude Code as a launch target."""
@@ -285,9 +214,8 @@ class ClaudeCode:
         starts nothing. A user printing exports is managing their own shell, where the binary may
         legitimately arrive later or under a name only they know.
         """
-        tiers = _resolve_tiers(session)
-        _note_remapped(session, tiers)
-        env = _environment(session, tiers)
+        _require_live_models(session)
+        env = _environment(session)
         # Diagnostics on stderr, so stdout stays a block a shell can evaluate unfiltered.
         _warn_on_setting_overrides(session, env)
         # This prints the grid's access token, making `--print-env` the **second** deliberate
@@ -300,28 +228,26 @@ class ClaudeCode:
         return 0
 
     def run(self, session: GridSession, argv: Sequence[str] = ()) -> int:
-        # First, before anything touches the machine: will this session actually work? A grid that
-        # cannot serve the required tiers is a refusal here, not an API error at the first prompt.
-        tiers = _resolve_tiers(session)
+        # First, before anything touches the machine: can this grid serve anything at all? An empty
+        # grid is a refusal here, not an API error at the first prompt.
+        _require_live_models(session)
         # Resolved here rather than checked by the caller first: one call, no window in which the app
         # can leave PATH between a check and its use — which is also why `LaunchTarget` has no separate
         # installed-check member for the offer below to sit behind.
         binary = claude_install.resolve_or_install(self.label)
-        # After the binary check, so a machine without the app gets one clean error rather than a
-        # preamble about tiers it will never use.
-        _note_remapped(session, tiers)
-        env = _environment(session, tiers)
+        env = _environment(session)
         _warn_on_setting_overrides(session, env)
-        # One line, printed by the target because only it knows which model it is about to ask for.
-        # After this the app owns the terminal, and the user can no longer tell which grid they are on.
+        # One line, because after it the app owns the terminal and the user can no longer tell which
+        # grid they are on. It names the grid and nothing else: this command no longer chooses a model
+        # (see `_environment`), so naming one here would be a claim it cannot keep.
         #
         # stderr, not stdout: this is a diagnostic about the launcher, while stdout belongs to the app.
-        # A user still sees it on a terminal, and a script capturing the app's output (once issue 05
-        # forwards arguments, `grid launch claude -p … | jq`) gets that output unpolluted.
+        # A user still sees it on a terminal, and a script capturing the app's output
+        # (`grid launch claude -p … | jq`) gets that output unpolluted.
         # `flush` is load-bearing: the child inherits this stream, and block-buffered output would
         # otherwise hold the line until exit — printing it *after* everything the app wrote.
         print(
-            f"Starting {self.label} on grid {session.label} (model {tiers.models['main']}).",
+            f"Starting {self.label} on grid {session.label}.",
             file=sys.stderr,
             flush=True,
         )

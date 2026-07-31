@@ -613,14 +613,9 @@ grid launch claude --print-env
 export ANTHROPIC_BASE_URL='https://relay.example/relay'
 export ANTHROPIC_AUTH_TOKEN='<your access token>'
 export ANTHROPIC_API_KEY='<your access token>'
-export ANTHROPIC_MODEL='claude:opus'
-export ANTHROPIC_SMALL_FAST_MODEL='claude:haiku'
-export CLAUDE_CODE_SUBAGENT_MODEL='claude:haiku'
-export ANTHROPIC_DEFAULT_OPUS_MODEL='claude:opus'
-export ANTHROPIC_DEFAULT_SONNET_MODEL='claude:sonnet'
-export ANTHROPIC_DEFAULT_HAIKU_MODEL='claude:haiku'
-export ANTHROPIC_DEFAULT_FABLE_MODEL='claude:fable'
 ```
+
+Three keys — an endpoint and a credential, and nothing else.
 
 The base carries the relay prefix and **no** `/v1`: Claude Code appends `/v1/messages` itself, so the
 `/v1` that `grid info --env` prints for OpenAI clients would 404 every request here. This is the
@@ -630,32 +625,29 @@ warning goes to stderr, so `eval "$(grid launch claude --print-env)"` evaluates 
 `--print-env` and `--` are mutually exclusive: with nothing started, the arguments after `--` have
 nothing to reach, so the combination is refused rather than silently dropped.
 
-**The model names are fixed in this release** — `claude:opus`, `claude:sonnet`, `claude:haiku`,
-`claude:fable`, one per Claude Code tier — so the grid has to serve them. `grid models` is the
-authoritative list of what a grid serves. Preflight always runs, has no off switch, and never asks a
-question. `claude:opus` (main) and `claude:haiku` (small/fast, which the subagent tier mirrors) are
-**required** — every session uses both — so a grid without them is refused before anything starts,
-naming what is missing and what the grid does serve:
+**No model is chosen for you.** `grid launch` sets no `ANTHROPIC_MODEL` and none of its siblings, so
+Claude Code resolves a model the way it does everywhere else — its own defaults, your
+`settings.json`, and `/model` inside the app. Which model a session runs on is your choice, and the
+grid answers for whatever it is asked. Use `grid models` to see what the grid serves, and point the
+app at one of those names.
+
+The trade is worth naming: a model the grid does not serve now fails at your **first prompt** rather
+than at launch. Grid cannot check it in advance, because it no longer knows what the app is going to
+ask for.
+
+Preflight is therefore down to the one model fact that holds whatever the app asks: a grid serving
+nothing can serve nothing. It always runs, has no off switch, and never asks a question:
 
 ```text
-Grid team can't run Claude Code: it doesn't serve claude:opus.
-Models on team: claude:haiku, glm-5.2.
-Run `grid join` on an engine that serves claude:opus, then `grid launch claude` again.
+Grid team serves no models yet, so Claude Code has nothing to talk to.
+Run `grid join` on a machine with an engine, then `grid launch claude` again.
 ```
 
-The other two tiers are reachable only through the app's own `/model` picker, so a grid that does not
-serve one has it pointed at the main tier's model, with one line saying so — a rarely used tier never
-blocks a launch:
-
-```text
-Grid team doesn't serve the sonnet, fable tiers — `/model` there resolves to claude:opus.
-```
-
-Preflight reads the grid's **public overview**, the same read `grid models` and `grid engines`
-render, so the two can never disagree about what is live.
+It reads the grid's **public overview**, the same read `grid models` and `grid engines` render, so
+the two can never disagree about what is live.
 
 **The credential is checked first, and repaired if it can be.** The order is deliberate: a dead token
-invalidates the model advice above, while a missing model says nothing about the token. `grid launch`
+invalidates the "your grid is empty" advice above, while an empty grid says nothing about the token. `grid launch`
 reads the token's own expiry offline, and asks the grid — `GET /relay/v1/models`, one round-trip —
 whether it will actually accept it. A token that has expired, is within a day of expiring, or is
 refused by the grid is **refreshed in place** and the launch continues, with one line on stderr:

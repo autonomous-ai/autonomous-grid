@@ -22547,8 +22547,9 @@ def _capture_launch(monkeypatch, *, binary="/usr/local/bin/claude", exit_code=0,
     return seen
 
 
-# Every tier `shared/launch/claude.MODEL_TIERS` names, so the default grid below passes preflight.
-_LAUNCH_TIER_MODELS = ["claude:opus", "claude:sonnet", "claude:haiku", "claude:fable"]
+# A grid that is serving something, which is all preflight asks for now that the tier table is gone.
+# The names are arbitrary — no launch code reads them; only "the list is non-empty" is load-bearing.
+_LAUNCH_MODELS = ["claude:opus", "claude:sonnet", "claude:haiku", "claude:fable"]
 
 
 def _isolate_claude_settings(monkeypatch, tmp_path):
@@ -22566,12 +22567,12 @@ def _isolate_claude_settings(monkeypatch, tmp_path):
     return config, project
 
 
-def _mock_tier_overview(monkeypatch, *, models=None, overview=None, seen=None):
+def _mock_launch_overview(monkeypatch, *, models=None, overview=None, seen=None):
     """Serve an overview whose grid serves every Claude Code tier — or exactly `models`, or a
     hand-built `overview` payload for the malformed cases."""
     _mock_overview(monkeypatch, overview if overview is not None else {
         "nodes": [{"name": "seat", "engine": "claude", "online": True,
-                   "models": list(_LAUNCH_TIER_MODELS if models is None else models)}]
+                   "models": list(_LAUNCH_MODELS if models is None else models)}]
     }, seen)
 
 
@@ -22580,44 +22581,26 @@ def _seed_launchable_grid(monkeypatch, tmp_path, *, models=None, overview=None, 
     """A signed-in remote user with one running grid whose overview serves every Claude Code tier,
     and isolated Claude Code settings. What a launch needs to get all the way to the spawn."""
     _seed_running_remote_grid(monkeypatch, tmp_path, access_token=access_token)
-    _mock_tier_overview(monkeypatch, models=models, overview=overview, seen=seen)
+    _mock_launch_overview(monkeypatch, models=models, overview=overview, seen=seen)
     return _isolate_claude_settings(monkeypatch, tmp_path)
 
 
-def test_launch_preflight_refuses_a_grid_that_does_not_serve_the_main_tier(monkeypatch, tmp_path):
-    """The whole risk of a hardcoded tier table lands here: a grid that does not serve it.
+def test_launch_does_not_judge_which_models_a_grid_serves(monkeypatch, tmp_path):
+    """The positive statement of the change that removed the tier table.
 
-    Unchecked, the failure surfaces *inside* Claude Code at the first prompt as an API error naming a
-    model — which a user reads as "Claude Code is broken", not "my grid has no such model". So it is a
-    refusal before any spawn, and the message has to be actionable on its own: what is missing, and
-    what the grid does serve.
+    `grid launch` used to inject a model per Claude Code tier from a hardcoded table, and refuse any
+    grid that did not serve those exact names — which put this command in charge of a choice it has no
+    standing to make. It sets no model now, so it has no basis for an opinion about which models are
+    there: a grid serving nothing but an unrelated model launches, and the app asks for whatever its
+    own configuration resolves to.
     """
-    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:haiku", "glm-5.2"])
+    _seed_launchable_grid(monkeypatch, tmp_path, models=["glm-5.2"])
     seen = _capture_launch(monkeypatch)
 
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["launch", "claude"])
-
-    message = str(exc.value)
-    assert "claude:opus" in message, f"the missing model must be named: {message}"
-    assert "glm-5.2" in message, f"what the grid does serve must be listed: {message}"
-    assert "argv" not in seen, "refused before the spawn, never launched into a model error"
-
-
-def test_launch_preflight_refuses_a_grid_that_does_not_serve_the_small_fast_tier(monkeypatch,
-                                                                                tmp_path):
-    """The small/fast tier is required too — the subagent tier mirrors it, so every session uses it.
-
-    Its own test because a check that stopped at the first required tier would still pass the one
-    above, and the grid that serves only the main model is the likelier real-world half-configuration.
-    """
-    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:opus"])
-    seen = _capture_launch(monkeypatch)
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["launch", "claude"])
-    assert "claude:haiku" in str(exc.value), str(exc.value)
-    assert "argv" not in seen
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["argv"] == ["/usr/local/bin/claude"]
+    assert [key for key in seen["env"] if key.endswith("_MODEL")] == [], \
+        "no model variable is injected, so none can be judged"
 
 
 def test_launch_preflight_refuses_a_grid_with_no_live_models_cleanly(monkeypatch, tmp_path):
@@ -22646,7 +22629,7 @@ def test_launch_preflight_degrades_cleanly_on_a_malformed_overview(monkeypatch, 
         seen = _capture_launch(monkeypatch)
         with pytest.raises(SystemExit) as exc:
             cli.main(["launch", "claude"])
-        assert "claude:opus" in str(exc.value), f"{payload} -> {exc.value}"
+        assert "no models" in str(exc.value).lower(), f"{payload} -> {exc.value}"
         assert "argv" not in seen, payload
 
 
@@ -22661,35 +22644,19 @@ def test_launch_preflight_reads_the_same_public_overview_as_models_and_engines(m
     assert (seen_request["method"], seen_request["path"]) == ("GET", "/relay/v1/grid/overview")
 
 
-def test_launch_preflight_remaps_an_unserved_optional_tier_to_the_main_model(monkeypatch, tmp_path,
-                                                                            capsys):
-    """A tier nobody in the session would have picked must not block a launch — but it must not be
-    left unset either.
+def test_launch_leaves_the_users_own_model_configuration_alone(monkeypatch, tmp_path):
+    """The reason the tier table went: a model already chosen in the environment must survive.
 
-    Unset is the trap: Claude Code then falls back to a *real Anthropic* model name that no grid
-    serves, so `/model sonnet` breaks in a way that looks like a Grid bug. Pointing it at the main
-    tier's model keeps every tier switch landing on something the grid actually serves.
+    While `grid launch` injected seven model variables, whatever the user had set was overwritten for
+    that session — their `settings.json`, their `/model` default, an `ANTHROPIC_MODEL` exported in
+    their shell. Setting none of them is what puts that choice back where it belongs.
     """
-    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:opus", "claude:haiku"])
+    monkeypatch.setenv("ANTHROPIC_MODEL", "a-model-the-user-picked")
+    _seed_launchable_grid(monkeypatch, tmp_path)
     seen = _capture_launch(monkeypatch)
 
-    assert cli.main(["launch", "claude"]) == 0, "an optional tier cannot block the launch"
-
-    assert seen["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude:opus"
-    assert seen["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "claude:opus"
-    # The tiers the grid *does* serve are untouched — a remap is per tier, not a flattening.
-    assert seen["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude:haiku"
-    assert seen["env"]["ANTHROPIC_MODEL"] == "claude:opus"
-    # Every documented variable still carries a value: "remapped" must never mean "omitted".
-    for key in [k for k in seen["env"] if k.endswith("_MODEL")]:
-        assert seen["env"][key], f"{key} was left empty by a remap"
-
-    # One line, and it names which *tiers* moved — the user thinks in `/model sonnet`, not in models.
-    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.strip()]
-    remap = [ln for ln in lines if "sonnet" in ln]
-    assert len(remap) == 1, f"the remap is reported once, not per tier: {lines}"
-    assert "fable" in remap[0], f"every moved tier is named in that one line: {remap[0]}"
-    assert "claude:opus" in remap[0], f"...and what they now resolve to: {remap[0]}"
+    assert cli.main(["launch", "claude"]) == 0
+    assert seen["env"]["ANTHROPIC_MODEL"] == "a-model-the-user-picked", "inherited, never overwritten"
 
 
 def test_launch_warns_when_claude_code_user_settings_override_the_injected_env(monkeypatch, tmp_path,
@@ -22742,16 +22709,19 @@ def test_launch_warns_when_project_settings_override_the_injected_env(monkeypatc
     _config, project = _seed_launchable_grid(monkeypatch, tmp_path)
     (project / ".claude").mkdir(parents=True)
     (project / ".claude" / "settings.local.json").write_text(
-        json.dumps({"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-4-5"}}), encoding="utf-8")
+        # Two keys: one this command injects, one it stopped injecting when the tier table went.
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://elsewhere.example",
+                            "ANTHROPIC_MODEL": "a-model-the-user-picked"}}), encoding="utf-8")
     _capture_launch(monkeypatch)
 
     assert cli.main(["launch", "claude"]) == 0
-    warnings = [ln for ln in capsys.readouterr().err.splitlines()
-                if "CLAUDE_CODE_SUBAGENT_MODEL" in ln]
-    # Not an `ANTHROPIC_*` name, but it overrides a variable this command sets just the same, so the
-    # check is "a key we inject", not a prefix.
+    err = capsys.readouterr().err
+    warnings = [ln for ln in err.splitlines() if "ANTHROPIC_BASE_URL" in ln]
     assert len(warnings) == 1, f"a project-level override must warn too: {warnings}"
     assert "settings.local.json" in warnings[0]
+    # The check is "a key we inject", not a prefix — and `ANTHROPIC_MODEL` is no longer one of ours,
+    # so warning about it would be telling the user their own model choice is a problem.
+    assert "ANTHROPIC_MODEL" not in err, f"a key we do not set is not a collision: {err}"
 
 
 @pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs a character device")
@@ -22837,14 +22807,14 @@ def test_launch_survives_a_process_with_no_resolvable_home_directory(monkeypatch
         lambda: (_ for _ in ()).throw(RuntimeError("Could not determine home directory."))))
     (project / ".claude").mkdir(parents=True)
     (project / ".claude" / "settings.json").write_text(
-        json.dumps({"env": {"ANTHROPIC_MODEL": "claude-opus-4-6"}}), encoding="utf-8")
+        json.dumps({"env": {"ANTHROPIC_API_KEY": "sk-the-users-own"}}), encoding="utf-8")
     seen = _capture_launch(monkeypatch)
 
     assert cli.main(["launch", "claude"]) == 0
     assert seen["argv"], "no home directory is not a reason to refuse to launch"
     err = capsys.readouterr().err
     assert "home directory" in err, f"say which location could not be checked: {err}"
-    assert "ANTHROPIC_MODEL" in err, f"the project's settings are still checked: {err}"
+    assert "ANTHROPIC_API_KEY" in err, f"the project's settings are still checked: {err}"
 
 
 def test_launch_says_so_when_a_settings_file_cannot_be_read(monkeypatch, tmp_path, capsys):
@@ -22886,11 +22856,15 @@ def _grid_home_tree(root):
     )
 
 
-def test_launch_claude_hands_the_child_exactly_the_ten_documented_keys(monkeypatch, tmp_path):
+def test_launch_claude_hands_the_child_exactly_the_three_documented_keys(monkeypatch, tmp_path):
     """The env the child is given IS this feature's contract, so it is asserted key by key.
 
-    A one-character change to any variable name or model value must not be able to ship green: the
-    dictionary below is spelled out rather than derived from the constant it is testing.
+    A one-character change to any variable name must not be able to ship green: the dictionary below
+    is spelled out rather than derived from the code it is testing.
+
+    Three keys, not the ten ADR 0028 specified. The seven `*_MODEL` variables are gone: choosing which
+    model a session runs on is the user's, not this command's, and the exact-equality assertion below
+    is what keeps one from creeping back.
     """
     _seed_launchable_grid(monkeypatch, tmp_path)  # relay https://relay.example, access token AT
     monkeypatch.delenv("GRID_TOKEN", raising=False)  # so its absence below is the command's doing
@@ -22905,20 +22879,14 @@ def test_launch_claude_hands_the_child_exactly_the_ten_documented_keys(monkeypat
         "ANTHROPIC_BASE_URL": "https://relay.example/relay",
         "ANTHROPIC_AUTH_TOKEN": "AT",
         "ANTHROPIC_API_KEY": "AT",
-        "ANTHROPIC_MODEL": "claude:opus",
-        "ANTHROPIC_SMALL_FAST_MODEL": "claude:haiku",
-        "CLAUDE_CODE_SUBAGENT_MODEL": "claude:haiku",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude:opus",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude:sonnet",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude:haiku",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude:fable",
     }
-    assert len(expected) == 10, "the documented block is ten keys; this list drifted"
+    assert len(expected) == 3, "the documented block is three keys; this list drifted"
     # Inherited environment, with those keys layered over it — the child keeps the user's PATH,
     # HOME and everything else, or Claude Code would launch into a stripped shell.
     assert seen["env"] == {**os.environ, **expected}
-    # ... and *only* those: any variable this command added or changed is one of the ten. This is
-    # what keeps a telemetry variable (deliberately not set, ADR 0028) from creeping in unnoticed.
+    # ... and *only* those: any variable this command added or changed is one of the three. This is
+    # what keeps a telemetry variable (deliberately not set, ADR 0028) — or a model variable — from
+    # creeping in unnoticed.
     assert {k: v for k, v in seen["env"].items() if os.environ.get(k) != v} == expected
     # `/v1` on the base is the single most likely mistake: Claude Code appends `/v1/messages` itself.
     assert "/v1" not in seen["env"]["ANTHROPIC_BASE_URL"]
@@ -22936,7 +22904,7 @@ def test_launch_claude_base_url_never_doubles_a_slash(monkeypatch, tmp_path):
     _seed_remote(monkeypatch, tmp_path,
                  networks=[{"network_id": "n1", "name": "team", "access_token": "AT"}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example/"})
-    _mock_tier_overview(monkeypatch)
+    _mock_launch_overview(monkeypatch)
     _isolate_claude_settings(monkeypatch, tmp_path)
     seen = _capture_launch(monkeypatch)
 
@@ -22954,7 +22922,7 @@ def test_launch_claude_targets_a_named_grid_and_defaults_to_the_active_one(monke
         {"network_id": "n1", "name": "team", "access_token": "AT-TEAM"},
         {"network_id": "n2", "name": "lab", "access_token": "AT-LAB"}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
-    _mock_tier_overview(monkeypatch)
+    _mock_launch_overview(monkeypatch)
     _isolate_claude_settings(monkeypatch, tmp_path)
     seen = _capture_launch(monkeypatch)
 
@@ -23018,24 +22986,6 @@ def test_launch_is_wired_in_the_parser_and_classified_remote_only():
         with pytest.raises(SystemExit) as exc:
             parser.parse_args(["launch", "claude", flag])
         assert exc.value.code == 2, flag
-
-
-def test_launch_tier_models_are_named_in_exactly_one_module():
-    """The tier values are the single site a later discovery slice replaces, so a second copy anywhere
-    would make that a multi-site change — and one copy would then silently go stale."""
-    from shared.launch import claude
-
-    assert set(claude.MODEL_TIERS) == {"main", "small_fast", "opus", "sonnet", "haiku", "fable"}
-    home = Path(claude.__file__).resolve()
-    root = home.parents[2]
-    for value in sorted(set(claude.MODEL_TIERS.values())):
-        hits = {
-            path.resolve()
-            for package in ("cli", "shared", "local", "remote")
-            for path in (root / package).rglob("*.py")
-            if value in path.read_text(encoding="utf-8")
-        }
-        assert hits == {home}, f"{value!r} is named outside the one constant: {sorted(hits)}"
 
 
 def test_launch_adding_a_second_target_needs_no_change_to_the_claude_target(monkeypatch, tmp_path, capsys):
@@ -23383,14 +23333,14 @@ def test_launch_never_offers_an_install_for_a_grid_that_could_not_run_the_app(mo
     models were already read before the target was called, so checking them first costs nothing;
     installing first costs everything it takes to undo.
     """
-    _seed_launchable_grid(monkeypatch, tmp_path, models=["glm-5.2"])
+    _seed_launchable_grid(monkeypatch, tmp_path, overview={"nodes": []})
     _install_locations(monkeypatch, tmp_path)
     seen = _capture_launch(monkeypatch, binary=None, interactive=True, confirm=True)
 
     with pytest.raises(SystemExit) as exc:
         cli.main(["launch", "claude"])
 
-    assert "claude:opus" in str(exc.value), f"the grid is what failed, so name it: {exc.value}"
+    assert "no models" in str(exc.value).lower(), f"the grid is what failed, so name it: {exc.value}"
     assert seen["asked"] == [], "nobody may be offered an app their grid cannot run"
     assert seen["spawns"] == []
 
@@ -23623,7 +23573,10 @@ def test_launch_claude_prints_one_line_naming_the_grid_and_model_before_spawning
     assert seen["before_spawn"].out == "", "stdout belongs to the app, not to the launcher"
     lines = [line for line in seen["before_spawn"].err.splitlines() if line.strip()]
     assert len(lines) == 1, f"one line before the app starts, not {len(lines)}: {lines}"
-    assert "team" in lines[0] and "claude:opus" in lines[0]
+    # The grid, and only the grid. This command no longer chooses a model, so naming one here would
+    # be a claim it cannot keep — the app resolves that from its own configuration.
+    assert "team" in lines[0], lines[0]
+    assert "model" not in lines[0].lower(), f"nothing is claimed about the model: {lines[0]}"
 
 
 def _stub_binary(monkeypatch, path="/usr/local/bin/claude"):
@@ -23833,7 +23786,7 @@ def test_launch_does_not_read_a_forwarded_word_as_its_grid_argument(monkeypatch,
         {"network_id": "n1", "name": "team", "access_token": "AT-TEAM"},
         {"network_id": "n2", "name": "lab", "access_token": "AT-LAB"}], active="team")
     _mock_lifecycle(monkeypatch, status={"state": "running", "signaling_url": "https://relay.example"})
-    _mock_tier_overview(monkeypatch)
+    _mock_launch_overview(monkeypatch)
     _isolate_claude_settings(monkeypatch, tmp_path)
     seen = _capture_launch(monkeypatch)
 
@@ -24058,16 +24011,16 @@ def test_launch_print_env_prints_exactly_what_a_launch_would_inject(monkeypatch,
 def test_launch_print_env_runs_preflight_and_refuses_what_a_launch_refuses(monkeypatch, tmp_path,
                                                                            capsys):
     """Printing exports for a grid that cannot serve them would reproduce exactly the trap preflight
-    exists to close — the user evaluates the block, starts the app themselves, and meets a model
-    error that names nothing about their grid."""
-    _seed_launchable_grid(monkeypatch, tmp_path, models=["claude:haiku", "glm-5.2"])
+    exists to close — the user evaluates the block, starts the app themselves, and meets an error
+    that names nothing about their grid."""
+    _seed_launchable_grid(monkeypatch, tmp_path, overview={"nodes": []})
     _capture_launch(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
         cli.main(["launch", "claude", "--print-env"])
 
     message = str(exc.value)
-    assert "claude:opus" in message and "glm-5.2" in message, message
+    assert "no models" in message.lower() and "grid join" in message, message
     assert capsys.readouterr().out == "", "refused before a single export was printed"
 
 
@@ -24161,7 +24114,7 @@ def _mock_launch_relay(monkeypatch, *, probe=200, probe_sequence=None, models=No
             return httpx.Response(answer, json={"detail": body})
         return httpx.Response(200, json={"nodes": [{
             "name": "seat", "engine": "claude", "online": True,
-            "models": list(_LAUNCH_TIER_MODELS if models is None else models),
+            "models": list(_LAUNCH_MODELS if models is None else models),
         }]})
 
     _mock_relay(monkeypatch, handler)
