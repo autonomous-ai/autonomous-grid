@@ -34,6 +34,11 @@ def invoke(binary, prepared, tmpdir, stream=False):
         "--no-session-persistence",
         "--system-prompt-file", str(system_file),
     ]
+    # Only present when the caller's request carried a `thinking` budget or a `reasoning_effort`
+    # (cli_seat.prepare resolves either to a level); absent entirely otherwise, so a plain OpenAI
+    # request naming neither gets today's argv, unchanged.
+    if prepared.effort:
+        argv += ["--effort", prepared.effort]
     # stream-json emits real text deltas; plain json returns one object at the end.
     argv += (["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
              if stream else ["--output-format", "json"])

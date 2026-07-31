@@ -93,11 +93,17 @@ class AppServer:
             raise AppServerError(f"thread/start returned no thread id: {result}")
         return thread_id
 
-    def start_turn(self, thread_id, text):
+    def start_turn(self, thread_id, text, effort=None):
         """Send one user turn. The ANSWER does not come back here — it arrives as `turn/*` and
-        `item/*` notifications, which `drain_notifications` hands back."""
-        return self.call("turn/start", {"threadId": thread_id,
-                                        "input": [{"type": "text", "text": text}]})
+        `item/*` notifications, which `drain_notifications` hands back.
+
+        `effort` is per-turn, the way codex's own app-server schema has it — not session config,
+        so it travels with THIS request rather than every turn a long-lived thread might run.
+        Omitted (falsy) leaves the params byte-identical to before this field existed."""
+        params = {"threadId": thread_id, "input": [{"type": "text", "text": text}]}
+        if effort:
+            params["effort"] = effort
+        return self.call("turn/start", params)
 
     def drain_notifications(self):
         """Everything the server pushed since the last drain."""
@@ -276,7 +282,10 @@ def serve(binary, prepared, timeout, on_delta=None):
             # base is replaced, so this uses the one field rather than a stub plus a second.
             baseInstructions=prepared.system_prompt or None,
         )
-        server.start_turn(thread_id, prepared.prompt)
+        # `prepared.effort` is resolved once, by cli_seat.prepare, from either the request's
+        # `thinking` field or its `reasoning_effort` field — "" when the caller asked for neither,
+        # which keeps this call's params identical to before either was read.
+        server.start_turn(thread_id, prepared.prompt, effort=prepared.effort)
         text, tokens, duration_ms, failure = _collect(server, timeout, on_delta)
         if failure:
             raise SeatError(f"`codex` failed: {failure[:400]}")

@@ -106,6 +106,33 @@ def test_images_are_named_not_silently_dropped():
     assert "image omitted" in prompt
 
 
+def test_a_thinking_block_folds_its_reasoning_into_the_prompt():
+    """Regression: `_flatten_content` handled `text`, `image_url` and `input_image` only, so a
+    replayed `thinking` block — the model's own prior reasoning — vanished with no trace. From
+    turn two the model lost its own chain of thought and nobody was told."""
+    prompt = cli_seat.build_prompt([{"role": "user", "content": [
+        {"type": "thinking", "thinking": "first I considered X, then Y", "signature": "sig-abc"},
+        {"type": "text", "text": "so the answer is 4"},
+    ]}])
+    assert "first I considered X, then Y" in prompt
+    assert "so the answer is 4" in prompt
+    # the reasoning appears before the text that followed it — client block order preserved
+    assert prompt.index("first I considered X") < prompt.index("so the answer is 4")
+    # signature is opaque and only meaningful on the way back out; this seat never produces one
+    assert "sig-abc" not in prompt
+
+
+def test_an_unrecognised_block_leaves_a_visible_marker():
+    """An unknown block type used to be dropped with no trace at all — worse than an image, which
+    at least leaves `[image omitted ...]`. The next unhandled shape must be discoverable, not
+    invisible."""
+    prompt = cli_seat.build_prompt([{"role": "user", "content": [
+        {"type": "text", "text": "look"}, {"type": "some_future_block", "data": "x"},
+    ]}])
+    assert "look" in prompt
+    assert "some_future_block" in prompt and "omitted" in prompt
+
+
 def test_prepare_rejects_an_unserved_model():
     with pytest.raises(cli_seat.SeatBadRequest):
         cli_seat.prepare({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}, "claude")
@@ -182,6 +209,141 @@ def test_claude_invoke_disables_tools_and_replaces_the_system_prompt(tmp_path: P
     assert "--system-prompt-file" in argv and "--append-system-prompt-file" not in argv
     written = Path(argv[argv.index("--system-prompt-file") + 1])
     assert written.read_text(encoding="utf-8") == "SYSTEM"
+
+
+def test_prepare_maps_the_thinking_budget_to_an_effort_level():
+    """Regression: the request's `thinking` field was read nowhere (grep confirmed zero
+    occurrences), so a caller who enabled extended thinking got an ordinary answer and was
+    charged for the turn with no sign anything was ignored."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    # absent -> no --effort at all, so today's behaviour is unchanged
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == ""
+
+    # {"type": "disabled"} -> same as absent
+    disabled = {**body, "thinking": {"type": "disabled"}}
+    assert cli_seat.prepare(disabled, "claude", wire="anthropic").effort == ""
+
+    # two different budgets must produce two different levels, rising with the budget
+    small = {**body, "thinking": {"type": "enabled", "budget_tokens": 2000}}
+    large = {**body, "thinking": {"type": "enabled", "budget_tokens": 50000}}
+    small_effort = cli_seat.prepare(small, "claude", wire="anthropic").effort
+    large_effort = cli_seat.prepare(large, "claude", wire="anthropic").effort
+    assert small_effort and large_effort
+    assert small_effort != large_effort
+
+
+def test_adaptive_thinking_gets_a_middle_effort_not_silence():
+    """Regression: captured from a live, unmodified Claude Code run — no env overrides at all —
+    the DEFAULT request shape is `{"type": "adaptive", "display": "omitted"}`, not `enabled` or
+    `disabled`. `_effort_for_thinking` knew only those two and treated `adaptive` exactly like
+    `disabled`: no `--effort` flag. That silently downgraded every ordinary Claude Code turn —
+    thinking on, turn billed, `claude` never told to think — with no error and no warning."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "adaptive", "display": "omitted"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == "medium"
+
+
+def test_an_unrecognised_thinking_type_also_gets_a_middle_effort():
+    """The same class of gap `adaptive` was: a `type` value none of us has seen yet must not fall
+    through to "no effort" the way `adaptive` used to. The client sent a non-empty `type` that is
+    not the explicit `"disabled"` off-switch, so it asked for something — silence is the failure
+    mode this whole function exists to close."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "some_future_mode"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == "medium"
+
+
+def test_enabled_without_a_budget_also_gets_a_middle_effort():
+    """`{"type": "enabled"}` with no `budget_tokens` is still an enabled state, just one carrying
+    no number to grade — the same situation `adaptive` is in. It must resolve the same way
+    `adaptive` does rather than being the one enabled shape left silent."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "enabled"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == "medium"
+
+
+def test_enabled_with_a_budget_still_grades_by_size():
+    """The one case that DOES carry a number must keep climbing the ladder with it, not collapse
+    to the same flat "medium" the budget-less shapes above get."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+    small = cli_seat.prepare(
+        {**body, "thinking": {"type": "enabled", "budget_tokens": 2000}}, "claude",
+        wire="anthropic")
+    large = cli_seat.prepare(
+        {**body, "thinking": {"type": "enabled", "budget_tokens": 50000}}, "claude",
+        wire="anthropic")
+    assert small.effort == "low"
+    assert large.effort == "xhigh"
+
+
+def test_disabled_thinking_still_passes_no_effort():
+    """The one explicit off-switch must stay off: `disabled` is the caller actively saying "do not
+    think", not "gave no number" — it must not be swept into the new middle-effort default."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "disabled"}}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == ""
+
+
+def test_absent_thinking_still_passes_no_effort():
+    """A request naming no `thinking` field at all must remain today's baseline: no signal was
+    sent, so none should be invented."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").effort == ""
+
+
+def test_claude_invoke_passes_effort_only_when_the_request_asked_for_thinking(tmp_path: Path):
+    """The plumbing must reach `claude.py`'s `invoke`, which builds the argv — and an OpenAI
+    `/chat/completions` request (no `thinking` field) must produce byte-identical argv to today."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    no_thinking = cli_seat.prepare(body, "claude")  # OpenAI wire — never carries `thinking`
+    argv, _ = claude.invoke("/bin/claude", no_thinking, tmp_path)
+    assert "--effort" not in argv
+
+    enabled = {**body, "thinking": {"type": "enabled", "budget_tokens": 50000}}
+    prepared = cli_seat.prepare(enabled, "claude", wire="anthropic")
+    assert prepared.effort
+    argv, _ = claude.invoke("/bin/claude", prepared, tmp_path)
+    assert "--effort" in argv and argv[argv.index("--effort") + 1] == prepared.effort
+
+
+def test_prepare_reads_reasoning_effort_when_thinking_is_absent():
+    """Most traffic never reaches the seat in Anthropic's own shape — an engine that does not
+    speak Anthropic translates the request to the OpenAI wire first, and a plain OpenAI client
+    sends `reasoning_effort`, never `thinking`. Regression: grep confirmed zero occurrences of
+    `reasoning_effort` under shared/agent/, so this path discarded the caller's choice silently."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    # absent -> no effort at all, so a body carrying neither field is unaffected
+    assert cli_seat.prepare(body, "claude").effort == ""
+
+    # the OpenAI standard levels pass straight through 1:1 — not climbed to a higher rung either
+    # CLI also accepts, since "high" names OpenAI's own vocabulary, not a budget to interpret
+    for level in ("low", "medium", "high"):
+        prepared = cli_seat.prepare({**body, "reasoning_effort": level}, "claude")
+        assert prepared.effort == level
+
+    # an unrecognised value reads as no effort, same as an absent field
+    assert cli_seat.prepare({**body, "reasoning_effort": "extreme"}, "claude").effort == ""
+
+
+def test_thinking_wins_over_reasoning_effort_when_both_are_present():
+    """`thinking` carries an actual token budget; `reasoning_effort` carries one of three words.
+    The richer signal must win whenever it resolves to something, and only a `thinking` that
+    resolves to nothing (absent or disabled) should let `reasoning_effort` be read at all."""
+    body = {"model": "claude:sonnet", "messages": [{"role": "user", "content": "hi"}]}
+
+    both = {**body, "thinking": {"type": "enabled", "budget_tokens": 50000},
+            "reasoning_effort": "low"}
+    prepared = cli_seat.prepare(both, "claude", wire="anthropic")
+    assert prepared.effort != "low"
+    assert prepared.effort == cli_seat.prepare(
+        {**body, "thinking": both["thinking"]}, "claude", wire="anthropic").effort
+
+    # thinking present but disabled -> falls through to reasoning_effort
+    disabled_both = {**body, "thinking": {"type": "disabled"}, "reasoning_effort": "high"}
+    assert cli_seat.prepare(disabled_both, "claude", wire="anthropic").effort == "high"
 
 
 def test_claude_decode_reads_usage_and_folds_in_cache_tokens():
@@ -566,3 +728,162 @@ def test_tools_sent_means_parsed_and_no_tools_means_verbatim():
     assert plain["choices"][0]["message"]["content"] == raw
     assert "tool_calls" not in plain["choices"][0]["message"]
     assert plain["choices"][0]["finish_reason"] == "stop"
+
+
+# tool calls: Anthropic's own shape, spoken beside OpenAI's
+
+def test_an_anthropic_tool_use_is_read_back():
+    """Same scan as the OpenAI parse — `_json_objects` is reused — differing only in which keys
+    carry the call."""
+    text = '{"type": "tool_use", "name": "Read", "input": {"file_path": "data.txt"}}'
+    prose, calls = cli_seat.parse_anthropic_tool_uses(text)
+    assert prose == ""
+    assert calls[0]["name"] == "Read"
+    assert calls[0]["input"] == {"file_path": "data.txt"}
+    assert calls[0]["id"].startswith("toolu_")
+
+
+def test_anthropic_input_is_accepted_as_an_object_or_an_encoded_string():
+    """A model transcribing the template has no schema enforcement and may double-encode `input`
+    the way OpenAI's `arguments` convention taught it to. Dropping that string to `{}` would call
+    the tool with its arguments silently gone; decoding it mirrors `_one_call` on the OpenAI side."""
+    for input_value in ('{"file_path": "a.txt"}', '"{\\"file_path\\": \\"a.txt\\"}"'):
+        text = '{"type": "tool_use", "name": "Read", "input": ' + input_value + "}"
+        _, calls = cli_seat.parse_anthropic_tool_uses(text)
+        assert calls[0]["input"] == {"file_path": "a.txt"}
+
+
+def test_an_anthropic_answer_with_no_call_is_returned_byte_for_byte():
+    text = "  Just talking. Braces { } and a < sign.  "
+    assert cli_seat.parse_anthropic_tool_uses(text) == (text, [])
+
+
+def test_a_malformed_anthropic_block_stays_in_the_prose():
+    broken = '{"type": "tool_use", "input": {}}'
+    prose, calls = cli_seat.parse_anthropic_tool_uses(broken)
+    assert calls == []
+    assert prose == broken
+
+
+def test_to_anthropic_message_sets_tool_use_and_stop_reason():
+    raw = '{"type": "tool_use", "name": "Read", "input": {"file_path": "data.txt"}}'
+    result = cli_seat.SeatResult(text=raw, input_tokens=10, output_tokens=4)
+    message = cli_seat.to_anthropic_message(result, "claude", "claude:sonnet", cli_seat.ANTHROPIC)
+    assert message["type"] == "message"
+    assert message["stop_reason"] == "tool_use"
+    assert [b["type"] for b in message["content"]] == ["tool_use"]
+    assert message["usage"] == {"input_tokens": 10, "output_tokens": 4}
+
+
+# the seat reads Anthropic requests and serves /messages (Task 11)
+
+def test_an_anthropic_request_puts_the_top_level_system_in_the_system_prompt():
+    """Anthropic sends `system` as a top-level field, not a message with role=system. Read as a
+    message list it vanishes, and the model loses the caller's whole instruction set."""
+    body = {"model": "claude:sonnet",
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [{"role": "user", "content": "hi"}]}
+    prepared = cli_seat.prepare(body, "claude", wire="anthropic")
+    assert prepared.system_prompt == "You are Claude Code."
+    assert prepared.prompt == "hi"
+
+
+def test_an_anthropic_tool_result_block_is_replayed_as_text():
+    body = {"model": "claude:sonnet", "messages": [
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu1", "name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu1", "content": "SECRET"}]},
+    ]}
+    prompt = cli_seat.prepare(body, "claude", wire="anthropic").prompt
+    assert '"type": "tool_use"' in prompt
+    assert "Tool result: SECRET" in prompt
+
+
+def test_the_claude_catalog_row_declares_messages():
+    assert "messages" in api_catalog.WHITELISTS["claude"].endpoints
+
+
+# the seat refuses an Anthropic server tool (Task 12)
+
+def test_an_anthropic_server_tool_is_refused_rather_than_passed_through():
+    """`web_search`, `bash` and `code_execution` are run by Anthropic, not by the caller. The
+    seat must refuse them with 400 — letting one through produces a tool call nobody executes,
+    which reaches the user as a hang."""
+    body = {"model": "claude:sonnet",
+            "messages": [{"role": "user", "content": "search"}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}]}
+    with pytest.raises(cli_seat.SeatBadRequest) as exc:
+        cli_seat.prepare(body, "claude", wire="anthropic")
+    assert "web_search" in str(exc.value)
+
+
+def test_an_ordinary_function_tool_is_accepted():
+    body = {"model": "claude:sonnet",
+            "messages": [{"role": "user", "content": "read"}],
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}]}
+    assert cli_seat.prepare(body, "claude", wire="anthropic").tool_protocol is cli_seat.ANTHROPIC
+
+
+# SSE framing: event: + data: pairs (found live, not by a test)
+
+def test_the_anthropic_stream_pairs_a_named_event_with_each_data_line():
+    """Found by running the real seat: it emitted bare `data:` frames with no `event:` line, so
+    every frame dispatched under the SSE default event name `message` and a client switching on
+    the event name could not tell `content_block_delta` from `message_stop` apart. Anthropic's own
+    wire pairs a named `event:` line with its `data:` line before every blank-line boundary."""
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("hi")
+        return cli_seat.SeatResult(text="hi", output_tokens=1)
+
+    base = seat_for("claude")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    client = TestClient(app)
+
+    resp = client.post("/messages", json={
+        "model": "claude:sonnet", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    body = resp.text
+
+    assert 'event: message_start\ndata: {"type": "message_start"' in body
+    assert 'event: content_block_delta\ndata: {"type": "content_block_delta"' in body
+    assert 'event: message_stop\ndata: {"type": "message_stop"' in body
+    # every frame is an event: line immediately followed by its data: line, never a bare data: line
+    pairs = [ln for ln in body.split("\n\n") if ln.strip()]
+    for pair in pairs:
+        lines = pair.split("\n")
+        assert lines[0].startswith("event: "), f"frame missing event: line: {pair!r}"
+        assert lines[1].startswith("data: "), f"event: not paired with data: {pair!r}"
+
+
+def test_the_openai_stream_stays_data_only():
+    """The OpenAI `/chat/completions` stream is `data:`-only by its own convention and must stay
+    byte-identical — this pins that the Anthropic `event:` fix did not leak across wires."""
+    from fastapi.testclient import TestClient
+
+    from local.cli_seat_server import create_app
+    from shared.agent.seats import seat_for
+
+    def run(binary, prepared, timeout, on_delta):
+        on_delta("hi")
+        return cli_seat.SeatResult(text="hi", output_tokens=1)
+
+    base = seat_for("codex-cli")
+    spec = base.__class__(**{**base.__dict__, "run": run})
+    app = create_app(spec=spec, binary="/fake/bin", options=cli_seat.SeatOptions())
+    client = TestClient(app)
+
+    resp = client.post("/chat/completions", json={
+        "model": "codex-cli:gpt-5.6-terra", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]})
+    body = resp.text
+
+    assert "event:" not in body
+    assert "data: [DONE]" in body

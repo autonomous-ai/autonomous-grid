@@ -312,7 +312,16 @@ def quota_refusal(snapshot, options):
 # request -> prompt
 
 def _flatten_content(content):
-    """Only text survives; a CLI seat has no image path, so images are named as omitted."""
+    """Text and replayed reasoning survive; anything else leaves a visible marker rather than
+    vanishing without trace.
+
+    A `thinking` block is the model's own prior reasoning, replayed by the client on a later
+    turn — `{"type": "thinking", "thinking": "<reasoning text>", "signature": "<opaque>"}`. Folded
+    into the prompt the same way ordinary text is, in the same position, so the model keeps its
+    own chain of thought past turn one. `signature` is dropped: it only authenticates a reasoning
+    block on the way back out to Anthropic, and this seat can never produce a valid one for its
+    own answers.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -320,10 +329,17 @@ def _flatten_content(content):
         for part in content:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") == "text":
+            kind = part.get("type")
+            if kind == "text":
                 chunks.append(str(part.get("text") or ""))
-            elif part.get("type") in ("image_url", "input_image"):
+            elif kind == "thinking":
+                chunks.append(str(part.get("thinking") or ""))
+            elif kind in ("image_url", "input_image"):
                 chunks.append("[image omitted — this engine serves text only]")
+            else:
+                # Previously dropped with no trace at all. A short, neutral marker makes the
+                # next unhandled block shape discoverable instead of silently invisible.
+                chunks.append(f"[{kind or 'unknown'} block omitted — this engine serves text only]")
         return "\n".join(c for c in chunks if c)
     return "" if content is None else str(content)
 
@@ -433,6 +449,55 @@ def parse_openai_tool_calls(text):
 OPENAI = ToolProtocol(name="openai", render=render_openai_tools, parse=parse_openai_tool_calls)
 
 
+# Anthropic's own shape: one `tool_use` block instead of an array of `tool_calls`. Kept as a
+# second, independent protocol rather than a translation of OPENAI's — a seat serving `/messages`
+# natively should never need a round trip through the OpenAI shape to get there.
+ANTHROPIC_TOOL_TEMPLATE = """These tools are available to you:
+{tools_json}
+
+To use one, reply with a JSON object in exactly this shape and nothing else:
+{{"type": "tool_use", "name": <tool-name>, "input": {{<input-object>}}}}
+
+Emit one object per call. Reply with plain text instead whenever no tool is needed."""
+
+
+def render_anthropic_tools(tools):
+    block = ANTHROPIC_TOOL_TEMPLATE.format(tools_json=json.dumps(tools, ensure_ascii=False))
+    return f"{block}\n\n{TOOL_DELEGATION_NOTE}"
+
+
+def parse_anthropic_tool_uses(text):
+    """Answer text -> `(prose, tool_use blocks)`. Same scan as the OpenAI parse; only the keys
+    differ. An object that is not a usable call is LEFT WHERE IT IS — a half-written call is a
+    result worth seeing, and dropping it turns a visible malformation into a model that
+    mysteriously did nothing."""
+    calls, prose_parts, cursor = [], [], 0
+    for start, end, value in _json_objects(text):
+        if not isinstance(value, dict) or value.get("type") != "tool_use":
+            continue
+        name = value.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        prose_parts.append(text[cursor:start])
+        cursor = end
+        payload = value.get("input")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = {}
+        calls.append({"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                      "name": name, "input": payload if isinstance(payload, dict) else {}})
+    if not calls:
+        return text, []
+    prose_parts.append(text[cursor:])
+    return "".join(prose_parts).strip(), calls
+
+
+ANTHROPIC = ToolProtocol(name="anthropic", render=render_anthropic_tools,
+                         parse=parse_anthropic_tool_uses)
+
+
 def build_system_prompt(messages, tools=None, protocol=None):
     """The caller's system messages, verbatim.
 
@@ -447,21 +512,46 @@ def build_system_prompt(messages, tools=None, protocol=None):
     return system if system.strip() else DEFAULT_SYSTEM_PROMPT
 
 
+def _has_tool_result(content):
+    """True iff `content` is an Anthropic block list carrying a `tool_result` — the lone-user-turn
+    shortcut below must not take this path, or the result vanishes with no `User:`/`Tool result:`
+    line to carry it."""
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
+
+
 def build_prompt(messages):
     """The non-system messages as one stdin prompt. Each request is a fresh process with no
     memory, so the whole transcript is replayed. A lone user turn passes through verbatim."""
     turns = [m for m in messages if m.get("role") != "system"]
     if not turns:
         raise SeatBadRequest("messages[] must contain at least one non-system message.")
-    if len(turns) == 1 and turns[0].get("role") == "user":
+    if (len(turns) == 1 and turns[0].get("role") == "user"
+            and not _has_tool_result(turns[0].get("content"))):
         return _flatten_content(turns[0].get("content"))
 
     lines = []
     for message in turns:
         role = message.get("role")
-        text = _flatten_content(message.get("content"))
+        content = message.get("content")
+        text = _flatten_content(content)
         if role == "user":
-            lines.append(f"User: {text}" if text else "User:")
+            # Anthropic's own shape: a tool result arrives as a `tool_result` block INSIDE a user
+            # message, never as a `role: "tool"` message. Rendered with the IDENTICAL wording the
+            # OpenAI `role: "tool"` branch below uses — one convention, not two — rather than
+            # "User: Tool result: …", which would be a second spelling of the same thing.
+            results = [b for b in (content if isinstance(content, list) else [])
+                       if isinstance(b, dict) and b.get("type") == "tool_result"]
+            if results:
+                for block in results:
+                    lines.append(f"Tool result: {_flatten_content(block.get('content'))}")
+                rest = _flatten_content([b for b in content if not
+                                         (isinstance(b, dict) and b.get("type") == "tool_result")])
+                if rest:
+                    lines.append(f"User: {rest}")
+            else:
+                lines.append(f"User: {text}" if text else "User:")
         elif role == "assistant":
             rendered = [f"Assistant: {text}" if text else "Assistant:"]
             # Replayed in the SAME shape the instruction asks for. They used to be replayed as
@@ -480,6 +570,17 @@ def build_prompt(messages):
                               "function": {"name": function.get("name"), "arguments": arguments}})
             if calls:
                 rendered.append(json.dumps({"tool_calls": calls}, ensure_ascii=False))
+            # Anthropic's own shape: a `tool_use` block sits IN the content list rather than in a
+            # separate `tool_calls` field. Replayed one JSON object per call — the same convention
+            # ANTHROPIC_TOOL_TEMPLATE asks the model to write — so the history and the instruction
+            # agree from the second turn on, same as the OpenAI case above.
+            for block in (content if isinstance(content, list) else []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    rendered.append(json.dumps({
+                        "type": "tool_use",
+                        "name": block.get("name"),
+                        "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                    }, ensure_ascii=False))
             lines.append("\n".join(rendered))
         elif role == "tool":
             lines.append(f"Tool result: {text}")
@@ -501,9 +602,114 @@ class PreparedRequest:
     # None when the caller sent no `tools[]`, which is what keeps a client that brought its own
     # convention (Hermes' own `<tools>` system message) getting its text back verbatim.
     tool_protocol: object = None
+    # Which wire the caller spoke — "openai" or "anthropic". Carried on the request so the server
+    # answers in the SAME wire it was asked in without re-deriving it from the body a second time.
+    wire: str = "openai"
+    # The seat's own effort level, derived from the request's `thinking` field or, failing that,
+    # its `reasoning_effort` field — "" when the caller asked for neither, so today's argv/turn
+    # params are unaffected.
+    effort: str = ""
 
 
-def prepare(body, kind, protocol=None):
+def _effort_for_thinking(thinking):
+    """The request's Anthropic `thinking` field -> a `claude --effort` level, or "" for none.
+
+    The wire carries a token budget (`{"type": "enabled", "budget_tokens": N}`); `claude` only
+    exposes five coarse levels (low, medium, high, xhigh, max) with no token knob, so this mapping
+    is a judgement call, not a fact. Anthropic's own extended-thinking docs use 1024 tokens as the
+    documented minimum and ~10000 as the typical worked example, so the thresholds below put a
+    bare-minimum budget at `low`, put the common ~10000 case at `medium`, and reserve `xhigh`/`max`
+    for callers who explicitly asked for a large budget (the range where deeper multi-step
+    reasoning is typically wanted).
+
+    A live, unmodified Claude Code run sends neither of the two values this function used to know:
+    it sends `{"type": "adaptive", "display": "omitted"}` — the model decides its own budget, no
+    number to map. Treating that as "no effort" (its old behaviour) silently downgraded the CLI's
+    own default request shape: thinking is on, the turn is billed, and `claude` is never told to
+    think. There is no budget to derive a rung from, so `adaptive` is pinned to `"medium"` — a
+    judgement call, not a computed value, but a deliberate one: it is the same middle rung an
+    `enabled` request with no usable `budget_tokens` now also gets (below), so "the caller turned
+    thinking on but gave no number" reads the same way regardless of which of the two shapes for
+    saying that arrives.
+
+    Every OTHER type value — a future one none of us has seen yet, or a typo — is treated the same
+    way rather than falling through to "no effort": the client sent a non-empty `type` that is not
+    the explicit `"disabled"` off-switch, so it asked for *something*, and silence is the exact
+    failure mode this function exists to close. Only a genuinely absent/malformed field (no dict,
+    no `type`, or `type: "disabled"`) returns "" — that is the one case where nothing was asked for,
+    so an unset request still passes no flag at all, today's behaviour for that case unchanged.
+    """
+    if not isinstance(thinking, dict):
+        return ""
+    kind = thinking.get("type")
+    if not kind or kind == "disabled":
+        return ""
+    budget = thinking.get("budget_tokens")
+    if kind == "enabled" and isinstance(budget, (int, float)) and not isinstance(budget, bool) \
+            and budget > 0:
+        if budget < 4000:
+            return "low"
+        if budget < 10000:
+            return "medium"
+        if budget < 32000:
+            return "high"
+        if budget < 60000:
+            return "xhigh"
+        return "max"
+    # "enabled" with no usable budget, "adaptive", or any unrecognised type: all mean the caller
+    # turned thinking on without handing us a number to grade. See the docstring above for why
+    # "medium" and not "".
+    return "medium"
+
+
+def _effort_for_reasoning_effort(value):
+    """The OpenAI standard `reasoning_effort` field -> a CLI effort level, or "" for none.
+
+    Passed straight through 1:1 (`low`/`medium`/`high`) rather than climbed onto a higher rung,
+    even though both CLIs accept a wider ladder (claude adds xhigh/max; codex adds
+    none/minimal/xhigh/ultra). Unlike `thinking.budget_tokens`, this field is not a measurement a
+    mapping has to interpret — `low`/`medium`/`high` IS OpenAI's own vocabulary for how hard the
+    model should think, and both CLIs use the identical words for the identical idea. A caller who
+    asked for "high" asked for OpenAI's high; assuming they meant the CLI's most extreme setting
+    would be inventing intent the wire never carried. Anything outside those three words (or a
+    missing field) reads as no effort at all, the same as an absent `thinking`.
+    """
+    level = str(value or "").strip().lower()
+    return level if level in ("low", "medium", "high") else ""
+
+
+def _resolve_effort(body):
+    """The request body's reasoning-effort signal -> a CLI effort level, or "" for none.
+
+    Two fields can carry this, never both meaningfully at once in practice since they belong to
+    different wires: Anthropic's own `thinking` (a token budget) reaches the seat when a client
+    speaks `/messages` natively; the OpenAI standard `reasoning_effort` reaches it once an engine
+    that does not speak Anthropic has translated the request to the OpenAI wire first. `thinking`
+    wins whenever it actually resolves to an effort — it is the richer signal, carrying a real
+    budget rather than one of three words. A request naming neither, or naming only a disabled
+    `thinking`, falls through to `reasoning_effort`; a request with neither returns "", so an
+    ordinary body's resulting argv/turn params are unaffected.
+    """
+    thinking_effort = _effort_for_thinking(body.get("thinking"))
+    if thinking_effort:
+        return thinking_effort
+    return _effort_for_reasoning_effort(body.get("reasoning_effort"))
+
+
+def _reject_server_tools(tools):
+    """A tool with a `type` is one Anthropic runs on its own servers (`web_search`, `bash`,
+    `code_execution`…), not one the caller executes. This seat has no such server, so accepting
+    one would emit a tool call nobody answers — the consumer just hangs."""
+    for tool in tools or []:
+        kind = tool.get("type") if isinstance(tool, dict) else None
+        if kind and kind != "function":
+            raise SeatBadRequest(
+                f"Unsupported tool type: {kind} ({tool.get('name', '?')}). "
+                "This seat executes nothing itself; the caller runs every tool."
+            )
+
+
+def prepare(body, kind, protocol=None, wire="openai"):
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise SeatBadRequest("messages[] is required.")
@@ -514,16 +720,30 @@ def prepare(body, kind, protocol=None):
             f"This engine does not serve model {requested!r}. "
             f"Serves: {', '.join(advertised_models(kind))}."
         )
+    resolved_protocol = protocol or (ANTHROPIC if wire == "anthropic" else OPENAI)
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
+    if wire == "anthropic" and tools:
+        _reject_server_tools(tools)
     prompt = build_prompt(messages)
     if tools:
-        prompt = f"{prompt}\n\n{(protocol or OPENAI).render(tools)}"
+        prompt = f"{prompt}\n\n{resolved_protocol.render(tools)}"
+    if wire == "anthropic":
+        # `system` is a TOP-LEVEL field on this wire, not a `role: "system"` message — reading it
+        # off `messages` (the OpenAI shape) would silently drop the caller's whole instruction set,
+        # since Anthropic never puts one there. May be a plain string or a list of text blocks;
+        # `_flatten_content` already reads both.
+        system_prompt = _flatten_content(body.get("system"))
+        system_prompt = system_prompt if system_prompt.strip() else DEFAULT_SYSTEM_PROMPT
+    else:
+        system_prompt = build_system_prompt(messages)
     return PreparedRequest(
         model=requested or f"{kind}:{model_alias}",
         model_alias=model_alias,
         prompt=prompt,
-        system_prompt=build_system_prompt(messages),
-        tool_protocol=(protocol or OPENAI) if tools else None,
+        system_prompt=system_prompt,
+        tool_protocol=resolved_protocol if tools else None,
+        wire=wire,
+        effort=_resolve_effort(body),
     )
 
 
@@ -699,9 +919,38 @@ def to_chat_completion(result, kind, model, protocol=None):
     }
 
 
+def to_anthropic_message(result, kind, model, protocol=None):
+    """The Anthropic `message` shape, built directly rather than via a chat.completion the relay
+    would have to convert back."""
+    text, calls = result.text, []
+    if protocol is not None and getattr(protocol, "parse", None):
+        text, calls = protocol.parse(result.text)
+    content = ([{"type": "text", "text": text}] if text else []) + calls
+    return {
+        "id": f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": "tool_use" if calls else "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": result.input_tokens, "output_tokens": result.output_tokens},
+        "grid_cli_seat": {"kind": kind, "total_cost_usd": result.cost_usd,
+                          "duration_ms": result.duration_ms, "num_turns": result.num_turns,
+                          "session_id": result.session_id},
+    }
+
+
 def answer(spec, prepared, binary, timeout):
     result = run_seat(spec, prepared, binary, timeout)
     return to_chat_completion(result, spec.kind, prepared.model, prepared.tool_protocol)
+
+
+def answer_anthropic(spec, prepared, binary, timeout):
+    """`answer`'s Anthropic twin: the same one CLI run, decoded into the `message` shape
+    `/messages` promises rather than a chat.completion."""
+    result = run_seat(spec, prepared, binary, timeout)
+    return to_anthropic_message(result, spec.kind, prepared.model, prepared.tool_protocol)
 
 
 def answer_stream(spec, prepared, binary, timeout):
@@ -719,4 +968,19 @@ def answer_stream(spec, prepared, binary, timeout):
             completion = to_chat_completion(
                 result, spec.kind, prepared.model, prepared.tool_protocol)
             yield "done", (completion, quota)
+            return
+
+
+def answer_stream_anthropic(spec, prepared, binary, timeout):
+    """`answer_stream`'s Anthropic twin: identical deltas, the final event built by
+    `to_anthropic_message` instead of `to_chat_completion`."""
+    stream = stream_seat(spec, prepared, binary, timeout)
+    while True:
+        try:
+            yield "delta", next(stream)
+        except StopIteration as stop:
+            result, quota = stop.value
+            message = to_anthropic_message(
+                result, spec.kind, prepared.model, prepared.tool_protocol)
+            yield "done", (message, quota)
             return
