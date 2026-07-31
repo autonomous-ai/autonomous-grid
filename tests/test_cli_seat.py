@@ -106,6 +106,33 @@ def test_images_are_named_not_silently_dropped():
     assert "image omitted" in prompt
 
 
+def test_a_thinking_block_folds_its_reasoning_into_the_prompt():
+    """Regression: `_flatten_content` handled `text`, `image_url` and `input_image` only, so a
+    replayed `thinking` block — the model's own prior reasoning — vanished with no trace. From
+    turn two the model lost its own chain of thought and nobody was told."""
+    prompt = cli_seat.build_prompt([{"role": "user", "content": [
+        {"type": "thinking", "thinking": "first I considered X, then Y", "signature": "sig-abc"},
+        {"type": "text", "text": "so the answer is 4"},
+    ]}])
+    assert "first I considered X, then Y" in prompt
+    assert "so the answer is 4" in prompt
+    # the reasoning appears before the text that followed it — client block order preserved
+    assert prompt.index("first I considered X") < prompt.index("so the answer is 4")
+    # signature is opaque and only meaningful on the way back out; this seat never produces one
+    assert "sig-abc" not in prompt
+
+
+def test_an_unrecognised_block_leaves_a_visible_marker():
+    """An unknown block type used to be dropped with no trace at all — worse than an image, which
+    at least leaves `[image omitted ...]`. The next unhandled shape must be discoverable, not
+    invisible."""
+    prompt = cli_seat.build_prompt([{"role": "user", "content": [
+        {"type": "text", "text": "look"}, {"type": "some_future_block", "data": "x"},
+    ]}])
+    assert "look" in prompt
+    assert "some_future_block" in prompt and "omitted" in prompt
+
+
 def test_prepare_rejects_an_unserved_model():
     with pytest.raises(cli_seat.SeatBadRequest):
         cli_seat.prepare({"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}, "claude")

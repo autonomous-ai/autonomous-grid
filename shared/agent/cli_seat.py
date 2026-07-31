@@ -312,7 +312,16 @@ def quota_refusal(snapshot, options):
 # request -> prompt
 
 def _flatten_content(content):
-    """Only text survives; a CLI seat has no image path, so images are named as omitted."""
+    """Text and replayed reasoning survive; anything else leaves a visible marker rather than
+    vanishing without trace.
+
+    A `thinking` block is the model's own prior reasoning, replayed by the client on a later
+    turn — `{"type": "thinking", "thinking": "<reasoning text>", "signature": "<opaque>"}`. Folded
+    into the prompt the same way ordinary text is, in the same position, so the model keeps its
+    own chain of thought past turn one. `signature` is dropped: it only authenticates a reasoning
+    block on the way back out to Anthropic, and this seat can never produce a valid one for its
+    own answers.
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -320,10 +329,17 @@ def _flatten_content(content):
         for part in content:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") == "text":
+            kind = part.get("type")
+            if kind == "text":
                 chunks.append(str(part.get("text") or ""))
-            elif part.get("type") in ("image_url", "input_image"):
+            elif kind == "thinking":
+                chunks.append(str(part.get("thinking") or ""))
+            elif kind in ("image_url", "input_image"):
                 chunks.append("[image omitted — this engine serves text only]")
+            else:
+                # Previously dropped with no trace at all. A short, neutral marker makes the
+                # next unhandled block shape discoverable instead of silently invisible.
+                chunks.append(f"[{kind or 'unknown'} block omitted — this engine serves text only]")
         return "\n".join(c for c in chunks if c)
     return "" if content is None else str(content)
 
