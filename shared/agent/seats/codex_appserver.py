@@ -150,7 +150,7 @@ class AppServer:
                     self._replies[message.get("id")] = message
                     self._state.notify_all()
             elif "id" in message:
-                self._refuse(message["id"], message.get("method"))
+                self._respond_to_server(message["id"], message.get("method"), message.get("params"))
             else:
                 with self._state:
                     self.notifications.append(message)
@@ -164,15 +164,27 @@ class AppServer:
         for line in self.proc.stderr:
             self._stderr_tail.append(line)
 
-    def _refuse(self, request_id, method):
-        """The server asked US for something — an approval, a tool call. A headless seat has
-        nobody to ask, and silence would hang the turn forever, so refuse out loud."""
-        try:
+    def _respond_to_server(self, request_id, method, params=None):
+        """Answer a server request with the proper response shape per method, or refuse.
+
+        A headless seat has nobody to approve or execute tools, but silence hangs the
+        turn. Returning the proper JSON-RPC result (not a generic error) gives the model
+        a clean denial it can understand and recover from, rather than a cryptic -32601.
+        """
+        if method == "item/commandExecution/requestApproval":
+            self._send({"id": request_id, "result": {"decision": "decline"}})
+        elif method == "item/permissions/requestApproval":
+            self._send({"id": request_id, "result": {"permissions": {}}})
+        elif method == "item/tool/call":
+            self._send({"id": request_id, "result": {
+                "success": False,
+                "contentItems": [{"type": "inputText", "text":
+                    "This tool is not available. Emit tool calls as text per your instructions."}],
+            }})
+        else:
             self._send({"id": request_id,
                         "error": {"code": UNSUPPORTED_REQUEST,
                                   "message": f"{method}: this client answers no requests"}})
-        except AppServerError:
-            pass
 
     def _send(self, message):
         line = json.dumps(message) + "\n"
