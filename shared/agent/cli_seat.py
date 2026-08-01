@@ -332,6 +332,8 @@ def _flatten_content(content):
                 chunks.append(str(part.get("thinking") or ""))
             elif kind in ("image_url", "input_image"):
                 chunks.append("[image omitted — this engine serves text only]")
+            elif kind in ("tool_use", "tool_result"):
+                continue  # build_prompt renders these separately — skip, don't mark "omitted"
             else:
                 # Previously dropped with no trace at all. A short, neutral marker makes the
                 # next unhandled block shape discoverable instead of silently invisible.

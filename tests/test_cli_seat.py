@@ -1284,3 +1284,18 @@ def test_the_responses_stream_shares_the_rule():
 
     call = deltas([_OPENAI_CALL_JSON])
     assert "".join(call) == "", "the raw call leaked into the stream as prose"
+
+
+def test_flatten_content_skips_tool_use_not_omitted():
+    content = [
+        {"type": "text", "text": "let me read that"},
+        {"type": "tool_use", "id": "tu1", "name": "read_file", "input": {"path": "foo.txt"}},
+    ]
+    result = cli_seat._flatten_content(content)
+    assert "omitted" not in result
+    assert "let me read that" in result
+
+def test_flatten_content_skips_tool_result_not_omitted():
+    content = [{"type": "tool_result", "tool_use_id": "tu1", "content": "file contents"}]
+    result = cli_seat._flatten_content(content)
+    assert "omitted" not in result
