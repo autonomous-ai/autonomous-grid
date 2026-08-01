@@ -199,9 +199,12 @@ def test_options_survive_flags_then_record_then_child_argv():
 # adapters
 
 def test_claude_invoke_disables_tools_and_replaces_the_system_prompt(tmp_path: Path):
-    prepared = cli_seat.PreparedRequest("claude:sonnet", "sonnet", "hi", "SYSTEM")
+    prepared = cli_seat.PreparedRequest("claude:sonnet", "sonnet", "hi", "SYSTEM",
+                                        messages=({"role": "user", "content": "hi"},))
     argv, stdin = claude.invoke("/bin/claude", prepared, tmp_path)
-    assert stdin == "hi"
+    assert "--input-format" in argv and argv[argv.index("--input-format") + 1] == "stream-json"
+    first = json.loads(stdin.splitlines()[0])
+    assert first["type"] == "user" and first["message"]["content"] == "hi"
     assert "--tools" in argv and argv[argv.index("--tools") + 1] == ""
     assert "--safe-mode" in argv and "--no-session-persistence" in argv
     # REPLACES the vendor prompt: keeping it leaked the provider's cwd, OS and git branch to a
@@ -1339,5 +1342,29 @@ def test_to_stream_json_appends_tool_instructions():
     from shared.agent.seats.claude import to_stream_json
     lines = to_stream_json([{"role": "user", "content": "hi"}], tools_text="TOOLS HERE")
     content = json.loads(lines.splitlines()[-1])["message"]["content"]
+    assert isinstance(content, list)
+    assert any("TOOLS HERE" in b.get("text", "") for b in content)
+
+def test_claude_invoke_uses_stream_json_input(tmp_path):
+    prepared = cli_seat.PreparedRequest(
+        model="claude:sonnet", model_alias="sonnet", prompt="unused",
+        system_prompt="You are helpful.",
+        messages=({"role": "user", "content": "hello"},))
+    from shared.agent.seats import claude
+    argv, stdin = claude.invoke("/fake/claude", prepared, tmp_path)
+    assert "--input-format" in argv
+    assert argv[argv.index("--input-format") + 1] == "stream-json"
+    first = json.loads(stdin.splitlines()[0])
+    assert first["type"] == "user" and first["message"]["content"] == "hello"
+
+def test_claude_invoke_appends_tool_text(tmp_path):
+    prepared = cli_seat.PreparedRequest(
+        model="claude:sonnet", model_alias="sonnet", prompt="unused",
+        system_prompt="You are helpful.", tool_protocol=cli_seat.OPENAI,
+        tool_text="TOOLS HERE",
+        messages=({"role": "user", "content": "hello"},))
+    from shared.agent.seats import claude
+    _, stdin = claude.invoke("/fake/claude", prepared, tmp_path)
+    content = json.loads(stdin.splitlines()[-1])["message"]["content"]
     assert isinstance(content, list)
     assert any("TOOLS HERE" in b.get("text", "") for b in content)

@@ -51,8 +51,10 @@ def to_stream_json(messages, tools_text=None):
                 fn = (call or {}).get("function") or {}
                 args = fn.get("arguments")
                 if isinstance(args, str):
-                    try: args = json.loads(args)
-                    except ValueError: args = {}
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = {}
                 blocks.append({"type": "tool_use", "id": call.get("id", ""),
                                "name": fn.get("name", ""),
                                "input": args if isinstance(args, dict) else {}})
@@ -90,16 +92,14 @@ def invoke(binary, prepared, tmpdir, stream=False):
         "--model", prepared.model_alias,
         "--no-session-persistence",
         "--system-prompt-file", str(system_file),
+        "--input-format", "stream-json",
     ]
-    # Only present when the caller's request carried a `thinking` budget or a `reasoning_effort`
-    # (cli_seat.prepare resolves either to a level); absent entirely otherwise, so a plain OpenAI
-    # request naming neither gets today's argv, unchanged.
     if prepared.effort:
         argv += ["--effort", prepared.effort]
-    # stream-json emits real text deltas; plain json returns one object at the end.
     argv += (["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
              if stream else ["--output-format", "json"])
-    return argv, prepared.prompt
+    stdin = to_stream_json(prepared.messages, tools_text=prepared.tool_text or None)
+    return argv, stdin
 
 
 def _json_lines(raw):
