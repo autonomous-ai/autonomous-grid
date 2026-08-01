@@ -1299,3 +1299,20 @@ def test_flatten_content_skips_tool_result_not_omitted():
     content = [{"type": "tool_result", "tool_use_id": "tu1", "content": "file contents"}]
     result = cli_seat._flatten_content(content)
     assert "omitted" not in result
+
+def test_prepare_carries_raw_messages_and_tool_text():
+    body = {
+        "model": "claude:sonnet",
+        "messages": [{"role": "user", "content": "hello"}],
+        "tools": [{"type": "function", "function": {"name": "read_file", "parameters": {}}}],
+    }
+    prepared = cli_seat.prepare(body, "claude")
+    assert len(prepared.messages) == 1
+    assert prepared.messages[0]["content"] == "hello"
+    assert prepared.tool_text
+
+def test_prepare_tool_text_empty_without_tools():
+    body = {"model": "claude:sonnet",
+            "messages": [{"role": "user", "content": "hello"}]}
+    prepared = cli_seat.prepare(body, "claude")
+    assert prepared.tool_text == ""

@@ -678,6 +678,8 @@ class PreparedRequest:
     # `reasoning.effort` field, or the chat `reasoning_effort` field — "" when the caller asked for
     # none, so today's argv/turn params are unaffected.
     effort: str = ""
+    messages: tuple = ()   # raw non-system messages, for structured-input seats
+    tool_text: str = ""    # rendered tool protocol text, "" when caller sent no tools
 
 
 def _effort_for_thinking(thinking):
@@ -803,9 +805,10 @@ def prepare(body, kind, protocol=None, wire="openai"):
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
     if wire == "anthropic" and tools:
         _reject_server_tools(tools)
+    tool_text = resolved_protocol.render(tools) if tools else ""
     prompt = build_prompt(messages)
-    if tools:
-        prompt = f"{prompt}\n\n{resolved_protocol.render(tools)}"
+    if tool_text:
+        prompt = f"{prompt}\n\n{tool_text}"
     if wire == "anthropic":
         # `system` is a TOP-LEVEL field on this wire, not a `role: "system"` message — reading it
         # off `messages` (the OpenAI shape) would silently drop the caller's whole instruction set,
@@ -831,6 +834,8 @@ def prepare(body, kind, protocol=None, wire="openai"):
         tool_protocol=resolved_protocol if tools else None,
         wire=wire,
         effort=_resolve_effort(body),
+        messages=tuple(m for m in messages if m.get("role") != "system"),
+        tool_text=tool_text,
     )
 
 
