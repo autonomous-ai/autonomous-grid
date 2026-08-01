@@ -171,20 +171,23 @@ class AppServer:
         turn. Returning the proper JSON-RPC result (not a generic error) gives the model
         a clean denial it can understand and recover from, rather than a cryptic -32601.
         """
-        if method in ("item/commandExecution/requestApproval", "execCommandApproval"):
-            self._send({"id": request_id, "result": {"decision": "decline"}})
-        elif method in ("item/permissions/requestApproval", "applyPatchApproval"):
-            self._send({"id": request_id, "result": {"permissions": {}}})
-        elif method == "item/tool/call":
-            self._send({"id": request_id, "result": {
-                "success": False,
-                "contentItems": [{"type": "inputText", "text":
-                    "This tool is not available. Emit tool calls as text per your instructions."}],
-            }})
-        else:
-            self._send({"id": request_id,
-                        "error": {"code": UNSUPPORTED_REQUEST,
-                                  "message": f"{method}: this client answers no requests"}})
+        try:
+            if method in ("item/commandExecution/requestApproval", "execCommandApproval"):
+                self._send({"id": request_id, "result": {"decision": "decline"}})
+            elif method in ("item/permissions/requestApproval", "applyPatchApproval"):
+                self._send({"id": request_id, "result": {"permissions": {}}})
+            elif method == "item/tool/call":
+                self._send({"id": request_id, "result": {
+                    "success": False,
+                    "contentItems": [{"type": "inputText", "text":
+                        "This tool is not available. Emit tool calls as text per your instructions."}],
+                }})
+            else:
+                self._send({"id": request_id,
+                            "error": {"code": UNSUPPORTED_REQUEST,
+                                      "message": f"{method}: this client answers no requests"}})
+        except AppServerError:
+            pass  # broken pipe — the reader thread detects the exit naturally
 
     def _send(self, message):
         line = json.dumps(message) + "\n"

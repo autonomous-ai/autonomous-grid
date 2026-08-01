@@ -1368,3 +1368,68 @@ def test_claude_invoke_appends_tool_text(tmp_path):
     content = json.loads(stdin.splitlines()[-1])["message"]["content"]
     assert isinstance(content, list)
     assert any("TOOLS HERE" in b.get("text", "") for b in content)
+
+
+# edge cases for to_stream_json (bugs found in code review)
+
+def test_to_stream_json_merges_consecutive_tool_results():
+    """B2: parallel tool calls produce consecutive role:tool messages. Claude requires
+    alternating user/assistant turns, so they must merge into ONE user message."""
+    from shared.agent.seats.claude import to_stream_json
+    messages = [
+        {"role": "user", "content": "check both files"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+            {"id": "c2", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "file A"},
+        {"role": "tool", "tool_call_id": "c2", "content": "file B"},
+        {"role": "user", "content": "thanks"},
+    ]
+    objs = [json.loads(line) for line in to_stream_json(messages).splitlines()]
+    types = [o["type"] for o in objs]
+    assert types == ["user", "assistant", "user", "user"]
+    merged = objs[2]["message"]["content"]
+    assert len(merged) == 2
+    assert all(b["type"] == "tool_result" for b in merged)
+    assert merged[0]["content"] == "file A"
+    assert merged[1]["content"] == "file B"
+
+
+def test_to_stream_json_empty_assistant_gets_placeholder():
+    """R4: an assistant message with no text and no tool_calls must not produce content: []
+    — Claude requires at least one block per message."""
+    from shared.agent.seats.claude import to_stream_json
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None},
+        {"role": "user", "content": "hello?"},
+    ]
+    objs = [json.loads(line) for line in to_stream_json(messages).splitlines()]
+    assistant_blocks = objs[1]["message"]["content"]
+    assert len(assistant_blocks) >= 1
+
+
+def test_to_stream_json_image_in_user_content_is_omitted():
+    """R3: OpenAI image_url blocks in user content must not be passed raw to Claude —
+    flatten to text (images become 'omitted')."""
+    from shared.agent.seats.claude import to_stream_json
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "describe this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+    ]}]
+    obj = json.loads(to_stream_json(messages).splitlines()[0])
+    content = obj["message"]["content"]
+    assert isinstance(content, list)
+    assert any(b["type"] == "text" and "describe this" in b["text"] for b in content)
+    assert not any("image_url" in str(b) for b in content)
+
+
+def test_to_stream_json_tools_text_with_no_user_messages():
+    """R5: if there are no user messages, tools_text creates one rather than being dropped."""
+    from shared.agent.seats.claude import to_stream_json
+    messages = [{"role": "assistant", "content": "hi"}]
+    lines = to_stream_json(messages, tools_text="TOOLS")
+    last = json.loads(lines.splitlines()[-1])
+    assert last["type"] == "user"
+    assert any("TOOLS" in b.get("text", "") for b in last["message"]["content"])

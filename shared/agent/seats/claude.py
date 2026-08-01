@@ -18,20 +18,32 @@ def to_stream_json(messages, tools_text=None):
 
     System messages are skipped (system prompt goes via --system-prompt-file).
     OpenAI tool_calls become Anthropic tool_use blocks; role:tool becomes user + tool_result.
-    tools_text (if set) is appended to the last user message.
+    Consecutive tool results are merged into ONE user message (Claude requires alternating
+    user/assistant turns). tools_text (if set) is appended to the last user message.
     """
     from shared.agent import cli_seat
 
     lines, last_user = [], None
+    pending_tool_results = []
+
+    def flush_tool_results():
+        nonlocal last_user
+        if pending_tool_results:
+            lines.append(json.dumps({"type": "user", "message": {"role": "user",
+                "content": pending_tool_results[:]}}, ensure_ascii=False))
+            last_user = len(lines) - 1
+            pending_tool_results.clear()
+
     for msg in messages:
         role, content = msg.get("role"), msg.get("content")
         if role == "system":
             continue
         if role == "tool":
-            lines.append(json.dumps({"type": "user", "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": msg.get("tool_call_id", ""),
-                 "content": cli_seat._flatten_content(content)}]}}, ensure_ascii=False))
+            pending_tool_results.append({"type": "tool_result",
+                "tool_use_id": msg.get("tool_call_id", ""),
+                "content": cli_seat._flatten_content(content)})
             continue
+        flush_tool_results()
         if role == "assistant":
             blocks = []
             text = cli_seat._flatten_content(content)
@@ -53,21 +65,36 @@ def to_stream_json(messages, tools_text=None):
                     blocks.append({"type": "tool_use", "id": block.get("id", ""),
                                    "name": block.get("name", ""),
                                    "input": block.get("input") if isinstance(block.get("input"), dict) else {}})
+            if not blocks:
+                blocks.append({"type": "text", "text": ""})
             lines.append(json.dumps({"type": "assistant",
                 "message": {"role": "assistant", "content": blocks}}, ensure_ascii=False))
             continue
+        if isinstance(content, list):
+            tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+            other = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
+            text = cli_seat._flatten_content(other) if other else ""
+            content = ([{"type": "text", "text": text}] if text else []) + tool_results
+            if not content:
+                content = ""
         lines.append(json.dumps({"type": "user",
             "message": {"role": role or "user",
                         "content": content if content is not None else ""}}, ensure_ascii=False))
         last_user = len(lines) - 1
 
-    if tools_text and last_user is not None:
-        obj = json.loads(lines[last_user])
-        c = obj["message"]["content"]
-        c = [{"type": "text", "text": c}] if isinstance(c, str) else (c if isinstance(c, list) else [])
-        c.append({"type": "text", "text": tools_text})
-        obj["message"]["content"] = c
-        lines[last_user] = json.dumps(obj, ensure_ascii=False)
+    flush_tool_results()
+
+    if tools_text:
+        if last_user is not None:
+            obj = json.loads(lines[last_user])
+            c = obj["message"]["content"]
+            c = [{"type": "text", "text": c}] if isinstance(c, str) else (c if isinstance(c, list) else [])
+            c.append({"type": "text", "text": tools_text})
+            obj["message"]["content"] = c
+            lines[last_user] = json.dumps(obj, ensure_ascii=False)
+        else:
+            lines.append(json.dumps({"type": "user", "message": {"role": "user",
+                "content": [{"type": "text", "text": tools_text}]}}, ensure_ascii=False))
 
     return "\n".join(lines)
 
