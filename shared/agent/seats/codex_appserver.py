@@ -171,9 +171,9 @@ class AppServer:
         turn. Returning the proper JSON-RPC result (not a generic error) gives the model
         a clean denial it can understand and recover from, rather than a cryptic -32601.
         """
-        if method == "item/commandExecution/requestApproval":
+        if method in ("item/commandExecution/requestApproval", "execCommandApproval"):
             self._send({"id": request_id, "result": {"decision": "decline"}})
-        elif method == "item/permissions/requestApproval":
+        elif method in ("item/permissions/requestApproval", "applyPatchApproval"):
             self._send({"id": request_id, "result": {"permissions": {}}})
         elif method == "item/tool/call":
             self._send({"id": request_id, "result": {

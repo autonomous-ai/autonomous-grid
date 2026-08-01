@@ -12,17 +12,7 @@ LABEL = "Claude Code"
 # Exits 0 when signed in.
 SIGNIN_ARGV = ("auth", "status")
 
-# Three flags carry the whole isolation story, each verified on the real binary:
-#   --safe-mode         NOT --bare. --bare takes only ANTHROPIC_API_KEY and never reads OAuth or
-#                       the keychain, so a subscription seat under it answers "Not logged in".
-#   --tools ""          removes every built-in tool, so the model must WRITE a tool call as text.
-#   --system-prompt-file REPLACES Claude Code's own prompt with the caller's.
-#
-# Replacing, not appending, is a privacy decision. Claude Code's default prompt carries the
-# machine's cwd, OS and git status, so a seat that kept it answered a bare `pwd?` with the
-# provider's real path and username — no tool needed. Replacing also drops ~5000 prompt tokens
-# per request. The cost: this serves plain Claude, not Claude Code, so a benchmark measuring the
-# two combined must use a different seat.
+
 def to_stream_json(messages, tools_text=None):
     """Convert OpenAI/Anthropic messages to Claude --input-format stream-json lines.
 
@@ -82,6 +72,17 @@ def to_stream_json(messages, tools_text=None):
     return "\n".join(lines)
 
 
+# Three flags carry the whole isolation story, each verified on the real binary:
+#   --safe-mode         NOT --bare. --bare takes only ANTHROPIC_API_KEY and never reads OAuth or
+#                       the keychain, so a subscription seat under it answers "Not logged in".
+#   --tools ""          removes every built-in tool, so the model must WRITE a tool call as text.
+#   --system-prompt-file REPLACES Claude Code's own prompt with the caller's.
+#
+# Replacing, not appending, is a privacy decision. Claude Code's default prompt carries the
+# machine's cwd, OS and git status, so a seat that kept it answered a bare `pwd?` with the
+# provider's real path and username — no tool needed. Replacing also drops ~5000 prompt tokens
+# per request. The cost: this serves plain Claude, not Claude Code, so a benchmark measuring the
+# two combined must use a different seat.
 def invoke(binary, prepared, tmpdir, stream=False):
     system_file = tmpdir / "system.txt"
     system_file.write_text(prepared.system_prompt, encoding="utf-8")

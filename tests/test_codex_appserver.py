@@ -255,13 +255,15 @@ def test_notifications_are_collected_not_mistaken_for_replies():
 
 def test_a_server_request_is_refused_rather_than_left_hanging():
     """The server can ask the client for an approval. A headless seat has nobody to ask, and
-    silence would hang the turn — so it must answer with an error."""
+    silence would hang the turn — so it must answer, not ignore. Known approval methods get a
+    proper decline; unknown methods get a generic error so the turn never hangs."""
     proc = FakeProc()
     _server(proc)
     proc.push({"id": 77, "method": "execCommandApproval", "params": {}})
     assert _wait_for(lambda: proc.written)
     assert proc.written[0]["id"] == 77
-    assert proc.written[0]["error"]["code"] == codex_appserver.UNSUPPORTED_REQUEST
+    # Old method name (execCommandApproval) is handled as a command approval → decline
+    assert proc.written[0]["result"]["decision"] == "decline"
 
 
 def test_junk_lines_do_not_kill_the_reader():
