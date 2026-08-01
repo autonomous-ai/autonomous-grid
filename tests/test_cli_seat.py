@@ -1316,3 +1316,28 @@ def test_prepare_tool_text_empty_without_tools():
             "messages": [{"role": "user", "content": "hello"}]}
     prepared = cli_seat.prepare(body, "claude")
     assert prepared.tool_text == ""
+
+def test_to_stream_json_converts_openai_messages():
+    from shared.agent.seats.claude import to_stream_json
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "read_file", "arguments": '{"path": "foo.txt"}'}}
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "file contents"},
+        {"role": "user", "content": "thanks"},
+    ]
+    objs = [json.loads(line) for line in to_stream_json(messages).splitlines()]
+    assert len(objs) == 4
+    assert objs[0]["message"]["content"] == "hello"
+    tu = next(b for b in objs[1]["message"]["content"] if b["type"] == "tool_use")
+    assert tu["name"] == "read_file" and tu["input"] == {"path": "foo.txt"}
+    assert any(b["type"] == "tool_result" for b in objs[2]["message"]["content"])
+
+def test_to_stream_json_appends_tool_instructions():
+    from shared.agent.seats.claude import to_stream_json
+    lines = to_stream_json([{"role": "user", "content": "hi"}], tools_text="TOOLS HERE")
+    content = json.loads(lines.splitlines()[-1])["message"]["content"]
+    assert isinstance(content, list)
+    assert any("TOOLS HERE" in b.get("text", "") for b in content)

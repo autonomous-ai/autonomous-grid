@@ -23,6 +23,63 @@ SIGNIN_ARGV = ("auth", "status")
 # provider's real path and username — no tool needed. Replacing also drops ~5000 prompt tokens
 # per request. The cost: this serves plain Claude, not Claude Code, so a benchmark measuring the
 # two combined must use a different seat.
+def to_stream_json(messages, tools_text=None):
+    """Convert OpenAI/Anthropic messages to Claude --input-format stream-json lines.
+
+    System messages are skipped (system prompt goes via --system-prompt-file).
+    OpenAI tool_calls become Anthropic tool_use blocks; role:tool becomes user + tool_result.
+    tools_text (if set) is appended to the last user message.
+    """
+    from shared.agent import cli_seat
+
+    lines, last_user = [], None
+    for msg in messages:
+        role, content = msg.get("role"), msg.get("content")
+        if role == "system":
+            continue
+        if role == "tool":
+            lines.append(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": msg.get("tool_call_id", ""),
+                 "content": cli_seat._flatten_content(content)}]}}, ensure_ascii=False))
+            continue
+        if role == "assistant":
+            blocks = []
+            text = cli_seat._flatten_content(content)
+            if text:
+                blocks.append({"type": "text", "text": text})
+            for call in msg.get("tool_calls") or []:
+                fn = (call or {}).get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try: args = json.loads(args)
+                    except ValueError: args = {}
+                blocks.append({"type": "tool_use", "id": call.get("id", ""),
+                               "name": fn.get("name", ""),
+                               "input": args if isinstance(args, dict) else {}})
+            for block in (content if isinstance(content, list) else []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    blocks.append({"type": "tool_use", "id": block.get("id", ""),
+                                   "name": block.get("name", ""),
+                                   "input": block.get("input") if isinstance(block.get("input"), dict) else {}})
+            lines.append(json.dumps({"type": "assistant",
+                "message": {"role": "assistant", "content": blocks}}, ensure_ascii=False))
+            continue
+        lines.append(json.dumps({"type": "user",
+            "message": {"role": role or "user",
+                        "content": content if content is not None else ""}}, ensure_ascii=False))
+        last_user = len(lines) - 1
+
+    if tools_text and last_user is not None:
+        obj = json.loads(lines[last_user])
+        c = obj["message"]["content"]
+        c = [{"type": "text", "text": c}] if isinstance(c, str) else (c if isinstance(c, list) else [])
+        c.append({"type": "text", "text": tools_text})
+        obj["message"]["content"] = c
+        lines[last_user] = json.dumps(obj, ensure_ascii=False)
+
+    return "\n".join(lines)
+
+
 def invoke(binary, prepared, tmpdir, stream=False):
     system_file = tmpdir / "system.txt"
     system_file.write_text(prepared.system_prompt, encoding="utf-8")
