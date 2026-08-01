@@ -87,6 +87,14 @@ skill_mcp_dependency_install = false
 goals = false
 sqlite = false
 code_mode_host = false
+
+# Block apply_patch at call time — the tool can't be hidden from the model (no feature
+# flag exists, unlike shell_tool), but "blocked by app configuration" is cleaner than
+# the generic JSON-RPC error _respond_to_server returns for unknown methods. The model
+# still SEES the tool in its function list, but when it calls it the app-server blocks
+# it internally without asking the client.
+[apps._default.tools.apply_patch]
+enabled = false
 """
 
 # `--ignore-user-config` is deliberately ABSENT: the config above is ours and must be read.
@@ -187,9 +195,9 @@ def run(binary, prepared, timeout, on_delta=None):
     the client — unanswered, those hang the turn, which is the likeliest explanation for a 16-minute
     request observed on the exec path.
 
-    The caller's system prompt goes in `developerInstructions`, closer to the conversation than
-    base instructions, because the Hermes tool protocol is an instruction to obey rather than
-    background the model may drift from.
+    The caller's system prompt REPLACES codex's own base prompt via `baseInstructions`. Measured:
+    leaving the vendor prompt in place and using `developerInstructions` instead still had codex
+    answer "the workspace denied the file-edit request" — it kept believing it had an editor.
     """
     from shared.agent.seats import codex_appserver
 
