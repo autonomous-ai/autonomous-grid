@@ -572,17 +572,16 @@ def _discovered_codex_cli_entries() -> tuple[ApiModelEntry, ...]:
     )
 
 def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
-    """The whitelist entry advertised under ``advertised``, or None.
+    """The whitelist entry advertised under ``advertised`` (e.g. ``openai:gpt-5.5``), or None.
 
-    The bare vendor name is the advertised name now; the old `<kind>:<vendor>` spelling still
-    resolves so a record written before the change keeps working.
+    Only the namespaced form resolves — a bare vendor name is not an advertised name.
     """
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:
         return None
     for entry in resolvable_entries(kind):
-        if advertised in (advertised_name(kind, entry), entry.vendor_name):
-            return entry   # bare vendor name resolves too, so an older record still works
+        if advertised_name(kind, entry) == advertised:
+            return entry
     return None
 
 

@@ -92,11 +92,13 @@ def test_the_tool_block_goes_in_the_turn_not_the_system_prompt():
     assert cli_seat.build_system_prompt(messages) == "be brief"
 
     body = {"model": "claude:sonnet", "messages": messages}
-    assert cli_seat.prepare(body, "claude").prompt == "hi"
+    # The turn travels as verbatim JSON, not flattened prose: a `tool_use` stays a tool_use, so the
+    # model can see the shape it is expected to answer in.
+    assert '"hi"' in cli_seat.prepare(body, "claude").prompt
     with_tools = cli_seat.prepare({**body, "tools": tools}, "claude")
     assert with_tools.system_prompt == "be brief", "the tool block must not reach the system prompt"
-    assert with_tools.prompt.startswith("hi")
     assert "tool_calls" in with_tools.prompt
+    assert with_tools.prompt.index("hi") < with_tools.prompt.index("tool_calls")
 
 
 def test_images_are_named_not_silently_dropped():
@@ -202,9 +204,12 @@ def test_claude_invoke_disables_tools_and_replaces_the_system_prompt(tmp_path: P
     prepared = cli_seat.PreparedRequest("claude:sonnet", "sonnet", "hi", "SYSTEM",
                                         messages=({"role": "user", "content": "hi"},))
     argv, stdin = claude.invoke("/bin/claude", prepared, tmp_path)
-    assert "--input-format" in argv and argv[argv.index("--input-format") + 1] == "stream-json"
-    first = json.loads(stdin.splitlines()[0])
-    assert first["type"] == "user" and first["message"]["content"] == "hi"
+    # NOT `--input-format stream-json`: it reads each `user` line as a live turn, so a replayed
+    # transcript re-answers every past question and claude's own answers are spliced into the
+    # history between them. Measured — three lines in, two `result` envelopes out, the first
+    # re-answering the opening message. One prompt, one turn.
+    assert "--input-format" not in argv
+    assert stdin == prepared.prompt
     assert "--tools" in argv and argv[argv.index("--tools") + 1] == ""
     assert "--safe-mode" in argv and "--no-session-persistence" in argv
     # REPLACES the vendor prompt: keeping it leaked the provider's cwd, OS and git branch to a
@@ -846,7 +851,7 @@ def test_an_anthropic_request_puts_the_top_level_system_in_the_system_prompt():
             "messages": [{"role": "user", "content": "hi"}]}
     prepared = cli_seat.prepare(body, "claude", wire="anthropic")
     assert prepared.system_prompt == "You are Claude Code."
-    assert prepared.prompt == "hi"
+    assert '"hi"' in prepared.prompt
 
 
 def test_an_anthropic_tool_result_block_is_replayed_as_text():
@@ -858,8 +863,11 @@ def test_an_anthropic_tool_result_block_is_replayed_as_text():
             {"type": "tool_result", "tool_use_id": "tu1", "content": "SECRET"}]},
     ]}
     prompt = cli_seat.prepare(body, "claude", wire="anthropic").prompt
+    # Both keep their own shape — flattening turned them into the words "Tool result:" and the
+    # model had to guess the format back.
     assert '"type": "tool_use"' in prompt
-    assert "Tool result: SECRET" in prompt
+    assert '"type": "tool_result"' in prompt
+    assert "SECRET" in prompt
 
 
 def test_the_claude_catalog_row_declares_messages():
@@ -960,7 +968,8 @@ def test_the_codex_cli_catalog_row_declares_responses():
 def test_a_responses_request_reads_string_input_as_a_user_message():
     body = {"model": "codex-cli:gpt-5.5", "input": "hello"}
     prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
-    assert prepared.prompt == "hello"
+    assert json.loads(prepared.prompt.split("\n\n", 1)[1]) == [
+        {"role": "user", "content": "hello"}]
 
 
 def test_a_responses_request_reads_message_array_input():
@@ -969,10 +978,12 @@ def test_a_responses_request_reads_message_array_input():
         {"role": "assistant", "content": "second"},
         {"role": "user", "content": "third"},
     ]}
+    # Verbatim JSON, not "User: …" prose — roles stay roles, so nothing has to be parsed back out.
     prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
-    assert "User: first" in prepared.prompt
-    assert "Assistant: second" in prepared.prompt
-    assert "User: third" in prepared.prompt
+    assert json.loads(prepared.prompt.split("\n\n", 1)[1]) == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "user", "content": "third"}]
 
 
 def test_a_responses_request_reads_instructions_as_the_system_prompt():
@@ -998,7 +1009,8 @@ def test_responses_input_text_content_parts_are_normalised():
         {"role": "user", "content": [{"type": "input_text", "text": "a plain question"}]},
     ]}
     prepared = cli_seat.prepare(body, "codex-cli", wire="responses")
-    assert prepared.prompt == "a plain question"
+    turns = json.loads(prepared.prompt.split("\n\n", 1)[1])
+    assert turns == [{"role": "user", "content": [{"type": "text", "text": "a plain question"}]}]
 
 
 def test_a_responses_function_call_output_item_is_replayed_as_a_tool_result():
@@ -1010,9 +1022,10 @@ def test_a_responses_function_call_output_item_is_replayed_as_a_tool_result():
         {"role": "user", "content": "thanks"},
     ]}
     prompt = cli_seat.prepare(body, "codex-cli", wire="responses").prompt
+    # The call and its result keep their own shapes; flattening turned both into sentences.
     assert '"name": "get_weather"' in prompt
-    assert "Tool result: Sunny, 32C" in prompt
-    assert "User: thanks" in prompt
+    assert '"role": "tool"' in prompt and "Sunny, 32C" in prompt
+    assert '"thanks"' in prompt
 
 
 def test_to_response_builds_a_responses_object():
@@ -1034,8 +1047,10 @@ def test_to_response_maps_tool_calls_to_function_call_items():
     result = cli_seat.SeatResult(text=text, input_tokens=1, output_tokens=1)
     resp = cli_seat.to_response(result, "codex-cli", "codex-cli:gpt-5.5", cli_seat.OPENAI)
     items = resp["output"]
-    assert items[0]["type"] == "message"
-    fc = items[1]
+    # No message item: the answer WAS the call. One used to be emitted with `content: []`, so a
+    # client reading `output[]` in order met an assistant message saying nothing before the call.
+    assert [i["type"] for i in items] == ["function_call"]
+    fc = items[0]
     assert fc["type"] == "function_call"
     assert fc["name"] == "get_weather"
     assert json.loads(fc["arguments"]) == {"city": "Hanoi"}
@@ -1345,29 +1360,29 @@ def test_to_stream_json_appends_tool_instructions():
     assert isinstance(content, list)
     assert any("TOOLS HERE" in b.get("text", "") for b in content)
 
-def test_claude_invoke_uses_stream_json_input(tmp_path):
+def test_claude_invoke_sends_one_prompt_not_stream_json(tmp_path):
     prepared = cli_seat.PreparedRequest(
         model="claude:sonnet", model_alias="sonnet", prompt="unused",
         system_prompt="You are helpful.",
         messages=({"role": "user", "content": "hello"},))
     from shared.agent.seats import claude
     argv, stdin = claude.invoke("/fake/claude", prepared, tmp_path)
-    assert "--input-format" in argv
-    assert argv[argv.index("--input-format") + 1] == "stream-json"
-    first = json.loads(stdin.splitlines()[0])
-    assert first["type"] == "user" and first["message"]["content"] == "hello"
+    # One prompt, one turn. `--input-format stream-json` treats every `user` line as a live turn,
+    # so a replayed transcript re-answers the whole history and claude's own replies land between
+    # the messages being replayed.
+    assert "--input-format" not in argv
+    assert stdin == prepared.prompt
 
-def test_claude_invoke_appends_tool_text(tmp_path):
-    prepared = cli_seat.PreparedRequest(
-        model="claude:sonnet", model_alias="sonnet", prompt="unused",
-        system_prompt="You are helpful.", tool_protocol=cli_seat.OPENAI,
-        tool_text="TOOLS HERE",
-        messages=({"role": "user", "content": "hello"},))
-    from shared.agent.seats import claude
-    _, stdin = claude.invoke("/fake/claude", prepared, tmp_path)
-    content = json.loads(stdin.splitlines()[-1])["message"]["content"]
-    assert isinstance(content, list)
-    assert any("TOOLS HERE" in b.get("text", "") for b in content)
+def test_the_tool_block_is_the_last_thing_in_the_prompt():
+    """Assembled by `prepare`, not by the seat's `invoke` — one place builds the turn, so every
+    seat gets the block in the same position. Last, because that is what made the model emit a call
+    instead of answering "I don't have access to a Read tool"."""
+    body = {"model": "claude:sonnet",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"name": "Read", "input_schema": {"type": "object"}}]}
+    prepared = cli_seat.prepare(body, "claude", wire="anthropic")
+    assert prepared.prompt.rstrip().endswith(prepared.tool_text.rstrip())
+    assert '"hello"' in prepared.prompt
 
 
 # edge cases for to_stream_json (bugs found in code review)

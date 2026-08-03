@@ -4,12 +4,12 @@ import tomllib
 from shared.agent.seats import codex
 
 
-def test_config_blocks_apply_patch():
-    """apply_patch has no [features] flag (unlike shell_tool), so it must be blocked via the
-    [apps] config — 'blocked by app configuration' is cleaner than the generic JSON-RPC error."""
+def test_config_carries_no_apps_section():
+    """`[apps._default.tools]` is not a field codex knows — `codex --strict-config` rejects it on
+    0.146.0, so writing it blocked nothing and only read as though it had. Codex ignores
+    unrecognised keys silently without that flag, which is why it looked like it worked."""
     config = tomllib.loads(codex.CONFIG_TOML)
-    tools = config.get("apps", {}).get("_default", {}).get("tools", {})
-    assert tools.get("apply_patch", {}).get("enabled") is False
+    assert "apps" not in config
 
 
 def test_config_still_disables_shell_tool():

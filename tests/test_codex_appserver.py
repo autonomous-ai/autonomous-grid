@@ -263,7 +263,7 @@ def test_a_server_request_is_refused_rather_than_left_hanging():
     assert _wait_for(lambda: proc.written)
     assert proc.written[0]["id"] == 77
     # Old method name (execCommandApproval) is handled as a command approval → decline
-    assert proc.written[0]["result"]["decision"] == "decline"
+    assert set(proc.written[0]["result"]["decision"]) == {"denied"}
 
 
 def test_junk_lines_do_not_kill_the_reader():
@@ -360,15 +360,21 @@ def _mock_server():
     from unittest.mock import MagicMock
     server = AppServer.__new__(AppServer)
     server._send = MagicMock()
+    server.refusals = []      # __init__ is bypassed, so the refusal log has to be seeded here
     return server
 
 
-def test_respond_declines_command_execution_approval():
+def test_respond_denies_command_execution_approval():
+    """`decision` is a ReviewDecision: approved / approved_for_session / timed_out / abort, plus the
+    object form `{"denied": {"rejection": …}}`. It has NO `"decline"` member, so that string was a
+    value the server could not read and the turn ended there. `denied` is also the only member that
+    carries text and is documented to let the agent continue and try something else."""
     server = _mock_server()
     server._respond_to_server(1, "item/commandExecution/requestApproval")
     sent = server._send.call_args[0][0]
     assert sent["id"] == 1
-    assert sent["result"]["decision"] == "decline"
+    assert set(sent["result"]["decision"]) == {"denied"}
+    assert sent["result"]["decision"]["denied"]["rejection"]
 
 
 def test_respond_denies_all_permissions():
@@ -384,7 +390,7 @@ def test_respond_redirects_tool_call():
     sent = server._send.call_args[0][0]
     assert sent["result"]["success"] is False
     assert len(sent["result"]["contentItems"]) == 1
-    assert "not available" in sent["result"]["contentItems"][0]["text"]
+    assert "emit the tool call" in sent["result"]["contentItems"][0]["text"].lower()
 
 
 def test_respond_generic_error_for_unknown_method():
