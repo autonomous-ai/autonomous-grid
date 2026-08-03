@@ -363,7 +363,10 @@ CODEX_CLI_WHITELIST: tuple[ApiModelEntry, ...] = tuple(
         supports_structured_outputs=False,
         notes="Codex CLI seat — verify against a signed-in seat.",
     )
-    for name in ("gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini")
+    # `gpt-5.6-sol` is what Codex CLI picks when the user takes its DEFAULT model. Captured live:
+    # 30 consecutive requests for it, every one answered "No providers available for this model",
+    # because the seat advertised the other four and not the one the client reaches for first.
+    for name in ("gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini")
 )
 
 # One structure per kind: the verified-date and the entries can't drift apart.
@@ -448,10 +451,19 @@ def supported_kinds() -> tuple[str, ...]:
 
 
 def advertised_name(kind: str, entry: ApiModelEntry) -> str:
+    """`<kind>:<vendor>` — the prefix is load-bearing for the codex seat.
+
+    Bare vendor names were tried. Codex CLI recognises its own model slugs and, for the 5.6 family,
+    then sends `tools: []` through any non-built-in provider — measured 0 tools bare vs 10 with the
+    prefix. Nothing in its catalog changes that (`tool_mode`, `use_responses_lite` and
+    `multi_agent_version` were all patched in its own cache, still 0), so the prefix is the only
+    thing that keeps those models usable at all.
+    """
     return f"{kind}:{entry.vendor_name}"
 
 
 _claude_entries: tuple[ApiModelEntry, ...] | None = None
+_codex_cli_entries: tuple[ApiModelEntry, ...] | None = None
 
 
 def entries_for(kind: str) -> tuple[ApiModelEntry, ...]:
@@ -465,12 +477,17 @@ def entries_for(kind: str) -> tuple[ApiModelEntry, ...]:
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:
         return ()
-    if kind != CLAUDE_KIND:
-        return whitelist.entries
-    global _claude_entries
-    if _claude_entries is None:
-        _claude_entries = _discovered_claude_entries() or whitelist.entries
-    return _claude_entries
+    if kind == CLAUDE_KIND:
+        global _claude_entries
+        if _claude_entries is None:
+            _claude_entries = _discovered_claude_entries() or whitelist.entries
+        return _claude_entries
+    if kind == CODEX_CLI_KIND:
+        global _codex_cli_entries
+        if _codex_cli_entries is None:
+            _codex_cli_entries = _discovered_codex_cli_entries() or whitelist.entries
+        return _codex_cli_entries
+    return whitelist.entries
 
 
 def _discovered_claude_entries() -> tuple[ApiModelEntry, ...]:
@@ -526,17 +543,46 @@ def resolvable_entries(kind: str) -> tuple[ApiModelEntry, ...]:
     return tuple(out)
 
 
-def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
-    """The whitelist entry advertised under ``advertised`` (e.g. ``openai:gpt-5.5``), or None.
 
-    Only the namespaced form resolves — a bare vendor name is not an advertised name.
+def _discovered_codex_cli_entries() -> tuple[ApiModelEntry, ...]:
+    """The signed-in account's own list, via the app-server's `model/list`.
+
+    Imported inside the call for the same cycle reason as the Claude one. `()` on any failure, so
+    an unauthenticated or older CLI falls back to CODEX_CLI_WHITELIST rather than serving nothing.
+    """
+    from shared.agent import cli_seat, codex_models
+    from shared.agent.seats import codex as codex_seat
+
+    binary = cli_seat.seat_bin(codex_seat.SPEC)
+    if binary is None:
+        return ()
+    return tuple(
+        ApiModelEntry(
+            vendor_name=model_id,
+            # `model/list` carries no window or tool flag; both stay at the static row's values
+            # rather than being invented from a field that does not exist.
+            context_window=0,
+            supports_tools=True,
+            supports_vision=False,
+            supports_json_mode=False,
+            supports_structured_outputs=False,
+            notes="Codex CLI seat — id read from the signed-in account.",
+        )
+        for model_id in codex_models.discover(binary)
+    )
+
+def find_advertised(kind: str, advertised: str) -> ApiModelEntry | None:
+    """The whitelist entry advertised under ``advertised``, or None.
+
+    The bare vendor name is the advertised name now; the old `<kind>:<vendor>` spelling still
+    resolves so a record written before the change keeps working.
     """
     whitelist = WHITELISTS.get(kind)
     if whitelist is None:
         return None
     for entry in resolvable_entries(kind):
-        if advertised_name(kind, entry) == advertised:
-            return entry
+        if advertised in (advertised_name(kind, entry), entry.vendor_name):
+            return entry   # bare vendor name resolves too, so an older record still works
     return None
 
 

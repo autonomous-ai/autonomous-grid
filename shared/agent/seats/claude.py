@@ -13,6 +13,59 @@ LABEL = "Claude Code"
 SIGNIN_ARGV = ("auth", "status")
 
 
+def _as_text(value):
+    """Anything unsendable, verbatim as text. Never dropped, never summarised."""
+    return {"type": "text", "text": json.dumps(value, ensure_ascii=False, default=str)}
+
+
+def _as_anthropic_image(block):
+    """OpenAI `image_url` / `input_image` -> Anthropic `image`. None if there is no url to carry."""
+    source = block.get("image_url") if isinstance(block.get("image_url"), dict) else {}
+    url = source.get("url") or block.get("url") or block.get("image_url")
+    if not isinstance(url, str) or not url:
+        return None
+    if not url.startswith("data:"):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    head, _, data = url.partition(",")
+    if not data:
+        return None
+    return {"type": "image", "source": {"type": "base64",
+                                        "media_type": head[5:].split(";")[0] or "image/png",
+                                        "data": data}}
+
+
+# Caller-side request metadata, not content. `cache_control` belongs to the caller's own API call —
+# forwarded into ours it 400s (`ttl='1h'` needs a beta header this seat does not send).
+STRIPPED_KEYS = ("cache_control",)
+
+
+def _passthrough_blocks(content):
+    """Blocks forwarded as-is, in their original order.
+
+    `claude` is Anthropic-native, so a block this file does not know is still one the CLI may.
+    Nothing is dropped or replaced with a marker: what cannot go as-is goes as text.
+    """
+    blocks = []
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            blocks.append(_as_text(block))
+            continue
+        if any(key in block for key in STRIPPED_KEYS):
+            block = {k: v for k, v in block.items() if k not in STRIPPED_KEYS}
+        kind = block.get("type")
+        if kind == "text":
+            # An empty text block 400s, so it travels as its own JSON rather than being deleted.
+            blocks.append(block if block.get("text") else _as_text(block))
+        elif kind == "tool_result":
+            blocks.append(block if block.get("content")
+                          else {**block, "content": json.dumps(block, ensure_ascii=False)})
+        elif kind in ("image_url", "input_image"):
+            blocks.append(_as_anthropic_image(block) or _as_text(block))
+        else:
+            blocks.append(block)
+    return blocks
+
+
 def to_stream_json(messages, tools_text=None):
     """Convert OpenAI/Anthropic messages to Claude --input-format stream-json lines.
 
@@ -20,35 +73,47 @@ def to_stream_json(messages, tools_text=None):
     OpenAI tool_calls become Anthropic tool_use blocks; role:tool becomes user + tool_result.
     Consecutive tool results are merged into ONE user message (Claude requires alternating
     user/assistant turns). tools_text (if set) is appended to the last user message.
+
+    Empty content 400s (`text content blocks must be non-empty`), so a message with nothing in it
+    travels as its own JSON rather than being dropped or padded with invented text.
     """
-    from shared.agent import cli_seat
+    return "\n".join(
+        json.dumps({"type": m["role"], "message": m}, ensure_ascii=False)
+        for m in conversation(messages, tools_text)
+    )
 
-    lines, last_user = [], None
-    pending_tool_results = []
 
-    def flush_tool_results():
+def conversation(messages, tools_text=None):
+    """The transcript as Anthropic messages: `[{"role", "content"}, …]`.
+
+    OpenAI `tool_calls` become `tool_use`; `role: "tool"` becomes a user `tool_result`, consecutive
+    ones merged into one message. Blocks keep their type and order. `tools_text`, if set, is
+    appended to the last user message.
+    """
+    out, last_user = [], None
+    pending = []
+
+    def flush():
         nonlocal last_user
-        if pending_tool_results:
-            lines.append(json.dumps({"type": "user", "message": {"role": "user",
-                "content": pending_tool_results[:]}}, ensure_ascii=False))
-            last_user = len(lines) - 1
-            pending_tool_results.clear()
+        if pending:
+            out.append({"role": "user", "content": pending[:]})
+            last_user = len(out) - 1
+            pending.clear()
 
     for msg in messages:
         role, content = msg.get("role"), msg.get("content")
         if role == "system":
             continue
         if role == "tool":
-            pending_tool_results.append({"type": "tool_result",
+            pending.append(_passthrough_blocks([{
+                "type": "tool_result",
                 "tool_use_id": msg.get("tool_call_id", ""),
-                "content": cli_seat._flatten_content(content)})
+                "content": content,
+            }])[0])
             continue
-        flush_tool_results()
+        flush()
         if role == "assistant":
-            blocks = []
-            text = cli_seat._flatten_content(content)
-            if text:
-                blocks.append({"type": "text", "text": text})
+            blocks = _passthrough_blocks(content)
             for call in msg.get("tool_calls") or []:
                 fn = (call or {}).get("function") or {}
                 args = fn.get("arguments")
@@ -60,43 +125,24 @@ def to_stream_json(messages, tools_text=None):
                 blocks.append({"type": "tool_use", "id": call.get("id", ""),
                                "name": fn.get("name", ""),
                                "input": args if isinstance(args, dict) else {}})
-            for block in (content if isinstance(content, list) else []):
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    blocks.append({"type": "tool_use", "id": block.get("id", ""),
-                                   "name": block.get("name", ""),
-                                   "input": block.get("input") if isinstance(block.get("input"), dict) else {}})
-            if not blocks:
-                blocks.append({"type": "text", "text": ""})
-            lines.append(json.dumps({"type": "assistant",
-                "message": {"role": "assistant", "content": blocks}}, ensure_ascii=False))
+            out.append({"role": "assistant", "content": blocks or [_as_text(msg)]})
             continue
-        if isinstance(content, list):
-            tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
-            other = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
-            text = cli_seat._flatten_content(other) if other else ""
-            content = ([{"type": "text", "text": text}] if text else []) + tool_results
-            if not content:
-                content = ""
-        lines.append(json.dumps({"type": "user",
-            "message": {"role": role or "user",
-                        "content": content if content is not None else ""}}, ensure_ascii=False))
-        last_user = len(lines) - 1
+        content = _passthrough_blocks(content) if isinstance(content, list) else content
+        out.append({"role": role or "user", "content": content or [_as_text(msg)]})
+        last_user = len(out) - 1
 
-    flush_tool_results()
+    flush()
 
     if tools_text:
-        if last_user is not None:
-            obj = json.loads(lines[last_user])
-            c = obj["message"]["content"]
-            c = [{"type": "text", "text": c}] if isinstance(c, str) else (c if isinstance(c, list) else [])
-            c.append({"type": "text", "text": tools_text})
-            obj["message"]["content"] = c
-            lines[last_user] = json.dumps(obj, ensure_ascii=False)
+        if last_user is None:
+            out.append({"role": "user", "content": [{"type": "text", "text": tools_text}]})
         else:
-            lines.append(json.dumps({"type": "user", "message": {"role": "user",
-                "content": [{"type": "text", "text": tools_text}]}}, ensure_ascii=False))
+            c = out[last_user]["content"]
+            c = [{"type": "text", "text": c}] if isinstance(c, str) else list(c)
+            out[last_user]["content"] = c + [{"type": "text", "text": tools_text}]
+    return out
 
-    return "\n".join(lines)
+
 
 
 # Three flags carry the whole isolation story, each verified on the real binary:
@@ -111,6 +157,22 @@ def to_stream_json(messages, tools_text=None):
 # per request. The cost: this serves plain Claude, not Claude Code, so a benchmark measuring the
 # two combined must use a different seat.
 def invoke(binary, prepared, tmpdir, stream=False):
+    """One turn, one prompt on stdin.
+
+    `--input-format stream-json` cannot replay a transcript: every `user` line is a live turn, and
+    claude's own answer to each is inserted into the history before the next runs. Measured — the
+    replay of [user, assistant(tool_use), user(tool_result)] produced:
+
+        result #1: ''                                              <- claude's own turn, empty
+        result #2: 'API Error: 400 messages: text content blocks must be non-empty'
+
+    That empty turn is claude's, not ours, so no amount of filtering on the way in removes it. The
+    same interleaving splits a `tool_use` from its `tool_result`, which is the `messages.N.content.M`
+    400 and the repeated identical tool call.
+
+    `to_stream_json` is kept and tested for the session-based path (`--session-id`/`--resume`),
+    which is the only way to replay structure without spawning turns.
+    """
     system_file = tmpdir / "system.txt"
     system_file.write_text(prepared.system_prompt, encoding="utf-8")
     argv = [
@@ -120,14 +182,12 @@ def invoke(binary, prepared, tmpdir, stream=False):
         "--model", prepared.model_alias,
         "--no-session-persistence",
         "--system-prompt-file", str(system_file),
-        "--input-format", "stream-json",
     ]
     if prepared.effort:
         argv += ["--effort", prepared.effort]
     argv += (["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
              if stream else ["--output-format", "json"])
-    stdin = to_stream_json(prepared.messages, tools_text=prepared.tool_text or None)
-    return argv, stdin
+    return argv, prepared.prompt
 
 
 def _json_lines(raw):
@@ -235,6 +295,21 @@ def parse_usage(text):
     )
 
 
+def expected_turns(stdin):
+    """How many turns this stdin will make `claude` run — one per `user` line.
+
+    Counted off the built stdin rather than off `messages`, so it cannot disagree with what
+    `to_stream_json` actually emitted. At least one: a request always runs a turn.
+    """
+    turns = 0
+    for line in (stdin or "").splitlines():
+        try:
+            turns += json.loads(line).get("type") == "user"
+        except ValueError:
+            continue
+    return max(1, turns)
+
+
 def parse_event(event):
     """One streamed event -> the text to forward, a QuotaSnapshot, or None.
 
@@ -250,13 +325,29 @@ def parse_event(event):
             return QuotaSnapshot(session_pct=100, week_pct=100,
                                  session_reset=_reset_text(info), week_reset=_reset_text(info))
         return None
+    # End of ONE turn, not of the request: a replayed transcript runs one per `user` line, and
+    # `stream_seat` counts these to know when the live turn has finally started.
+    if event.get("type") == "result":
+        from shared.agent.cli_seat import TurnEnd
+
+        return TurnEnd()
     if event.get("type") != "stream_event":
         return None
     inner = event.get("event") or {}
     if inner.get("type") != "content_block_delta":
         return None
     delta = inner.get("delta") or {}
-    return delta.get("text") if delta.get("type") == "text_delta" else None
+    if delta.get("type") == "text_delta":
+        return delta.get("text")
+    # Extended thinking, when the caller asked for an effort. Returned as `Reasoning` rather than a
+    # bare string so it cannot be mistaken for the answer — the tool parse must never read it, and a
+    # `--effort` turn used to sit silent until the thinking finished.
+    if delta.get("type") == "thinking_delta":
+        from shared.agent.cli_seat import Reasoning
+
+        text = delta.get("thinking") or ""
+        return Reasoning(text) if text else None
+    return None
 
 
 SPEC = SeatSpec(
@@ -279,4 +370,5 @@ SPEC = SeatSpec(
     quota_argv=QUOTA_ARGV,
     parse_usage=parse_usage,
     parse_event=parse_event,
+    expected_turns=expected_turns,
 )

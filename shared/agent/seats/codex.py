@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from shared.agent.cli_seat import SeatError, SeatResult, SeatSpec
+from shared.agent.cli_seat import STRUCTURED, SeatError, SeatResult, SeatSpec
 
 BINARY = "codex"
 LABEL = "Codex"
@@ -32,6 +32,12 @@ CONFIG_TOML = """# Written by grid at every seat start. Hand edits are overwritt
 approval_policy = "untrusted"
 sandbox_mode = "read-only"
 web_search = "disabled"
+
+# Reasoning summaries ON, so a thinking turn has something on the wire. Default is "none": codex
+# emits no `item/reasoning/summaryTextDelta` at all, and a request that thinks for 4s of a 5s turn
+# sends nothing until the answer starts. "auto" lets the model decide how much to summarise; the
+# seat forwards it as a reasoning item, never as answer text (`_REASONING` in codex_appserver).
+model_reasoning_summary = "auto"
 
 # Suppress the prompt blocks codex injects of its own accord. Verified with
 # `codex debug prompt-input`: without these the model is handed a sandbox description, an
@@ -87,15 +93,43 @@ skill_mcp_dependency_install = false
 goals = false
 sqlite = false
 code_mode_host = false
-
-# Block apply_patch at call time — the tool can't be hidden from the model (no feature
-# flag exists, unlike shell_tool), but "blocked by app configuration" is cleaner than
-# the generic JSON-RPC error _respond_to_server returns for unknown methods. The model
-# still SEES the tool in its function list, but when it calls it the app-server blocks
-# it internally without asking the client.
-[apps._default.tools.apply_patch]
-enabled = false
 """
+# Removed: `[apps._default.tools.apply_patch] enabled = false`. `codex --strict-config` rejects it —
+# "unknown configuration field `apps._default.tools`" on 0.146.0 — so it blocked nothing and only
+# looked like it did, since codex ignores unrecognised keys silently without that flag. Validate any
+# change to the config above with:
+#     CODEX_HOME=~/.grid/seats/codex-cli codex --strict-config exec --skip-git-repo-check -s read-only "hi"
+# apply_patch is ruled out by TOOL_NOTE instead, the same way `exec` and `wait` are.
+
+# Codex keeps `exec` and `wait` in the model's function list whatever the config says. Verified on
+# 0.146.0: `[features] shell_tool` is still a recognised key but no longer names this tool, and
+# nothing else removes it — `--disable exec_tool` / `exec` / `command_execution` answer "Unknown
+# feature flag", `--disable unified_exec` is accepted and changes nothing, and `tools.exec.enabled`
+# / `experimental_use_exec_command_tool` are unknown config fields. Asked to list its tools, a live
+# seat answers `functions.exec` / `functions.wait`.
+#
+# So the seat can only DECLINE the approval those calls raise, and the decline carries no
+# explanation: `ExecCommandApprovalResponse` has one field, `decision`. The model reads the bare
+# refusal as ground truth and answers "this environment exposes no shell/command-execution tool,
+# therefore the command was not run" — measured, verbatim — instead of emitting the caller's tool
+# call. This note is the only channel left to tell it otherwise.
+#
+# It says which tools are real by REFERENCE, never by name. Naming them was tried and backfired:
+# the note listed `exec` and `wait` as disabled, and those are the very names Codex CLI gives its
+# OWN tools when it is the client — so the note was telling the model the caller's tools did not
+# work. Measured against a caller offering `exec`/`wait`: 5 of 6 turns emitted the call, the sixth
+# answered "I can't inspect the repository from this environment." Phrased by reference the note
+# cannot collide, whatever the caller names its tools, and it still is not the generic "you have no
+# tools" line the model can disprove by reading its own function list.
+TOOL_NOTE = (
+    "Only the tools listed above are real. Any other tool in your function list — including any "
+    "built-in of your own, whatever it is called — is disabled here: calling it is refused, "
+    "returns nothing, and wastes the turn. A tool listed above is NOT disabled even when a "
+    "built-in of yours happens to share its name; reach it by emitting the JSON call, never by "
+    "invoking it directly. A refusal is a fact about this process, not about the user's request: "
+    "never mention it, and never conclude from it that the work cannot be done or that no way to "
+    "run commands is available."
+)
 
 # `--ignore-user-config` is deliberately ABSENT: the config above is ours and must be read.
 # `--ignore-rules` stays — a project `.rules` file lives outside CODEX_HOME and would still load.
@@ -218,6 +252,10 @@ SPEC = SeatSpec(
     binary=BINARY,
     home_env="CODEX_HOME",
     config_files=(("config.toml", CONFIG_TOML),),
+    tool_note=TOOL_NOTE,
+    # The turn is decoded against OPENAI_OUTPUT_SCHEMA, so the answer arrives as {text, tool_calls}.
+    # Falls back to the plain text scan when it does not — see `parse_structured_answer`.
+    tool_protocol=STRUCTURED,
     label=LABEL,
     signin_argv=SIGNIN_ARGV,
     login_argv=("login",),

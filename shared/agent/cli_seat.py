@@ -16,6 +16,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -50,6 +51,30 @@ class SeatResult:
 
 
 @dataclass(frozen=True)
+class Reasoning:
+    """One chunk of the model's thinking, travelling the same channel as an answer delta.
+
+    A marker type rather than a second callback: a seat emits thinking and answer text on one
+    ordered stream, and splitting them into two channels would lose which came first. It must not be
+    a bare string — thinking is NOT part of the answer, so it never reaches `_SafeText`, never counts
+    toward the text the parse reads back, and never lands in `content`.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True)
+class TurnEnd:
+    """One of the CLI's turns finished — NOT the request.
+
+    A CLI handed a replayed transcript may run several turns for one request, answering each past
+    question again on its way to the live one. Only the last of those is the answer; the rest are
+    re-runs and must not reach the client. `parse_event` marks the boundaries with this and
+    `stream_seat` counts them, because only the seat knows how many turns it asked for.
+    """
+
+
+@dataclass(frozen=True)
 class QuotaSnapshot:
     """One quota reading. Percentages are 0-100; resets stay verbatim (they carry no year)."""
 
@@ -79,9 +104,15 @@ class SeatSpec:
                                     # `on_delta(text)` is called per streamed chunk, or None.
                                     # Wins over invoke/decode when set.
     parse_usage: object = None      # (text) -> QuotaSnapshot | None
-    parse_event: object = None      # (event) -> str to stream | QuotaSnapshot | None
+    parse_event: object = None      # (event) -> str | Reasoning | QuotaSnapshot | TurnEnd | None
+    expected_turns: object = None   # (stdin) -> how many turns this input will make the CLI run.
+                                    # None = one, the ordinary case. Set only by a CLI whose input
+                                    # format re-runs replayed history (see seats/claude.py).
     home_env: str = ""              # env var pointing the CLI at its own home; "" = shares the user's
     config_files: tuple = ()        # ((relative path, text), …) written into that home
+    tool_note: str = ""             # extra instruction appended to the tool block, for a CLI whose
+                                    # own tools stay visible to the model and must be named to be
+                                    # ruled out. "" for a CLI that can hide them (claude's --tools "")
 
 
 @dataclass(frozen=True)
@@ -352,6 +383,12 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 # of emitting a tool call — it believed it still had an editor and reported the refusal as the
 # outcome. It only works when the vendor's base prompt is REPLACED too; left in place, that prompt
 # reasserts the agent identity and the model goes back to trying the work itself.
+#
+# Do not soften this for a seat it does not fit. It was reworded once, to stop asserting "no file,
+# shell, editor or network tool" on codex, where the model can see `exec` in its own list — and the
+# rewording measurably cost claude, where the sentence is exactly true (`--tools ""`) and the
+# enumeration is the part that works. A seat whose CLI leaves its own tools visible corrects this in
+# its `tool_note` instead, which is appended after and is the last word.
 TOOL_DELEGATION_NOTE = (
     "You have NO ability to execute anything yourself — no file, shell, editor or network tool. "
     "Any workspace, sandbox or approval described to you concerns the process you run in, NOT the "
@@ -373,7 +410,10 @@ def _json_objects(text):
     them inside strings, so a `\\{.*?\\}` or a brace counter truncates any call whose argument is
     an object — the common case.
     """
-    decoder = json.JSONDecoder()
+    # strict=False: a model writing a shell command puts REAL newlines and tabs inside the JSON
+    # string. Strict mode rejects those as control characters, the scan finds no call, and the raw
+    # `{"tool_calls": …}` is handed back as prose — the user sees it printed instead of run.
+    decoder = json.JSONDecoder(strict=False)
     index = 0
     while True:
         index = text.find("{", index)
@@ -404,7 +444,7 @@ def _one_call(entry):
     arguments = function.get("arguments")
     if isinstance(arguments, str):
         try:
-            arguments = json.loads(arguments)
+            arguments = json.loads(arguments, strict=False)
         except ValueError:
             arguments = {}
     return {
@@ -444,7 +484,62 @@ def parse_openai_tool_calls(text):
     return "".join(prose_parts).strip(), calls
 
 
+# The same shape OPENAI_TOOL_TEMPLATE asks for, as a schema a CLI can enforce at decode time.
+# Asking produces a call that is *usually* well-formed; measured on a live codex turn, one came back
+# with a closing brace missing and the whole object was printed to the user as prose. A constrained
+# decode cannot emit that. `text` stays so an ordinary answer is still expressible — constrain the
+# shape, not the choice of whether to call a tool.
+#
+# Strict structured outputs, whose rules the first draft broke and the vendor named exactly:
+# "'additionalProperties' is required to be supplied and to be false". Every object must also list
+# EVERY property in `required` — there are no optional keys — so `tool_calls` is required and simply
+# empty when no tool is wanted. `arguments` is a STRING holding JSON, not an object: a free-form
+# object cannot be expressed under these rules, and the OpenAI wire spells it that way regardless
+# (`_one_call` already decodes both).
+OPENAI_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["text", "tool_calls"],
+    "properties": {
+        "text": {"type": "string",
+                 "description": "The reply. Empty when a tool call is the whole answer."},
+        "tool_calls": {
+            "type": "array",
+            "description": "Empty when no tool is needed.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "arguments"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "arguments": {"type": "string",
+                                  "description": "JSON object, encoded as a string."},
+                },
+            },
+        },
+    },
+}
+
+
+def parse_structured_answer(text):
+    """A schema-constrained answer -> `(prose, calls)`. Falls back to the text scan.
+
+    The fallback is not belt-and-braces: `outputSchema` binds the FINAL message only, so a turn that
+    ends in prose, or a CLI that ignored the schema, still arrives in the old shape.
+    """
+    try:
+        value = json.loads(text, strict=False)
+    except (TypeError, ValueError):
+        return parse_openai_tool_calls(text)
+    if not isinstance(value, dict) or "text" not in value:
+        return parse_openai_tool_calls(text)
+    calls = [c for c in (_one_call(c) for c in value.get("tool_calls") or []) if c]
+    return str(value.get("text") or ""), calls
+
+
 OPENAI = ToolProtocol(name="openai", render=render_openai_tools, parse=parse_openai_tool_calls)
+STRUCTURED = ToolProtocol(name="structured", render=render_openai_tools,
+                          parse=parse_structured_answer)
 
 
 # Anthropic's own shape: one `tool_use` block instead of an array of `tool_calls`. Kept as a
@@ -481,7 +576,7 @@ def parse_anthropic_tool_uses(text):
         payload = value.get("input")
         if isinstance(payload, str):
             try:
-                payload = json.loads(payload)
+                payload = json.loads(payload, strict=False)
             except ValueError:
                 payload = {}
         calls.append({"type": "tool_use", "id": f"toolu_{uuid.uuid4().hex[:24]}",
@@ -585,6 +680,45 @@ def build_prompt(messages):
         else:
             lines.append(text)
     return "\n\n".join(line for line in lines if line)
+
+
+# Caller-side request metadata, not content: `cache_control` belongs to the caller's own API call
+# and 400s when forwarded into ours.
+STRIPPED_KEYS = ("cache_control",)
+
+# Framed, because the payload is a JSON array and without this the model describes it instead of
+# continuing it.
+JSON_PROMPT_HEADER = (
+    "The conversation so far, as JSON. Continue it: answer the last message. "
+    "Do not describe or repeat the JSON."
+)
+
+
+def _strip_metadata(value):
+    if isinstance(value, dict):
+        return {k: _strip_metadata(v) for k, v in value.items() if k not in STRIPPED_KEYS}
+    if isinstance(value, list):
+        return [_strip_metadata(v) for v in value]
+    return value
+
+
+def json_prompt(messages, tools_text=None, keep_system=False):
+    """The transcript as verbatim JSON — nothing flattened into prose.
+
+    A `tool_use` stays a tool_use and a `tool_result` stays a tool_result, so the model can see the
+    shape it is expected to answer in. Flattening turned both into sentences, and the model then had
+    to guess the format back.
+
+    `keep_system` keeps `role: "system"` messages in the transcript, for a wire whose system prompt
+    came from a top-level field and so never read them.
+    """
+    turns = _strip_metadata(
+        list(messages) if keep_system else [m for m in messages if m.get("role") != "system"])
+    if not turns:
+        raise SeatBadRequest("messages[] must contain at least one non-system message.")
+    body = json.dumps(turns, ensure_ascii=False, indent=2, default=str)
+    prompt = f"{JSON_PROMPT_HEADER}\n\n{body}"
+    return f"{prompt}\n\n{tools_text}" if tools_text else prompt
 
 
 def _responses_content_parts(content):
@@ -761,15 +895,21 @@ def _resolve_effort(body):
     rather than one of three words. A request naming none of the three returns "", so an ordinary
     body's resulting argv/turn params are unaffected.
     """
-    thinking_effort = _effort_for_thinking(body.get("thinking"))
-    if thinking_effort:
-        return thinking_effort
-    reasoning = body.get("reasoning")
-    if isinstance(reasoning, dict):
-        effort = _effort_for_reasoning_effort(reasoning.get("effort"))
-        if effort:
-            return effort
-    return _effort_for_reasoning_effort(body.get("reasoning_effort"))
+    thinking = body.get("thinking")
+    budget = thinking.get("budget_tokens") if isinstance(thinking, dict) else None
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+        return _effort_for_thinking(thinking)   # a real number beats every word below
+
+    # A word the caller actually wrote beats one this file infers. Claude Code sends BOTH
+    # `thinking: {"type": "adaptive"}` (no number, so we guess "medium") and
+    # `output_config: {"effort": "high"}` — captured live. Reading only `thinking` graded its
+    # high-effort request as medium.
+    for source in (body.get("output_config"), body.get("reasoning")):
+        if isinstance(source, dict):
+            effort = _effort_for_reasoning_effort(source.get("effort"))
+            if effort:
+                return effort
+    return _effort_for_reasoning_effort(body.get("reasoning_effort")) or _effort_for_thinking(thinking)
 
 
 def _reject_server_tools(tools):
@@ -785,7 +925,50 @@ def _reject_server_tools(tools):
             )
 
 
-def prepare(body, kind, protocol=None, wire="openai"):
+def _tool_name(tool):
+    """The name a tool can be called by, or "" when it has none."""
+    if not isinstance(tool, dict):
+        return ""
+    name = tool.get("name")
+    if not name and isinstance(tool.get("function"), dict):
+        name = tool["function"].get("name")
+    return name if isinstance(name, str) else ""
+
+
+def _callable_tools(tools):
+    """Only the tools the caller can actually execute for us.
+
+    Captured from a live Codex CLI request: its `tools[]` also carries `{"type": "web_search",
+    "name": null}` and `{"type": "namespace", ...}`. Those run on the vendor's side, not the
+    caller's, and a nameless entry cannot be named in a name-based protocol — rendered into the
+    prompt they are an offer nobody can answer.
+    """
+    return [t for t in tools or []
+            if (t.get("type") if isinstance(t, dict) else None) in (None, "function")
+            and _tool_name(t)]
+
+
+def _tool_constraints(body):
+    """The caller's `tool_choice` / `parallel_tool_calls`, as instruction text. "" when free."""
+    parts = []
+    if body.get("parallel_tool_calls") is False:
+        # The templates invite several calls at once; Codex CLI asks for one.
+        parts.append("Emit AT MOST ONE tool call in this reply.")
+    choice = body.get("tool_choice")
+    if isinstance(choice, dict):
+        if choice.get("type") in ("any", "tool", "function"):
+            named = choice.get("name") or (choice.get("function") or {}).get("name")
+            parts.append(f"You MUST call {named or 'one of the tools above'} in this reply.")
+    elif choice == "required":
+        parts.append("You MUST call one of the tools above in this reply.")
+    return " ".join(parts)
+
+
+def _tools_disabled(choice):
+    return choice == "none" or (isinstance(choice, dict) and choice.get("type") == "none")
+
+
+def prepare(body, kind, protocol=None, wire="openai", tool_note=""):
     if wire == "responses":
         messages = _messages_from_responses_input(body)
         if not messages:
@@ -805,10 +988,19 @@ def prepare(body, kind, protocol=None, wire="openai"):
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
     if wire == "anthropic" and tools:
         _reject_server_tools(tools)
+    tools = None if _tools_disabled(body.get("tool_choice")) else _callable_tools(tools)
     tool_text = resolved_protocol.render(tools) if tools else ""
-    prompt = build_prompt(messages)
+    # Constraints, then the seat's note — the caller's own rules outrank ours, and both come after
+    # the tool list so they are the last thing read about tools.
     if tool_text:
-        prompt = f"{prompt}\n\n{tool_text}"
+        for extra in (_tool_constraints(body), tool_note):
+            if extra:
+                tool_text = f"{tool_text}\n\n{extra}"
+    # `keep_system`: a system prompt taken from a TOP-LEVEL field leaves any `role: "system"`
+    # message in the transcript unread. Claude Code sends both — captured live, a 6379-character
+    # system message sat inside `messages[]` and was dropped.
+    prompt = json_prompt(messages, tool_text or None,
+                         keep_system=wire in ("anthropic", "responses"))
     if wire == "anthropic":
         # `system` is a TOP-LEVEL field on this wire, not a `role: "system"` message — reading it
         # off `messages` (the OpenAI shape) would silently drop the caller's whole instruction set,
@@ -883,6 +1075,10 @@ def stream_seat(spec, prepared, binary, timeout):
     with tempfile.TemporaryDirectory(prefix=f"grid-{spec.kind}-seat-") as tmp:
         tmpdir = Path(tmp)
         argv, stdin = spec.invoke(binary, prepared, tmpdir, stream=True)
+        # Turns to sit out before anything is forwarded. Counted from the stdin actually built, not
+        # recomputed from `messages`, so it cannot drift from what the CLI was really handed.
+        skip_turns = max(0, spec.expected_turns(stdin) - 1) if spec.expected_turns else 0
+        turns_done = 0
         try:
             proc = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -911,7 +1107,12 @@ def stream_seat(spec, prepared, binary, timeout):
                     parsed = spec.parse_event(event)
                     if isinstance(parsed, QuotaSnapshot):
                         quota.append(parsed)   # free quota reading, carried by the answer itself
-                    elif parsed:
+                    elif isinstance(parsed, TurnEnd):
+                        turns_done += 1
+                    elif parsed and turns_done >= skip_turns:
+                        # Everything before the last turn is the CLI re-answering a question the
+                        # transcript had already settled. Forwarded, it arrived glued to the front
+                        # of the real answer with no separator — the "…work on?Mochi" shape.
                         yield parsed
         finally:
             writer.join(timeout=1)
@@ -969,6 +1170,25 @@ def _write_stdin(proc, text):
         pass  # the child exited early; its own output explains why
 
 
+
+def parse_calls(protocol, text):
+    """`(prose, calls)` from a protocol, shouting when a call was attempted and did not parse.
+
+    A malformed call still travels as text — it is the model's output and is not ours to repair or
+    delete. But it must not travel SILENTLY: unannounced it reads like an ordinary answer, and the
+    user is left staring at raw JSON with nothing saying a tool call failed. Measured on a live
+    codex turn: the model wrote `{"tool_calls": …}` with one closing brace missing, the scan found
+    nothing, and the whole object was printed as prose.
+    """
+    if protocol is None or not getattr(protocol, "parse", None):
+        return text, []
+    prose, calls = protocol.parse(text)
+    if not calls and ('"tool_calls"' in text or '"tool_use"' in text):
+        print(f"[cli-seat] a tool call did not parse ({len(text)}B); forwarded as text",
+              file=sys.stderr, flush=True)
+    return prose, calls
+
+
 # answer -> OpenAI chat.completion
 
 def to_chat_completion(result, kind, model, protocol=None):
@@ -980,9 +1200,7 @@ def to_chat_completion(result, kind, model, protocol=None):
     translates into an Anthropic `tool_use` block. Without it the text is returned verbatim, which
     is what a caller that brought its own convention wants.
     """
-    text, tool_calls = result.text, []
-    if protocol is not None and getattr(protocol, "parse", None):
-        text, tool_calls = protocol.parse(result.text)
+    text, tool_calls = parse_calls(protocol, result.text)
     message = {"role": "assistant", "content": text}
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -1011,13 +1229,33 @@ def to_chat_completion(result, kind, model, protocol=None):
     }
 
 
+def _to_tool_use(call):
+    """A parsed call in EITHER protocol's shape -> an Anthropic `tool_use` block.
+
+    The seat's protocol and the wire it answers on are chosen independently: codex parses with
+    STRUCTURED (OpenAI-shaped calls) but may be asked on `/messages`. Without this the OpenAI shape
+    was spliced into `content` verbatim and the client received a block of type "function".
+    """
+    if call.get("type") == "tool_use":
+        return call
+    function = call.get("function") or {}
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments, strict=False)
+        except ValueError:
+            arguments = {}
+    return {"type": "tool_use",
+            "id": call.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+            "name": function.get("name") or "",
+            "input": arguments if isinstance(arguments, dict) else {}}
+
+
 def to_anthropic_message(result, kind, model, protocol=None):
     """The Anthropic `message` shape, built directly rather than via a chat.completion the relay
     would have to convert back."""
-    text, calls = result.text, []
-    if protocol is not None and getattr(protocol, "parse", None):
-        text, calls = protocol.parse(result.text)
-    content = ([{"type": "text", "text": text}] if text else []) + calls
+    text, calls = parse_calls(protocol, result.text)
+    content = ([{"type": "text", "text": text}] if text else []) + [_to_tool_use(c) for c in calls]
     return {
         "id": f"msg_{uuid.uuid4().hex}",
         "type": "message",
@@ -1045,8 +1283,18 @@ def answer_anthropic(spec, prepared, binary, timeout):
     return to_anthropic_message(result, spec.kind, prepared.model, prepared.tool_protocol)
 
 
+def _kinded(chunk):
+    """One streamed chunk -> ("reasoning", text) or ("delta", text).
+
+    Shared by the three `answer_stream*` wrappers so a seat's thinking cannot be labelled the answer
+    on one wire and thinking on another.
+    """
+    return ("reasoning", chunk.text) if isinstance(chunk, Reasoning) else ("delta", chunk)
+
+
 def answer_stream(spec, prepared, binary, timeout):
-    """Yield ("delta", text) as the CLI produces it, then ("done", (completion, quota|None)).
+    """Yield ("delta", text) / ("reasoning", text) as the CLI produces it, then
+    ("done", (completion, quota|None)).
 
     Tool calls ride the final ("done") event, never a delta: only a whole answer can be parsed,
     so nothing about a call is known until the CLI has finished writing it.
@@ -1054,7 +1302,7 @@ def answer_stream(spec, prepared, binary, timeout):
     stream = stream_seat(spec, prepared, binary, timeout)
     while True:
         try:
-            yield "delta", next(stream)
+            yield _kinded(next(stream))
         except StopIteration as stop:
             result, quota = stop.value
             completion = to_chat_completion(
@@ -1069,7 +1317,7 @@ def answer_stream_anthropic(spec, prepared, binary, timeout):
     stream = stream_seat(spec, prepared, binary, timeout)
     while True:
         try:
-            yield "delta", next(stream)
+            yield _kinded(next(stream))
         except StopIteration as stop:
             result, quota = stop.value
             message = to_anthropic_message(
@@ -1087,16 +1335,20 @@ def to_response(result, kind, model, protocol=None):
     ``tool_calls`` on a message — the same parse that extracts them for chat feeds this instead, so
     a tool conversation round-trips identically on every wire the seat speaks.
     """
-    text, tool_calls = result.text, []
-    if protocol is not None and getattr(protocol, "parse", None):
-        text, tool_calls = protocol.parse(result.text)
-    output = [{
-        "id": f"msg_{uuid.uuid4().hex}",
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": text, "annotations": []}] if text else [],
-    }]
+    text, tool_calls = parse_calls(protocol, result.text)
+    # A call-only answer carries NO message item. It used to emit one with `content: []`, and a
+    # Responses client reading `output[]` in order then saw an assistant message that said nothing
+    # standing in front of the call. An empty message is only correct when there is nothing else to
+    # report — an answer with neither text nor calls — so that one case still gets it.
+    output = []
+    if text or not tool_calls:
+        output.append({
+            "id": f"msg_{uuid.uuid4().hex}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}] if text else [],
+        })
     for call in tool_calls:
         function = call.get("function") or {}
         output.append({
@@ -1142,7 +1394,7 @@ def answer_stream_response(spec, prepared, binary, timeout):
     stream = stream_seat(spec, prepared, binary, timeout)
     while True:
         try:
-            yield "delta", next(stream)
+            yield _kinded(next(stream))
         except StopIteration as stop:
             result, quota = stop.value
             response = to_response(

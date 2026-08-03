@@ -110,7 +110,7 @@ async def _handle(app: FastAPI, request: Request, *, wire: str = "openai"):
 
     try:
         prepared = await run_in_threadpool(
-            cli_seat.prepare, body, spec.kind, spec.tool_protocol, wire,
+            cli_seat.prepare, body, spec.kind, spec.tool_protocol, wire, spec.tool_note,
         )
     except cli_seat.SeatBadRequest as exc:
         return _error(400, str(exc))
@@ -185,7 +185,17 @@ async def _stream(app: FastAPI, prepared, *, wire: str = "openai"):
                 kind, payload = await run_in_threadpool(_next_or_none, stream)
                 if kind is None:
                     break
-                if kind == "delta":
+                if kind == "reasoning":
+                    # `reasoning_content` is the field the OpenAI-compatible ecosystem settled on
+                    # for this; a client that does not know it ignores it, and one that does shows
+                    # the think instead of a dead connection. Never `content` — that is the answer,
+                    # and the tool parse reads it.
+                    delta = {"reasoning_content": payload}
+                    if first:
+                        delta["role"], first = "assistant", False
+                    yield _frame({**base, "choices": [
+                        {"index": 0, "delta": delta, "finish_reason": None}]})
+                elif kind == "delta":
                     payload = safe.feed(payload)
                     if not payload:
                         continue
@@ -263,6 +273,12 @@ async def _stream_anthropic(app: FastAPI, prepared):
                 kind, payload = await run_in_threadpool(_next_or_none, stream)
                 if kind is None:
                     break
+                if kind == "reasoning":
+                    # Dropped, deliberately, and the only wire where it is. An Anthropic `thinking`
+                    # block carries a `signature` the vendor mints and the client verifies when the
+                    # block is replayed on the next turn; this seat has no signature to put there,
+                    # so an unsigned block would be rejected on replay — worse than not sending it.
+                    continue
                 if kind == "delta":
                     payload = safe.feed(payload)
                     if not payload:
@@ -361,13 +377,23 @@ class _SafeText:
 
 
 async def _stream_responses(app, prepared):
-    """OpenAI Responses SSE: ``response.created``, ``output_text`` delta(s), ``response.completed``.
+    """OpenAI Responses SSE: every item announced as its own ``output_item``, then
+    ``response.completed``.
 
     Same streaming rule as the OpenAI/Anthropic streams, via the same ``_SafeText``: text before the
     first ``{`` goes out as it arrives, the rest waits for the parse — because only the parse knows
     which bytes were the call, and emitting those early is what let a client print raw tool JSON as
-    prose AND run the tool. Tool-call items ride the terminal ``response.completed`` event's
-    ``output[]``, never a delta (they cannot be known until the answer is whole).
+    prose AND run the tool.
+
+    A tool call is still only KNOWN once the answer is whole, but it must still be announced as an
+    ``output_item``. It used to appear nowhere but inside the terminal ``response.completed``, and a
+    client that builds its output from the item events — Codex CLI does — saw a stream that
+    announced nothing and ran no tool. So the call is replayed here as the item event sequence the
+    dialect defines (``added`` -> ``arguments.delta`` -> ``arguments.done`` -> ``done``), with the
+    whole argument string as one delta: the bytes arrive at once, and the shape is what matters.
+
+    ``output_index`` is assigned in emission order and reused in ``response.completed``, so the
+    indices a client saw stream are the indices it finds in the final object.
 
     Reuses ``_anthropic_frame`` — the SSE framing (``event: <type>\\ndata: <json>``) is identical
     across the Anthropic and Responses dialects; only the event names differ.
@@ -377,24 +403,51 @@ async def _stream_responses(app, prepared):
     safe = _SafeText(bool(prepared.tool_protocol))
     resp_id = f"resp_{uuid.uuid4().hex}"
     msg_id = f"msg_{uuid.uuid4().hex}"
+    reasoning_id = f"rs_{uuid.uuid4().hex[:24]}"
 
     yield _anthropic_frame({"type": "response.created", "response": {
         "id": resp_id, "object": "response", "status": "in_progress",
         "model": prepared.model, "output": []}})
 
-    def _open_text():
+    # Assigned as items open, never guessed: thinking may be absent, text may be absent (a call-only
+    # answer), and a hardcoded 0 for the message was what made every later index wrong.
+    next_index = 0
+    reasoning_index = text_index = None
+    reasoning_open, text_open = False, False
+    reasoning_text, full_text = "", ""
+    response_obj = None
+
+    def _open_reasoning(index):
         return (
-            _anthropic_frame({"type": "response.output_item.added", "output_index": 0,
+            _anthropic_frame({"type": "response.output_item.added", "output_index": index,
+                "item": {"id": reasoning_id, "type": "reasoning", "summary": []}}),
+            _anthropic_frame({"type": "response.reasoning_summary_part.added",
+                "item_id": reasoning_id, "output_index": index, "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""}}),
+        )
+
+    def _close_reasoning(index, text):
+        return (
+            _anthropic_frame({"type": "response.reasoning_summary_text.done",
+                "item_id": reasoning_id, "output_index": index, "summary_index": 0, "text": text}),
+            _anthropic_frame({"type": "response.reasoning_summary_part.done",
+                "item_id": reasoning_id, "output_index": index, "summary_index": 0,
+                "part": {"type": "summary_text", "text": text}}),
+            _anthropic_frame({"type": "response.output_item.done", "output_index": index,
+                "item": {"id": reasoning_id, "type": "reasoning",
+                         "summary": [{"type": "summary_text", "text": text}]}}),
+        )
+
+    def _open_text(index):
+        return (
+            _anthropic_frame({"type": "response.output_item.added", "output_index": index,
                 "item": {"id": msg_id, "type": "message", "status": "in_progress",
                          "role": "assistant", "content": []}}),
             _anthropic_frame({"type": "response.content_part.added",
-                "output_index": 0, "content_index": 0,
+                "item_id": msg_id, "output_index": index, "content_index": 0,
                 "part": {"type": "output_text", "text": "", "annotations": []}}),
         )
 
-    text_open = False
-    full_text = ""
-    response_obj = None
     async with app.state.slots:
         try:
             while True:
@@ -403,17 +456,36 @@ async def _stream_responses(app, prepared):
                 kind, payload = await run_in_threadpool(_next_or_none, stream)
                 if kind is None:
                     break
+                if kind == "reasoning":
+                    if not reasoning_open:
+                        reasoning_index, next_index = next_index, next_index + 1
+                        for frame in _open_reasoning(reasoning_index):
+                            yield frame
+                        reasoning_open = True
+                    reasoning_text += payload
+                    yield _anthropic_frame({"type": "response.reasoning_summary_text.delta",
+                        "item_id": reasoning_id, "output_index": reasoning_index,
+                        "summary_index": 0, "delta": payload})
+                    continue
                 if kind == "delta":
                     payload = safe.feed(payload)
                     if not payload:
                         continue
+                    # The think is over the moment the answer starts, so close its item before the
+                    # message opens — two items may not be in progress at the same index depth.
+                    if reasoning_open:
+                        for frame in _close_reasoning(reasoning_index, reasoning_text):
+                            yield frame
+                        reasoning_open = False
                     if not text_open:
-                        for frame in _open_text():
+                        text_index, next_index = next_index, next_index + 1
+                        for frame in _open_text(text_index):
                             yield frame
                         text_open = True
                     full_text += payload
                     yield _anthropic_frame({"type": "response.output_text.delta",
-                        "output_index": 0, "content_index": 0, "delta": payload})
+                        "item_id": msg_id, "output_index": text_index,
+                        "content_index": 0, "delta": payload})
                 else:
                     response_obj, quota = payload
                     if quota is not None:
@@ -425,13 +497,19 @@ async def _stream_responses(app, prepared):
                     # none (a call-only answer leaves this empty and the text item never opens).
                     tail = safe.remainder(_responses_output_text(response_obj))
                     if tail:
+                        if reasoning_open:
+                            for frame in _close_reasoning(reasoning_index, reasoning_text):
+                                yield frame
+                            reasoning_open = False
                         if not text_open:
-                            for frame in _open_text():
+                            text_index, next_index = next_index, next_index + 1
+                            for frame in _open_text(text_index):
                                 yield frame
                             text_open = True
                         full_text += tail
                         yield _anthropic_frame({"type": "response.output_text.delta",
-                            "output_index": 0, "content_index": 0, "delta": tail})
+                            "item_id": msg_id, "output_index": text_index,
+                            "content_index": 0, "delta": tail})
         except Exception as exc:  # noqa: BLE001 — mirrors the OpenAI stream's terminal-error contract
             yield _anthropic_frame({"type": "response.failed", "response": {
                 "id": resp_id, "object": "response", "status": "failed",
@@ -440,20 +518,50 @@ async def _stream_responses(app, prepared):
                           "code": "cli_seat_error"}}})
             return
 
+    # A think with no answer after it (the model emitted only a tool call) still has to close.
+    if reasoning_open:
+        for frame in _close_reasoning(reasoning_index, reasoning_text):
+            yield frame
+        reasoning_open = False
+
     if text_open:
         yield _anthropic_frame({"type": "response.output_text.done",
-            "output_index": 0, "content_index": 0, "text": full_text})
+            "item_id": msg_id, "output_index": text_index, "content_index": 0, "text": full_text})
         yield _anthropic_frame({"type": "response.content_part.done",
-            "output_index": 0, "content_index": 0,
+            "item_id": msg_id, "output_index": text_index, "content_index": 0,
             "part": {"type": "output_text", "text": full_text, "annotations": []}})
         yield _anthropic_frame({"type": "response.output_item.done",
-            "output_index": 0,
+            "output_index": text_index,
             "item": {"id": msg_id, "type": "message", "status": "completed",
                      "role": "assistant",
                      "content": [{"type": "output_text", "text": full_text, "annotations": []}]}})
 
     completed = response_obj or {"id": resp_id, "object": "response", "status": "completed",
                                   "model": prepared.model, "output": [], "usage": {}}
+    for call in [item for item in (completed.get("output") or [])
+                 if isinstance(item, dict) and item.get("type") == "function_call"]:
+        index, next_index = next_index, next_index + 1
+        opening = {**call, "arguments": "", "status": "in_progress"}
+        yield _anthropic_frame({"type": "response.output_item.added",
+            "output_index": index, "item": opening})
+        yield _anthropic_frame({"type": "response.function_call_arguments.delta",
+            "item_id": call.get("id"), "output_index": index,
+            "delta": call.get("arguments") or "{}"})
+        yield _anthropic_frame({"type": "response.function_call_arguments.done",
+            "item_id": call.get("id"), "output_index": index,
+            "arguments": call.get("arguments") or "{}"})
+        yield _anthropic_frame({"type": "response.output_item.done",
+            "output_index": index, "item": call})
+
+    # The thinking item is not in `to_response`'s output — it is a streaming-only concern there —
+    # but a client that saw it stream must find it in the final object at the SAME index, so it is
+    # spliced in at the front, which is where its index came from.
+    if reasoning_index is not None:
+        completed = {**completed, "output": [
+            {"id": reasoning_id, "type": "reasoning",
+             "summary": [{"type": "summary_text", "text": reasoning_text}]},
+            *(completed.get("output") or []),
+        ]}
     yield _anthropic_frame({"type": "response.completed", "response": completed})
 
 

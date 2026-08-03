@@ -15,6 +15,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -29,6 +30,16 @@ CLIENT_NAME = "grid"
 # Sent back when the SERVER asks the client for something. -32601 is JSON-RPC "method not found".
 UNSUPPORTED_REQUEST = -32601
 
+# Why every refusal below happened, in the model's own turn. Carried in whichever field the method's
+# schema provides for it, so the model reads a reason and a way forward rather than a bare "no" —
+# a bare "no" is what it reported to the user as "this environment exposes no shell".
+REJECTION = (
+    "Nothing can be executed in this process — the request never reached the user's machine, and "
+    "retrying it will fail the same way. This is not a limit on what the user asked for. To act, "
+    "emit the tool call as JSON in the shape your instructions describe; the caller runs it and "
+    "returns the output to you."
+)
+
 
 class AppServerError(RuntimeError):
     """The app-server could not be started, died, or answered with an error."""
@@ -42,6 +53,7 @@ class AppServer:
         self.proc = proc
         self.timeout = timeout
         self.notifications = deque(maxlen=1000)  # bounded: a live thread pushes thousands
+        self.refusals = []   # every server request this client turned down, in order
         self._replies = {}
         self._state = threading.Condition()
         self._write_lock = threading.Lock()
@@ -93,16 +105,20 @@ class AppServer:
             raise AppServerError(f"thread/start returned no thread id: {result}")
         return thread_id
 
-    def start_turn(self, thread_id, text, effort=None):
+    def start_turn(self, thread_id, text, effort=None, output_schema=None):
         """Send one user turn. The ANSWER does not come back here — it arrives as `turn/*` and
         `item/*` notifications, which `drain_notifications` hands back.
 
         `effort` is per-turn, the way codex's own app-server schema has it — not session config,
         so it travels with THIS request rather than every turn a long-lived thread might run.
-        Omitted (falsy) leaves the params byte-identical to before this field existed."""
+        `output_schema` constrains the final assistant message — the one lever that makes a tool
+        call structurally valid instead of merely requested. Both are omitted when falsy, leaving
+        the params byte-identical to before either existed."""
         params = {"threadId": thread_id, "input": [{"type": "text", "text": text}]}
         if effort:
             params["effort"] = effort
+        if output_schema:
+            params["outputSchema"] = output_schema
         return self.call("turn/start", params)
 
     def drain_notifications(self):
@@ -167,27 +183,61 @@ class AppServer:
     def _respond_to_server(self, request_id, method, params=None):
         """Answer a server request with the proper response shape per method, or refuse.
 
-        A headless seat has nobody to approve or execute tools, but silence hangs the
-        turn. Returning the proper JSON-RPC result (not a generic error) gives the model
-        a clean denial it can understand and recover from, rather than a cryptic -32601.
+        A headless seat has nobody to approve or execute tools, but silence hangs the turn. Every
+        refusal here therefore says WHY, in the field the schema provides for it, so the model can
+        recover inside the same turn instead of stopping.
+
+        The two approval families use different vocabularies, and this had them crossed. A
+        `ReviewDecision` (command execution, apply-patch) has no `"decline"` member at all — its
+        options are `approved`, `approved_for_session`, `timed_out`, `abort`, and the object form
+        `{"denied": {"rejection": …}}`. Sending the string `"decline"` was sending a value that does
+        not exist, and the turn stopped there. `"decline"` is a `FileChangeApprovalDecision`, the
+        enum for the ONE method that was falling through to the generic error instead.
+
+        `denied` is also the only refusal that carries text and the only one documented to let the
+        agent "continue the session and try something else" — `abort` stops until the next user
+        message, which is the behaviour being complained about, not the one wanted.
         """
         try:
-            if method in ("item/commandExecution/requestApproval", "execCommandApproval"):
-                self._send({"id": request_id, "result": {"decision": "decline"}})
-            elif method in ("item/permissions/requestApproval", "applyPatchApproval"):
-                self._send({"id": request_id, "result": {"permissions": {}}})
+            if method in ("item/commandExecution/requestApproval", "execCommandApproval",
+                          "applyPatchApproval"):
+                self._refuse_with_reason(request_id, method,
+                                         {"decision": {"denied": {"rejection": REJECTION}}})
+            elif method == "item/fileChange/requestApproval":
+                # `decline` here means "denied, but keep going"; `cancel` is the one that interrupts.
+                self._refuse_with_reason(request_id, method, {"decision": "decline"})
+            elif method == "item/permissions/requestApproval":
+                # Grant nothing. Both members are optional, so `{}` IS the empty profile.
+                self._refuse_with_reason(request_id, method, {"permissions": {}})
+            elif method == "item/tool/requestUserInput":
+                # Nobody to ask. Answering with no answers beats the generic error, which this
+                # method used to get: it is a shape the server can read.
+                self._refuse_with_reason(request_id, method, {"answers": {}})
             elif method == "item/tool/call":
-                self._send({"id": request_id, "result": {
+                self._refuse_with_reason(request_id, method, {
                     "success": False,
-                    "contentItems": [{"type": "inputText", "text":
-                        "This tool is not available. Emit tool calls as text per your instructions."}],
-                }})
+                    "contentItems": [{"type": "inputText", "text": REJECTION}],
+                })
             else:
-                self._send({"id": request_id,
-                            "error": {"code": UNSUPPORTED_REQUEST,
-                                      "message": f"{method}: this client answers no requests"}})
+                self._refuse_with_reason(request_id, method, None)
         except AppServerError:
             pass  # broken pipe — the reader thread detects the exit naturally
+
+    def _refuse_with_reason(self, request_id, method, result):
+        """Send `result` (or a JSON-RPC error when None) and record that the refusal happened.
+
+        Recorded because a refusal used to be invisible from outside: the model quietly gave up mid
+        turn and the seat's log showed a plain 200. `refusals` is what makes "it just stopped"
+        answerable after the fact.
+        """
+        self.refusals.append(method)
+        print(f"[cli-seat] refused server request {method}", file=sys.stderr, flush=True)
+        if result is None:
+            self._send({"id": request_id,
+                        "error": {"code": UNSUPPORTED_REQUEST,
+                                  "message": f"{method}: this client answers no requests"}})
+            return
+        self._send({"id": request_id, "result": result})
 
     def _send(self, message):
         line = json.dumps(message) + "\n"
@@ -253,6 +303,11 @@ def read_quota(home=None, binary=None, timeout=60.0):
 # Notification methods, exactly as the server spells them (from its own ServerNotification schema —
 # these are compared literally, not guessed at by substring).
 _DELTA = "item/agentMessage/delta"          # params: {delta, itemId, threadId, turnId}
+# Thinking. Two separate items, never two spellings of one: `summaryTextDelta` is the short summary
+# codex shows a human, `textDelta` the raw chain when a caller asked for it. Both are forwarded and
+# neither is duplicated by the other. Ignoring them left the stream silent for the whole think —
+# measured 4.3s of a 5.2s turn with nothing on the wire.
+_REASONING = ("item/reasoning/summaryTextDelta", "item/reasoning/textDelta")
 _ITEM_DONE = "item/completed"               # params: {item, threadId, turnId, completedAtMs}
 _TURN_DONE = "turn/completed"               # params: {turn, threadId} — NOT usage; see below
 _TOKENS = "thread/tokenUsage/updated"       # params: {tokenUsage: {last, total}, threadId, turnId}
@@ -300,7 +355,10 @@ def serve(binary, prepared, timeout, on_delta=None):
         # `prepared.effort` is resolved once, by cli_seat.prepare, from either the request's
         # `thinking` field or its `reasoning_effort` field — "" when the caller asked for neither,
         # which keeps this call's params identical to before either was read.
-        server.start_turn(thread_id, prepared.prompt, effort=prepared.effort)
+        # Constrained only when the caller sent tools. With none, there is no call to shape and a
+        # schema would just force plain prose through a JSON wrapper.
+        schema = cli_seat.OPENAI_OUTPUT_SCHEMA if prepared.tool_text else None
+        server.start_turn(thread_id, prepared.prompt, effort=prepared.effort, output_schema=schema)
         text, tokens, duration_ms, failure = _collect(server, timeout, on_delta)
         if failure:
             raise SeatError(f"`codex` failed: {failure[:400]}")
@@ -344,6 +402,14 @@ def _collect(server, timeout, on_delta):
                     text += chunk
                     if on_delta:
                         on_delta(chunk)
+            elif method in _REASONING:
+                # Forwarded but NOT added to `text`: thinking is not the answer, and folding it in
+                # would put it through the tool parse and into `content`.
+                chunk = params.get("delta") or params.get("text") or ""
+                if chunk and on_delta:
+                    from shared.agent.cli_seat import Reasoning
+
+                    on_delta(Reasoning(chunk))
             elif method == _ITEM_DONE:
                 item = params.get("item") or {}
                 # The completed item is authoritative — deltas may be partial, or absent entirely.

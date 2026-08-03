@@ -729,6 +729,7 @@ def _api_upstream_name(api_kind: str, advertised: str) -> str:
     return advertised.partition(":")[2] or advertised
 
 
+
 def _api_unsupported_params(api_kind: str, body: dict[str, Any]) -> list[str]:
     """Params in ``body`` the vendor is known to reject (catalog fact), null values excluded —
     the vendors accept an explicit null, so only a real value earns a refusal."""
