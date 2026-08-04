@@ -467,6 +467,18 @@ def _add_task(sub) -> None:
     get.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     get.set_defaults(handler=cmd_remote_task)
 
+    # A separate verb rather than `get --follow`: `get` answers "where did it get to" in one shot,
+    # `follow` holds a stream open and owns a cursor. One flag flipping between those two would
+    # change the output shape wholesale.
+    follow = task_sub.add_parser("follow", help="Watch a task's output as it runs")
+    follow.add_argument("task_id", help="Task id returned by `grid task create`.")
+    follow.add_argument(
+        "--after-seq", type=int, default=-1, dest="after_seq",
+        help="Resume after this event sequence number (default: -1, from the start).")
+    follow.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    follow.add_argument("--json", action="store_true", help="Emit one JSON event per line.")
+    follow.set_defaults(handler=cmd_remote_task)
+
 
 def _add_price(sub) -> None:
     """Remote-only `grid price set|rm|show` — this engine's authoritative model price (grid_chat_pricing).

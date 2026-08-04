@@ -20,7 +20,7 @@ module is the stateless wire boundary.
 from __future__ import annotations
 
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import quote
 
 import httpx
@@ -44,6 +44,14 @@ TASK_CLAIM_TIMEOUT = 35.0
 # Reporting a terminal result is small and bounded, but it is the LAST word on work that has already
 # been done: losing it means the task is retried from scratch. Generous on purpose.
 _TASK_RESULT_TIMEOUT = 60.0
+# Publishing progress is small, frequent, and DISPOSABLE — a lost event costs a line of output, not
+# work. Tight on purpose: the publisher runs on the thread driving the child, so a slow relay must
+# cost the task a moment, never minutes.
+_TASK_EVENT_TIMEOUT = 15.0
+# Following a task's stream, from the CLIENT side. The read phase is unbounded because that is the
+# whole point — a task legitimately says nothing for minutes while a build runs, and silence is not
+# evidence of death (ADR 0032 D-c). Connect stays bounded so an unreachable relay still fails fast.
+_TASK_FOLLOW_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=5.0)
 
 # Bring-up's own register deadline, stated phase by phase (ADR 0022). The read phase is the one that
 # matters and the one a bare float never names: a relay that ACCEPTS the connection and then never
@@ -330,6 +338,98 @@ def report_task_result(
     except httpx.HTTPError as exc:
         raise RelayError(f"report_task_result transport error: {exc}") from None
     _guard(resp, "report_task_result")
+
+
+def publish_task_events(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Append a BATCH of progress events to a task's log (``POST /relay/v1/tasks/{id}/events``).
+
+    A batch rather than one event per request because a real agent run produces events continuously
+    (ADR 0032 D-f): one POST per line would mean one TCP+TLS handshake per line.
+
+    The relay assigns each event's ``seq`` — this side never numbers them. After a requeue the next
+    attempt runs on a machine that never saw the previous one's log, and the sequence must continue
+    rather than restart (ADR 0032 D-d), which only the relay can arrange.
+
+    Lease-fenced server-side, so ``.status`` matters to the caller: 403 means the lease moved on and
+    404 means the task already ended — both verdicts that retrying cannot change, unlike a 5xx or a
+    transport failure.
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
+            resp = client.post(
+                # The id came off the wire and is being interpolated into a path.
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/events",
+                json={"events": events},
+            )
+    except httpx.HTTPError as exc:
+        raise RelayError(f"publish_task_events transport error: {exc}") from None
+    _guard(resp, "publish_task_events")
+    try:
+        return resp.json() if resp.content else {}
+    except ValueError:
+        # The append committed — the relay said 200. A body we cannot read costs us the seq range,
+        # which nothing on this path uses, so it must not be reported as a failed publish.
+        return {}
+
+
+def stream_task_events(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+    *,
+    after_seq: int = -1,
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Follow a task's event log as SSE (``GET /relay/v1/tasks/{id}/events?after_seq=N``).
+
+    Yields ``(seq, payload)``. The ``seq`` comes from the block's ``id:`` line and IS the caller's
+    resume cursor: reconnecting with ``after_seq=<last seq yielded>`` returns exactly what follows,
+    with no gap and no repeat. ``after_seq=-1`` means "from the start".
+
+    Two kinds of line are skipped rather than raised on, because both are ordinary: `: ping`
+    comments, which ``EventSourceResponse`` interleaves on an idle stream, and a `data:` line that
+    will not parse — one unreadable event must not end a stream the caller is still following.
+
+    A non-200 raises ``RelayError`` carrying ``.status``, so 410 (expired) and 403 (not yours) reach
+    the caller as facts rather than as an empty stream that reads like "nothing has happened yet".
+    """
+    import json as _json
+
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_FOLLOW_TIMEOUT) as client:
+            with client.stream(
+                "GET",
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/events",
+                params={"after_seq": after_seq},
+            ) as resp:
+                if resp.status_code >= 400:
+                    resp.read()  # a streamed response has no `.text` until it is drained
+                    _guard(resp, "stream_task_events")
+                seq: int | None = None
+                for line in resp.iter_lines():
+                    if line.startswith("id:"):
+                        try:
+                            seq = int(line[3:].strip())
+                        except ValueError:
+                            seq = None
+                    elif line.startswith("data:"):
+                        try:
+                            payload = _json.loads(line[5:].strip())
+                        except (ValueError, RecursionError):
+                            # `RecursionError` is a `RuntimeError`, NOT a `ValueError`, so naming
+                            # only `ValueError` leaves a hole no malformed-input case finds — the
+                            # same trap `_task_error_message` below already records. Payloads are
+                            # opaque and unbounded in depth by contract, and an escape here is a
+                            # raw traceback out of `grid task follow`, which catches `RelayError`.
+                            continue  # unreadable event — skip it, don't end the stream
+                        if isinstance(payload, dict) and seq is not None:
+                            yield seq, payload
+    except httpx.HTTPError as exc:
+        raise RelayError(f"stream_task_events transport error: {exc}") from None
 
 
 def submit_response(

@@ -12879,6 +12879,141 @@ def test_report_task_result_raises_on_failure(monkeypatch):
             "https://relay.example", "AT", "T1", state="completed", output="x", error=None)
 
 
+def test_publish_task_events_posts_the_batch(monkeypatch):
+    """Events go up as a BATCH on their own endpoint (a cross-repo lockstep path). One POST per
+    line would be a fresh TCP+TLS handshake per line once a real agent is producing them."""
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"first_seq": 0, "last_seq": 1, "count": 2})
+
+    _mock_serve_engine(monkeypatch, handler)
+    events = [{"type": "task.output", "text": "a"}, {"type": "task.output", "text": "b"}]
+    relay.publish_task_events("https://relay.example", "AT", "T1", events)
+
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/T1/events")
+    assert seen["body"] == {"events": events}
+
+
+def test_publish_task_events_percent_encodes_the_task_id(monkeypatch):
+    """Same trap as `report_task_result`: the id came off the wire and lands in a PATH."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(
+        monkeypatch,
+        lambda r: (seen.update(raw=r.url.raw_path), httpx.Response(200, json={}))[1],
+    )
+    relay.publish_task_events("https://relay.example", "AT", "../../nodes/evil", [])
+
+    assert seen["raw"] == b"/relay/v1/tasks/..%2F..%2Fnodes%2Fevil/events"
+
+
+def test_publish_task_events_401_raises_relay_unauthorized(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(401, json={"detail": "nope"}))
+    with pytest.raises(relay.RelayUnauthorized):
+        relay.publish_task_events("https://relay.example", "AT", "T1", [])
+
+
+def test_publish_task_events_carries_the_status_so_the_publisher_can_stop(monkeypatch):
+    """403 (the lease moved) and 404 (already terminal) are verdicts, not blips — the publisher
+    must be able to tell them apart from a transient fault and stop rather than spin."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(403, text="not your lease"))
+    with pytest.raises(relay.RelayError) as exc:
+        relay.publish_task_events("https://relay.example", "AT", "T1", [])
+    assert exc.value.status == 403
+
+
+def test_stream_task_events_yields_seq_and_payload(monkeypatch):
+    """The `id:` line IS the client's cursor — without it a reattach cannot say where it got to."""
+    from remote import relay
+
+    body = (
+        'id: 0\ndata: {"type": "task.output", "text": "a"}\n\n'
+        'id: 1\ndata: {"type": "task.terminal", "state": "completed"}\n\n'
+    )
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    got = list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+    assert got == [
+        (0, {"type": "task.output", "text": "a"}),
+        (1, {"type": "task.terminal", "state": "completed"}),
+    ]
+
+
+def test_stream_task_events_sends_the_cursor_and_encodes_the_id(monkeypatch):
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda r: (
+        seen.update(raw=r.url.raw_path, query=dict(r.url.params)),
+        httpx.Response(200, text="", headers={"Content-Type": "text/event-stream"}),
+    )[1])
+
+    list(relay.stream_task_events("https://relay.example", "AT", "a/b", after_seq=7))
+
+    assert seen["query"] == {"after_seq": "7"}
+    assert b"/relay/v1/tasks/a%2Fb/events" in seen["raw"]
+
+
+def test_stream_task_events_skips_pings_and_unparseable_blocks(monkeypatch):
+    """`EventSourceResponse` interleaves `: ping` comments on an idle stream. A follower that
+    treated one as an event would render garbage; one that CRASHED on it would drop the stream."""
+    from remote import relay
+
+    body = (
+        ": ping\n\n"
+        'id: 0\ndata: {"type": "task.output"}\n\n'
+        "id: 1\ndata: not-json\n\n"
+        ": ping\n\n"
+        'id: 2\ndata: {"type": "task.terminal", "state": "failed"}\n\n'
+    )
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    got = list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+    assert [seq for seq, _p in got] == [0, 2]
+
+
+def test_stream_task_events_survives_a_payload_that_blows_the_recursion_limit(monkeypatch):
+    """`json.loads` raises `RecursionError` — a `RuntimeError`, NOT a `ValueError` — so a guard
+    written as `except ValueError` has a hole no malformed-input parametrize finds. The same trap
+    is already guarded two functions away in this file (`_task_error_message`). An escape here is
+    a raw traceback out of `grid task follow`: `_task_follow` catches `RelayError`, not this."""
+    from remote import relay
+
+    depth = 200_000
+    deep = '{"type":"task.output","n":' + '{"n":' * depth + 'null' + '}' * depth + '}'
+    body = f"id: 0\ndata: {deep}\n\n" + 'id: 1\ndata: {"type": "task.terminal"}\n\n'
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    got = list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+
+    # The unreadable event is skipped; the stream keeps going and still delivers the terminal.
+    assert [seq for seq, _p in got] == [1]
+
+
+def test_stream_task_events_maps_an_error_status(monkeypatch):
+    """410 (expired) and 403 (not yours) must reach the caller as a classified error, not as an
+    empty stream that reads exactly like "nothing has happened yet"."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(410, json={"detail": "expired"}))
+    with pytest.raises(relay.RelayError) as exc:
+        list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+    assert exc.value.status == 410
+
+
 def test_serve_node_id_comes_from_access_token_jwt():
     """The relay binds node_id to the token (PUT /nodes/{id} → 403 'Cannot access another node'
     otherwise), so the serve loop must read node_id from the JWT claim, never invent a random one."""
@@ -21499,6 +21634,264 @@ def test_task_subcommands_are_wired_to_the_handler():
     assert (get.subcommand, get.task_id) == ("get", "T1")
 
 
+def test_task_follow_is_wired_to_the_handler():
+    parser = cli.build_parser()
+
+    follow = parser.parse_args(["task", "follow", "T1"])
+    assert follow.handler is cli.cmd_remote_task
+    assert (follow.subcommand, follow.task_id, follow.after_seq) == ("follow", "T1", -1)
+
+
+def test_task_follow_takes_a_cursor():
+    """`--after-seq` is what makes reattaching after a lost connection lose nothing and repeat
+    nothing — the whole reason the log is sequenced."""
+    args = cli.build_parser().parse_args(["task", "follow", "T1", "--after-seq", "42"])
+    assert args.after_seq == 42
+
+
+def _sse(*blocks):
+    return "".join(blocks)
+
+
+def _block(seq, payload):
+    return f"id: {seq}\ndata: {json.dumps(payload)}\n\n"
+
+
+def test_task_follow_renders_events_as_they_arrive(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.attempt_started", "attempt": 1, "provider_id": "node-2"}),
+        _block(1, {"type": "task.output", "text": "hello world"}),
+        _block(2, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "hello world" in out
+    assert "completed" in out
+
+
+def test_task_follow_exits_non_zero_when_the_task_failed(monkeypatch, tmp_path, capsys):
+    """The exit code is what a script watching a task branches on — a failed task that exits 0 is
+    a silent failure by any other name."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _block(0, {"type": "task.terminal", "state": "failed", "error": "exited 1"})
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 1
+    assert "exited 1" in capsys.readouterr().out
+
+
+def test_task_follow_sends_the_cursor_it_was_given(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (
+        seen.update(query=dict(r.url.params), path=r.url.path),
+        httpx.Response(200, text=_block(6, {"type": "task.terminal", "state": "completed"}),
+                       headers={"Content-Type": "text/event-stream"}),
+    )[1])
+
+    cli.main(["task", "follow", "T1", "--after-seq", "5"])
+
+    assert seen["path"] == "/relay/v1/tasks/T1/events"
+    assert seen["query"] == {"after_seq": "5"}
+
+
+def test_task_follow_reattaches_at_its_cursor_after_a_dropped_connection(
+        monkeypatch, tmp_path, capsys):
+    """The acceptance criterion, driven from the client: the stream dies mid-task and the follower
+    comes back asking for exactly what it has not seen — no gap, no repeat."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    cursors = []
+    attempts = {"n": 0}
+
+    def handler(request):
+        cursors.append(dict(request.url.params).get("after_seq"))
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # The relay answered, then the connection died two events in.
+            return httpx.Response(
+                200,
+                text=_sse(_block(0, {"type": "task.output", "text": "first"}),
+                          _block(1, {"type": "task.output", "text": "second"})),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(
+            200,
+            text=_sse(_block(2, {"type": "task.output", "text": "third"}),
+                      _block(3, {"type": "task.terminal", "state": "completed"})),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert cursors == ["-1", "1"], "the reattach must resume at the last seq actually seen"
+    assert out.count("first") == 1 and out.count("second") == 1, "no event may be repeated"
+    assert "third" in out, "no event may be lost"
+
+
+def test_task_follow_gives_up_rather_than_reconnecting_forever(monkeypatch, tmp_path, capsys):
+    """A relay that is simply gone must not turn a follow into an infinite loop."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        raise httpx.ConnectError("relay is gone")
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc != 0
+    assert attempts["n"] <= remote_task._RECONNECT_ATTEMPTS + 1
+
+
+def test_task_follow_stops_when_reattaching_keeps_yielding_nothing(monkeypatch, tmp_path, capsys):
+    """A clean end with no terminal event is ambiguous — the relay finishing and a proxy severing a
+    live stream look identical here. So it reattaches; what stops it is reattaching and learning
+    nothing new, not the first clean end."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(200, text="", headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 1
+    assert 1 < attempts["n"] <= remote_task._RECONNECT_ATTEMPTS + 1
+    assert "without a terminal event" in capsys.readouterr().err
+
+
+def test_task_follow_keeps_following_while_a_severed_stream_still_makes_progress(
+        monkeypatch, tmp_path, capsys):
+    """Progress refills the reattach budget. A proxy that cuts a busy stream every few minutes must
+    not slowly starve a long task of retries and abandon it mid-run."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+    # More severed-but-productive rounds than the raw budget allows, so a test that passed without
+    # the refill would have to be passing for the wrong reason.
+    rounds = remote_task._RECONNECT_ATTEMPTS + 3
+
+    def handler(request):
+        attempts["n"] += 1
+        if attempts["n"] <= rounds:
+            return httpx.Response(
+                200, text=_block(attempts["n"] - 1, {"type": "task.output", "text": "tick"}),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(
+            200, text=_block(attempts["n"] - 1, {"type": "task.terminal", "state": "completed"}),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 0
+    assert capsys.readouterr().out.count("tick") == rounds
+
+
+def test_task_follow_does_not_retry_a_refusal(monkeypatch, tmp_path, capsys):
+    """403/404/410 are answers. Reconnecting cannot turn "not your task" into your task."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(410, json={"detail": "Task expired (past its deadline)"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc != 0
+    assert attempts["n"] == 1, "an answered refusal must not be retried"
+    assert "expired" in capsys.readouterr().err.lower()
+
+
+def test_task_follow_json_emits_one_object_per_line(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.output", "text": "a"}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1", "--json"])
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert [json.loads(ln)["seq"] for ln in lines] == [0, 1]
+    assert json.loads(lines[0])["event"]["text"] == "a"
+
+
+def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tmp_path, capsys):
+    """Event types grow (issue 08's `task.tree`). A follower that only rendered known types would
+    show a user nothing while the relay faithfully streamed them the thing they asked for."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a/b.py"]}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    assert "task.tree" in capsys.readouterr().out
+
+
+def test_task_follow_is_refused_in_local_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "follow", "T1"])
+    assert "remote" in str(exc.value).lower()
+
+
 def test_task_selects_its_grid_with_a_flag_not_a_positional():
     """`--grid`, like `price`/`router`: a leading optional positional would be ambiguous with the
     free-form prompt that follows it."""
@@ -21780,6 +22173,348 @@ def _fast_task_backoff(monkeypatch):
     monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
 
 
+def _publisher_state(refresh=None):
+    """The slice of serve state a publisher touches: the relay base and the credential."""
+    return SimpleNamespace(
+        signaling_url="https://relay.example",
+        token=lambda: "AT",
+        refresh=refresh or (lambda stale_token=None: False),
+        tasks_stop=threading.Event(),
+    )
+
+
+def _capture_publishes(monkeypatch, responder=None):
+    """Record every batch the publisher sends. `responder(batch)` may raise to simulate the relay."""
+    from remote import task_events
+
+    sent = []
+
+    def fake_publish(_base, _token, _task_id, events):
+        sent.append(list(events))
+        if responder is not None:
+            return responder(list(events))
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", fake_publish)
+    return sent
+
+
+def test_publisher_coalesces_events_into_one_batch(monkeypatch):
+    """A per-event POST is a fresh connection per event. Buffering is what makes the channel
+    affordable once a real agent (issue 03) is producing output continuously."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    # Pin the age threshold out of the way: this test is about the SIZE path, and leaving the timer
+    # live would make it fail whenever the runner stalls 200ms between two statements.
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 3600.0)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.publish("task.output", text="b")
+    assert sent == [], "nothing should go out before a flush threshold or an explicit flush"
+
+    pub.flush()
+    assert sent == [[
+        {"type": "task.output", "text": "a"},
+        {"type": "task.output", "text": "b"},
+    ]]
+
+
+def test_publisher_flushes_a_buffer_that_has_been_waiting(monkeypatch):
+    """The other half of coalescing. Without an age bound, a task producing one line a minute would
+    show nothing at all until its buffer filled — the opposite of a progress stream."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    monkeypatch.setattr(task_events, "_FLUSH_AT_EVENTS", 10_000)  # the size path cannot fire
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 0.0)  # every event is already "old"
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+
+    assert sent == [[{"type": "task.output", "text": "a"}]]
+
+
+def test_publisher_flushes_on_its_own_once_the_buffer_fills(monkeypatch):
+    """Buffering without a ceiling is just a delay — a long-running task would show nothing until
+    it ended, which is the opposite of what a progress stream is for."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 3600.0)  # isolate the size path
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(task_events._FLUSH_AT_EVENTS):
+        pub.publish("task.output", text=str(i))
+
+    assert len(sent) == 1
+    assert len(sent[0]) == task_events._FLUSH_AT_EVENTS
+
+
+def test_publisher_never_raises_when_the_relay_is_unreachable(monkeypatch, capsys):
+    """A lost progress event costs a line of output. Letting it escape would cost the RESULT, which
+    is the one thing on this path that is not disposable."""
+    from remote import relay, task_events
+
+    def boom(_batch):
+        raise relay.RelayError("connection refused")
+
+    _capture_publishes(monkeypatch, boom)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()   # must not raise
+    pub.close()   # must not raise
+
+    assert "T1" in capsys.readouterr().err
+
+
+def test_publisher_never_raises_on_a_system_exit(monkeypatch):
+    """SystemExit is this repo's clean-error idiom and is NOT an Exception — a guard that catches
+    only Exception lets it through and kills the task loop's thread."""
+    from remote import task_events
+
+    def boom(_batch):
+        raise SystemExit("clean error")
+
+    _capture_publishes(monkeypatch, boom)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+    pub.close()
+
+
+def test_publisher_stops_after_the_lease_moves_and_says_so_once(monkeypatch, capsys):
+    """403 is a verdict, not a blip: another provider holds the lease and every later batch will be
+    refused too. Retrying spends the task's time and floods the log."""
+    from remote import relay, task_events
+
+    def refused(_batch):
+        raise relay.RelayError("not your lease", status=403)
+
+    sent = _capture_publishes(monkeypatch, refused)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(5):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1, "publishing must stop after the first refusal, not retry every batch"
+    warnings = [line for line in capsys.readouterr().err.splitlines() if "T1" in line]
+    assert len(warnings) == 1, f"the refusal should be reported once, got {warnings}"
+
+
+def test_publisher_stops_after_the_task_already_ended(monkeypatch):
+    """404 means terminal. Nothing this publisher sends can ever land again."""
+    from remote import relay, task_events
+
+    def gone(_batch):
+        raise relay.RelayError("no longer running", status=404)
+
+    sent = _capture_publishes(monkeypatch, gone)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(3):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1
+
+
+def test_publisher_does_not_latch_off_on_a_refused_batch(monkeypatch, capsys):
+    """422 is a verdict about THIS BATCH, not about the lease or the task — unlike 403/404, which
+    are the only two the latch's own docstring justifies.
+
+    Reachable today: `create_task` accepts a prompt up to 100 KB, `/bin/echo` returns a
+    newline-free one as a SINGLE line, and the relay caps one event at 64 KiB. Latching on that
+    422 kills all progress narration for the rest of a task that is still running under a valid
+    lease — the live stream ADR 0032 D-f exists for, gone from the first flush onward."""
+    from remote import relay, task_events
+
+    calls = {"n": 0}
+
+    def refuse_first(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayError("an event exceeds 65536 bytes", status=422)
+        return {}
+
+    sent = _capture_publishes(monkeypatch, refuse_first)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="huge")
+    pub.flush()
+    pub.publish("task.output", text="next")
+    pub.flush()
+
+    assert len(sent) == 2, "a refused batch must not end publishing for the whole task"
+    assert "T1" in capsys.readouterr().err, "the dropped batch must still be reported"
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503])
+def test_publisher_keeps_going_on_a_status_that_decided_nothing(monkeypatch, status):
+    """A proxy's 408/429 and any 5xx are transient. Latching on them silences a healthy task."""
+    from remote import relay, task_events
+
+    calls = {"n": 0}
+
+    def flaky(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayError("transient", status=status)
+        return {}
+
+    sent = _capture_publishes(monkeypatch, flaky)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+    pub.publish("task.output", text="b")
+    pub.flush()
+
+    assert len(sent) == 2
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_publisher_still_latches_off_on_the_two_real_verdicts(monkeypatch, status):
+    """The narrowing must not go too far: 403 (the lease moved) and 404 (the task ended) really do
+    mean nothing this publisher sends can ever land again."""
+    from remote import relay, task_events
+
+    def verdict(_batch):
+        raise relay.RelayError("verdict", status=status)
+
+    sent = _capture_publishes(monkeypatch, verdict)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(3):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1
+
+
+def test_a_long_output_line_is_truncated_below_the_relays_event_cap(monkeypatch):
+    """Second layer under the latch fix: without a client-side bound, EVERY batch carrying that
+    line 422s, so the stream is dead either way. The cap is a lockstep value — the provider must
+    respect the relay's `_MAX_EVENT_BYTES` (64 KiB), which is SMALLER than the prompt it echoes."""
+    import json as _json
+    from remote import tasks, task_events
+
+    published = []
+    monkeypatch.setattr(
+        tasks, "_task_argv",
+        lambda prompt: ["/bin/sh", "-c", "printf 'x%.0s' $(seq 1 90000); printf '\\n'"])
+
+    tasks.run_task(
+        {"task_id": "T1", "prompt": "x"},
+        publish=lambda event_type, **fields: published.append({"type": event_type, **fields}),
+    )
+
+    assert published, "the line should still be published, just bounded"
+    encoded = len(_json.dumps(published[0]).encode("utf-8"))
+    assert encoded <= task_events.MAX_EVENT_BYTES, f"event is {encoded} bytes"
+    assert published[0]["text"].startswith("xxx")
+
+
+def test_publisher_keeps_going_after_a_transient_failure(monkeypatch):
+    """The mirror of the two above: a 5xx or a transport fault decided nothing, so the next batch
+    must still be attempted. Treating every failure as terminal would silence a whole task on one
+    blip."""
+    from remote import relay, task_events
+
+    calls = {"n": 0}
+
+    def flaky(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayError("bad gateway", status=502)
+        return {}
+
+    sent = _capture_publishes(monkeypatch, flaky)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+    pub.publish("task.output", text="b")
+    pub.flush()
+
+    assert len(sent) == 2
+
+
+def test_publisher_refreshes_the_token_once_on_401(monkeypatch):
+    """Same single-retry rule as `claim_once` and `report_once` — one refresh, then give up."""
+    from remote import relay, task_events
+
+    refreshed = {"n": 0}
+
+    def refresh(stale_token=None):
+        refreshed["n"] += 1
+        return True
+
+    calls = {"n": 0}
+
+    def unauthorized_once(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayUnauthorized()
+        return {}
+
+    sent = _capture_publishes(monkeypatch, unauthorized_once)
+    pub = task_events.TaskEventPublisher(_publisher_state(refresh), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+
+    assert refreshed["n"] == 1
+    assert len(sent) == 2, "the batch is re-sent once with the refreshed token"
+
+
+def test_publisher_stops_when_the_token_cannot_be_refreshed(monkeypatch):
+    """No credential means no further batch can land — stop rather than 401 on every one."""
+    from remote import relay, task_events
+
+    def unauthorized(_batch):
+        raise relay.RelayUnauthorized()
+
+    sent = _capture_publishes(monkeypatch, unauthorized)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")  # refresh returns False
+
+    for i in range(3):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1
+
+
+def test_publisher_close_flushes_whatever_is_buffered(monkeypatch):
+    """The last lines of a task are the ones that say how it went. Dropping the tail buffer would
+    lose exactly them."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="last")
+    pub.close()
+
+    assert sent == [[{"type": "task.output", "text": "last"}]]
+
+
+def test_publisher_flush_with_an_empty_buffer_sends_nothing(monkeypatch):
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.flush()
+    pub.close()
+
+    assert sent == []
+
+
 def _task_loop_state(claims):
     """A minimal serve state + a claim double yielding `claims`, then retiring the task loop.
 
@@ -21816,7 +22551,7 @@ def test_task_loop_claims_runs_and_reports(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "say hello\n", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "say hello\n", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
 
     tasks.task_loop(state)
@@ -21832,7 +22567,7 @@ def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
     ])
     reported = []
 
-    def run(job):
+    def run(job, *_a):
         if job["task_id"] == "T1":
             raise RuntimeError("child exploded")
         return ("completed", "fine\n", None)
@@ -21857,7 +22592,7 @@ def test_task_loop_survives_a_system_exit_from_a_task(monkeypatch):
     ])
     seen = []
 
-    def run(job):
+    def run(job, *_a):
         if job["task_id"] == "T1":
             raise SystemExit("corrupt record")
         seen.append(job["task_id"])
@@ -21883,7 +22618,7 @@ def test_task_loop_backs_off_on_a_transient_relay_error(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -21930,7 +22665,7 @@ def test_task_loop_survives_a_transient_404(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -21954,7 +22689,7 @@ def test_task_loop_404_budget_resets_after_a_success(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -21992,7 +22727,7 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("failed", None, "exit 127"))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("failed", None, "exit 127"))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(kw))
 
     tasks.task_loop(state)
@@ -22015,7 +22750,7 @@ def test_task_loop_survives_a_failure_to_report(monkeypatch):
         reported.append(tid)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22043,7 +22778,7 @@ def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypat
             raise relay.RelayError("connection reset", status=None)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22068,7 +22803,7 @@ def test_a_terminal_4xx_report_answer_is_not_retried(monkeypatch, capsys, status
         raise relay.RelayError("answered", status=status)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22089,7 +22824,7 @@ def test_a_report_that_never_lands_gives_up_after_a_bounded_number_of_attempts(m
         raise relay.RelayError("still down", status=None)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22110,7 +22845,7 @@ def test_a_lost_report_says_the_task_is_stuck_not_that_it_will_be_requeued(monke
 
     tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("boom", status=None)))
 
     tasks.task_loop(state)
@@ -22127,7 +22862,7 @@ def test_a_lost_report_records_which_kind_of_failure_it_was(monkeypatch, capsys)
 
     tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("nope", status=403)))
 
     tasks.task_loop(state)
@@ -22174,10 +22909,13 @@ def test_run_task_echoes_the_prompt():
 
 
 def test_run_task_reports_failure_rather_than_raising(monkeypatch):
-    """Every failure mode of the child is a FAILED task, never an exception into the loop."""
+    """Every failure mode of the child is a FAILED task, never an exception into the loop.
+
+    Patches `Popen` rather than `run`: the child is spawned and streamed now, so a spawn that
+    cannot even start is the failure this pins."""
     from remote import tasks
 
-    monkeypatch.setattr(tasks.subprocess, "run", _raise(OSError("no such binary")))
+    monkeypatch.setattr(tasks.subprocess, "Popen", _raise(OSError("no such binary")))
 
     state, output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
 
@@ -22186,16 +22924,34 @@ def test_run_task_reports_failure_rather_than_raising(monkeypatch):
 
 
 def test_run_task_times_out_into_a_failed_state(monkeypatch):
+    """The fast unit form of the deadline. `test_a_child_that_writes_nothing_still_times_out`
+    proves it against a real wedged child; this one pins the mapping to a failed triple."""
     import subprocess as _subprocess
     from remote import tasks
 
     monkeypatch.setattr(
-        tasks.subprocess, "run", _raise(_subprocess.TimeoutExpired(cmd="echo", timeout=1)))
+        tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="echo", timeout=1)))
 
     state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
 
     assert state == "failed"
     assert "timed out" in error.lower()
+
+
+def test_run_task_reports_a_non_zero_exit_with_its_stderr(monkeypatch):
+    """stderr needs its own reader thread — a child that fills that pipe while nobody drains it
+    blocks on write and is indistinguishable from a hang."""
+    from remote import tasks
+
+    monkeypatch.setattr(
+        tasks, "_task_argv",
+        lambda prompt: ["/bin/sh", "-c", "echo boom >&2; exit 3"])
+
+    state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+
+    assert state == "failed"
+    assert "exited 3" in error
+    assert "boom" in error
 
 
 def test_run_task_refuses_a_prompt_that_is_not_a_string(monkeypatch):
@@ -22207,6 +22963,167 @@ def test_run_task_refuses_a_prompt_that_is_not_a_string(monkeypatch):
         state, _output, error = tasks.run_task(job)
         assert state == "failed", job
         assert error
+
+
+def test_run_task_publishes_each_output_line_as_it_arrives(monkeypatch):
+    """Progress is PUBLISHED as the child produces it, not summarised after it exits (ADR 0032
+    D-f). `/bin/echo` emits one line, so what this pins is the mechanism issue 03 plugs into."""
+    from remote import tasks
+
+    published = []
+    state, output, error = tasks.run_task(
+        {"task_id": "T1", "prompt": "say hello"},
+        publish=lambda event_type, **fields: published.append((event_type, fields)),
+    )
+
+    assert (state, error) == ("completed", None)
+    assert published == [("task.output", {"text": "say hello"})]
+    assert output.strip() == "say hello"
+
+
+def test_run_task_publishes_every_line_of_a_multi_line_child(monkeypatch):
+    from remote import tasks
+
+    published = []
+    monkeypatch.setattr(tasks, "_task_argv", lambda prompt: ["/bin/sh", "-c", "printf 'a\\nb\\nc\\n'"])
+
+    state, output, _error = tasks.run_task(
+        {"task_id": "T1", "prompt": "x"},
+        publish=lambda event_type, **fields: published.append(fields.get("text")),
+    )
+
+    assert state == "completed"
+    assert published == ["a", "b", "c"]
+    assert output == "a\nb\nc\n"
+
+
+def test_a_child_that_writes_nothing_still_times_out(monkeypatch):
+    """The regression a naive `for line in proc.stdout` would introduce: that loop blocks forever
+    on a child that produces no output, so the wall-clock budget silently stops existing. The old
+    `subprocess.run(timeout=)` could not fail this way, and neither may its replacement."""
+    from remote import tasks
+
+    monkeypatch.setattr(tasks, "_TASK_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(tasks, "_task_argv", lambda prompt: ["/bin/sleep", "30"])
+
+    started = time.monotonic()
+    state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+    elapsed = time.monotonic() - started
+
+    assert state == "failed"
+    assert "timed out" in error.lower()
+    assert elapsed < 10, f"the deadline did not fire; took {elapsed:.1f}s"
+
+
+def test_a_child_that_writes_then_wedges_still_times_out(monkeypatch):
+    """The subtler half: output resets nothing. A child that prints and then hangs must still be
+    bounded, or a single early line buys a task unlimited wallclock."""
+    from remote import tasks
+
+    monkeypatch.setattr(tasks, "_TASK_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(
+        tasks, "_task_argv", lambda prompt: ["/bin/sh", "-c", "echo started; sleep 30"])
+
+    published = []
+    started = time.monotonic()
+    state, _output, error = tasks.run_task(
+        {"task_id": "T1", "prompt": "x"},
+        publish=lambda event_type, **fields: published.append(fields.get("text")),
+    )
+    elapsed = time.monotonic() - started
+
+    assert state == "failed"
+    assert "timed out" in error.lower()
+    assert elapsed < 10, f"the deadline did not fire; took {elapsed:.1f}s"
+    assert published == ["started"], "the line it did emit should still have been published"
+
+
+def test_a_timed_out_child_is_killed_not_left_running(monkeypatch):
+    """A daemon reader thread does not reap the process. An abandoned child keeps the provider's
+    CPU and, in issue 03, its agent subscription."""
+    from remote import tasks
+
+    monkeypatch.setattr(tasks, "_TASK_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(tasks, "_task_argv", lambda prompt: ["/bin/sleep", "30"])
+
+    spawned = []
+    real_popen = tasks.subprocess.Popen
+    monkeypatch.setattr(
+        tasks.subprocess, "Popen",
+        lambda *a, **k: spawned.append(real_popen(*a, **k)) or spawned[-1])
+
+    tasks.run_task({"task_id": "T1", "prompt": "x"})
+
+    assert spawned, "the child was never spawned"
+    assert spawned[0].poll() is not None, "the timed-out child is still running"
+
+
+def test_run_task_survives_a_publisher_that_raises(monkeypatch, capsys):
+    """The publisher is documented as never raising — but `run_task`'s contract is that NOTHING
+    escapes it, and a contract that relies on another module keeping its promise is not one.
+
+    Surviving is not enough: a publisher breaking its own contract is a BUG, and swallowing it in
+    silence means the stream goes quiet with nothing anywhere saying why."""
+    from remote import tasks
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("publisher exploded")
+
+    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "hi"}, publish=boom)
+
+    assert (state, error) == ("completed", None)
+    assert output.strip() == "hi"
+    assert "publisher exploded" in capsys.readouterr().err
+
+
+def test_a_broken_publisher_is_reported_once_not_per_line(monkeypatch, capsys):
+    """Per-line would turn one broken publisher into a flood proportional to the task's output."""
+    from remote import tasks
+
+    monkeypatch.setattr(
+        tasks, "_task_argv", lambda prompt: ["/bin/sh", "-c", "printf 'a\\nb\\nc\\nd\\n'"])
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("publisher exploded")
+
+    tasks.run_task({"task_id": "T1", "prompt": "x"}, publish=boom)
+
+    assert capsys.readouterr().err.count("publisher exploded") == 1
+
+
+def test_a_child_emitting_non_utf8_bytes_does_not_silently_truncate_the_output(monkeypatch):
+    """`text=True` without `errors=` is STRICT utf-8: one bad byte raises `UnicodeDecodeError`
+    inside the reader thread, where the broad guard swallows it — the thread ends, EOF is queued,
+    and `run_task` reports `completed` with the output silently cut off at the bad byte.
+
+    This codebase already fixed the identical trap for `orphan_sweep`'s subprocess (`errors=
+    "replace"`). Matters here the moment issue 03 runs a real agent instead of `/bin/echo`."""
+    from remote import tasks
+
+    monkeypatch.setattr(
+        tasks, "_task_argv",
+        lambda prompt: ["/bin/sh", "-c", r"printf 'before\n\xff\xfe\nafter\n'"])
+
+    published = []
+    state, output, error = tasks.run_task(
+        {"task_id": "T1", "prompt": "x"},
+        publish=lambda event_type, **fields: published.append(fields.get("text")),
+    )
+
+    assert (state, error) == ("completed", None)
+    assert "before" in output and "after" in output, f"output was truncated: {output!r}"
+    assert published[0] == "before" and published[-1] == "after"
+
+
+def test_run_task_without_a_publisher_still_works(monkeypatch):
+    """`publish` is optional so the loop, the tests, and any future caller can run a task without
+    wiring a channel — the child is the point, the stream is an observer."""
+    from remote import tasks
+
+    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "solo"})
+
+    assert (state, error) == ("completed", None)
+    assert output.strip() == "solo"
 
 
 def _raise(exc):

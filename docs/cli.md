@@ -879,13 +879,27 @@ guidance to switch.
 
 ```
 grid task create --prompt <text> [--project <name>] [--grid <grid>] [--json]
-grid task get <task-id> [--grid <grid>] [--json]
+grid task get    <task-id> [--grid <grid>] [--json]
+grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
 ```
 
 **Remote-only.** Hand the grid a coding task and read the result back later. Unlike a chat request,
 a task **outlives the command that created it**: `create` returns immediately with an id, a provider
 claims the task from the grid's durable queue and runs it, and `get` reports where it got to. You can
 close your laptop in between.
+
+`follow` watches the task's progress as it happens, rather than polling `get`. The provider publishes
+events while it works and the relay keeps them in one **append-only log per task**, so `follow` is
+resumable: every event carries a sequence number, and a stream that drops is reattached at the last
+one seen — nothing is lost and nothing is repeated. `--after-seq <n>` attaches at a cursor by hand
+(the default, `-1`, means from the very start); `--json` emits one `{"seq": …, "event": {…}}` object
+per line for a script to consume.
+
+`follow` exits with the task's own outcome — `0` for `completed`, non-zero for `failed` /
+`timed_out`, or if the stream ended without ever saying how the task finished.
+
+The log is **one sequence for the task's whole life**, including across a retry: a reattached client
+never finds that its cursor has come to mean something else.
 
 `--project` groups tasks that share a workspace (default: `default`). **One task runs per project at
 a time** — creating a second one while the first is still `preparing`, `queued` or `running` is
@@ -894,6 +908,10 @@ Use different `--project` names to run tasks in parallel.
 
 A task's `state` is `queued` (waiting for a provider), `running` (claimed), or one of the terminal
 `completed` / `failed` / `timed_out`. `get` prints the result on success and the error on failure.
+
+`follow` refuses a task that is past its deadline but never finished (`410`), rather than holding a
+stream open on work nothing will advance — distinct from a task that does not exist (`404`) or
+belongs to someone else (`403`).
 
 Serving tasks is **opt-in on the provider side** and off by default: an engine claims tasks only when
 started with `GRID_TASKS=1` in its environment (`GRID_TASKS=1 grid join …`). A provider without it
