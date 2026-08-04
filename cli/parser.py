@@ -40,6 +40,7 @@ from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
+from .remote_task import cmd_remote_task
 from .remote_router import (
     MAX_ADVISORS,
     AdvisorsAction,
@@ -83,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth(sub)
     _add_members(sub)
     _add_price(sub)
+    _add_task(sub)
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
@@ -439,6 +441,31 @@ def _add_members(sub) -> None:
     listing.add_argument("grid", nargs="?", default=None)
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     listing.set_defaults(handler=cmd_remote_members)
+
+
+def _add_task(sub) -> None:
+    """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).
+
+    Gated in local mode by dispatch (`task` is in `REMOTE_ONLY`). `--grid` is a FLAG, not a leading
+    positional: the prompt that follows is free-form, and an optional positional in front of it is
+    ambiguous — the same call `router set-advisors` made."""
+    task = sub.add_parser("task", help="Create and read distributed tasks (remote)")
+    task_sub = task.add_subparsers(dest="subcommand", required=True)
+
+    create = task_sub.add_parser("create", help="Hand the grid a task and queue it for a provider")
+    create.add_argument("--prompt", required=True, help="What the agent should do.")
+    create.add_argument(
+        "--project", default=None,
+        help="Project to run in (default: 'default'). One task runs per project at a time.")
+    create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    create.set_defaults(handler=cmd_remote_task)
+
+    get = task_sub.add_parser("get", help="Show a task's state and result")
+    get.add_argument("task_id", help="Task id returned by `grid task create`.")
+    get.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    get.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    get.set_defaults(handler=cmd_remote_task)
 
 
 def _add_price(sub) -> None:

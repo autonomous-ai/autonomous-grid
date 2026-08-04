@@ -875,6 +875,30 @@ model you aren't currently serving (`grid join` first). `rm` does not (you can c
 `grid leave`). `show` lists the grid's models and prices. In `local` mode the command exits with
 guidance to switch.
 
+## Task
+
+```
+grid task create --prompt <text> [--project <name>] [--grid <grid>] [--json]
+grid task get <task-id> [--grid <grid>] [--json]
+```
+
+**Remote-only.** Hand the grid a coding task and read the result back later. Unlike a chat request,
+a task **outlives the command that created it**: `create` returns immediately with an id, a provider
+claims the task from the grid's durable queue and runs it, and `get` reports where it got to. You can
+close your laptop in between.
+
+`--project` groups tasks that share a workspace (default: `default`). **One task runs per project at
+a time** — creating a second one while the first is still `preparing`, `queued` or `running` is
+refused, so a project's tasks are strictly sequential and each starts from the last one's result.
+Use different `--project` names to run tasks in parallel.
+
+A task's `state` is `queued` (waiting for a provider), `running` (claimed), or one of the terminal
+`completed` / `failed` / `timed_out`. `get` prints the result on success and the error on failure.
+
+Serving tasks is **opt-in on the provider side** and off by default: an engine claims tasks only when
+started with `GRID_TASKS=1` in its environment (`GRID_TASKS=1 grid join …`). A provider without it
+serves inference exactly as before, and the two loops are independent — neither can stop the other.
+
 ## Router
 
 ```

@@ -5,6 +5,11 @@ per-grid ``access_token`` (Bearer). It registers its capabilities (``PUT /nodes/
 long-polls for work (``GET /relay/v1/poll``), posts each result back
 (``POST /relay/v1/{response,error}/{txn}``), and heartbeats (``POST /nodes/heartbeat``).
 
+A provider that also runs distributed tasks (ADR 0032) claims them on a SECOND, separate long-poll
+(``POST /relay/v1/tasks/claim``) and reports terminal results to
+``POST /relay/v1/tasks/{id}/result``. That plane shares this module's transport and credential and
+nothing else — no queue, no reaper, no escrow in common with the inference path above.
+
 Ported and trimmed from ``grid-src/grid_cli/provider_runtime/provider/{register,poll_worker,
 heartbeat}.py``, repointed onto the in-repo ``signaling_url`` base (DECISIONS D11/ADR 0003). Unlike
 ``control_plane`` — which raises a ``SystemExit`` on any ``>=400`` — the relay layer maps status
@@ -31,6 +36,14 @@ HEARTBEAT_INTERVAL = 30
 # short timeout buys is throwing the result away.
 _SUBMIT_TIMEOUT = 180.0
 _REGISTER_TIMEOUT = 15.0
+
+# Distributed tasks (ADR 0032). The claim long-poll must OUTLAST the relay's own claim window
+# (`task_claim_timeout_seconds`, 30s) or the client gives up first and every idle cycle looks like a
+# transport error — the same 30-vs-35 relationship `POLL_TIMEOUT` has with `poll_timeout_seconds`.
+TASK_CLAIM_TIMEOUT = 35.0
+# Reporting a terminal result is small and bounded, but it is the LAST word on work that has already
+# been done: losing it means the task is retried from scratch. Generous on purpose.
+_TASK_RESULT_TIMEOUT = 60.0
 
 # Bring-up's own register deadline, stated phase by phase (ADR 0022). The read phase is the one that
 # matters and the one a bare float never names: a relay that ACCEPTS the connection and then never
@@ -258,6 +271,67 @@ def poll(signaling_url: str, access_token: str, *, timeout: float = POLL_TIMEOUT
     raise RelayError(f"poll returned unexpected {resp.status_code}")
 
 
+def claim_task(
+    signaling_url: str,
+    access_token: str,
+    *,
+    timeout: float = TASK_CLAIM_TIMEOUT,
+) -> dict[str, Any] | None:
+    """Long-poll for one task and claim it (``POST /relay/v1/tasks/claim``).
+
+    A task is claimed on its own endpoint, never ``/poll``: tasks are a durable queue claimed at
+    poll time, while ``/poll`` serves an in-memory queue routed at enqueue time (ADR 0032 D-a).
+    Mixing them would put a durable mechanism inside a route built for an ephemeral one — and put
+    the money path at risk for a feature that does not touch money.
+
+    Returns the claimed task on 200 (``{task_id, project_id, prompt, branch, attempt,
+    lease_expires_at}``), ``None`` on 204 (nothing queued). 401 → ``RelayUnauthorized``; anything
+    else → ``RelayError`` carrying ``.status``, so the caller can tell a relay with no tasks plane
+    (404) from a transient fault.
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=timeout) as client:
+            resp = client.post("/relay/v1/tasks/claim")
+    except httpx.HTTPError as exc:
+        raise RelayError(f"claim_task transport error: {exc}") from None
+    if resp.status_code == 204:
+        return None
+    if resp.status_code == 200:
+        try:
+            return resp.json()
+        except ValueError as exc:  # malformed 200 — transient relay fault, back off rather than die
+            raise RelayError(f"claim_task returned a malformed body: {exc}") from None
+    _guard(resp, "claim_task")
+    raise RelayError(f"claim_task returned unexpected {resp.status_code}", status=resp.status_code)
+
+
+def report_task_result(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+    *,
+    state: str,
+    output: str | None,
+    error: str | None,
+) -> None:
+    """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
+
+    The relay authorizes this against the lease, so a provider whose lease expired is refused (403)
+    without ever having learned it lost — which is the point of fencing on the lease rather than on
+    liveness (ADR 0032 D-c).
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
+            resp = client.post(
+                # The id came off the wire and is being interpolated into a path.
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/result",
+                json={"state": state, "output": output, "error": error},
+            )
+    except httpx.HTTPError as exc:
+        raise RelayError(f"report_task_result transport error: {exc}") from None
+    _guard(resp, "report_task_result")
+
+
 def submit_response(
     signaling_url: str,
     access_token: str,
@@ -346,6 +420,67 @@ def _price_oneshot(signaling_url: str, access_token: str, method: str, path: str
     if resp.status_code >= 400:
         raise SystemExit(f"{method} {path} failed ({resp.status_code}): {resp.text[:400]}")
     return resp.json() if resp.content else {}
+
+
+# ---------------------------------------------------------------------------
+# Distributed tasks, consumer side (ADR 0032): create a task and read one back.
+# One-shot CLI calls like the price block above, so any failure is a clean SystemExit — but with
+# the relay's `detail` unwrapped, because these carry messages a user is meant to act on ("this
+# project already has an active task"), not just a status a developer reads.
+# ---------------------------------------------------------------------------
+
+
+def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, **kwargs: Any) -> Any:
+    try:
+        with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
+            resp = client.request(method, path, **kwargs)
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # `InvalidURL` is NOT an `HTTPError` subclass — the trap `deregister_node` records above, and
+        # it is raised by the `httpx.Client(base_url=...)` construction inside this very `try`. These
+        # are CLI one-shots whose CALLER classifies the exception (the contract is "any failure is a
+        # clean SystemExit"), which is exactly the condition that makes the mapping load-bearing.
+        raise SystemExit(f"Cannot reach the relay ({method} {path}): {exc}") from None
+    if resp.status_code >= 400:
+        raise SystemExit(_task_error_message(resp))
+    return resp.json() if resp.content else {}
+
+
+def _task_error_message(resp: httpx.Response) -> str:
+    """The relay's `detail` if it sent one, else the raw body — never an empty or bare-status line."""
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        # Broad on purpose. A hostile or truncated body can raise well outside `ValueError`:
+        # `json` recurses, and `RecursionError` is a `RuntimeError`. This function only ever builds
+        # an error STRING — there is nothing it could usefully re-raise, and letting anything escape
+        # would turn a clean CLI exit into a traceback.
+        detail = None
+    if isinstance(detail, str) and detail.strip():
+        return detail
+    return f"Task request failed ({resp.status_code}): {resp.text[:400]}"
+
+
+def create_task(
+    signaling_url: str,
+    access_token: str,
+    *,
+    prompt: str,
+    project: str | None,
+) -> dict[str, Any]:
+    """Create a task (``POST /relay/v1/tasks``)."""
+    body: dict[str, Any] = {"prompt": prompt}
+    if project:
+        body["project"] = project
+    return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/tasks", json=body)
+
+
+def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
+    """Read one task back (``GET /relay/v1/tasks/{id}``)."""
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        # The id is user input going into a path.
+        f"/relay/v1/tasks/{quote(task_id, safe='')}",
+    )
 
 
 def set_model_price(

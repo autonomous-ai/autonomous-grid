@@ -1409,6 +1409,11 @@ class _ServeState:
         # different engine. Empty = nothing withheld, which is also what every failure path leaves.
         self._sweep = engine_health.SweepResult(health=engine_health.EngineHealth())
         self.stop = threading.Event()
+        # Retires the distributed-tasks loop ALONE (ADR 0032). A second event, not a flag on
+        # `stop`, because the two planes must be independently stoppable: a relay with no tasks
+        # plane, or a task credential gone bad, retires task serving while inference keeps running,
+        # and nothing on the task side may ever set `stop`. Teardown sets both.
+        self.tasks_stop = threading.Event()
         self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
         self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
         self.reload_requested = threading.Event()  # SIGHUP sets this; the reload loop waits on it
@@ -2684,6 +2689,66 @@ def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
         state.stop.set()
 
 
+def _task_serving_enabled() -> bool:
+    """Whether this provider claims distributed tasks (ADR 0032). Opt-in, and off by default.
+
+    Read from the environment at serve time rather than baked into the run record: the detached
+    serve child inherits the parent's environment (`_spawn_remote_engine` passes ``{**os.environ}``),
+    so ``GRID_TASKS=1 grid join …`` reaches here. Opt-in is not a convenience — a task loop spends
+    the operator's own agent subscription, so it may never turn itself on.
+    """
+    return os.getenv("GRID_TASKS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _start_task_worker(state: _ServeState) -> threading.Thread | None:
+    """Start the distributed-tasks claim loop, if enabled. Returns the thread, or None.
+
+    Deliberately NOT wrapped in ``_supervise`` — the same exemption ``_reload_loop`` has, for the
+    same reason. ``_supervise`` sets ``state.stop`` on any fault, which is right for a poll worker
+    (a dead one strands advertised inference capacity) and wrong here: a fault in task serving must
+    leave inference running. ``task_loop`` self-guards and owns its own retirement signal.
+
+    Not joined on drain either. A task runs for minutes; the drain budget is 5s and belongs to
+    in-flight inference jobs. The thread is a daemon, so it cannot outlive the process.
+
+    Guarded end to end, because this call runs on the MAIN thread and BEFORE `_serve_loop`'s own
+    try/finally: an unguarded fault here — an import error in `remote/tasks.py`, `RuntimeError:
+    can't start new thread` under exhaustion — would escape to the top-level handler, unregister the
+    node and kill the process. Every other fault in this plane is isolated; a startup fault must be
+    too, or the isolation is only true once the thread already exists.
+    """
+    try:
+        if not _task_serving_enabled():
+            return None
+        from . import tasks
+
+        thread = threading.Thread(
+            target=_supervise_tasks, args=(tasks.task_loop, state), daemon=True, name="task-worker")
+        thread.start()
+        return thread
+    except (Exception, SystemExit) as exc:
+        print(f"\nCould not start task serving ({exc!r}); inference is unaffected.", file=sys.stderr)
+        state.tasks_stop.set()
+        return None
+
+
+def _supervise_tasks(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
+    """`_supervise` for the task loop: just as loud, but it retires task serving instead of the engine.
+
+    ``task_loop`` guards its own body, so arriving here means a fault outside that guard. Letting it
+    escape would drop the thread into the default excepthook and leave task serving silently dead
+    for the life of the process — the failure ``_supervise`` was written to prevent. The difference
+    is only which stop event is set: ``tasks_stop``, never ``state.stop``, so a task-plane fault
+    cannot take inference down with it.
+    """
+    try:
+        loop(state)
+    except BaseException as exc:  # noqa: BLE001 — a loop-level fault must fail loud, not vanish
+        print(f"\n{threading.current_thread().name} stopped unexpectedly: {exc!r}", file=sys.stderr)
+        traceback.print_exc()
+        state.tasks_stop.set()
+
+
 def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = None) -> None:
     """Heartbeat + one poll worker per concurrency slot, until stop / SIGTERM.
 
@@ -2717,6 +2782,7 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
     ]
     for worker in workers:
         worker.start()
+    _start_task_worker(state)
     # Unblock SIGHUP on THIS (main) thread last: the reload daemon + heartbeat + N workers all inherited
     # the block, so a join/leave SIGHUP now lands here and EINTRs the park below — never on a poll worker
     # mid-forward (ADR 0010 C4).
@@ -2727,6 +2793,7 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
             state.stop.wait(60)  # park; a worker/heartbeat may set stop, or SIGTERM unwinds here
     finally:
         state.stop.set()
+        state.tasks_stop.set()  # retire task serving with the engine, not only on its own signal
         deadline = time.monotonic() + _DRAIN_TIMEOUT
         # Wait on in-flight JOBS, never on the worker threads. A worker parked in a long-poll cannot
         # be woken by `state.stop` and does not return for up to `relay.POLL_TIMEOUT` (35s) — far past

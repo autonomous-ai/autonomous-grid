@@ -10771,6 +10771,7 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
         "members": ["members", "list"],
         "price": ["price", "show"],
         "router": ["router", "status"],
+        "task": ["task", "get", "T1"],
     }
     # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
     # *and* skipped by the `is None` filter below — the one state that is invisible in both
@@ -12518,6 +12519,157 @@ def test_serve_loop_worker_death_stops_engine(monkeypatch, tmp_path):
     assert state.stop.is_set()
 
 
+def test_serve_loop_starts_no_task_worker_by_default(monkeypatch, tmp_path):
+    """Task serving is opt-in. Without `GRID_TASKS` a provider behaves exactly as it did before this
+    feature existed — no extra thread, no extra relay traffic, no subscription spent."""
+    from remote import serve, tasks
+
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(tasks, "task_loop", lambda state: pytest.fail("task loop must not run"))
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    assert not any(t.name == "task-worker" for t in threading.enumerate())
+
+
+def test_serve_loop_starts_one_task_worker_when_enabled(monkeypatch, tmp_path):
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    names: list[str] = []
+    started = threading.Event()
+
+    def fake_task_loop(state):
+        names.append(threading.current_thread().name)
+        started.set()
+        state.tasks_stop.wait(30)
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: (started.wait(5), state.stop.set()))
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    assert names == ["task-worker"]
+    assert state.tasks_stop.is_set()  # teardown retires it, or the thread outlives the engine
+
+
+def test_serve_loop_task_worker_death_does_not_stop_the_engine(monkeypatch, tmp_path):
+    """The deliberate counterpart to `test_serve_loop_worker_death_stops_engine`.
+
+    A dead POLL worker strands advertised inference capacity, so it stops the engine. A dead TASK
+    worker strands nothing that was advertised — the node keeps serving inference — so it must NOT.
+    This is the acceptance criterion "stopping one leaves the other serving", in the direction that
+    `_supervise` would silently get wrong.
+    """
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    polls = threading.Event()
+
+    def boom(state):
+        raise RuntimeError("task plane exploded")
+
+    def poll(state):
+        polls.wait(5)          # keep serving inference after the task worker has died
+        state.stop.set()
+
+    monkeypatch.setattr(tasks, "task_loop", boom)
+    monkeypatch.setattr(serve, "_poll_loop", poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threading.Timer(0.3, polls.set).start()
+    serve._serve_loop(state)
+
+    # The engine stopped because the POLL worker said so, not because the task worker died.
+    assert polls.is_set()
+
+
+def test_task_worker_that_fails_to_START_does_not_take_the_engine_down(monkeypatch, tmp_path, capsys):
+    """The one call in this feature that runs on the MAIN thread, outside every other guard.
+
+    `_start_task_worker` is invoked before `_serve_loop`'s own try/finally, so an exception there —
+    an import fault in `remote/tasks.py`, `RuntimeError: can't start new thread` under exhaustion —
+    would propagate out of `_serve_loop` to the top-level handler, unregister the node and kill the
+    process. A task-plane STARTUP fault must be as survivable as a task-plane runtime fault.
+    """
+    from remote import serve
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(serve, "_task_serving_enabled", _raise(RuntimeError("cannot start thread")))
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)  # must return normally, not raise
+
+    assert "cannot start thread" in capsys.readouterr().err  # loud, but not fatal
+
+
+def test_task_worker_death_is_logged_and_retires_task_serving(monkeypatch, tmp_path, capsys):
+    """`task_loop` self-guards, so reaching here means a fault OUTSIDE its guard. The thread must
+    not simply vanish: an unguarded raise would strand task serving silently for the life of the
+    process — the exact failure `_supervise` exists to prevent, minus the engine teardown."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(tasks, "task_loop", _raise(RuntimeError("task plane exploded")))
+    state = _serve_state(monkeypatch, tmp_path)
+
+    thread = serve._start_task_worker(state)
+    thread.join(timeout=5)
+
+    err = capsys.readouterr().err
+    assert "task-worker" in err and "task plane exploded" in err
+    assert state.tasks_stop.is_set()   # task serving is honestly marked as retired
+    assert not state.stop.is_set()     # ...and inference is untouched
+
+
+def test_serve_loop_task_stop_does_not_stop_inference(monkeypatch, tmp_path):
+    """Retiring the task loop (a relay with no tasks plane, a bad task credential) leaves the poll
+    workers serving — the other direction of the same independence."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    served: list[int] = []
+    retired = threading.Event()
+
+    def fake_task_loop(state):
+        state.tasks_stop.set()   # retire immediately, as the 404 path does
+        retired.set()
+
+    def poll(state):
+        retired.wait(5)
+        served.append(1)         # inference still dispatching after the task loop retired
+        state.stop.set()
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    monkeypatch.setattr(serve, "_poll_loop", poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    # Inference dispatched AFTER the task loop retired — that is the whole claim. (`state.stop` is
+    # set here by the poll worker's own exit, so asserting on it would prove nothing either way.)
+    assert served == [1]
+    assert state.tasks_stop.is_set()
+
+
+def test_serve_state_exposes_an_independent_task_stop_event(monkeypatch, tmp_path):
+    """Two events, not one: `stop` tears the engine down, `tasks_stop` retires task serving alone."""
+    state = _serve_state(monkeypatch, tmp_path)
+
+    state.tasks_stop.set()
+
+    assert not state.stop.is_set()
+
+
 def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
     """A job that finishes within the drain budget submits its result before _serve_loop returns —
     'drain', not 'kill on stop'."""
@@ -12622,6 +12774,109 @@ def test_relay_poll_malformed_body_raises_relay_error(monkeypatch):
     _mock_serve_engine(monkeypatch, lambda r: httpx.Response(200, content=b"<html>gateway hiccup</html>"))
     with pytest.raises(relay.RelayError):
         relay.poll("https://relay.example", "AT")
+
+
+# ---------------------------------------------------------------------------
+# Distributed tasks — the provider's claim client (remote/relay.py, ADR 0032)
+# ---------------------------------------------------------------------------
+
+def test_claim_task_posts_to_the_tasks_claim_endpoint(monkeypatch):
+    """A task is claimed on its OWN endpoint, never `/poll`: tasks are a durable queue claimed at
+    poll time, and putting them on the inference route would mix that with an ephemeral,
+    enqueue-time-routed one (ADR 0032 D-a). The path is a cross-repo lockstep value."""
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"task_id": "T1", "prompt": "hello"})
+
+    _mock_serve_engine(monkeypatch, handler)
+    job = relay.claim_task("https://relay.example", "AT")
+
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/claim")
+    assert seen["auth"] == "Bearer AT"
+    assert job == {"task_id": "T1", "prompt": "hello"}
+
+
+def test_claim_task_returns_none_on_204(monkeypatch):
+    """204 is "no work waiting", not a failure — the loop re-polls rather than backing off."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(204))
+    assert relay.claim_task("https://relay.example", "AT") is None
+
+
+def test_claim_task_malformed_body_raises_relay_error(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(200, content=b"<html>nope</html>"))
+    with pytest.raises(relay.RelayError):
+        relay.claim_task("https://relay.example", "AT")
+
+
+def test_claim_task_401_raises_relay_unauthorized(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(401, json={"detail": "nope"}))
+    with pytest.raises(relay.RelayUnauthorized):
+        relay.claim_task("https://relay.example", "AT")
+
+
+def test_claim_task_404_carries_the_status_so_the_loop_can_retire(monkeypatch):
+    """A relay with no tasks plane 404s. The loop needs the STATUS to tell that apart from a
+    transient fault, or an old relay produces an infinite retry storm."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(404, text="Not Found"))
+    with pytest.raises(relay.RelayError) as exc:
+        relay.claim_task("https://relay.example", "AT")
+    assert exc.value.status == 404
+
+
+def test_report_task_result_posts_the_terminal_state(monkeypatch):
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "T1", "state": "completed"})
+
+    _mock_serve_engine(monkeypatch, handler)
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="hi\n", error=None)
+
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/T1/result")
+    assert seen["body"] == {"state": "completed", "output": "hi\n", "error": None}
+
+
+def test_report_task_result_percent_encodes_the_task_id(monkeypatch):
+    """A task id reaches us over the wire; it interpolates into a PATH. Never trust its shape."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(
+        monkeypatch,
+        lambda r: (seen.update(raw=r.url.raw_path), httpx.Response(200, json={}))[1],
+    )
+    relay.report_task_result(
+        "https://relay.example", "AT", "../../nodes/evil", state="failed", output=None, error="x")
+
+    # `raw_path` is what goes on the wire; `URL.path` would show it already decoded and hide this.
+    assert seen["raw"] == b"/relay/v1/tasks/..%2F..%2Fnodes%2Fevil/result"
+
+
+def test_report_task_result_raises_on_failure(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(403, text="not your lease"))
+    with pytest.raises(relay.RelayError):
+        relay.report_task_result(
+            "https://relay.example", "AT", "T1", state="completed", output="x", error=None)
 
 
 def test_serve_node_id_comes_from_access_token_jwt():
@@ -21228,6 +21483,136 @@ def test_relay_set_model_price_omits_unset_metadata(monkeypatch, tmp_path):
     assert set(seen["body"]) == {"model", "modality", "input_rate", "output_rate", "cache_rate"}
 
 
+# ---------------------------------------------------------------------------
+# `grid task` — the distributed-tasks client (ADR 0032)
+# ---------------------------------------------------------------------------
+
+def test_task_subcommands_are_wired_to_the_handler():
+    parser = cli.build_parser()
+
+    create = parser.parse_args(["task", "create", "--prompt", "say hello"])
+    assert create.handler is cli.cmd_remote_task
+    assert (create.subcommand, create.prompt) == ("create", "say hello")
+
+    get = parser.parse_args(["task", "get", "T1"])
+    assert get.handler is cli.cmd_remote_task
+    assert (get.subcommand, get.task_id) == ("get", "T1")
+
+
+def test_task_selects_its_grid_with_a_flag_not_a_positional():
+    """`--grid`, like `price`/`router`: a leading optional positional would be ambiguous with the
+    free-form prompt that follows it."""
+    args = cli.build_parser().parse_args(
+        ["task", "create", "--prompt", "hello", "--grid", "team"])
+    assert args.grid == "team"
+
+
+def test_task_create_requires_a_prompt(capsys):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["task", "create"])
+
+
+def test_task_is_refused_in_local_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "get", "T1"])
+    assert "remote" in str(exc.value).lower()
+
+
+def test_task_create_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
+    """Full remote-mode round trip: parser -> dispatch -> cmd_remote_task -> relay POST /tasks."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "create", "--prompt", "say hello", "--project", "alpha"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"], seen["auth"]) == ("POST", "/relay/v1/tasks", "Bearer AT")
+    assert seen["body"] == {"prompt": "say hello", "project": "alpha"}
+    assert "T1" in capsys.readouterr().out
+
+
+def test_task_get_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "id": "T1", "state": "completed", "result_text": "say hello\n", "error": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "get", "T1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/tasks/T1")
+    out = capsys.readouterr().out
+    assert "completed" in out and "say hello" in out
+
+
+def test_task_get_json_echoes_the_relay_reply(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reply = {"id": "T1", "state": "completed", "result_text": "hi\n", "error": None}
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+    cli.main(["task", "get", "T1", "--json"])
+
+    assert json.loads(capsys.readouterr().out) == reply
+
+
+def test_task_get_percent_encodes_the_id_in_the_path(monkeypatch, tmp_path):
+    """The id is user input interpolated into a request path."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (seen.update(raw=r.url.raw_path), httpx.Response(200, json={}))[1])
+    cli.main(["task", "get", "../nodes/evil"])
+
+    assert seen["raw"] == b"/relay/v1/tasks/..%2Fnodes%2Fevil"
+
+
+def test_task_create_surfaces_a_busy_project_as_a_clean_error(monkeypatch, tmp_path):
+    """409 is the one-active-task-per-project invariant answering. The user gets a sentence, not a
+    traceback and not a raw status line."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        409, json={"detail": "Project 'default' already has an active task"}))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "create", "--prompt", "hello"])
+    assert "already has an active task" in str(exc.value)
+
+
+def test_task_requires_sign_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")  # remote, but no credentials on disk
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "get", "T1"])
+    assert "signed in" in str(exc.value).lower()
+
+
+def test_task_unknown_subcommand_errors(monkeypatch, tmp_path):
+    """The parser blocks this path; the guard catches direct misuse of the handler."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    with pytest.raises(SystemExit):
+        cli.cmd_remote_task(SimpleNamespace(subcommand="explode", grid=None, json=False))
+
+
 def test_price_set_end_to_end_through_cli_main(monkeypatch, tmp_path):
     """Full remote-mode round trip: parser -> dispatch -> cmd_remote_price -> relay PUT.
     A signed-in user with a running grid runs `grid price set` and we capture the wire body."""
@@ -21387,6 +21772,447 @@ def _poll_loop_state_and_poll(job_then_none):
 
     monkey_targets = {"poll_once": fake_poll, "handle_job": lambda _s, _job: None}
     return serve, state, monkey_targets
+
+
+def _fast_task_backoff(monkeypatch):
+    """Collapse the claim back-off so retry-path tests don't sit through real 5s waits."""
+    from remote import tasks
+    monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
+
+
+def _task_loop_state(claims):
+    """A minimal serve state + a claim double yielding `claims`, then retiring the task loop.
+
+    Deliberately NOT the poll loop's state: the task loop must not touch `enter_job`/`exit_job` (a
+    task runs for minutes and has no place in the 5s drain budget) and must not read or write
+    `state.stop` except to observe it.
+    """
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(),
+        tasks_stop=threading.Event(),
+        signaling_url="https://relay.example",
+        token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    queue = list(claims)
+
+    def fake_claim(_state):
+        if queue:
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        _state.tasks_stop.set()  # nothing left to claim — let the loop retire
+        return None
+
+    return tasks, state, fake_claim
+
+
+def test_task_loop_claims_runs_and_reports(monkeypatch):
+    """The provider half of the round trip: claim → run → report a terminal state."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "say hello"}])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "say hello\n", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks.task_loop(state)
+
+    assert reported == [("T1", {"state": "completed", "output": "say hello\n", "error": None})]
+
+
+def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
+    """A malformed or exploding task must not kill the loop — the next claim still happens."""
+    tasks, state, fake_claim = _task_loop_state([
+        {"task_id": "T1", "prompt": "boom"},
+        {"task_id": "T2", "prompt": "fine"},
+    ])
+    reported = []
+
+    def run(job):
+        if job["task_id"] == "T1":
+            raise RuntimeError("child exploded")
+        return ("completed", "fine\n", None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks.task_loop(state)
+
+    assert [tid for tid, _ in reported] == ["T1", "T2"]      # T1 still reported, as failed
+    assert reported[0][1]["state"] == "failed"
+    assert "child exploded" in reported[0][1]["error"]
+    assert not state.stop.is_set()                            # inference keeps serving
+
+
+def test_task_loop_survives_a_system_exit_from_a_task(monkeypatch):
+    """`SystemExit` is this repo's clean-error idiom, and it is not an `Exception`. A loop guarding
+    only `Exception` would die silently here and take task serving with it."""
+    tasks, state, fake_claim = _task_loop_state([
+        {"task_id": "T1", "prompt": "x"}, {"task_id": "T2", "prompt": "y"},
+    ])
+    seen = []
+
+    def run(job):
+        if job["task_id"] == "T1":
+            raise SystemExit("corrupt record")
+        seen.append(job["task_id"])
+        return ("completed", "", None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state)
+
+    assert seen == ["T2"]
+    assert not state.stop.is_set()
+
+
+def test_task_loop_backs_off_on_a_transient_relay_error(monkeypatch):
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        relay.RelayError("relay hiccup"), {"task_id": "T1", "prompt": "x"},
+    ])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]           # recovered, did not exit
+    assert not state.stop.is_set()
+
+
+def test_task_loop_retires_against_a_relay_with_no_tasks_plane(monkeypatch, capsys):
+    """A relay that PERSISTENTLY 404s predates the tasks plane. Retire rather than retry forever —
+    and leave inference completely untouched."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state(
+        [relay.RelayError("nope", status=404)] * tasks_404_budget())
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+
+    tasks.task_loop(state)
+
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()      # the engine keeps serving inference
+
+
+def tasks_404_budget():
+    from remote import tasks
+    return tasks._MISSING_PLANE_404_BUDGET
+
+
+def test_task_loop_survives_a_transient_404(monkeypatch):
+    """A single 404 is NOT proof the tasks plane is missing.
+
+    `remote/serve.py` records the field incident this repeats: "a master mid-respawn answers 503 (or
+    404), and before this loop that single answer ended the child". A proxy blip or a relay redeploy
+    would otherwise retire task serving on every provider in the fleet at once, for the life of each
+    process, with one stderr line each.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        relay.RelayError("blip", status=404), {"task_id": "T1", "prompt": "x"},
+    ])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]           # recovered from the 404 and kept serving tasks
+    assert not state.stop.is_set()
+
+
+def test_task_loop_404_budget_resets_after_a_success(monkeypatch):
+    """Consecutive, not cumulative — otherwise a long-lived provider retires from unrelated blips
+    spread across days."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    budget = tasks_404_budget()
+    claims = ([relay.RelayError("blip", status=404)] * (budget - 1)
+              + [{"task_id": "T1", "prompt": "x"}]
+              + [relay.RelayError("blip", status=404)] * (budget - 1)
+              + [{"task_id": "T2", "prompt": "y"}])
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1", "T2"]     # never retired, despite 2*(budget-1) total 404s
+
+
+def test_task_loop_retires_when_the_token_is_rejected(monkeypatch):
+    """An unrefreshable 401 retires the TASK loop only. The poll loop stops the whole engine on the
+    same signal, but a task credential going bad is not a reason to stop serving inference."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([relay.RelayUnauthorized()])
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+
+    tasks.task_loop(state)
+
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()
+
+
+def test_task_loop_stops_when_the_engine_stops(monkeypatch):
+    """`state.stop` retires the task loop too — teardown must not leave it running."""
+    tasks, state, _ = _task_loop_state([])
+    state.stop.set()
+    monkeypatch.setattr(
+        tasks, "claim_once",
+        lambda _s: pytest.fail("must not claim after the engine has stopped"))
+
+    tasks.task_loop(state)
+
+
+def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("failed", None, "exit 127"))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(kw))
+
+    tasks.task_loop(state)
+
+    assert reported == [{"state": "failed", "output": None, "error": "exit 127"}]
+
+
+def test_task_loop_survives_a_failure_to_report(monkeypatch):
+    """Losing the report loses one task's result. It must not lose the loop as well."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        {"task_id": "T1", "prompt": "x"}, {"task_id": "T2", "prompt": "y"},
+    ])
+    reported = []
+
+    def report(_s, tid, **kw):
+        if tid == "T1":
+            raise relay.RelayError("lease lost", status=403)
+        reported.append(tid)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert reported == ["T2"]
+    assert not state.stop.is_set()
+
+
+def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypatch, capsys):
+    """The one salvageable stranding: the work is done and only the last message was lost.
+
+    A dead provider still strands its task until lease expiry exists (issue 07) — this does not
+    pretend otherwise. It recovers the case where the provider is alive and the network blipped,
+    which is the difference between losing a completed agent run and not.
+    """
+    from remote import relay, tasks as tasks_mod
+
+    monkeypatch.setattr(tasks_mod, "_REPORT_BACKOFF_SECONDS", 0.001)
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    attempts = []
+
+    def report(_s, tid, **kw):
+        attempts.append(kw)
+        if len(attempts) < 3:
+            raise relay.RelayError("connection reset", status=None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert len(attempts) == 3
+    assert attempts[-1] == {"state": "completed", "output": "done", "error": None}
+    assert "stuck" not in capsys.readouterr().err     # it landed; nothing was stranded
+
+
+@pytest.mark.parametrize("status", [403, 404, 422])
+def test_a_terminal_4xx_report_answer_is_not_retried(monkeypatch, capsys, status):
+    """403 (another provider holds the lease), 404 (already terminal), 422 (we sent nonsense) are
+    ANSWERS, not blips. Retrying them cannot change the outcome and only delays the loop."""
+    from remote import relay, tasks as tasks_mod
+
+    monkeypatch.setattr(tasks_mod, "_REPORT_BACKOFF_SECONDS", 0.001)
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    attempts = []
+
+    def report(_s, tid, **kw):
+        attempts.append(kw)
+        raise relay.RelayError("answered", status=status)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert len(attempts) == 1
+    assert str(status) in capsys.readouterr().err
+
+
+def test_a_report_that_never_lands_gives_up_after_a_bounded_number_of_attempts(monkeypatch, capsys):
+    from remote import relay, tasks as tasks_mod
+
+    monkeypatch.setattr(tasks_mod, "_REPORT_BACKOFF_SECONDS", 0.001)
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    attempts = []
+
+    def report(_s, tid, **kw):
+        attempts.append(kw)
+        raise relay.RelayError("still down", status=None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert len(attempts) == tasks_mod._REPORT_ATTEMPTS   # bounded, not forever
+    assert "stuck" in capsys.readouterr().err.lower()    # and honest about the outcome
+
+
+def test_a_lost_report_says_the_task_is_stuck_not_that_it_will_be_requeued(monkeypatch, capsys):
+    """The log must describe what THIS build does, not what a later slice will do.
+
+    Nothing renews or expires a lease yet, and nothing requeues: a task whose result is lost stays
+    `running` forever, and because `running` is inside the one-active-task index predicate, the
+    PROJECT is locked with it. Telling an operator "it will be requeued" points them away from the
+    only thing that can actually clear it.
+    """
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("boom", status=None)))
+
+    tasks.task_loop(state)
+
+    err = capsys.readouterr().err
+    assert "requeued" not in err
+    assert "T1" in err and "stuck" in err.lower()
+
+
+def test_a_lost_report_records_which_kind_of_failure_it_was(monkeypatch, capsys):
+    """403 (someone else holds the lease — two providers may have run this) and a transport loss are
+    different incidents. The relay distinguishes them; the provider's log must not collapse them."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job: ("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("nope", status=403)))
+
+    tasks.task_loop(state)
+
+    assert "403" in capsys.readouterr().err
+
+
+def test_task_oneshot_maps_an_invalid_url_to_a_clean_exit(monkeypatch):
+    """`httpx.InvalidURL` is NOT an `HTTPError` subclass — the trap `deregister_node` records in this
+    same file. These CLI one-shots promise "any failure is a clean SystemExit", and their caller is
+    the one that classifies the exception, so the mapping is load-bearing here."""
+    from remote import relay
+
+    assert not issubclass(httpx.InvalidURL, httpx.HTTPError)  # pin the premise, not just the fix
+
+    with pytest.raises(SystemExit):
+        relay.get_task("http://[malformed", "AT", "T1")
+
+
+def test_task_error_message_survives_a_body_that_blows_the_recursion_limit(monkeypatch):
+    """`json` recurses, and `RecursionError` is a `RuntimeError`, not a `ValueError` — a narrow
+    except here would let it escape a function whose whole contract is 'clean SystemExit'."""
+    from remote import relay
+
+    class _Hostile:
+        status_code = 400
+        text = "deeply nested"
+
+        def json(self):
+            raise RecursionError("maximum recursion depth exceeded")
+
+    assert "400" in relay._task_error_message(_Hostile())
+
+
+def test_run_task_echoes_the_prompt():
+    """The tracer bullet's payload: no agent, no git — just prove a child ran and its output came
+    back through the seam."""
+    from remote import tasks
+
+    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "say hello"})
+
+    assert (state, error) == ("completed", None)
+    assert output.strip() == "say hello"
+
+
+def test_run_task_reports_failure_rather_than_raising(monkeypatch):
+    """Every failure mode of the child is a FAILED task, never an exception into the loop."""
+    from remote import tasks
+
+    monkeypatch.setattr(tasks.subprocess, "run", _raise(OSError("no such binary")))
+
+    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+
+    assert state == "failed"
+    assert "no such binary" in error
+
+
+def test_run_task_times_out_into_a_failed_state(monkeypatch):
+    import subprocess as _subprocess
+    from remote import tasks
+
+    monkeypatch.setattr(
+        tasks.subprocess, "run", _raise(_subprocess.TimeoutExpired(cmd="echo", timeout=1)))
+
+    state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+
+    assert state == "failed"
+    assert "timed out" in error.lower()
+
+
+def test_run_task_refuses_a_prompt_that_is_not_a_string(monkeypatch):
+    """The job dict came off the wire. A missing or non-string prompt is a failed task, not a
+    TypeError thrown into the loop's guard."""
+    from remote import tasks
+
+    for job in ({"task_id": "T1"}, {"task_id": "T1", "prompt": None}, {"task_id": "T1", "prompt": 7}):
+        state, _output, error = tasks.run_task(job)
+        assert state == "failed", job
+        assert error
+
+
+def _raise(exc):
+    def _boom(*_a, **_kw):
+        raise exc
+    return _boom
 
 
 def test_poll_loop_is_silent_on_success_by_default(monkeypatch, capsys):
