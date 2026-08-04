@@ -484,6 +484,16 @@ def _add_task(sub) -> None:
     follow.add_argument("--json", action="store_true", help="Emit one JSON event per line.")
     follow.set_defaults(handler=cmd_remote_task)
 
+    fetch = task_sub.add_parser("fetch", help="Fetch a finished task's result into a directory")
+    fetch.add_argument("task_id", help="Task id returned by `grid task create`.")
+    fetch.add_argument(
+        "--into", default=None, metavar="DIR",
+        help="Where to put the result (default: ./<task-id>). Created if missing; an existing "
+             "directory is added to, never reset.")
+    fetch.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    fetch.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    fetch.set_defaults(handler=cmd_remote_task)
+
 
 def _add_price(sub) -> None:
     """Remote-only `grid price set|rm|show` — this engine's authoritative model price (grid_chat_pricing).

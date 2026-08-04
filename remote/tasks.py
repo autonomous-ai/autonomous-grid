@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from . import relay, task_agent, task_repo, task_stream
@@ -92,13 +92,16 @@ def _warn(message: str) -> None:
 @dataclass(frozen=True)
 class TaskOutcome:
     """What one task run produced. A record rather than a tuple — it grew a fourth field the moment
-    a real agent ran, and a fifth is coming with issue 05's result commit."""
+    a real agent ran, and a fifth when the result started coming back through git."""
 
     state: str
     output: str | None
     error: str | None
     #: The Claude Code conversation this run opened, so the project's next task resumes it (issue 06).
     session_id: str | None = None
+    #: The commit the pushed task branch ended on. Set for EVERY terminal outcome, success and
+    #: failure alike (ADR 0032 D-e) — only the relay decides whether `main` follows it.
+    result_commit: str | None = None
 
 
 def task_timeout() -> float:
@@ -137,7 +140,8 @@ def claim_once(state: Any) -> dict[str, Any] | None:
 
 
 def report_once(serve_state: Any, task_id: str, *, state: str, output: str | None,
-                error: str | None, session_id: str | None = None) -> None:
+                error: str | None, session_id: str | None = None,
+                result_commit: str | None = None) -> None:
     """Report a terminal result; on 401 refresh the token and retry exactly once.
 
     The serve state is named `serve_state` here only because `state` is the wire's name for the
@@ -147,13 +151,15 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
     try:
         relay.report_task_result(
             serve_state.signaling_url, token, task_id,
-            state=state, output=output, error=error, session_id=session_id)
+            state=state, output=output, error=error, session_id=session_id,
+            result_commit=result_commit)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
         relay.report_task_result(
             serve_state.signaling_url, serve_state.token(), task_id,
-            state=state, output=output, error=error, session_id=session_id)
+            state=state, output=output, error=error, session_id=session_id,
+            result_commit=result_commit)
 
 
 class _Collected:
@@ -441,7 +447,7 @@ class _ChildFailed(Exception):
 def run_task(job: dict[str, Any],
              publish: Callable[..., None] | None = None,
              on_spawn: Callable[[subprocess.Popen], None] | None = None,
-             fetch_input: Callable[[], bytes] | None = None) -> TaskOutcome:
+             remote: task_repo.GitRemote | None = None) -> TaskOutcome:
     """Run one task's agent and return how it went.
 
     The contract that matters is this one: **every** failure mode returns a `failed` outcome.
@@ -456,9 +462,9 @@ def run_task(job: dict[str, Any],
 
     `publish` is optional: the child is the point and the stream is an observer, so a caller with no
     channel wired runs a task exactly as before. `on_spawn` hands the caller the child's `Popen` for
-    issue 07's lease renewal. `fetch_input` downloads the task's input bundle, and is called only
-    when the claim named an `input_commit` — a relay predating the git plane sends none, and a
-    provider talking to one runs in an empty workspace exactly as it did then.
+    issue 07's lease renewal. `remote` is the project's git repository on the relay, used only when
+    the claim named an `input_commit` — a relay predating the git plane sends none, and a provider
+    talking to one runs in an empty workspace exactly as it did then.
     """
     # Built first so every `return` below can go through `_failed`, which is what makes the scrub
     # and the session id impossible to forget on a path someone adds later.
@@ -485,19 +491,19 @@ def run_task(job: dict[str, Any],
     # failure ADR 0032 D-b exists to prevent — so there is no "carry on without it" branch.
     input_commit = job.get("input_commit")
     if input_commit:
-        if fetch_input is None:
+        if remote is None:
             # A CALLER bug, and it must not be mistaken for the old-relay degrade below. That
-            # degrade is gated on `input_commit` being ABSENT; a truthy commit with no fetcher
+            # degrade is gated on `input_commit` being ABSENT; a truthy commit with no remote
             # would otherwise skip the checkout in silence and spawn the agent against whatever the
             # per-project workspace already held — stale from a prior task, or empty. Issues 05 and
             # 07 both assemble job dicts for this path, so the guard lives in the function rather
             # than in the convention today's only caller happens to follow.
             return _failed(
                 translator,
-                f"the task names input commit {input_commit} but no way to fetch it was wired")
+                f"the task names input commit {input_commit} but no git remote was wired")
         try:
             task_repo.materialize(
-                workspace, fetch_input(),
+                workspace, url=remote.url, token=remote.token,
                 branch=str(job.get("branch") or ""), input_commit=str(input_commit))
         except (Exception, SystemExit) as exc:
             return _failed(translator, f"could not prepare the task's workspace: {exc}")
@@ -608,8 +614,18 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
         return
 
     publisher = _publisher_for(state, task_id, job)
+    remote = _git_remote(state, job)
+    landed = True
+    # Whether the agent was actually SPAWNED — a dict because the callback closes over it.
+    # `on_spawn` has been plumbed through `run_task` since issue 03 and had no caller; this
+    # is it. It is the only precise answer to "is there anything of the agent's to push",
+    # and the checks that look like it (does the workspace exist, is it a git repo) are
+    # true for the whole life of a project regardless of what this attempt managed.
+    spawned = {"yes": False}
     try:
-        outcome = run_task(job, publisher.publish, fetch_input=_input_fetcher(state, task_id))
+        outcome = run_task(job, publisher.publish, remote=remote,
+                           on_spawn=lambda _proc: spawned.update(yes=True))
+        outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
     except (Exception, SystemExit) as exc:
         # `run_task` is written not to raise; if it ever does, the task still owes the relay a
         # terminal report — silence would hold the project's lock until the lease expires.
@@ -630,10 +646,23 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
         except (Exception, SystemExit) as exc:
             _warn(f"could not flush the last progress events for task {task_id} ({exc!r})")
 
+    if not landed:
+        # DELIBERATELY no terminal report. The result is not in the repository, so reporting one
+        # would mark the task terminal with nothing to fetch — and terminal is precisely the state
+        # nothing retries. Left `running`, its lease lapses and issue 07's reclaim hands it to
+        # another provider, which is the only path that can still produce the result the user asked
+        # for. The reason has already gone to the user as a `task.stderr` event.
+        _warn(f"task {task_id}'s result could not be pushed, so no terminal state was reported — "
+              f"the task is left `running` so its lease can lapse and another provider can retry "
+              f"it. Until lease reclaim ships (issue 07) it stays `running` until its deadline, "
+              f"holding its project's lock; `grid task get {task_id}` shows where it stands.")
+        return
+
     for attempt in range(1, _REPORT_ATTEMPTS + 1):
         try:
             report_once(state, task_id, state=outcome.state, output=outcome.output,
-                        error=outcome.error, session_id=outcome.session_id)
+                        error=outcome.error, session_id=outcome.session_id,
+                        result_commit=outcome.result_commit)
             return
         except (Exception, SystemExit) as exc:
             status = getattr(exc, "status", None)
@@ -664,26 +693,73 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
             state.tasks_stop.wait(_REPORT_BACKOFF_SECONDS)
 
 
-def _input_fetcher(state: Any, task_id: str) -> Callable[[], bytes]:
-    """A one-shot download of THIS task's input, with the same single-retry-on-401 rule as the rest.
+def _git_remote(state: Any, job: dict[str, Any]) -> task_repo.GitRemote | None:
+    """The project's repository on the relay, or `None` when this claim named no git plane.
 
-    Bound to `task_id` here rather than passed through `run_task`, so the id the fetch uses cannot
-    drift from the id the loop is working on — the lease fence would turn a mismatch into a 403 the
-    provider reports as an unreadable failure rather than as "I asked for the wrong task".
-
-    Deliberately NOT guarded: `run_task` treats a failed fetch as fatal, because an agent run
-    against input that never arrived produces a confidently wrong result (ADR 0032 D-b).
+    There is no refresh-and-retry here, unlike `claim_once` and `report_once`. git does not answer
+    with a status code — a stale credential arrives as prose on stderr, and pattern-matching that to
+    decide whether to refresh would be a guess. It does not need to be one: a git failure routes to
+    the push-failure path below, the task's lease lapses, and the next attempt claims with a token
+    freshly fetched. **The recovery path already exists**, so a second one keyed on parsing git's
+    English would add a way to be wrong without adding a way to succeed.
     """
-    def fetch() -> bytes:
-        token = state.token()
-        try:
-            return relay.fetch_task_input(state.signaling_url, token, task_id)
-        except relay.RelayUnauthorized:
-            if not state.refresh(stale_token=token):
-                raise
-            return relay.fetch_task_input(state.signaling_url, state.token(), task_id)
+    project_id = str(job.get("project_id") or "")
+    if not job.get("input_commit") or not project_id:
+        return None
+    return task_repo.GitRemote(
+        url=relay.git_remote_url(state.signaling_url, project_id), token=state.token())
 
-    return fetch
+
+def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
+                 remote: task_repo.GitRemote | None, publisher: Any) -> tuple[TaskOutcome, bool]:
+    """Commit the workspace and push the task branch. Returns `(outcome, it_landed)`.
+
+    Runs for a FAILED outcome too (ADR 0032 D-e): the branch is what lets a user see what the agent
+    did before it broke and cherry-pick what was right. Only the relay decides whether `main`
+    follows, and only on success.
+
+    **Gated on the agent having been SPAWNED**, which is the precise reading of that rule — "what
+    the agent did" presupposes an agent that ran. An earlier version asked whether the workspace was
+    a git repo instead, and that is a proxy which fails in the direction that matters: `.git` is
+    created by the FIRST step of `materialize`, and the workspace persists per project, so it exists
+    for the rest of the project's life. A `materialize` that got as far as `symbolic-ref` and then
+    failed at `clean` — leaving a previous task's un-cleanable leftovers in place — would satisfy
+    that check, and `commit_and_push` would then succeed, because HEAD already legitimately names
+    the task branch. The result: a `result_commit` full of another task's files, published as
+    "what the agent did" for a task whose agent never started. That is precisely the confidently
+    wrong answer D-b exists to prevent, reached from the other end.
+    """
+    if remote is None:
+        # No git plane on this relay, so there is no branch to push and nothing to explain. Not a
+        # failure — it is the pre-issue-04 degrade, and the relay records nothing either.
+        return outcome, True
+    if not spawned:
+        # `run_task` already failed the task for a reason the user can read, and there is nothing of
+        # the agent's to preserve. The relay reads the branch tip itself, so the task still settles
+        # on its input commit — the truthful answer for an attempt that never ran.
+        return outcome, True
+
+    try:
+        workspace = task_agent.workspace_for(str(job.get("project_id") or ""))
+        commit = task_repo.commit_and_push(
+            workspace, url=remote.url, token=remote.token,
+            branch=str(job.get("branch") or ""),
+            message=f"task {job.get('task_id')} ({outcome.state})")
+    except (Exception, SystemExit) as exc:
+        # SCRUBBED like every other message that leaves this process: it is built from git's own
+        # stderr, and it travels into the durable event log the requesting user reads back.
+        reason = task_stream.redact(f"could not push the task's result: {exc}")
+        # Logged LOCALLY AND UNCONDITIONALLY, before the event is even attempted, because the event
+        # cannot be relied on to carry it. `TaskEventPublisher` is documented "never raises": it
+        # buffers, and a batch the relay refuses is dropped inside `flush()` with a generic message.
+        # So the case this reason matters most in — the push failed BECAUSE the lease was lost — is
+        # exactly the case where the same lost lease silences the channel carrying the explanation.
+        # Guarding the publish in a `try` looked like it covered this and could not: nothing raises.
+        _warn(f"task {job.get('task_id')}: {reason}")
+        publisher.publish("task.stderr", text=reason)
+        return outcome, False
+
+    return replace(outcome, result_commit=commit), True
 
 
 def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:

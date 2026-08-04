@@ -1,4 +1,4 @@
-"""Remote-mode `grid task create|get` — hand the grid a coding task and read the result back.
+"""Remote-mode `grid task create|get|follow|fetch` — hand the grid a coding task, read it back.
 
 A task (ADR 0032) is work that outlives the request that created it: the client posts a prompt, a
 provider claims it and runs an agent against it, and the client comes back later for the result.
@@ -32,6 +32,12 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_FILES = 200
 
+# The states in which a task has stopped and its branch is final. LOCKSTEP with grid-src's
+# `tasks.TERMINAL_STATES`, and this half is deliberately CONSERVATIVE: a state this build has never
+# heard of is treated as not-yet-finished, so a newer relay's extra state refuses a fetch rather
+# than handing back the input files as though they were the result.
+_TERMINAL_STATES = frozenset({"completed", "failed", "timed_out"})
+
 
 def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
     """(relay_base, access_token, label) for the selected grid. Clean SystemExit if signed-out."""
@@ -56,6 +62,8 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
         return _task_create(args)
     if args.subcommand == "follow":
         return _task_follow(args)
+    if args.subcommand == "fetch":
+        return _task_fetch(args)
     # argparse (required=True + choices) guarantees the rest is `get`; guard explicitly anyway, so
     # direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "get":
@@ -294,6 +302,78 @@ def _render(seq: int, event: dict, *, as_json: bool) -> None:
         # understand a shape this build has never seen.
         rest = {k: v for k, v in event.items() if k != "type"}
         print(f"[{seq}] {kind} {json.dumps(rest, sort_keys=True)}" if rest else f"[{seq}] {kind}")
+
+
+def _task_fetch(args: argparse.Namespace) -> int:
+    """Put a finished task's result on disk, over the relay's git front (ADR 0032 issue 05).
+
+    No SSH key is provisioned for anyone: the same grid token this CLI already holds authenticates
+    the fetch, handed to git through the environment so it never reaches argv and is never written
+    into the clone's `.git/config`. A result directory is a thing people zip up and pass around, and
+    a grid access token lives a year.
+    """
+    from remote import relay, task_repo
+
+    base, token, _label = _resolve(args)
+    task = relay.get_task(base, token, args.task_id)
+
+    state = task.get("state")
+    if state not in _TERMINAL_STATES:
+        # Refused rather than served: until the provider pushes, the branch still holds only the
+        # INPUT, so a fetch would hand back the uploaded files as though they were the result.
+        raise SystemExit(
+            f"Task {args.task_id} is {state or 'unknown'}, so it has no result yet. "
+            f"Watch it with `grid task follow {args.task_id}`.")
+    commit, branch, project_id = (
+        task.get("result_commit"), task.get("branch"), task.get("project_id"))
+    if not (commit and branch and project_id):
+        raise SystemExit(
+            f"Task {args.task_id} finished as {state} but recorded no result to fetch. "
+            f"`grid task get {args.task_id}` shows what it did report.")
+
+    dest = Path(args.into) if getattr(args, "into", None) else Path(args.task_id)
+    if dest.exists() and not dest.is_dir():
+        raise SystemExit(f"Cannot fetch into {dest}: it exists and is not a directory.")
+    if dest.is_dir() and any(dest.iterdir()):
+        # A directory of somebody's own work is not a place to check a branch out into: `git
+        # checkout -- .` overwrites a file of the same name without complaining. Only a directory
+        # THIS command created is safe, and only for the project it was created for — updating one
+        # in place is how a project's successive tasks are followed.
+        #
+        # The presence of `.git` is NOT that proof, and using it as such was a real defect: the
+        # user's own repository has one too, so `--into ~/my-project` (or running the command inside
+        # it) sailed past the guard and destroyed uncommitted work.
+        held = task_repo.fetched_project(dest)
+        if held is None:
+            raise SystemExit(
+                f"Cannot fetch into {dest}: it already has files in it and was not created by "
+                f"`grid task fetch`. Pass --into with a new directory.")
+        if held != project_id:
+            raise SystemExit(
+                f"Cannot fetch into {dest}: it holds project {held}, and task {args.task_id} "
+                f"belongs to project {project_id}. Pass --into with a different directory.")
+    dest.mkdir(parents=True, exist_ok=True)
+
+    try:
+        task_repo.checkout_result(
+            dest, url=relay.git_remote_url(base, project_id), token=token,
+            branch=branch, commit=commit, project_id=project_id)
+    except Exception as exc:
+        raise SystemExit(f"Could not fetch task {args.task_id}: {exc}")
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {"task_id": args.task_id, "state": state, "result_commit": commit,
+             "branch": branch, "path": str(dest)}, indent=2))
+        return 0
+
+    print(f"task {args.task_id} ({state}) at {commit}")
+    print(f"fetched into {dest}")
+    # Named so the user can see WHAT arrived rather than being told that something did — on a
+    # `failed` task especially, the file list is the point of fetching at all.
+    for path in sorted(p for p in dest.rglob("*") if p.is_file() and ".git" not in p.parts):
+        print(f"  {path.relative_to(dest)}")
+    return 0
 
 
 def _task_get(args: argparse.Namespace) -> int:

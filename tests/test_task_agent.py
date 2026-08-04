@@ -1047,26 +1047,28 @@ def _git(cwd, *args, check=True):
              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"})
 
 
-def _bundle_for(tmp_path, branch, files):
-    """Build a real bundle the way the relay does, and return `(bytes, commit)`.
+def _remote_for(tmp_path, branch, files, name="origin.git"):
+    """A real bare repo standing in for the relay's, and the branch tip. `(GitRemote, commit)`.
 
-    A real one rather than a fixture blob: the provider's whole job here is to hand this to git, so
-    a stand-in that git would reject proves nothing about the path under test.
+    A local path is a perfectly good git "URL", so the whole fetch/reset/clean/commit/push path runs
+    against real git with no HTTP server in the way. What HTTP adds — the credential — is proved
+    separately by looking at the child's environment, which is where it has to be either way.
     """
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    _git(origin, "init", "-q", "-b", "main", ".")
+    from remote.task_repo import GitRemote
+
+    seed = tmp_path / f"seed-{name}"
+    seed.mkdir()
+    _git(seed, "init", "-q", "-b", "main", ".")
     for path, content in files.items():
-        target = origin / path
+        target = seed / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-    _git(origin, "add", "-A")
-    _git(origin, "commit", "-q", "-m", "input")
-    _git(origin, "branch", "-f", branch)
-    commit = _git(origin, "rev-parse", branch).stdout.strip()
-    _git(origin, "bundle", "create", "--quiet", str(tmp_path / "in.bundle"),
-         f"refs/heads/{branch}")
-    return (tmp_path / "in.bundle").read_bytes(), commit
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "input")
+    _git(seed, "branch", "-f", branch)
+    bare = tmp_path / name
+    _git(tmp_path, "clone", "--bare", "-q", str(seed), str(bare))
+    return GitRemote(url=str(bare), token="tok"), _git(bare, "rev-parse", branch).stdout.strip()
 
 
 def test_the_agent_reads_the_exact_file_the_client_uploaded(agent, tmp_path, monkeypatch):
@@ -1078,11 +1080,11 @@ def test_the_agent_reads_the_exact_file_the_client_uploaded(agent, tmp_path, mon
     """
     from remote import tasks
 
-    bundle, commit = _bundle_for(tmp_path, "task/T1", {"src/a.txt": "ZEBRA-4417\n"})
+    remote, commit = _remote_for(tmp_path, "task/T1", {"src/a.txt": "ZEBRA-4417\n"})
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"%s\"}\\n' \"$(cat src/a.txt)\"\n")
 
     outcome = tasks.run_task(
-        _job(input_commit=commit, branch="task/T1"), fetch_input=lambda: bundle)
+        _job(input_commit=commit, branch="task/T1"), remote=remote)
 
     assert outcome.state == "completed", outcome.error
     assert outcome.output == "ZEBRA-4417"
@@ -1104,11 +1106,11 @@ def test_a_previous_tasks_leftovers_are_gone_but_the_reserved_directory_survives
     (workspace / ".grid").mkdir()
     (workspace / ".grid" / "transcript.jsonl").write_text("the project's conversation\n")
 
-    bundle, commit = _bundle_for(tmp_path, "task/T1", {"fresh.txt": "new\n"})
+    remote, commit = _remote_for(tmp_path, "task/T1", {"fresh.txt": "new\n"})
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
 
     outcome = tasks.run_task(
-        _job(input_commit=commit, branch="task/T1"), fetch_input=lambda: bundle)
+        _job(input_commit=commit, branch="task/T1"), remote=remote)
 
     assert outcome.state == "completed", outcome.error
     assert not (workspace / "stale.txt").exists(), "a previous task's file survived the reset"
@@ -1121,10 +1123,10 @@ def test_the_workspace_is_left_on_the_task_branch_for_the_push(agent, tmp_path):
     a detached checkout commits to nothing and the push has no ref to name."""
     from remote import task_agent, tasks
 
-    bundle, commit = _bundle_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
 
-    tasks.run_task(_job(input_commit=commit, branch="task/T1"), fetch_input=lambda: bundle)
+    tasks.run_task(_job(input_commit=commit, branch="task/T1"), remote=remote)
 
     workspace = task_agent.workspace_for("proj-1")
     assert _git(workspace, "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/task/T1"
@@ -1143,9 +1145,10 @@ def test_input_that_cannot_be_checked_out_fails_the_task_without_spawning_the_ag
     import os
     os.environ["GRID_TEST_RAN"] = str(ran)
     try:
+        from remote.task_repo import GitRemote
         outcome = tasks.run_task(
             _job(input_commit="0" * 40, branch="task/T1"),
-            fetch_input=lambda: b"this is not a git bundle")
+            remote=GitRemote(url=str(tmp_path / "nothing-here.git"), token="tok"))
     finally:
         os.environ.pop("GRID_TEST_RAN", None)
 
@@ -1165,62 +1168,67 @@ def test_a_relay_with_no_git_plane_runs_the_task_as_before(agent, tmp_path):
 
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
 
-    outcome = tasks.run_task(_job(), fetch_input=lambda: pytest.fail("nothing to fetch"))
+    outcome = tasks.run_task(_job(), remote=None)
 
     assert outcome.state == "completed", outcome.error
 
 
-def test_the_input_download_is_bounded_so_a_huge_bundle_cannot_exhaust_the_provider(monkeypatch):
-    """The relay is authenticated, not infinitely trusted, and this response is read into memory.
+def test_a_network_git_call_is_bounded_in_time_not_left_to_the_tasks_whole_deadline(
+        tmp_path, monkeypatch):
+    """What replaced the bundle's byte cap, and why it is a CLOCK now rather than a size.
 
-    A provider serves inference while a task runs (issue 03's last acceptance criterion), so an
-    unbounded read here would take the engine down with it — a task fault must never cost inference.
+    The provider used to read the whole input into memory, so it needed a byte ceiling of its own.
+    git streams to disk instead, so the exposure changed shape: the size is bounded at the relay
+    (`task_git_max_bytes`, where the body is actually buffered), and what the provider still owes
+    itself is a bound on TIME — a stalled relay must fail the fetch rather than silently consume the
+    task's entire deadline before the agent has started.
+
+    The local ceiling must stay separate and smaller: reusing it for the network would turn an
+    ordinary slow push into a lost result.
     """
-    import httpx
+    from remote import task_repo
 
-    from remote import relay
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seen = _spy_on_git(monkeypatch)
 
-    oversize = b"x" * (relay.MAX_INPUT_BUNDLE_BYTES + 1)
+    task_repo.materialize(workspace, url=remote.url, token=remote.token,
+                          branch="task/T1", input_commit=commit)
 
-    def handler(request):
-        return httpx.Response(200, content=oversize)
-
-    monkeypatch.setattr(
-        relay, "_client",
-        lambda url, token, *, timeout: httpx.Client(
-            transport=httpx.MockTransport(handler), base_url="http://relay"))
-
-    with pytest.raises(relay.RelayError) as caught:
-        relay.fetch_task_input("http://relay", "tok", "T1")
-
-    assert str(relay.MAX_INPUT_BUNDLE_BYTES) in str(caught.value)
+    # `-C <workspace>` always immediately precedes the subcommand.
+    by_subcommand = {argv[argv.index(str(workspace)) + 1]: kw.get("timeout")
+                     for argv, kw in seen}
+    assert by_subcommand["fetch"] == task_repo._GIT_NETWORK_TIMEOUT_SECONDS
+    assert by_subcommand["reset"] == task_repo._GIT_TIMEOUT_SECONDS
+    assert task_repo._GIT_NETWORK_TIMEOUT_SECONDS > task_repo._GIT_TIMEOUT_SECONDS
 
 
-def test_a_task_is_run_with_a_fetcher_bound_to_its_own_id(monkeypatch):
-    """The loop must hand `run_task` a fetcher for THIS task.
+def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
+    """The loop must hand `run_task` the remote for THIS task's project.
 
-    Passing the wrong id would check out another task's input — which the relay's lease fence turns
-    into a 403 rather than a leak, but the task then fails for a reason no operator could read.
+    The wrong project id would fetch someone else's repository — which the relay's fence turns into
+    a 404 rather than a leak, but the task then fails for a reason no operator could read. The token
+    has to be the live one too: `state.token()` at call time, not a value captured at start-up.
     """
-    from remote import relay, tasks
+    from remote import tasks
 
-    asked = []
-    monkeypatch.setattr(relay, "fetch_task_input",
-                        lambda url, token, task_id: asked.append(task_id) or b"BUNDLE")
     captured = {}
 
-    def fake_run(job, publish=None, on_spawn=None, fetch_input=None):
-        captured["bundle"] = fetch_input()
+    def fake_run(job, publish=None, on_spawn=None, remote=None):
+        captured["remote"] = remote
         return tasks.TaskOutcome("completed", "ok", None)
 
     monkeypatch.setattr(tasks, "run_task", fake_run)
+    monkeypatch.setattr(tasks, "_push_result", lambda _j, outcome, _r, _p: (outcome, True))
     monkeypatch.setattr(tasks, "report_once", lambda *a, **k: None)
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
 
-    tasks._run_and_report(_FakeState(), {"task_id": "T-42", "prompt": "p", "project_id": "proj-1"})
+    tasks._run_and_report(_FakeState(), {"task_id": "T-42", "prompt": "p",
+                                         "project_id": "proj-1", "input_commit": "c" * 40})
 
-    assert asked == ["T-42"]
-    assert captured["bundle"] == b"BUNDLE"
+    assert captured["remote"].url == "http://relay/relay/v1/git/proj-1"
+    assert captured["remote"].token == "tok"
 
 
 class _NullPublisher:
@@ -1260,7 +1268,8 @@ def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(mon
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
     monkeypatch.setattr(
         tasks, "report_once",
-        lambda _s, _t, *, state, output, error, session_id=None: reported.update(error=error))
+        lambda _s, _t, *, state, output, error, session_id=None, result_commit=None:
+        reported.update(error=error))
 
     tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1"})
 
@@ -1274,11 +1283,11 @@ def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(mon
 
 
 def test_a_task_that_needs_input_with_no_way_to_fetch_it_fails_rather_than_running_empty(agent):
-    """`input_commit` present but no fetcher wired is a CALLER bug, and it must not look like the
+    """`input_commit` present but no git remote wired is a CALLER bug, and it must not look like the
     old-relay degrade.
 
     That degrade is correctly gated on `input_commit` being ABSENT. If a truthy commit met a missing
-    fetcher, the old code skipped the checkout silently and spawned the agent against whatever was
+    remote, the old code skipped the checkout silently and spawned the agent against whatever was
     already in the per-project workspace — stale from a prior task, or empty. Issues 05 and 07 both
     assemble job dicts for this path, so the guard belongs in the function rather than in the
     convention that today's only caller happens to follow.
@@ -1287,7 +1296,410 @@ def test_a_task_that_needs_input_with_no_way_to_fetch_it_fails_rather_than_runni
 
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
 
-    outcome = tasks.run_task(_job(input_commit="abc123", branch="task/T1"), fetch_input=None)
+    outcome = tasks.run_task(_job(input_commit="abc123", branch="task/T1"), remote=None)
 
     assert outcome.state == "failed"
     assert "input" in (outcome.error or "").lower()
+
+
+# --- issue 05: the result comes back over git-over-HTTP ------------------------------------------
+
+def _spy_on_git(monkeypatch):
+    """Capture every git child's argv and call kwargs, while still really running it."""
+    from remote import task_repo
+
+    seen = []
+    real = task_repo.subprocess.run
+
+    def spy(argv, **kwargs):
+        seen.append((list(argv), dict(kwargs)))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(task_repo.subprocess, "run", spy)
+    return seen
+
+
+def _envs(seen):
+    return [dict(kw.get("env") or {}) for _argv, kw in seen]
+
+
+def test_the_grid_token_reaches_git_through_the_environment_not_the_command_line(
+        tmp_path, monkeypatch):
+    """Argv is world-readable on Linux (`/proc/<pid>/cmdline`); the environment is not
+    (`/proc/<pid>/environ` is 0600). A grid access token lives a year, so a provider serving
+    inference beside a task would otherwise leak it to every local `ps`.
+
+    Asserted BOTH ways round on purpose: that the token is in the environment, and that it is in no
+    argv. Checking only the first would pass just as happily with the token in both places.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seen = _spy_on_git(monkeypatch)
+
+    task_repo.materialize(workspace, url=remote.url, token="SEKRIT",
+                          branch="task/T1", input_commit=commit)
+
+    assert (workspace / "a.txt").read_text() == "x\n"
+    assert seen, "no git child ran at all"
+    assert not any("SEKRIT" in part for argv, _kw in seen for part in argv)
+    # The KEY as well as the value. Asserting only the value passes just as happily when the token
+    # is bound to a setting git ignores — a mutant that renamed this to `http.unusedHeader` survived
+    # the first version of this test, and every request would have gone out unauthenticated.
+    assert any(env.get("GIT_CONFIG_KEY_0") == "http.extraHeader"
+               and env.get("GIT_CONFIG_VALUE_0") == "Authorization: Bearer SEKRIT"
+               for env in _envs(seen))
+
+
+def test_the_credential_is_not_replayed_to_a_redirect_target(tmp_path, monkeypatch):
+    """`http.extraHeader` is sent to whatever host git ends up talking to. A relay that answered a
+    redirect — or a proxy that inserted one — would otherwise hand the grid token to a third party,
+    so redirects are refused rather than followed."""
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seen = _spy_on_git(monkeypatch)
+
+    task_repo.materialize(workspace, url=remote.url, token="SEKRIT",
+                          branch="task/T1", input_commit=commit)
+
+    settings = {env.get(f"GIT_CONFIG_KEY_{n}"): env.get(f"GIT_CONFIG_VALUE_{n}")
+                for env in _envs(seen) for n in range(int(env.get("GIT_CONFIG_COUNT") or 0))}
+    assert settings.get("http.followRedirects") == "false"
+
+
+def _relay_git_url(monkeypatch, url):
+    """Point the loop's remote-URL builder at a local bare repo, so the real commit/push path runs."""
+    from remote import relay
+    monkeypatch.setattr(relay, "git_remote_url", lambda _signaling, _project_id: url)
+
+
+class _RecordingPublisher:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, kind, **fields):
+        self.published.append((kind, fields))
+
+    def close(self):
+        pass
+
+
+def _job_with_input(commit, branch="task/T1"):
+    return {"task_id": "T1", "prompt": "p", "project_id": "proj-1",
+            "branch": branch, "input_commit": commit}
+
+
+def test_the_agents_work_is_pushed_and_the_reserved_directory_is_not(
+        agent, tmp_path, monkeypatch):
+    """The issue's demo from the provider's end: the agent writes a file, and that file is in the
+    commit the relay is told about.
+
+    `.grid/` staying OUT is the other half, and it is not tidiness. It is where issue 06's symlinked
+    transcript lives — the provider's own state, holding the conversation the agent had — and
+    committing it would push the provider's internals into the requesting user's repository, once
+    per task, permanently.
+    """
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("mkdir -p .grid\n"
+          "echo transcript > .grid/session.jsonl\n"
+          "echo fixed > fix.py\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "completed"
+    pushed = reported["result_commit"]
+    assert pushed and pushed != commit, "nothing new was pushed"
+    listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
+    assert "fix.py" in listing
+    assert not [path for path in listing if path.startswith(".grid")], listing
+
+
+def test_a_failed_task_still_commits_and_pushes_its_branch(agent, tmp_path, monkeypatch):
+    """ADR 0032 D-e: a failed attempt still commits and still pushes, so the user can see what the
+    agent did before it broke and cherry-pick what was right. Only `main` is withheld, and that is
+    the relay's decision, not this one."""
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("echo half-done > progress.txt\n"
+          "printf '{\"type\":\"result\",\"is_error\":true,\"subtype\":\"error_max_turns\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "failed"
+    pushed = reported["result_commit"]
+    assert pushed and pushed != commit
+    assert "progress.txt" in _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout
+
+
+def test_an_agent_that_changed_nothing_still_produces_a_result_commit(
+        agent, tmp_path, monkeypatch):
+    """One code path, not two. An agent that changed nothing is an ordinary outcome, and an empty
+    commit says so truthfully — while branching on `status --porcelain` would leave `result_commit`
+    meaning "what the agent produced" sometimes and "the input" other times."""
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"nothing to do\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "completed"
+    assert reported["result_commit"] not in (None, "", commit)
+    assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() \
+        == reported["result_commit"]
+
+
+def test_a_push_that_fails_reports_no_terminal_state_at_all(agent, tmp_path, monkeypatch):
+    """THE criterion: a failed push leaves the task in a state issue 07 can RETRY, not one that
+    looks complete.
+
+    Reporting `failed` would be terminal, and terminal is exactly what nothing retries — the result
+    would be lost with a tidy-looking record saying so. Staying silent lets the lease lapse, which
+    is the one path that can still produce what the user asked for.
+
+    Both halves are asserted, because either alone passes for the wrong reason: that NOTHING was
+    reported, and that the reason still reached the user's event log. A silent abandon would satisfy
+    the first and be exactly the failure this test exists to prevent.
+    """
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("echo fixed > fix.py\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    def refuse(*_a, **_k):
+        raise task_repo.PushError("could not push task/T1: the relay refused")
+
+    monkeypatch.setattr(task_repo, "commit_and_push", refuse)
+    reports = []
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: reports.append(k))
+    publisher = _RecordingPublisher()
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: publisher)
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reports == [], "a terminal state was reported for a result that is not in the repository"
+    assert any(kind == "task.stderr" and "the relay refused" in fields.get("text", "")
+               for kind, fields in publisher.published), publisher.published
+
+
+def test_a_task_with_no_git_plane_reports_normally_and_pushes_nothing(agent, monkeypatch):
+    """Old-relay degrade, on the push side. A claim with no `input_commit` has no branch to push,
+    so the loop must report exactly as it did before the git plane existed — degrading to the
+    PREVIOUS behaviour, never to a new failure."""
+    from remote import tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1"})
+
+    assert reported["state"] == "completed"
+    assert reported["result_commit"] is None
+
+
+# --- issue 05: `grid task fetch` ------------------------------------------------------------------
+
+def test_the_client_fetches_exactly_what_the_agent_produced(tmp_path, monkeypatch, capsys):
+    """The issue's closing criterion, from the client's end: the file the agent wrote, byte for byte.
+
+    Driven through `checkout_result` against a real repository rather than through mocks — what is
+    being claimed is that git puts the right bytes on disk, and a mock cannot be wrong about that.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"fix.py": "print(1)\n", "notes.md": "why\n"})
+    dest = tmp_path / "result"
+    dest.mkdir()
+
+    task_repo.checkout_result(dest, url=remote.url, token="tok",
+                              branch="task/T1", commit=commit)
+
+    assert (dest / "fix.py").read_text() == "print(1)\n"
+    assert (dest / "notes.md").read_text() == "why\n"
+
+
+def test_fetching_never_destroys_work_already_in_the_destination(tmp_path):
+    """`checkout_result` is deliberately NOT `materialize`. The provider's workspace is the
+    provider's, so resetting it hard is right; a directory a user named is theirs, and a fetch that
+    silently deleted their unrelated file would be unforgivable."""
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"fix.py": "print(1)\n"})
+    dest = tmp_path / "result"
+    dest.mkdir()
+    (dest / "my-notes.txt").write_text("mine\n")
+
+    task_repo.checkout_result(dest, url=remote.url, token="tok",
+                              branch="task/T1", commit=commit)
+
+    assert (dest / "my-notes.txt").read_text() == "mine\n"
+    assert (dest / "fix.py").read_text() == "print(1)\n"
+
+
+def test_the_clients_token_is_never_written_into_the_clones_config(tmp_path, monkeypatch):
+    """A grid access token lives a year, and a result directory is a thing users hand around, zip
+    up and commit. Persisting the credential into `.git/config` would turn every fetched result
+    into a copy of it, so the token is supplied per invocation and left nowhere."""
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"fix.py": "print(1)\n"})
+    dest = tmp_path / "result"
+    dest.mkdir()
+
+    task_repo.checkout_result(dest, url=remote.url, token="SEKRIT",
+                              branch="task/T1", commit=commit)
+
+    on_disk = "\n".join(
+        path.read_text(errors="replace")
+        for path in (dest / ".git").rglob("*") if path.is_file())
+    assert "SEKRIT" not in on_disk
+
+
+def test_a_refused_push_raises_push_error_and_not_checkout_error(tmp_path):
+    """The two exceptions mean opposite things to a caller, so the constructor must not leak the
+    wrong one: a `CheckoutError` says "fail the task", a `PushError` says "report nothing and let
+    the lease lapse". `commit_and_push` runs `_run`, which raises `CheckoutError` for every git
+    failure it sees — so without the translation the push path would inherit the checkout path's
+    meaning, and a lost result would be recorded as a finished, failed task nothing ever retries.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task_repo.materialize(workspace, url=remote.url, token="tok",
+                          branch="task/T1", input_commit=commit)
+    (workspace / "fix.py").write_text("print(1)\n")
+
+    with pytest.raises(task_repo.PushError) as caught:
+        task_repo.commit_and_push(
+            workspace, url=str(tmp_path / "no-such-repo.git"), token="tok",
+            branch="task/T1", message="task T1 (completed)")
+
+    assert not isinstance(caught.value, task_repo.CheckoutError)
+    # Still carries git's own words, which are the only thing that says WHY.
+    assert "task/T1" in str(caught.value)
+
+
+def test_a_push_that_is_refused_leaves_the_result_committed_locally(tmp_path):
+    """The commit happens before the push, so a failed push does not also lose the work.
+
+    That matters for the retry path: the same provider reclaiming the task, or an operator looking
+    at the workspace, still finds what the agent produced rather than an uncommitted tree that the
+    next attempt's `reset --hard` would erase.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task_repo.materialize(workspace, url=remote.url, token="tok",
+                          branch="task/T1", input_commit=commit)
+    (workspace / "fix.py").write_text("print(1)\n")
+
+    with pytest.raises(task_repo.PushError):
+        task_repo.commit_and_push(workspace, url=str(tmp_path / "gone.git"), token="tok",
+                                  branch="task/T1", message="task T1 (completed)")
+
+    assert _git(workspace, "rev-parse", "HEAD").stdout.strip() != commit
+    assert "fix.py" in _git(workspace, "show", "--name-only", "--format=", "HEAD").stdout
+
+
+def test_a_workspace_that_could_not_be_prepared_pushes_nothing(agent, tmp_path, monkeypatch):
+    """A `materialize` that fails PART WAY must not publish a result, and "is the workspace a git
+    repo" cannot tell that apart from success.
+
+    `_ensure_repo` is the first thing `materialize` does, and the workspace persists per project —
+    so after any task has ever run, `.git` is there for good. Here the fetch and `symbolic-ref`
+    succeed (leaving HEAD legitimately on the task branch) and `clean` fails, exactly as it would
+    with an un-removable leftover from a previous attempt. Without a check on the SPAWN, the commit
+    and push then succeed and the relay is handed a `result_commit` full of another task's files,
+    attributed to an agent that never started — the confidently-wrong answer from the other end.
+    """
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    real_run = task_repo._run
+
+    def fail_on_clean(workspace, *args, **kwargs):
+        if args and args[0] == "clean":
+            raise task_repo.CheckoutError("git clean failed (1): Permission denied")
+        return real_run(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(task_repo, "_run", fail_on_clean)
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "failed"
+    assert reported["result_commit"] is None, "a result was published for an agent that never ran"
+    assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == commit
+
+
+def test_a_push_failure_is_reported_locally_even_when_the_event_channel_is_dead(
+        agent, tmp_path, monkeypatch, capsys):
+    """The push most often fails BECAUSE the lease was lost — and the event channel is fenced on the
+    same lease, so it is silenced by the same cause.
+
+    `TaskEventPublisher` never raises (it buffers, and `flush` drops a refused batch with a generic
+    message), so a `try/except` around the publish could not cover this and the reason would exist
+    nowhere. It is written to stderr unconditionally instead, BEFORE the event is attempted.
+    """
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("echo fixed > fix.py\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    def refuse(*_a, **_k):
+        raise task_repo.PushError("could not push task/T1: the relay refused (403)")
+
+    monkeypatch.setattr(task_repo, "commit_and_push", refuse)
+    monkeypatch.setattr(tasks, "report_once",
+                        lambda *a, **k: pytest.fail("a terminal state was reported"))
+
+    class _DeadChannel:
+        """What the real publisher does once the relay has refused it: accepts and discards."""
+
+        def publish(self, *_a, **_k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _DeadChannel())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    err = capsys.readouterr().err
+    assert "the relay refused (403)" in err, err

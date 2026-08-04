@@ -881,6 +881,7 @@ guidance to switch.
 grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <name>] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
+grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
 ```
 
 **Remote-only.** Hand the grid a coding task and read the result back later. Unlike a chat request,
@@ -929,6 +930,40 @@ create one either.
 Limits, refused with the number stated rather than truncated: **200 files**, **5 MB per file**,
 **20 MB in total**.
 
+### Getting the result back
+
+`fetch` puts a finished task's files on disk: `grid task fetch <task-id>` lands them in `./<task-id>`,
+or wherever `--into` names. It needs `git` on the machine you run it from.
+
+The project is a git repository the relay serves over HTTP, and **your grid token is the whole
+credential** — no SSH key is provisioned for anyone, at either end. The token is handed to `git`
+through its environment, so it never appears in a process listing and is never written into the
+fetched clone's `.git/config`; a result directory is something you can hand around without handing
+over a year-long credential with it. If you'd rather drive git yourself, the remote is
+`<relay>/relay/v1/git/<project-id>` (`get --json` reports the `project_id`) with
+`http.extraHeader` carrying `Authorization: Bearer <your grid token>`.
+
+`fetch` refuses a task that has not finished: until the provider pushes, the branch still holds only
+the files you uploaded, and handing those back as "the result" would be a wrong answer delivered
+confidently. It also refuses `--into` a directory that already has files in it and was not made by
+`grid task fetch` for this same project, rather than checking out over your own work — the check is
+a marker the command writes itself, not the presence of a `.git`, because your own repositories have
+one of those too.
+
+**On success the project's `main` moves to the result; on failure it does not.** That is what makes
+`main` a known-good state and the base the project's next task is cut from. A failed attempt still
+commits and still pushes its own `task/<id>` branch, so you can fetch it, read what the agent did
+before it broke, and cherry-pick what was right — `get --json` reports the `result_commit` for both
+outcomes.
+
+**What a provider may see and write is decided by the lease, not by trust.** A provider running one
+of your tasks is shown that task's branch and the project's `main` — not the branches of your other
+tasks, including failed ones whose work never reached `main`. It may push only
+while it currently holds that task's lease, and only that task's own branch; the moment the lease
+ends, the relay refuses it — without the provider needing to be told it lost. You cannot push to a
+project while a task is active on it, and neither you nor a provider can move `main` by hand: only
+the relay advances it, and only for a task it saw succeed.
+
 A task's `state` is `queued` (waiting for a provider), `running` (claimed), or one of the terminal
 `completed` / `failed` / `timed_out`. `get` prints the result on success and the error on failure.
 
@@ -943,11 +978,25 @@ serves inference exactly as before, and the two loops are independent — neithe
 ### What a provider actually runs
 
 A claimed task first brings the project's workspace to the task's input commit: it fetches the task
-branch from the relay and resets the workspace to it exactly, so a previous task's leftovers can
-never be mistaken for this task's input. **`git` must be installed on the provider.** The one
-directory spared is `.grid/`, which is the provider's own state and is why nothing may be uploaded
-there. If the input cannot be checked out the task fails **without spawning the agent** — an agent
-run against input that never arrived produces a confidently wrong answer.
+branch from the relay over the same git-over-HTTP front the client uses, and resets the workspace to
+it exactly, so a previous task's leftovers can never be mistaken for this task's input. **`git` must
+be installed on the provider.** The one directory spared is `.grid/`, which is the provider's own
+state — it is why nothing may be uploaded there, and it is excluded from the result commit as well.
+If the input cannot be checked out the task fails **without spawning the agent** — an agent run
+against input that never arrived produces a confidently wrong answer.
+
+When the agent exits, the provider commits the workspace and pushes `task/<id>` — for a failed run
+as well as a successful one — and reports the commit it pushed. The relay checks that against the
+branch it actually holds, so a push that silently failed cannot be recorded as a finished task. If
+the push cannot be made at all, the provider deliberately reports **nothing**: a terminal state is
+one nothing retries, so the task is left `running` for its lease to lapse and another provider to
+pick it up, and the git error is published to the task's event stream instead. Until lease reclaim
+ships, such a task stays `running` until its deadline and holds its project's lock — `grid task get`
+shows it, and `grid task follow` shows the reason.
+
+One case worth knowing: if the agent clones another repository into the workspace, git records it as
+a submodule reference whose objects the relay does not have, and the push fails with git's own
+(fairly opaque) message. It routes to the retry path above rather than losing anything.
 
 Once the workspace is ready the task spawns **Claude Code** in print mode against it, and its
 `stream-json` output is republished as the task's events while it runs: `task.session` (the

@@ -22016,6 +22016,175 @@ def test_task_get_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
     assert "completed" in out and "say hello" in out
 
 
+def test_task_fetch_refuses_a_task_that_has_not_finished(monkeypatch, tmp_path, capsys):
+    """Until the provider pushes, the branch still holds only the INPUT. Serving that would hand
+    the user their own uploaded files back as though they were the agent's result — a wrong answer
+    delivered confidently, which is the failure ADR 0032 keeps closing."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "running", "branch": "task/T1", "project_id": "p1",
+        "result_commit": None}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1"])
+
+    assert "running" in str(caught.value)
+    assert "follow" in str(caught.value)
+
+
+def test_task_fetch_refuses_to_check_out_over_somebody_elses_directory(
+        monkeypatch, tmp_path, capsys):
+    """`--into` names a directory the USER chose, so a checkout that overwrote a same-named file
+    would be silent data loss. A directory a previous `grid task fetch` made is the one exception —
+    that is how a project's successive tasks are followed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    mine = tmp_path / "my-work"
+    mine.mkdir()
+    (mine / "notes.txt").write_text("mine")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(mine)])
+
+    # The exact refusal, not just "some refusal mentioning --into": the two guards here produce
+    # different messages that both name the flag, so a loose assertion passes whichever one fired.
+    assert "was not created by" in str(caught.value), str(caught.value)
+    assert (mine / "notes.txt").read_text() == "mine", "the user's own file was touched"
+
+
+def test_task_fetch_refuses_a_destination_that_is_the_users_own_git_repository(
+        monkeypatch, tmp_path):
+    """The dangerous case, and the one `.git`-exists could not see.
+
+    A user passing `--into ~/my-project` (or running the command inside one) hits a directory that
+    HAS a `.git` and is not ours. `checkout_result` would then `git checkout -- .` over it, which
+    overwrites a file of the same name without complaining — unlike `git checkout <branch>`, which
+    refuses. Nothing about the presence of `.git` distinguishes the user's repository from one this
+    command made, so a marker written by the fetch itself is what the guard reads.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    mine = tmp_path / "my-real-project"
+    (mine / ".git").mkdir(parents=True)
+    (mine / "fix.py").write_text("the user's own uncommitted work\n")
+
+    from remote import task_repo
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda *a, **k: pytest.fail("checked out over the user's own repository"))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(mine)])
+
+    assert "was not created by" in str(caught.value), str(caught.value)
+    assert (mine / "fix.py").read_text() == "the user's own uncommitted work\n"
+
+
+def test_task_fetch_updates_a_directory_it_made_before_for_the_same_project(
+        monkeypatch, tmp_path):
+    """The flip side, and the reason the guard is a marker rather than a blanket refusal: following
+    a project's successive tasks means fetching into the same directory again."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    ours = tmp_path / "result"
+    (ours / ".git").mkdir(parents=True)
+    (ours / ".git" / "grid-task-fetch").write_text("p1\n")
+    (ours / "from-task-1.py").write_text("earlier\n")
+    asked = {}
+
+    from remote import task_repo
+
+    monkeypatch.setattr(task_repo, "checkout_result", lambda dest, **kw: asked.update(kw))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T2", "state": "completed", "branch": "task/T2", "project_id": "p1",
+        "result_commit": "d" * 40}))
+
+    assert cli.main(["task", "fetch", "T2", "--into", str(ours)]) == 0
+    assert asked["commit"] == "d" * 40
+
+
+def test_task_fetch_refuses_a_directory_holding_a_different_project(monkeypatch, tmp_path):
+    """Two projects' results in one directory would interleave two unrelated histories, and the
+    second checkout would overwrite the first project's files by name."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    other = tmp_path / "result"
+    (other / ".git").mkdir(parents=True)
+    (other / ".git" / "grid-task-fetch").write_text("some-other-project\n")
+    (other / "kept.py").write_text("from the other project\n")
+
+    from remote import task_repo
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda *a, **k: pytest.fail("checked out one project's result over another's"))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(other)])
+
+    assert "some-other-project" in str(caught.value), str(caught.value)
+
+
+def test_task_fetch_defaults_the_destination_to_the_task_id(monkeypatch, tmp_path):
+    """So `grid task fetch <id>` on its own can never land in a directory holding other work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    asked = {}
+
+    from remote import task_repo
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda dest, **kw: asked.update(dest=str(dest), **kw))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["task", "fetch", "T1"])
+
+    assert rc == 0
+    # Resolved rather than compared as a string: the default is deliberately RELATIVE, because
+    # `fetched into T1` is what a user can act on and an absolute temp path is not.
+    from pathlib import Path
+
+    assert Path(asked["dest"]).resolve() == (tmp_path / "T1").resolve()
+    assert asked["branch"] == "task/T1"
+    assert asked["commit"] == "c" * 40
+    # The relay's git front, built from the SAME base the API calls use.
+    assert asked["url"].endswith("/relay/v1/git/p1")
+    assert asked["token"] == "AT"
+
+
+def test_task_fetch_reports_a_finished_task_that_recorded_no_result(monkeypatch, tmp_path):
+    """Terminal but with nothing pushed is a real state — an attempt that died before it could
+    commit. Saying so beats an obscure git error about a commit that does not exist."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": None}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1"])
+
+    assert "no result to fetch" in str(caught.value)
+
+
 def test_task_get_json_echoes_the_relay_reply(monkeypatch, tmp_path, capsys):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -22619,7 +22788,7 @@ def test_task_loop_claims_runs_and_reports(monkeypatch):
     # The session id rides the terminal report, which is the only durable record of it: the relay
     # stores it on the task so the project's NEXT task can `--resume` the conversation (issue 06).
     assert reported == [("T1", {"state": "completed", "output": "say hello\n", "error": None,
-                                "session_id": "sess-1"})]
+                                "session_id": "sess-1", "result_commit": None})]
 
 
 def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
@@ -22796,8 +22965,11 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
 
     tasks.task_loop(state)
 
+    # `result_commit` is None because this job named no `input_commit`: there is no branch to push,
+    # so the relay reads nothing and the column is left as it is (the old-relay degrade).
     assert reported == [
-        {"state": "failed", "output": None, "error": "exit 127", "session_id": None}]
+        {"state": "failed", "output": None, "error": "exit 127", "session_id": None,
+         "result_commit": None}]
 
 
 def test_task_loop_survives_a_failure_to_report(monkeypatch):
@@ -22851,7 +23023,8 @@ def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypat
 
     assert len(attempts) == 3
     assert attempts[-1] == {
-        "state": "completed", "output": "done", "error": None, "session_id": None}
+        "state": "completed", "output": "done", "error": None, "session_id": None,
+        "result_commit": None}
     assert "stuck" not in capsys.readouterr().err     # it landed; nothing was stranded
 
 

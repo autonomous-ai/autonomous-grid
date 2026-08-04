@@ -52,14 +52,6 @@ _TASK_EVENT_TIMEOUT = 15.0
 # whole point — a task legitimately says nothing for minutes while a build runs, and silence is not
 # evidence of death (ADR 0032 D-c). Connect stays bounded so an unreachable relay still fails fast.
 _TASK_FOLLOW_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=5.0)
-# Downloading the task's input. Longer than a result POST because the body is the whole repository
-# rather than a status, and short enough that a stalled relay fails the attempt instead of eating
-# the task's deadline before the agent has started.
-_TASK_INPUT_TIMEOUT = 120.0
-# Ceiling on the input bundle this provider will hold in memory. LOCKSTEP-ish with the relay's own
-# `task_repo.MAX_BUNDLE_BYTES` — matched deliberately, but this side is the one that must hold: a
-# provider protects itself rather than trusting the far end to have been configured the same way.
-MAX_INPUT_BUNDLE_BYTES = 64 * 1024 * 1024
 
 # Bring-up's own register deadline, stated phase by phase (ADR 0022). The read phase is the one that
 # matters and the one a bare float never names: a relay that ACCEPTS the connection and then never
@@ -330,6 +322,7 @@ def report_task_result(
     output: str | None,
     error: str | None,
     session_id: str | None = None,
+    result_commit: str | None = None,
 ) -> None:
     """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
 
@@ -341,10 +334,17 @@ def report_task_result(
     task so the project's next task can ``--resume`` it (issue 06). Sent only when there is one, so
     a report from a run that never reached the agent cannot blank a session id the relay already
     holds — nothing else on this wire distinguishes "no session" from "do not change it".
+
+    ``result_commit`` is where the pushed task branch ended up. The relay checks it against the
+    branch it actually holds and refuses the report (409) if they disagree, which is what stops a
+    push that silently failed from being recorded as a finished task. Omitted, like ``session_id``,
+    when there is none — a run that never got as far as pushing lets the relay read the tip itself.
     """
     body: dict[str, Any] = {"state": state, "output": output, "error": error}
     if session_id:
         body["session_id"] = session_id
+    if result_commit:
+        body["result_commit"] = result_commit
     try:
         with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
             resp = client.post(
@@ -357,45 +357,18 @@ def report_task_result(
     _guard(resp, "report_task_result")
 
 
-def fetch_task_input(
-    signaling_url: str,
-    access_token: str,
-    task_id: str,
-) -> bytes:
-    """Download a task's input as a git bundle (``GET /relay/v1/tasks/{id}/input``).
+def git_remote_url(signaling_url: str, project_id: str) -> str:
+    """The project's repository on the relay's smart-HTTP front (ADR 0032 issue 05).
 
-    Lease-fenced server-side exactly like ``/result`` and ``/events``: a provider that no longer
-    holds the lease is refused, because a task's input is the requesting user's private source
-    (ADR 0032 D-c).
+    The single construction point for this URL, and LOCKSTEP with grid-src's route literal
+    (`task_git.py`, `/relay/v1/git/{project_id}`). git appends `/info/refs`, `/git-upload-pack` and
+    `/git-receive-pack` to it itself, so only the base is spelled here.
 
-    Read in bounded chunks rather than with ``resp.content``. The relay is authenticated but that is
-    not a licence to stream an unbounded body into this process's memory — a provider serves
-    inference while a task runs, so an OOM here would take the engine down with the task.
+    Named a PROJECT rather than a task: the repository outlives every task in it, and one clone
+    serves a project's whole sequence of tasks.
     """
-    try:
-        with _client(signaling_url, access_token, timeout=_TASK_INPUT_TIMEOUT) as client:
-            with client.stream(
-                "GET",
-                # The id came off the wire and is being interpolated into a path.
-                f"/relay/v1/tasks/{quote(task_id, safe='')}/input",
-            ) as resp:
-                if resp.status_code >= 400:
-                    resp.read()  # a streamed response has no `.text` until it is drained
-                    _guard(resp, "fetch_task_input")
-                chunks: list[bytes] = []
-                size = 0
-                for chunk in resp.iter_bytes():
-                    size += len(chunk)
-                    if size > MAX_INPUT_BUNDLE_BYTES:
-                        # Raised mid-stream, so the oversized body is abandoned rather than
-                        # finished and then measured — measuring afterwards has already paid the
-                        # cost the limit exists to avoid.
-                        raise RelayError(
-                            f"the task's input exceeds the {MAX_INPUT_BUNDLE_BYTES}-byte limit")
-                    chunks.append(chunk)
-                return b"".join(chunks)
-    except httpx.HTTPError as exc:
-        raise RelayError(f"fetch_task_input transport error: {exc}") from None
+    # The id came off the wire and is being interpolated into a URL.
+    return f"{signaling_url.rstrip('/')}/relay/v1/git/{quote(project_id, safe='')}"
 
 
 def publish_task_events(
