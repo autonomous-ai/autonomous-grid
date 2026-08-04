@@ -878,7 +878,7 @@ guidance to switch.
 ## Task
 
 ```
-grid task create --prompt <text> [--project <name>] [--grid <grid>] [--json]
+grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <name>] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
 ```
@@ -906,6 +906,29 @@ a time** — creating a second one while the first is still `preparing`, `queued
 refused, so a project's tasks are strictly sequential and each starts from the last one's result.
 Use different `--project` names to run tasks in parallel.
 
+### Sending files with a task
+
+`--file` uploads a file with the task; repeat it for more. `--file ./bug.py` lands as `bug.py`;
+`--file ./local/conf.toml:config/conf.toml` places it at a path you choose.
+
+The files travel in the **same request** as the prompt, and that ordering is the guarantee, not a
+convenience: each project is a git repository the relay owns, and creating a task cuts `task/<id>`
+from the project's `main`, commits the input, and only *then* makes the task claimable. "The task
+exists" and "its input is in git" are one event, so a provider can never claim a task and check out
+before the files arrive — which would run the agent against missing input with nothing to say why
+the answer is wrong. `get --json` reports the `input_commit` the files landed on.
+
+**Filenames are validated at the relay and never repaired.** A path that is absolute, contains
+`..`, or names anything inside `.git/` or `.grid/` is refused and *nothing* is committed — a file
+under `.git/hooks/` would execute on the provider the moment it checked the branch out. The check is
+case- and Unicode-insensitive, so `.GIT` and a zero-width-space spelling are refused too. Symlinks
+are refused by this CLI before upload, because uploading what one points at would send a file you
+never named; the relay commits every file as a regular file, so a client that is not this CLI cannot
+create one either.
+
+Limits, refused with the number stated rather than truncated: **200 files**, **5 MB per file**,
+**20 MB in total**.
+
 A task's `state` is `queued` (waiting for a provider), `running` (claimed), or one of the terminal
 `completed` / `failed` / `timed_out`. `get` prints the result on success and the error on failure.
 
@@ -919,7 +942,14 @@ serves inference exactly as before, and the two loops are independent — neithe
 
 ### What a provider actually runs
 
-A claimed task spawns **Claude Code** in print mode against the project's workspace, and its
+A claimed task first brings the project's workspace to the task's input commit: it fetches the task
+branch from the relay and resets the workspace to it exactly, so a previous task's leftovers can
+never be mistaken for this task's input. **`git` must be installed on the provider.** The one
+directory spared is `.grid/`, which is the provider's own state and is why nothing may be uploaded
+there. If the input cannot be checked out the task fails **without spawning the agent** — an agent
+run against input that never arrived produces a confidently wrong answer.
+
+Once the workspace is ready the task spawns **Claude Code** in print mode against it, and its
 `stream-json` output is republished as the task's events while it runs: `task.session` (the
 conversation id), `task.tool_use` (a tool name and the file it targets), `task.output` (what the
 agent says), `task.stderr`, and `task.result`. Anything credential-shaped is stripped before an

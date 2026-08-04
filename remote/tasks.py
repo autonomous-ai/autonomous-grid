@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import relay, task_agent, task_stream
+from . import relay, task_agent, task_repo, task_stream
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -440,7 +440,8 @@ class _ChildFailed(Exception):
 
 def run_task(job: dict[str, Any],
              publish: Callable[..., None] | None = None,
-             on_spawn: Callable[[subprocess.Popen], None] | None = None) -> TaskOutcome:
+             on_spawn: Callable[[subprocess.Popen], None] | None = None,
+             fetch_input: Callable[[], bytes] | None = None) -> TaskOutcome:
     """Run one task's agent and return how it went.
 
     The contract that matters is this one: **every** failure mode returns a `failed` outcome.
@@ -455,7 +456,9 @@ def run_task(job: dict[str, Any],
 
     `publish` is optional: the child is the point and the stream is an observer, so a caller with no
     channel wired runs a task exactly as before. `on_spawn` hands the caller the child's `Popen` for
-    issue 07's lease renewal.
+    issue 07's lease renewal. `fetch_input` downloads the task's input bundle, and is called only
+    when the claim named an `input_commit` — a relay predating the git plane sends none, and a
+    provider talking to one runs in an empty workspace exactly as it did then.
     """
     # Built first so every `return` below can go through `_failed`, which is what makes the scrub
     # and the session id impossible to forget on a path someone adds later.
@@ -476,6 +479,28 @@ def run_task(job: dict[str, Any],
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
         return _failed(translator, f"could not start the agent: {exc}")
+
+    # BEFORE the spawn, and fatal if it fails. An agent run against input that never arrived
+    # produces a confidently wrong result with nothing anywhere indicating why — the precise
+    # failure ADR 0032 D-b exists to prevent — so there is no "carry on without it" branch.
+    input_commit = job.get("input_commit")
+    if input_commit:
+        if fetch_input is None:
+            # A CALLER bug, and it must not be mistaken for the old-relay degrade below. That
+            # degrade is gated on `input_commit` being ABSENT; a truthy commit with no fetcher
+            # would otherwise skip the checkout in silence and spawn the agent against whatever the
+            # per-project workspace already held — stale from a prior task, or empty. Issues 05 and
+            # 07 both assemble job dicts for this path, so the guard lives in the function rather
+            # than in the convention today's only caller happens to follow.
+            return _failed(
+                translator,
+                f"the task names input commit {input_commit} but no way to fetch it was wired")
+        try:
+            task_repo.materialize(
+                workspace, fetch_input(),
+                branch=str(job.get("branch") or ""), input_commit=str(input_commit))
+        except (Exception, SystemExit) as exc:
+            return _failed(translator, f"could not prepare the task's workspace: {exc}")
 
     try:
         _returncode, _raw = _run_child(
@@ -584,11 +609,18 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
 
     publisher = _publisher_for(state, task_id, job)
     try:
-        outcome = run_task(job, publisher.publish)
+        outcome = run_task(job, publisher.publish, fetch_input=_input_fetcher(state, task_id))
     except (Exception, SystemExit) as exc:
         # `run_task` is written not to raise; if it ever does, the task still owes the relay a
         # terminal report — silence would hold the project's lock until the lease expires.
-        outcome = TaskOutcome("failed", None, f"task runner raised: {exc!r}")
+        #
+        # SCRUBBED, like every message `_failed` builds, and for the identical reason: this text is
+        # made from an exception nobody here controls, and it travels to the relay, onto the task
+        # row, and into the durable `task.terminal` event the requesting user reads back. `_failed`
+        # itself cannot be reused — it needs the translator that lives inside `run_task`, which is
+        # exactly the call that just failed — so the guarantee is restated rather than inherited.
+        outcome = TaskOutcome(
+            "failed", None, task_stream.redact(f"task runner raised: {exc!r}"))
     finally:
         # Flush the tail BEFORE reporting terminal: the relay appends `task.terminal` as part of the
         # state change, and a batch arriving after that is refused (the task is no longer running),
@@ -630,6 +662,28 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
             _warn(f"report attempt {attempt}/{_REPORT_ATTEMPTS} for task {task_id} failed "
                   f"({exc}); retrying")
             state.tasks_stop.wait(_REPORT_BACKOFF_SECONDS)
+
+
+def _input_fetcher(state: Any, task_id: str) -> Callable[[], bytes]:
+    """A one-shot download of THIS task's input, with the same single-retry-on-401 rule as the rest.
+
+    Bound to `task_id` here rather than passed through `run_task`, so the id the fetch uses cannot
+    drift from the id the loop is working on — the lease fence would turn a mismatch into a 403 the
+    provider reports as an unreadable failure rather than as "I asked for the wrong task".
+
+    Deliberately NOT guarded: `run_task` treats a failed fetch as fatal, because an agent run
+    against input that never arrived produces a confidently wrong result (ADR 0032 D-b).
+    """
+    def fetch() -> bytes:
+        token = state.token()
+        try:
+            return relay.fetch_task_input(state.signaling_url, token, task_id)
+        except relay.RelayUnauthorized:
+            if not state.refresh(stale_token=token):
+                raise
+            return relay.fetch_task_input(state.signaling_url, state.token(), task_id)
+
+    return fetch
 
 
 def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:

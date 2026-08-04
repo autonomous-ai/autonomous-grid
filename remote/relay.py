@@ -52,6 +52,14 @@ _TASK_EVENT_TIMEOUT = 15.0
 # whole point — a task legitimately says nothing for minutes while a build runs, and silence is not
 # evidence of death (ADR 0032 D-c). Connect stays bounded so an unreachable relay still fails fast.
 _TASK_FOLLOW_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=5.0)
+# Downloading the task's input. Longer than a result POST because the body is the whole repository
+# rather than a status, and short enough that a stalled relay fails the attempt instead of eating
+# the task's deadline before the agent has started.
+_TASK_INPUT_TIMEOUT = 120.0
+# Ceiling on the input bundle this provider will hold in memory. LOCKSTEP-ish with the relay's own
+# `task_repo.MAX_BUNDLE_BYTES` — matched deliberately, but this side is the one that must hold: a
+# provider protects itself rather than trusting the far end to have been configured the same way.
+MAX_INPUT_BUNDLE_BYTES = 64 * 1024 * 1024
 
 # Bring-up's own register deadline, stated phase by phase (ADR 0022). The read phase is the one that
 # matters and the one a bare float never names: a relay that ACCEPTS the connection and then never
@@ -349,6 +357,47 @@ def report_task_result(
     _guard(resp, "report_task_result")
 
 
+def fetch_task_input(
+    signaling_url: str,
+    access_token: str,
+    task_id: str,
+) -> bytes:
+    """Download a task's input as a git bundle (``GET /relay/v1/tasks/{id}/input``).
+
+    Lease-fenced server-side exactly like ``/result`` and ``/events``: a provider that no longer
+    holds the lease is refused, because a task's input is the requesting user's private source
+    (ADR 0032 D-c).
+
+    Read in bounded chunks rather than with ``resp.content``. The relay is authenticated but that is
+    not a licence to stream an unbounded body into this process's memory — a provider serves
+    inference while a task runs, so an OOM here would take the engine down with the task.
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_INPUT_TIMEOUT) as client:
+            with client.stream(
+                "GET",
+                # The id came off the wire and is being interpolated into a path.
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/input",
+            ) as resp:
+                if resp.status_code >= 400:
+                    resp.read()  # a streamed response has no `.text` until it is drained
+                    _guard(resp, "fetch_task_input")
+                chunks: list[bytes] = []
+                size = 0
+                for chunk in resp.iter_bytes():
+                    size += len(chunk)
+                    if size > MAX_INPUT_BUNDLE_BYTES:
+                        # Raised mid-stream, so the oversized body is abandoned rather than
+                        # finished and then measured — measuring afterwards has already paid the
+                        # cost the limit exists to avoid.
+                        raise RelayError(
+                            f"the task's input exceeds the {MAX_INPUT_BUNDLE_BYTES}-byte limit")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+    except httpx.HTTPError as exc:
+        raise RelayError(f"fetch_task_input transport error: {exc}") from None
+
+
 def publish_task_events(
     signaling_url: str,
     access_token: str,
@@ -575,11 +624,23 @@ def create_task(
     *,
     prompt: str,
     project: str | None,
+    files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Create a task (``POST /relay/v1/tasks``)."""
+    """Create a task (``POST /relay/v1/tasks``).
+
+    The files ride in the SAME request as the prompt, and that is the point of the slice rather than
+    a convenience: "the task exists" and "its input is in git" must be one event (ADR 0032 D-b).
+    Creating the task first and uploading after lets a provider claim and check out before the files
+    land, and the agent then runs against missing input with nothing indicating why.
+
+    Omitted entirely when there are none, so a relay predating the git plane never sees a key it
+    does not understand.
+    """
     body: dict[str, Any] = {"prompt": prompt}
     if project:
         body["project"] = project
+    if files:
+        body["files"] = files
     return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/tasks", json=body)
 
 

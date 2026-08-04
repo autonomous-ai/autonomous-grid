@@ -1033,3 +1033,261 @@ def test_a_publisher_that_raises_never_costs_the_task_its_result(agent, capsys):
     assert outcome.state == "completed"
     assert outcome.output == "done"
     assert capsys.readouterr().err.count("publisher bug") == 1
+
+
+# --- issue 04: the task's input is already in git ------------------------------------------------
+
+def _git(cwd, *args, check=True):
+    import os
+    import subprocess
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=check,
+        env={"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+             "HOME": "/nonexistent", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"})
+
+
+def _bundle_for(tmp_path, branch, files):
+    """Build a real bundle the way the relay does, and return `(bytes, commit)`.
+
+    A real one rather than a fixture blob: the provider's whole job here is to hand this to git, so
+    a stand-in that git would reject proves nothing about the path under test.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main", ".")
+    for path, content in files.items():
+        target = origin / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "input")
+    _git(origin, "branch", "-f", branch)
+    commit = _git(origin, "rev-parse", branch).stdout.strip()
+    _git(origin, "bundle", "create", "--quiet", str(tmp_path / "in.bundle"),
+         f"refs/heads/{branch}")
+    return (tmp_path / "in.bundle").read_bytes(), commit
+
+
+def test_the_agent_reads_the_exact_file_the_client_uploaded(agent, tmp_path, monkeypatch):
+    """The issue's demo, end to end: upload a file, the agent reads THAT file.
+
+    Driven through `run_task` rather than the checkout helper, because the guarantee is about the
+    agent's cwd at spawn time — a checkout that happened after the child started would satisfy a
+    unit test of the helper and still hand the agent an empty directory.
+    """
+    from remote import tasks
+
+    bundle, commit = _bundle_for(tmp_path, "task/T1", {"src/a.txt": "ZEBRA-4417\n"})
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"%s\"}\\n' \"$(cat src/a.txt)\"\n")
+
+    outcome = tasks.run_task(
+        _job(input_commit=commit, branch="task/T1"), fetch_input=lambda: bundle)
+
+    assert outcome.state == "completed", outcome.error
+    assert outcome.output == "ZEBRA-4417"
+
+
+def test_a_previous_tasks_leftovers_are_gone_but_the_reserved_directory_survives(
+        agent, tmp_path, monkeypatch):
+    """The workspace is per-PROJECT and persists across tasks — the transcript path depends on it.
+
+    So the reset has to be exact: a previous task's file left lying about is indistinguishable from
+    this task's input. `.grid/` is the one exception, and deliberately so — it is where issue 06's
+    symlinked transcript directory lives, and a `git clean` that deleted it would delete the
+    project's whole conversation on every task.
+    """
+    from remote import task_agent, tasks
+
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    (workspace / "stale.txt").write_text("from the last task\n")
+    (workspace / ".grid").mkdir()
+    (workspace / ".grid" / "transcript.jsonl").write_text("the project's conversation\n")
+
+    bundle, commit = _bundle_for(tmp_path, "task/T1", {"fresh.txt": "new\n"})
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    outcome = tasks.run_task(
+        _job(input_commit=commit, branch="task/T1"), fetch_input=lambda: bundle)
+
+    assert outcome.state == "completed", outcome.error
+    assert not (workspace / "stale.txt").exists(), "a previous task's file survived the reset"
+    assert (workspace / "fresh.txt").read_text() == "new\n"
+    assert (workspace / ".grid" / "transcript.jsonl").read_text() == "the project's conversation\n"
+
+
+def test_the_workspace_is_left_on_the_task_branch_for_the_push(agent, tmp_path):
+    """Issue 05 pushes `task/<id>` from here, so HEAD must be that branch and not a detached head —
+    a detached checkout commits to nothing and the push has no ref to name."""
+    from remote import task_agent, tasks
+
+    bundle, commit = _bundle_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    tasks.run_task(_job(input_commit=commit, branch="task/T1"), fetch_input=lambda: bundle)
+
+    workspace = task_agent.workspace_for("proj-1")
+    assert _git(workspace, "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/task/T1"
+    assert _git(workspace, "rev-parse", "HEAD").stdout.strip() == commit
+
+
+def test_input_that_cannot_be_checked_out_fails_the_task_without_spawning_the_agent(
+        agent, tmp_path):
+    """An agent that ran against missing input produces a confidently wrong result, which is the
+    exact failure ADR 0032 D-b exists to prevent. Failing before the spawn is the only safe answer."""
+    from remote import tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n"
+          "touch \"$GRID_TEST_RAN\"\n")
+    ran = tmp_path / "the-agent-ran"
+    import os
+    os.environ["GRID_TEST_RAN"] = str(ran)
+    try:
+        outcome = tasks.run_task(
+            _job(input_commit="0" * 40, branch="task/T1"),
+            fetch_input=lambda: b"this is not a git bundle")
+    finally:
+        os.environ.pop("GRID_TEST_RAN", None)
+
+    assert outcome.state == "failed"
+    assert not ran.exists(), "the agent was spawned against input that never arrived"
+    assert "workspace" in (outcome.error or "").lower() or "input" in (outcome.error or "").lower()
+
+
+def test_a_relay_with_no_git_plane_runs_the_task_as_before(agent, tmp_path):
+    """Old-relay compatibility, and the direction it fails in.
+
+    A claim payload with no `input_commit` comes from a relay predating this slice. The provider
+    runs the task in an empty workspace exactly as it did then — degrading to the PREVIOUS
+    behaviour, never to a new failure.
+    """
+    from remote import tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    outcome = tasks.run_task(_job(), fetch_input=lambda: pytest.fail("nothing to fetch"))
+
+    assert outcome.state == "completed", outcome.error
+
+
+def test_the_input_download_is_bounded_so_a_huge_bundle_cannot_exhaust_the_provider(monkeypatch):
+    """The relay is authenticated, not infinitely trusted, and this response is read into memory.
+
+    A provider serves inference while a task runs (issue 03's last acceptance criterion), so an
+    unbounded read here would take the engine down with it — a task fault must never cost inference.
+    """
+    import httpx
+
+    from remote import relay
+
+    oversize = b"x" * (relay.MAX_INPUT_BUNDLE_BYTES + 1)
+
+    def handler(request):
+        return httpx.Response(200, content=oversize)
+
+    monkeypatch.setattr(
+        relay, "_client",
+        lambda url, token, *, timeout: httpx.Client(
+            transport=httpx.MockTransport(handler), base_url="http://relay"))
+
+    with pytest.raises(relay.RelayError) as caught:
+        relay.fetch_task_input("http://relay", "tok", "T1")
+
+    assert str(relay.MAX_INPUT_BUNDLE_BYTES) in str(caught.value)
+
+
+def test_a_task_is_run_with_a_fetcher_bound_to_its_own_id(monkeypatch):
+    """The loop must hand `run_task` a fetcher for THIS task.
+
+    Passing the wrong id would check out another task's input — which the relay's lease fence turns
+    into a 403 rather than a leak, but the task then fails for a reason no operator could read.
+    """
+    from remote import relay, tasks
+
+    asked = []
+    monkeypatch.setattr(relay, "fetch_task_input",
+                        lambda url, token, task_id: asked.append(task_id) or b"BUNDLE")
+    captured = {}
+
+    def fake_run(job, publish=None, on_spawn=None, fetch_input=None):
+        captured["bundle"] = fetch_input()
+        return tasks.TaskOutcome("completed", "ok", None)
+
+    monkeypatch.setattr(tasks, "run_task", fake_run)
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: None)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), {"task_id": "T-42", "prompt": "p", "project_id": "proj-1"})
+
+    assert asked == ["T-42"]
+    assert captured["bundle"] == b"BUNDLE"
+
+
+class _NullPublisher:
+    def publish(self, *_a, **_k):
+        pass
+
+    def close(self):
+        pass
+
+
+class _FakeState:
+    signaling_url = "http://relay"
+
+    def token(self):
+        return "tok"
+
+    def refresh(self, stale_token=None):
+        return False
+
+
+def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(monkeypatch):
+    """The fourth door, and it was open.
+
+    Every failure `run_task` RETURNS goes through `_failed`, which scrubs. This message is built
+    outside it, from an exception nobody here controls — and it travels the same way: to the relay,
+    onto the task row, and into the durable `task.terminal` event the requesting user reads back.
+    A credential in an exception's repr would be in a permanent log with no way to unsay it.
+    """
+    from remote import tasks
+
+    reported = {}
+
+    def explode(*_a, **_k):
+        raise RuntimeError("relay refused: Authorization: Bearer sk-ant-oat01-DEADBEEFCAFE")
+
+    monkeypatch.setattr(tasks, "run_task", explode)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    monkeypatch.setattr(
+        tasks, "report_once",
+        lambda _s, _t, *, state, output, error, session_id=None: reported.update(error=error))
+
+    tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1"})
+
+    assert "DEADBEEFCAFE" not in reported["error"]
+    # The MARKER is expected to survive — it is deliberately recognizable, so a reader can tell
+    # "a credential was here and was removed" from "there was nothing here".
+    assert "sk-ant-***" in reported["error"]
+    # Still says something useful — a scrub that erased the whole message would trade one silent
+    # failure for another.
+    assert "task runner raised" in reported["error"]
+
+
+def test_a_task_that_needs_input_with_no_way_to_fetch_it_fails_rather_than_running_empty(agent):
+    """`input_commit` present but no fetcher wired is a CALLER bug, and it must not look like the
+    old-relay degrade.
+
+    That degrade is correctly gated on `input_commit` being ABSENT. If a truthy commit met a missing
+    fetcher, the old code skipped the checkout silently and spawned the agent against whatever was
+    already in the per-project workspace — stale from a prior task, or empty. Issues 05 and 07 both
+    assemble job dicts for this path, so the guard belongs in the function rather than in the
+    convention that today's only caller happens to follow.
+    """
+    from remote import tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    outcome = tasks.run_task(_job(input_commit="abc123", branch="task/T1"), fetch_input=None)
+
+    assert outcome.state == "failed"
+    assert "input" in (outcome.error or "").lower()

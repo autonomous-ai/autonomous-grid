@@ -457,6 +457,11 @@ def _add_task(sub) -> None:
     create.add_argument(
         "--project", default=None,
         help="Project to run in (default: 'default'). One task runs per project at a time.")
+    create.add_argument(
+        "--file", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="File to upload with the task; repeatable. Committed with the task before any "
+             "provider can claim it, so the agent always finds it. Placed at the file's own name "
+             "unless you give a destination (e.g. ./conf.toml:config/conf.toml).")
     create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_task)

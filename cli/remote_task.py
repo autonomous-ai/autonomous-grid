@@ -12,14 +12,25 @@ top; `remote.*` / sibling cli modules imported lazily.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
+from pathlib import Path
 
 # Bounded reattach: a relay that is genuinely gone must end the command rather than spin. The budget
 # is per OUTAGE, not per task — any event received resets it, so a long task that blips repeatedly
 # is not slowly starved of retries.
 _RECONNECT_ATTEMPTS = 5
 _RECONNECT_BACKOFF_SECONDS = 2.0
+
+# Local upload bounds, refused HERE rather than after a multi-megabyte POST the relay then rejects.
+# LOCKSTEP with grid-src `task_files.MAX_FILE_BYTES` / `MAX_TOTAL_BYTES` / `MAX_FILES`: the relay is
+# the authority and refuses anything over its own limits regardless, so a client that drifts LOW
+# merely refuses early with a clear message, and one that drifts HIGH pays for the upload before
+# being told no. Neither corrupts anything, which is why these are duplicated rather than negotiated.
+MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_TOTAL_BYTES = 20 * 1024 * 1024
+MAX_FILES = 200
 
 
 def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
@@ -52,12 +63,100 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
     return _task_get(args)
 
 
+def _collect_files(specs: list[str] | None) -> list[dict]:
+    """Read each `--file LOCAL[:DEST]` into the wire shape, or exit with a sentence naming the file.
+
+    Every refusal here is local and happens BEFORE the relay is contacted. Two of them cannot be
+    delegated to it at all:
+
+      * **A symlink.** The wire carries `{path, content}`, so a symlink is not representable and the
+        relay has nothing to detect. Following it and uploading the TARGET would be worse than
+        refusing — it silently uploads a file the user never named, and the classic target of a
+        planted link is a private key. (The relay's half of this rule is structural: it writes mode
+        `100644` and nothing else, so a caller that is not this CLI still cannot create one.)
+      * **A directory or an unreadable file.** The relay never sees these; they are facts about this
+        machine.
+
+    Path RULES — `..`, `.git/`, absolute — are deliberately NOT re-implemented here. The relay is
+    the sole authority on them, and a second copy in another repo drifts silently: each side keeps
+    working, just not identically, and the gap is a path one accepts and the other does not.
+    """
+    if not specs:
+        # No key at all rather than an empty list: a relay predating the git plane must not receive
+        # a field it does not understand for a task that has no files.
+        return []
+    if len(specs) > MAX_FILES:
+        raise SystemExit(f"Too many files: {len(specs)} (the limit is {MAX_FILES}).")
+
+    files: list[dict] = []
+    total = 0
+    for spec in specs:
+        local, dest = _split_spec(spec)
+        source = Path(local)
+
+        # `is_symlink` BEFORE any other probe: `exists()` and `is_file()` both follow the link, so
+        # checking them first would report a planted symlink as a perfectly ordinary file.
+        if source.is_symlink():
+            raise SystemExit(
+                f"Refusing to upload {local}: it is a symlink, and uploading what it points at "
+                f"would send a file you did not name. Pass the target directly if you meant it.")
+        if not source.exists():
+            raise SystemExit(f"Cannot upload {local}: no such file.")
+        if source.is_dir():
+            raise SystemExit(
+                f"Cannot upload {local}: it is a directory, and --file takes one file at a time.")
+        if not source.is_file():
+            raise SystemExit(f"Cannot upload {local}: it is not a regular file.")
+
+        try:
+            content = source.read_bytes()
+        except OSError as exc:
+            raise SystemExit(f"Cannot read {local}: {exc}")
+
+        if len(content) > MAX_FILE_BYTES:
+            raise SystemExit(
+                f"Cannot upload {local}: it is {len(content)} bytes, over the "
+                f"{MAX_FILE_BYTES}-byte per-file limit.")
+        total += len(content)
+        if total > MAX_TOTAL_BYTES:
+            raise SystemExit(
+                f"The upload exceeds the {MAX_TOTAL_BYTES}-byte total limit.")
+
+        files.append({"path": dest, "content_b64": base64.b64encode(content).decode()})
+    return files
+
+
+def _split_spec(spec: str) -> tuple[str, str]:
+    """`LOCAL[:DEST]` → `(local, dest)`, defaulting the destination to the file's basename.
+
+    Split on the LAST colon, not the first: a colon is a legal character in a filename on every
+    platform this runs on, so `--file ./od:2026-08-04.csv:notes/od.csv` must keep the colon in the
+    LOCAL name and take only the final field as the destination. Splitting on the first would look
+    for a file called `./od` and report it missing.
+
+    Only when what follows is non-empty — `--file ./a.txt:` is a typo, not a request to upload to
+    "". A colon-bearing filename with NO destination is still ambiguous by construction and resolves
+    to "no such file", which names the path it looked for.
+    """
+    if ":" in spec:
+        local, _, dest = spec.rpartition(":")
+        if local and dest:
+            return local, dest
+    return spec, Path(spec).name
+
+
 def _task_create(args: argparse.Namespace) -> int:
     from remote import relay
 
+    # Read the files BEFORE resolving the grid: a typo in a filename should not first cost a
+    # credential lookup and a control-plane round trip to discover.
+    files = _collect_files(getattr(args, "file", None))
+
     base, token, label = _resolve(args)
+    # `files` and not `files or None`: `create_task` already decides whether the key goes on the
+    # wire, and a second guard here reads as though it mattered while doing nothing.
     task = relay.create_task(
-        base, token, prompt=args.prompt, project=getattr(args, "project", None))
+        base, token, prompt=args.prompt, project=getattr(args, "project", None), files=files)
 
     if getattr(args, "json", False):
         print(json.dumps(task, indent=2))

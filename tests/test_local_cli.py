@@ -22611,7 +22611,7 @@ def test_task_loop_claims_runs_and_reports(monkeypatch):
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
         tasks, "run_task",
-        lambda job, *_a: tasks.TaskOutcome("completed", "say hello\n", None, session_id="sess-1"))
+        lambda job, *_a, **_k: tasks.TaskOutcome("completed", "say hello\n", None, session_id="sess-1"))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
 
     tasks.task_loop(state)
@@ -22630,7 +22630,7 @@ def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
     ])
     reported = []
 
-    def run(job, *_a):
+    def run(job, *_a, **_k):
         if job["task_id"] == "T1":
             raise RuntimeError("child exploded")
         return tasks.TaskOutcome("completed", "fine\n", None)
@@ -22655,7 +22655,7 @@ def test_task_loop_survives_a_system_exit_from_a_task(monkeypatch):
     ])
     seen = []
 
-    def run(job, *_a):
+    def run(job, *_a, **_k):
         if job["task_id"] == "T1":
             raise SystemExit("corrupt record")
         seen.append(job["task_id"])
@@ -22681,7 +22681,7 @@ def test_task_loop_backs_off_on_a_transient_relay_error(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -22728,7 +22728,7 @@ def test_task_loop_survives_a_transient_404(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -22752,7 +22752,7 @@ def test_task_loop_404_budget_resets_after_a_success(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -22791,7 +22791,7 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
-        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("failed", None, "exit 127"))
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("failed", None, "exit 127"))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(kw))
 
     tasks.task_loop(state)
@@ -22815,7 +22815,7 @@ def test_task_loop_survives_a_failure_to_report(monkeypatch):
         reported.append(tid)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22844,7 +22844,7 @@ def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypat
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
-        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22871,7 +22871,7 @@ def test_a_terminal_4xx_report_answer_is_not_retried(monkeypatch, capsys, status
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
-        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22893,7 +22893,7 @@ def test_a_report_that_never_lands_gives_up_after_a_bounded_number_of_attempts(m
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
-        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22915,7 +22915,7 @@ def test_a_lost_report_says_the_task_is_stuck_not_that_it_will_be_requeued(monke
     tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
-        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("boom", status=None)))
 
     tasks.task_loop(state)
@@ -22933,7 +22933,7 @@ def test_a_lost_report_records_which_kind_of_failure_it_was(monkeypatch, capsys)
     tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(
-        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("nope", status=403)))
 
     tasks.task_loop(state)
@@ -26456,3 +26456,150 @@ def test_launch_that_refreshes_writes_only_the_two_token_fields(monkeypatch, tmp
         if before["networks"][0].get(key) != after["networks"][0].get(key)
     }
     assert changed == {"access_token", "refresh_token"}
+
+
+# --- issue 04: `grid task create --file` ---------------------------------------------------------
+
+def test_task_create_uploads_a_file_at_its_basename(monkeypatch, tmp_path, capsys):
+    """The default placement. A client uploading `./build/report.txt` means the agent should find
+    `report.txt`, not a `build/` directory it never asked for."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "nested" / "report.txt"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"ZEBRA-4417\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (
+        seen.update(body=json.loads(r.content)),
+        httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"}))[1])
+    rc = cli.main(["task", "create", "--prompt", "read it", "--file", str(source)])
+
+    assert rc == 0
+    assert seen["body"]["files"] == [
+        {"path": "report.txt", "content_b64": base64.b64encode(b"ZEBRA-4417\n").decode()}]
+
+
+def test_task_create_places_a_file_at_an_explicit_destination(monkeypatch, tmp_path):
+    """`LOCAL:DEST` is how a caller reproduces a source tree the agent expects to navigate.
+
+    The local name deliberately CONTAINS a colon. A colon is legal in a filename on every platform
+    this runs on, so the split has to take the last field and not the first — splitting on the
+    first would look for a file called `od` and report it missing. A plain path exercises neither
+    branch, so this is the only shape that tells the two apart.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "od:2026-08-04.toml"
+    source.write_bytes(b"k = 1\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (
+        seen.update(body=json.loads(r.content)),
+        httpx.Response(201, json={"id": "T1", "state": "queued"}))[1])
+    cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:config/conf.toml"])
+
+    assert [f["path"] for f in seen["body"]["files"]] == ["config/conf.toml"]
+
+
+def test_task_create_refuses_a_symlink_without_calling_the_relay(monkeypatch, tmp_path, capsys):
+    """The relay CANNOT catch this: the wire carries `{path, content}`, so a symlink is not
+    representable and there is nothing for it to detect.
+
+    So the rule has two halves and this is the client's. The relay's half is structural — it writes
+    mode `100644` and nothing else — which is what holds when a caller is not this CLI. Following
+    the link here and uploading its TARGET would be worse than refusing: it silently uploads a file
+    the user never named, and the classic target is a private key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY\n")
+    link = tmp_path / "innocent.txt"
+    link.symlink_to(secret)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(link)])
+
+    assert "symlink" in str(exit_info.value).lower()
+    assert str(link) in str(exit_info.value)
+    assert called == [], "the relay was contacted despite a local refusal"
+
+
+def test_task_create_refuses_a_directory(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "src"
+    folder.mkdir()
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(folder)])
+
+    assert "directory" in str(exit_info.value).lower()
+    assert called == []
+
+
+def test_task_create_refuses_a_missing_file_naming_it(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(tmp_path / "nope.txt")])
+
+    assert "nope.txt" in str(exit_info.value)
+    assert called == []
+
+
+def test_task_create_refuses_an_oversized_file_with_the_limit_stated(monkeypatch, tmp_path):
+    """Refused HERE rather than after a multi-megabyte upload that the relay then rejects."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (remote_task.MAX_FILE_BYTES + 1))
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(big)])
+
+    assert str(remote_task.MAX_FILE_BYTES) in str(exit_info.value)
+    assert called == []
+
+
+def test_task_create_without_files_sends_no_files_key(monkeypatch, tmp_path):
+    """An older relay must not receive a key it does not understand for a task that has no files."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (
+        seen.update(body=json.loads(r.content)),
+        httpx.Response(201, json={"id": "T1", "state": "queued"}))[1])
+    cli.main(["task", "create", "--prompt", "p"])
+
+    assert "files" not in seen["body"]
+
+
+def test_task_create_shows_the_relays_rejection_of_a_path(monkeypatch, tmp_path, capsys):
+    """The relay is the sole authority on path rules — this client deliberately does not
+    re-implement them, because two copies across two repos drift silently. So its 422 has to reach
+    the user as words rather than a traceback."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_bytes(b"x")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        422, json={"detail": "path is inside a reserved directory ('.git')"}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:.git/hooks/x"])
+
+    assert "reserved directory" in str(exit_info.value)
