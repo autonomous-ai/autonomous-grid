@@ -321,19 +321,28 @@ def report_task_result(
     state: str,
     output: str | None,
     error: str | None,
+    session_id: str | None = None,
 ) -> None:
     """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
 
     The relay authorizes this against the lease, so a provider whose lease expired is refused (403)
     without ever having learned it lost — which is the point of fencing on the lease rather than on
     liveness (ADR 0032 D-c).
+
+    ``session_id`` is the Claude Code conversation this attempt opened; the relay stores it on the
+    task so the project's next task can ``--resume`` it (issue 06). Sent only when there is one, so
+    a report from a run that never reached the agent cannot blank a session id the relay already
+    holds — nothing else on this wire distinguishes "no session" from "do not change it".
     """
+    body: dict[str, Any] = {"state": state, "output": output, "error": error}
+    if session_id:
+        body["session_id"] = session_id
     try:
         with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
             resp = client.post(
                 # The id came off the wire and is being interpolated into a path.
                 f"/relay/v1/tasks/{quote(task_id, safe='')}/result",
-                json={"state": state, "output": output, "error": error},
+                json=body,
             )
     except httpx.HTTPError as exc:
         raise RelayError(f"report_task_result transport error: {exc}") from None

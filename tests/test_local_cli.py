@@ -12854,6 +12854,43 @@ def test_report_task_result_posts_the_terminal_state(monkeypatch):
     assert seen["body"] == {"state": "completed", "output": "hi\n", "error": None}
 
 
+def test_report_task_result_carries_the_session_id_when_there_is_one(monkeypatch):
+    """The terminal report is where the session id becomes durable — the relay stores it on the task
+    so the project's next task can `--resume` the same conversation (issue 06)."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda request: (
+        seen.update(body=json.loads(request.content)),
+        httpx.Response(200, json={}))[-1])
+
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="hi", error=None,
+        session_id="012c9e09-abcd")
+
+    assert seen["body"]["session_id"] == "012c9e09-abcd"
+
+
+def test_report_task_result_omits_the_session_id_rather_than_sending_null(monkeypatch):
+    """Absent must mean "do not change it", not "clear it".
+
+    A run that died before the agent ever started has no session id, and sending `null` would erase
+    the project's conversation — every later task on that project would then silently start from
+    nothing. The relay reads absence the same way; this is the client half of that contract.
+    """
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda request: (
+        seen.update(body=json.loads(request.content)),
+        httpx.Response(200, json={}))[-1])
+
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="failed", output=None, error="no binary")
+
+    assert "session_id" not in seen["body"]
+
+
 def test_report_task_result_percent_encodes_the_task_id(monkeypatch):
     """A task id reaches us over the wire; it interpolates into a PATH. Never trust its shape."""
     from remote import relay
@@ -21884,6 +21921,32 @@ def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tm
     assert "task.tree" in capsys.readouterr().out
 
 
+def test_task_follow_renders_tool_activity_as_a_tool_and_a_path(monkeypatch, tmp_path, capsys):
+    """Issue 03's acceptance criterion at the CLIENT end: the user sees what the agent is touching.
+
+    Rendered specially rather than falling through to the verbatim branch, because this is the line
+    a user reads most of — a task is minutes of tool calls and a sentence of prose.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.session", "session_id": "012c9e09"}),
+        _block(1, {"type": "task.tool_use", "tool": "Edit", "path": "src/app.py", "id": "t1"}),
+        _block(2, {"type": "task.tool_use", "tool": "Bash", "path": None, "id": "t2"}),
+        _block(3, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "Edit src/app.py" in out
+    assert "Bash" in out          # a tool with no path still says something happened
+    assert "012c9e09" in out
+
+
 def test_task_follow_is_refused_in_local_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     state.set_mode("local")
@@ -22401,17 +22464,12 @@ def test_a_long_output_line_is_truncated_below_the_relays_event_cap(monkeypatch)
     line 422s, so the stream is dead either way. The cap is a lockstep value — the provider must
     respect the relay's `_MAX_EVENT_BYTES` (64 KiB), which is SMALLER than the prompt it echoes."""
     import json as _json
-    from remote import tasks, task_events
+
+    from remote import task_events
 
     published = []
-    monkeypatch.setattr(
-        tasks, "_task_argv",
-        lambda prompt: ["/bin/sh", "-c", "printf 'x%.0s' $(seq 1 90000); printf '\\n'"])
-
-    tasks.run_task(
-        {"task_id": "T1", "prompt": "x"},
-        publish=lambda event_type, **fields: published.append({"type": event_type, **fields}),
-    )
+    _child(["/bin/sh", "-c", "printf 'x%.0s' $(seq 1 90000); printf '\\n'"],
+           publish=lambda event_type, **fields: published.append({"type": event_type, **fields}))
 
     assert published, "the line should still be published, just bounded"
     encoded = len(_json.dumps(published[0]).encode("utf-8"))
@@ -22551,12 +22609,17 @@ def test_task_loop_claims_runs_and_reports(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "say hello\n", None))
+    monkeypatch.setattr(
+        tasks, "run_task",
+        lambda job, *_a: tasks.TaskOutcome("completed", "say hello\n", None, session_id="sess-1"))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
 
     tasks.task_loop(state)
 
-    assert reported == [("T1", {"state": "completed", "output": "say hello\n", "error": None})]
+    # The session id rides the terminal report, which is the only durable record of it: the relay
+    # stores it on the task so the project's NEXT task can `--resume` the conversation (issue 06).
+    assert reported == [("T1", {"state": "completed", "output": "say hello\n", "error": None,
+                                "session_id": "sess-1"})]
 
 
 def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
@@ -22570,7 +22633,7 @@ def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
     def run(job, *_a):
         if job["task_id"] == "T1":
             raise RuntimeError("child exploded")
-        return ("completed", "fine\n", None)
+        return tasks.TaskOutcome("completed", "fine\n", None)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(tasks, "run_task", run)
@@ -22596,7 +22659,7 @@ def test_task_loop_survives_a_system_exit_from_a_task(monkeypatch):
         if job["task_id"] == "T1":
             raise SystemExit("corrupt record")
         seen.append(job["task_id"])
-        return ("completed", "", None)
+        return tasks.TaskOutcome("completed", "", None)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
     monkeypatch.setattr(tasks, "run_task", run)
@@ -22618,7 +22681,7 @@ def test_task_loop_backs_off_on_a_transient_relay_error(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -22665,7 +22728,7 @@ def test_task_loop_survives_a_transient_404(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -22689,7 +22752,7 @@ def test_task_loop_404_budget_resets_after_a_success(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
 
     tasks.task_loop(state)
@@ -22727,12 +22790,14 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
     reported = []
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("failed", None, "exit 127"))
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("failed", None, "exit 127"))
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(kw))
 
     tasks.task_loop(state)
 
-    assert reported == [{"state": "failed", "output": None, "error": "exit 127"}]
+    assert reported == [
+        {"state": "failed", "output": None, "error": "exit 127", "session_id": None}]
 
 
 def test_task_loop_survives_a_failure_to_report(monkeypatch):
@@ -22750,7 +22815,7 @@ def test_task_loop_survives_a_failure_to_report(monkeypatch):
         reported.append(tid)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "", None))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22778,13 +22843,15 @@ def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypat
             raise relay.RelayError("connection reset", status=None)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
 
     assert len(attempts) == 3
-    assert attempts[-1] == {"state": "completed", "output": "done", "error": None}
+    assert attempts[-1] == {
+        "state": "completed", "output": "done", "error": None, "session_id": None}
     assert "stuck" not in capsys.readouterr().err     # it landed; nothing was stranded
 
 
@@ -22803,7 +22870,8 @@ def test_a_terminal_4xx_report_answer_is_not_retried(monkeypatch, capsys, status
         raise relay.RelayError("answered", status=status)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22824,7 +22892,8 @@ def test_a_report_that_never_lands_gives_up_after_a_bounded_number_of_attempts(m
         raise relay.RelayError("still down", status=None)
 
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", report)
 
     tasks.task_loop(state)
@@ -22845,7 +22914,8 @@ def test_a_lost_report_says_the_task_is_stuck_not_that_it_will_be_requeued(monke
 
     tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("boom", status=None)))
 
     tasks.task_loop(state)
@@ -22862,7 +22932,8 @@ def test_a_lost_report_records_which_kind_of_failure_it_was(monkeypatch, capsys)
 
     tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
     monkeypatch.setattr(tasks, "claim_once", fake_claim)
-    monkeypatch.setattr(tasks, "run_task", lambda job, *_a: ("completed", "done", None))
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a: tasks.TaskOutcome("completed", "done", None))
     monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("nope", status=403)))
 
     tasks.task_loop(state)
@@ -22897,15 +22968,19 @@ def test_task_error_message_survives_a_body_that_blows_the_recursion_limit(monke
     assert "400" in relay._task_error_message(_Hostile())
 
 
-def test_run_task_echoes_the_prompt():
-    """The tracer bullet's payload: no agent, no git — just prove a child ran and its output came
-    back through the seam."""
+def _child(argv, *, timeout=5.0, publish=None, translator=None):
+    """`_run_child` with the arguments that do not vary, so the pump's own tests stay about the pump.
+
+    These exercise `_run_child` directly rather than through `run_task`. Since issue 03 that function
+    resolves a binary and a workspace before spawning anything, and threading a fake agent through
+    every one of them would test the agent seam over and over instead of the thing each of these was
+    written for: the deadline, the kill, the decoding, and the publisher guard.
+    """
     from remote import tasks
 
-    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "say hello"})
-
-    assert (state, error) == ("completed", None)
-    assert output.strip() == "say hello"
+    return tasks._run_child(
+        argv, timeout=timeout, publish=publish or (lambda *_a, **_kw: None),
+        translator=translator)
 
 
 def test_run_task_reports_failure_rather_than_raising(monkeypatch):
@@ -22913,45 +22988,46 @@ def test_run_task_reports_failure_rather_than_raising(monkeypatch):
 
     Patches `Popen` rather than `run`: the child is spawned and streamed now, so a spawn that
     cannot even start is the failure this pins."""
-    from remote import tasks
+    from remote import task_agent, tasks
 
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
+    monkeypatch.setattr(task_agent, "ensure_workspace", lambda path: path)
     monkeypatch.setattr(tasks.subprocess, "Popen", _raise(OSError("no such binary")))
 
-    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "prompt": "x"})
 
-    assert state == "failed"
-    assert "no such binary" in error
+    assert outcome.state == "failed"
+    assert "no such binary" in outcome.error
 
 
 def test_run_task_times_out_into_a_failed_state(monkeypatch):
     """The fast unit form of the deadline. `test_a_child_that_writes_nothing_still_times_out`
-    proves it against a real wedged child; this one pins the mapping to a failed triple."""
+    proves it against a real wedged child; this one pins the mapping to a failed outcome."""
     import subprocess as _subprocess
-    from remote import tasks
 
+    from remote import task_agent, tasks
+
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
+    monkeypatch.setattr(task_agent, "ensure_workspace", lambda path: path)
     monkeypatch.setattr(
-        tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="echo", timeout=1)))
+        tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="claude", timeout=1)))
 
-    state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "prompt": "x"})
 
-    assert state == "failed"
-    assert "timed out" in error.lower()
+    assert outcome.state == "failed"
+    assert "timed out" in outcome.error.lower()
 
 
-def test_run_task_reports_a_non_zero_exit_with_its_stderr(monkeypatch):
+def test_a_child_that_exits_non_zero_carries_its_stderr_out(monkeypatch):
     """stderr needs its own reader thread — a child that fills that pipe while nobody drains it
     blocks on write and is indistinguishable from a hang."""
     from remote import tasks
 
-    monkeypatch.setattr(
-        tasks, "_task_argv",
-        lambda prompt: ["/bin/sh", "-c", "echo boom >&2; exit 3"])
+    with pytest.raises(tasks._ChildFailed) as excinfo:
+        _child(["/bin/sh", "-c", "echo boom >&2; exit 3"])
 
-    state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
-
-    assert state == "failed"
-    assert "exited 3" in error
-    assert "boom" in error
+    assert excinfo.value.returncode == 3
+    assert "boom" in excinfo.value.stderr
 
 
 def test_run_task_refuses_a_prompt_that_is_not_a_string(monkeypatch):
@@ -22960,91 +23036,78 @@ def test_run_task_refuses_a_prompt_that_is_not_a_string(monkeypatch):
     from remote import tasks
 
     for job in ({"task_id": "T1"}, {"task_id": "T1", "prompt": None}, {"task_id": "T1", "prompt": 7}):
-        state, _output, error = tasks.run_task(job)
-        assert state == "failed", job
-        assert error
+        outcome = tasks.run_task(job)
+        assert outcome.state == "failed", job
+        assert outcome.error
 
 
-def test_run_task_publishes_each_output_line_as_it_arrives(monkeypatch):
-    """Progress is PUBLISHED as the child produces it, not summarised after it exits (ADR 0032
-    D-f). `/bin/echo` emits one line, so what this pins is the mechanism issue 03 plugs into."""
+def test_run_task_refuses_a_job_with_no_project(monkeypatch):
+    """Without a project there is no workspace, and the ADR path is the whole basis of resume.
+
+    Refused rather than defaulted: a task run in the wrong directory opens a session no later task
+    on that project can find, and nothing about the run would look wrong at the time.
+    """
     from remote import tasks
 
+    outcome = tasks.run_task({"task_id": "T1", "prompt": "x"})
+
+    assert outcome.state == "failed"
+    assert "could not start the agent" in outcome.error
+
+
+def test_the_pump_publishes_every_line_of_a_multi_line_child():
+    """Progress is PUBLISHED as the child produces it, not summarised after it exits (ADR 0032 D-f).
+
+    No translator here: this is the pump's own contract, that every line reaches the publisher in
+    order. What each line MEANS is `remote/task_stream.py`'s job, tested in `test_task_agent.py`.
+    """
     published = []
-    state, output, error = tasks.run_task(
-        {"task_id": "T1", "prompt": "say hello"},
-        publish=lambda event_type, **fields: published.append((event_type, fields)),
-    )
 
-    assert (state, error) == ("completed", None)
-    assert published == [("task.output", {"text": "say hello"})]
-    assert output.strip() == "say hello"
+    returncode, output = _child(
+        ["/bin/sh", "-c", "printf 'a\\nb\\nc\\n'"],
+        publish=lambda event_type, **fields: published.append(fields.get("text")))
 
-
-def test_run_task_publishes_every_line_of_a_multi_line_child(monkeypatch):
-    from remote import tasks
-
-    published = []
-    monkeypatch.setattr(tasks, "_task_argv", lambda prompt: ["/bin/sh", "-c", "printf 'a\\nb\\nc\\n'"])
-
-    state, output, _error = tasks.run_task(
-        {"task_id": "T1", "prompt": "x"},
-        publish=lambda event_type, **fields: published.append(fields.get("text")),
-    )
-
-    assert state == "completed"
+    assert returncode == 0
     assert published == ["a", "b", "c"]
     assert output == "a\nb\nc\n"
 
 
-def test_a_child_that_writes_nothing_still_times_out(monkeypatch):
+def test_a_child_that_writes_nothing_still_times_out():
     """The regression a naive `for line in proc.stdout` would introduce: that loop blocks forever
     on a child that produces no output, so the wall-clock budget silently stops existing. The old
     `subprocess.run(timeout=)` could not fail this way, and neither may its replacement."""
-    from remote import tasks
-
-    monkeypatch.setattr(tasks, "_TASK_TIMEOUT_SECONDS", 0.3)
-    monkeypatch.setattr(tasks, "_task_argv", lambda prompt: ["/bin/sleep", "30"])
+    import subprocess as _subprocess
 
     started = time.monotonic()
-    state, _output, error = tasks.run_task({"task_id": "T1", "prompt": "x"})
+    with pytest.raises(_subprocess.TimeoutExpired):
+        _child(["/bin/sleep", "30"], timeout=0.3)
     elapsed = time.monotonic() - started
 
-    assert state == "failed"
-    assert "timed out" in error.lower()
     assert elapsed < 10, f"the deadline did not fire; took {elapsed:.1f}s"
 
 
-def test_a_child_that_writes_then_wedges_still_times_out(monkeypatch):
+def test_a_child_that_writes_then_wedges_still_times_out():
     """The subtler half: output resets nothing. A child that prints and then hangs must still be
     bounded, or a single early line buys a task unlimited wallclock."""
-    from remote import tasks
-
-    monkeypatch.setattr(tasks, "_TASK_TIMEOUT_SECONDS", 0.5)
-    monkeypatch.setattr(
-        tasks, "_task_argv", lambda prompt: ["/bin/sh", "-c", "echo started; sleep 30"])
+    import subprocess as _subprocess
 
     published = []
     started = time.monotonic()
-    state, _output, error = tasks.run_task(
-        {"task_id": "T1", "prompt": "x"},
-        publish=lambda event_type, **fields: published.append(fields.get("text")),
-    )
+    with pytest.raises(_subprocess.TimeoutExpired):
+        _child(["/bin/sh", "-c", "echo started; sleep 30"], timeout=0.5,
+               publish=lambda event_type, **fields: published.append(fields.get("text")))
     elapsed = time.monotonic() - started
 
-    assert state == "failed"
-    assert "timed out" in error.lower()
     assert elapsed < 10, f"the deadline did not fire; took {elapsed:.1f}s"
     assert published == ["started"], "the line it did emit should still have been published"
 
 
 def test_a_timed_out_child_is_killed_not_left_running(monkeypatch):
     """A daemon reader thread does not reap the process. An abandoned child keeps the provider's
-    CPU and, in issue 03, its agent subscription."""
-    from remote import tasks
+    CPU and its agent subscription."""
+    import subprocess as _subprocess
 
-    monkeypatch.setattr(tasks, "_TASK_TIMEOUT_SECONDS", 0.3)
-    monkeypatch.setattr(tasks, "_task_argv", lambda prompt: ["/bin/sleep", "30"])
+    from remote import tasks
 
     spawned = []
     real_popen = tasks.subprocess.Popen
@@ -23052,78 +23115,64 @@ def test_a_timed_out_child_is_killed_not_left_running(monkeypatch):
         tasks.subprocess, "Popen",
         lambda *a, **k: spawned.append(real_popen(*a, **k)) or spawned[-1])
 
-    tasks.run_task({"task_id": "T1", "prompt": "x"})
+    with pytest.raises(_subprocess.TimeoutExpired):
+        _child(["/bin/sleep", "30"], timeout=0.3)
 
     assert spawned, "the child was never spawned"
     assert spawned[0].poll() is not None, "the timed-out child is still running"
 
 
-def test_run_task_survives_a_publisher_that_raises(monkeypatch, capsys):
-    """The publisher is documented as never raising — but `run_task`'s contract is that NOTHING
+def test_a_broken_publisher_never_costs_the_child_its_run(capsys):
+    """The publisher is documented as never raising — but `_run_child`'s contract is that NOTHING
     escapes it, and a contract that relies on another module keeping its promise is not one.
 
     Surviving is not enough: a publisher breaking its own contract is a BUG, and swallowing it in
-    silence means the stream goes quiet with nothing anywhere saying why."""
-    from remote import tasks
-
+    silence means the stream goes quiet with nothing anywhere saying why. Once per run, though —
+    per-line would turn one broken publisher into a flood proportional to the task's output."""
     def boom(*_a, **_kw):
         raise RuntimeError("publisher exploded")
 
-    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "hi"}, publish=boom)
+    returncode, output = _child(["/bin/sh", "-c", "printf 'a\\nb\\nc\\nd\\n'"], publish=boom)
 
-    assert (state, error) == ("completed", None)
-    assert output.strip() == "hi"
-    assert "publisher exploded" in capsys.readouterr().err
-
-
-def test_a_broken_publisher_is_reported_once_not_per_line(monkeypatch, capsys):
-    """Per-line would turn one broken publisher into a flood proportional to the task's output."""
-    from remote import tasks
-
-    monkeypatch.setattr(
-        tasks, "_task_argv", lambda prompt: ["/bin/sh", "-c", "printf 'a\\nb\\nc\\nd\\n'"])
-
-    def boom(*_a, **_kw):
-        raise RuntimeError("publisher exploded")
-
-    tasks.run_task({"task_id": "T1", "prompt": "x"}, publish=boom)
-
+    assert (returncode, output) == (0, "a\nb\nc\nd\n")
     assert capsys.readouterr().err.count("publisher exploded") == 1
 
 
-def test_a_child_emitting_non_utf8_bytes_does_not_silently_truncate_the_output(monkeypatch):
+def test_a_child_emitting_non_utf8_bytes_does_not_silently_truncate_the_output():
     """`text=True` without `errors=` is STRICT utf-8: one bad byte raises `UnicodeDecodeError`
     inside the reader thread, where the broad guard swallows it — the thread ends, EOF is queued,
-    and `run_task` reports `completed` with the output silently cut off at the bad byte.
+    and the run reports success with the output silently cut off at the bad byte.
 
     This codebase already fixed the identical trap for `orphan_sweep`'s subprocess (`errors=
-    "replace"`). Matters here the moment issue 03 runs a real agent instead of `/bin/echo`."""
-    from remote import tasks
-
-    monkeypatch.setattr(
-        tasks, "_task_argv",
-        lambda prompt: ["/bin/sh", "-c", r"printf 'before\n\xff\xfe\nafter\n'"])
-
+    "replace"`). It matters more now that a real agent writes this stream, not `/bin/echo`."""
     published = []
-    state, output, error = tasks.run_task(
-        {"task_id": "T1", "prompt": "x"},
-        publish=lambda event_type, **fields: published.append(fields.get("text")),
-    )
 
-    assert (state, error) == ("completed", None)
+    _returncode, output = _child(
+        ["/bin/sh", "-c", r"printf 'before\n\xff\xfe\nafter\n'"],
+        publish=lambda event_type, **fields: published.append(fields.get("text")))
+
     assert "before" in output and "after" in output, f"output was truncated: {output!r}"
     assert published[0] == "before" and published[-1] == "after"
 
 
-def test_run_task_without_a_publisher_still_works(monkeypatch):
+def test_run_task_without_a_publisher_still_works(monkeypatch, tmp_path):
     """`publish` is optional so the loop, the tests, and any future caller can run a task without
     wiring a channel — the child is the point, the stream is an observer."""
-    from remote import tasks
+    from remote import task_agent, tasks
 
-    state, output, error = tasks.run_task({"task_id": "T1", "prompt": "solo"})
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
+    monkeypatch.setenv("GRID_TASK_TIMEOUT_SECONDS", "20")
+    script = tmp_path / "claude"
+    script.write_text(
+        "#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+        "\"result\":\"solo\"}\\n'\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: str(script))
 
-    assert (state, error) == ("completed", None)
-    assert output.strip() == "solo"
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p1", "prompt": "solo"})
+
+    assert (outcome.state, outcome.error) == ("completed", None)
+    assert outcome.output == "solo"
 
 
 def _raise(exc):

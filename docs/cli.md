@@ -917,6 +917,39 @@ Serving tasks is **opt-in on the provider side** and off by default: an engine c
 started with `GRID_TASKS=1` in its environment (`GRID_TASKS=1 grid join …`). A provider without it
 serves inference exactly as before, and the two loops are independent — neither can stop the other.
 
+### What a provider actually runs
+
+A claimed task spawns **Claude Code** in print mode against the project's workspace, and its
+`stream-json` output is republished as the task's events while it runs: `task.session` (the
+conversation id), `task.tool_use` (a tool name and the file it targets), `task.output` (what the
+agent says), `task.stderr`, and `task.result`. Anything credential-shaped is stripped before an
+event leaves the provider.
+
+The agent authenticates with **the provider's own Claude subscription** — not with the grid token,
+and not with the requesting user's. Nothing about the grid is put into its environment.
+
+The task runs with `--permission-mode bypassPermissions` by default: print mode cannot answer a
+permission prompt, so any narrower mode silently denies the tools a coding task needs. This assumes
+an **internally operated fleet** ([ADR 0032](./adr/0032-a-task-is-not-an-inference-transaction.md)) —
+a provider runs a prompt written by someone else, with its own credentials, on its own machine.
+
+The environment variables that tune a provider, all optional:
+
+| variable | default | what it does |
+|---|---|---|
+| `GRID_TASKS` | off | `1` to claim tasks at all |
+| `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
+| `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
+| `GRID_TASK_PERMISSION_MODE` | `bypassPermissions` | any mode `claude --permission-mode` accepts |
+| `GRID_TASK_CLAUDE_CONFIG_DIR` | unset | a fixed `CLAUDE_CONFIG_DIR` for every task this provider runs. Fixed **per provider**, never per user — a fresh config directory has no credential of its own and the agent will refuse to start |
+
+The default root `/var/grid` needs privileges an ordinary account does not have. **Do not reach for
+`sudo` first** — point `GRID_TASK_ROOT` at a directory the provider's own account can write, or
+create `/var/grid` once and chown it. Claude Code declines to bypass permission checks when it
+believes it is running as root, so a provider started with `sudo` can fail every task it claims; the
+agent's own message comes back as the task's error, so check `grid task get <id>` if tasks fail
+immediately. Whatever root is chosen, **every provider in the grid must use the same one**.
+
 ## Router
 
 ```

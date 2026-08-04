@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 # Bounded reattach: a relay that is genuinely gone must end the command rather than spin. The budget
 # is per OUTAGE, not per task — any event received resets it, so a long task that blips repeatedly
@@ -86,7 +87,6 @@ def _task_follow(args: argparse.Namespace) -> int:
     can branch on it. A stream that ends without a terminal event exits non-zero too — the task's
     fate is unknown, and reporting unknown as success is the failure this guards.
     """
-    import sys
     import time
 
     from remote import relay
@@ -171,6 +171,18 @@ def _render(seq: int, event: dict, *, as_json: bool) -> None:
     kind = event.get("type") or "event"
     if kind == "task.output":
         print(event.get("text", ""))
+    elif kind == "task.tool_use":
+        # The line a user reads most of — a task is minutes of tool calls and a sentence of prose.
+        # The path is optional: `Bash` and `WebSearch` target nothing, and a stream that went silent
+        # during a ten-minute test run would read as a hang.
+        path = event.get("path")
+        print(f"[{seq}] {event.get('tool') or 'tool'}" + (f" {path}" if path else ""))
+    elif kind == "task.stderr":
+        # The agent's own diagnostics, on OUR stderr — so `grid task follow > out.txt` keeps the
+        # task's output separable from the noise around it.
+        print(f"[{seq}] {event.get('text', '')}", file=sys.stderr)
+    elif kind == "task.session":
+        print(f"[{seq}] session {event.get('session_id')}")
     elif kind == "task.attempt_started":
         provider = event.get("provider_id")
         where = f" on {provider}" if provider else ""
@@ -199,6 +211,8 @@ def _task_get(args: argparse.Namespace) -> int:
     print(f"state={task.get('state') or 'unknown'}")
     if task.get("provider_id"):
         print(f"provider={task['provider_id']}")
+    if task.get("claude_session_id"):
+        print(f"session={task['claude_session_id']}")
     if task.get("error"):
         print(f"error={task['error']}")
     result = task.get("result_text")
