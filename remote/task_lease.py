@@ -52,11 +52,23 @@ refusal, and the split is load-bearing rather than fussy:
 
 Killing is never required for correctness — D-c's fence holds whatever the loser does. It is a
 saving, so it is only spent on certainty.
+
+What else rides the beat
+------------------------
+
+One thing, and it is a passenger rather than a second job: a snapshot of the task's workspace
+(ADR 0032 D-f, issue 08). The tree is *published*, never asked for — a "show me the directory"
+request/response channel would make the wire bidirectional and oblige a provider saturated with a
+task to keep answering control traffic — so it rides the beat that already exists instead of opening
+a loop or a connection of its own. `_beat` states the three rules that keep it free: after the
+renewal, only once a child exists, and never able to cost anything.
 """
 from __future__ import annotations
 
 import sys
 import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 from . import relay
@@ -92,10 +104,15 @@ class LeaseRenewer:
     """Renews one task's lease while its agent lives. Never raises into the task loop."""
 
     def __init__(self, state: Any, task_id: str, *,
-                 interval: float = RENEW_INTERVAL_SECONDS) -> None:
+                 interval: float = RENEW_INTERVAL_SECONDS,
+                 on_beat: Callable[[], None] | None = None) -> None:
         self._state = state
         self._task_id = task_id
         self._interval = interval
+        # The one passenger this beat carries (ADR 0032 D-f, issue 08). Its contract is stated in the
+        # module docstring: called after a renewal, only while a child is attached, and never allowed
+        # to cost anything.
+        self._on_beat = on_beat
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # The agent's process handle — the ONLY thing this class treats as evidence. `None` means
@@ -128,9 +145,18 @@ class LeaseRenewer:
     def close(self) -> None:
         """Stop renewing and wait briefly for the thread to notice.
 
-        Called BEFORE the terminal report, so a renewal cannot be in flight while the state changes
+        Called BEFORE the terminal report, so a renewal in flight does not race the state changing
         underneath it — the write would simply be refused, but the log would then carry a 404 that
         looks like a fault rather than a race the caller created.
+
+        What the join actually guarantees is narrower than "nothing is in flight", and saying so
+        matters because the gap is where the confusing log line comes from. One iteration can outlast
+        `_CLOSE_JOIN_SECONDS` several times over — `_renew_once`'s own round trip is bounded at
+        `relay._TASK_EVENT_TIMEOUT` (15s), three times the join — and this call must NOT wait for it:
+        the caller is on its way to reporting a terminal result, and parking it there would delay the
+        one write that matters for the sake of one that no longer does. So the guarantee is that no
+        NEW work is started (`_loop` re-checks the stop before beating, and exits at the top of the
+        next wait), not that in-flight work has finished.
         """
         self._stop.set()
         thread = self._thread
@@ -140,7 +166,16 @@ class LeaseRenewer:
     def _loop(self) -> None:
         # Waits FIRST: the claim has just written a full-TTL lease, so an immediate renewal would be
         # a round trip that changes nothing.
-        while not self._stop.wait(self._interval):
+        #
+        # And waits on an ABSOLUTE schedule rather than sleeping a fixed interval after the work. The
+        # distinction is the whole safety margin: with a fixed sleep, the period is the interval PLUS
+        # everything the iteration did — the renewal's own round trip and the beat's — so a slow
+        # relay silently stretches the gap between two renewals until the relay reclaims a task that
+        # is running perfectly. Measured from the start of a period, ordinary work is absorbed rather
+        # than added, and only work slower than the whole interval delays anything.
+        # `tests/test_task_lease.py` pins the resulting worst-case gap against the relay's own TTL.
+        next_renewal = time.monotonic() + self._interval
+        while not self._stop.wait(max(0.0, next_renewal - time.monotonic())):
             try:
                 if self._child_is_gone():
                     # Latched, permanently. The lease now lapses on the relay's clock and the task
@@ -149,6 +184,7 @@ class LeaseRenewer:
                     return
                 if not self._renew_once():
                     return
+                self._beat()
             except (Exception, SystemExit) as exc:
                 # `SystemExit` is this repo's clean-error idiom and is NOT an `Exception`; a guard
                 # naming only `Exception` would let it kill this thread silently. Nothing here may
@@ -156,6 +192,41 @@ class LeaseRenewer:
                 # like one that is working, right up until the task is reclaimed mid-run.
                 _warn(f"lease renewal for task {self._task_id} hit an unexpected error ({exc!r}); "
                       f"still renewing")
+            # `max` with the clock so an iteration that overran does not leave a backlog of
+            # zero-length waits to burn through: being late is caught up by going straight round
+            # again, not by renewing several times in a row.
+            next_renewal = max(next_renewal + self._interval, time.monotonic())
+
+    def _beat(self) -> None:
+        """The one passenger on this beat: a snapshot of the workspace (ADR 0032 D-f, issue 08).
+
+        Three properties, and each is load-bearing rather than defensive:
+
+          * **After the renewal**, never before. A snapshot has its own budget
+            (`task_repo.LS_FILES_TIMEOUT_SECONDS`) and spending it before the renewal would put a git
+            invocation between the lease and every extension of it. After, the cost lands on the NEXT
+            beat's spacing, which `tests/test_task_lease.py` pins inside the relay's TTL.
+          * **Never started after `close()`.** The join there is bounded and cannot cover an
+            iteration, so a renewal parked in the relay can outlast it — and without this check the
+            supervisor would then spend a full snapshot on a task whose terminal report is already
+            being written. Nothing is corrupted either way; what is saved is a beat's work and a 404
+            in the log that reads as a fault rather than as a race the caller created.
+          * **Only once a child is attached.** The renewer starts before `run_task` and covers a
+            checkout that can run for 300s; the workspace is per-project and persists, so a snapshot
+            taken then would show the PREVIOUS task's files labelled as this task's. Renewal in that
+            window is honest — the supervisor really is inside `run_task` — but the tree would not be.
+          * **Guarded, and never allowed to matter.** `WorkspaceTree.beat` is written never to raise;
+            this does not rest on that. An escape here ends the renewal thread, the lease lapses, and
+            the task is reclaimed mid-run — a result lost to a progress feature.
+        """
+        if self._on_beat is None or self._proc is None or self._stop.is_set():
+            return
+        try:
+            self._on_beat()
+        except (Exception, SystemExit) as exc:
+            _warn(f"the workspace snapshot for task {self._task_id} raised ({exc!r}) — it is "
+                  f"documented never to; the lease is still being renewed and the task is "
+                  f"unaffected")
 
     def _child_is_gone(self) -> bool:
         """Whether the agent we are vouching for has exited.

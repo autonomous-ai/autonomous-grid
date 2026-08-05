@@ -502,6 +502,284 @@ def test_the_reset_reason_is_bounded_to_what_the_relay_will_accept(monkeypatch, 
         f"relay that refuses anything over {relay_cap} — with the whole report")
 
 
+def test_the_heartbeat_carries_a_tree_snapshot_while_the_agent_works(renewals):
+    """ADR 0032 D-f's tracer bullet: the workspace view rides the beat that already exists.
+
+    Not its own thread and not its own connection — the whole point of publishing rather than
+    answering requests is that observability costs one more thing on a beat the provider was sending
+    anyway.
+    """
+    from remote import task_lease
+
+    beats = []
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=0.01, on_beat=lambda: beats.append(1))
+    renewer.attach(_FakeProc(alive=True))
+    renewer.start()
+    try:
+        assert _wait_for(lambda: len(beats) >= 3)
+    finally:
+        renewer.close()
+
+
+def test_nothing_is_snapshotted_before_the_agent_exists(renewals):
+    """The renewer starts BEFORE `run_task`, and the checkout it covers can run for 300s.
+
+    A snapshot taken in that window would show the PREVIOUS task's workspace — the directory is
+    per-project and persists — labelled as this task's. Renewal in that window is still correct and
+    still happens; the tree is the part that would be lying.
+    """
+    from remote import task_lease
+
+    beats = []
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=0.01, on_beat=lambda: beats.append(1))
+    renewer.start()
+    try:
+        assert _wait_for(lambda: len(renewals) >= 3), "the lease must still be renewed pre-spawn"
+    finally:
+        renewer.close()
+
+    assert beats == []
+
+
+def test_the_lease_is_renewed_before_the_tree_is_ever_read(renewals):
+    """Order, and it is the whole reason a slow listing is survivable.
+
+    Renewing first means a listing that takes its full budget delays only the NEXT beat, and the
+    arithmetic below keeps that inside the relay's TTL. Reading the tree first would put a git
+    invocation between the lease and its renewal on every single beat.
+    """
+    from remote import task_lease
+
+    order = []
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=0.01, on_beat=lambda: order.append("tree"))
+    monkey = renewer  # kept readable below
+    renewer.attach(_FakeProc(alive=True))
+
+    import remote.task_lease as module
+    real = module.relay.renew_task_lease
+
+    def _recording(signaling_url, token, task_id):
+        order.append("lease")
+        return real(signaling_url, token, task_id)
+
+    module.relay.renew_task_lease = _recording
+    try:
+        monkey.start()
+        assert _wait_for(lambda: len(order) >= 4)
+    finally:
+        module.relay.renew_task_lease = real
+        renewer.close()
+
+    assert order[:4] == ["lease", "tree", "lease", "tree"]
+
+
+def test_a_tree_snapshot_that_blows_up_never_costs_the_lease(renewals):
+    """The criterion: tree publication failing does not break the heartbeat.
+
+    `WorkspaceTree.beat` is written never to raise, and this does not rest on that — the guard is
+    here as well, because a beat that escaped would end the renewal thread and the task would be
+    reclaimed mid-run by a *progress* feature.
+    """
+    from remote import task_lease
+
+    def _explode():
+        raise SystemExit("the workspace is on fire")
+
+    renewer = task_lease.LeaseRenewer(_FakeState(), "t-1", interval=0.01, on_beat=_explode)
+    renewer.attach(_FakeProc(alive=True))
+    renewer.start()
+    try:
+        assert _wait_for(lambda: len(renewals) >= 3), "a failing tree snapshot stopped the renewals"
+    finally:
+        renewer.close()
+
+
+def test_the_tree_stops_the_moment_the_agent_does(renewals):
+    """Nothing is vouched for after the child exits, and nothing is narrated either — the terminal
+    commit is what says what the workspace finally held."""
+    from remote import task_lease
+
+    beats = []
+    proc = _FakeProc(alive=True)
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=0.01, on_beat=lambda: beats.append(1))
+    renewer.attach(proc)
+    renewer.start()
+    try:
+        assert _wait_for(lambda: len(beats) >= 2)
+        proc.exit(0)
+        time.sleep(0.05)
+        settled = len(beats)
+        time.sleep(0.05)
+        assert len(beats) == settled
+    finally:
+        renewer.close()
+
+
+def test_the_worst_case_gap_between_two_renewals_stays_inside_the_relays_lease_ttl():
+    """The arithmetic that makes riding the heartbeat safe, asserted rather than described — and
+    asserted over EVERY term, which is where the first version of it was wrong.
+
+    What must hold is one thing: two SUCCESSFUL renewals are never further apart than the relay's
+    TTL. The gap is the loop's whole period, so it counts the renewal's own round trip and the beat's
+    — not just the wait. The first version counted the wait and the listing and stopped there, which
+    made a 130s gap look like a 35s one:
+
+        30s wait + 30s renew (a POST plus one refresh retry) + 10s listing (`ls-files` twice)
+        + 30s waiting on the publisher's lock + 30s for the tree's own POST = 130s > 120s TTL.
+
+    Three changes closed it, and each is pinned by its own test elsewhere in this file or in
+    `tests/test_task_tree.py`: the wait is now measured from the START of an iteration, so ordinary
+    work no longer adds to the period; the listing has ONE budget across both git calls; and the tree
+    publish declines to wait for a busy channel instead of parking on it.
+
+    Every relay-side figure is read from grid-src rather than restated, so raising one of ours
+    without raising theirs fails here instead of in a fleet that quietly redoes every long task.
+    """
+    from remote import relay, task_lease, task_repo
+
+    ttl = _relay_config_constant("task_lease_seconds")
+    # A relay round trip, doubled: `_renew_once` and `_send` both retry once past a 401 refresh.
+    round_trip = 2 * relay._TASK_EVENT_TIMEOUT
+    # One beat: the listing's whole budget, then the tree's own POST. No lock wait — the beat asks
+    # the publisher not to block (`test_the_heartbeats_snapshot_never_waits_for_a_busy_channel`).
+    beat = task_repo.LS_FILES_TIMEOUT_SECONDS + round_trip
+    # The wait is absolute, so a period is the interval OR the work, whichever is longer — never the
+    # sum (`test_a_slow_beat_does_not_push_the_next_renewal_out_by_its_own_duration`).
+    gap = max(task_lease.RENEW_INTERVAL_SECONDS, round_trip + beat)
+
+    assert gap * 1.5 <= ttl, (
+        f"two renewals can be {gap}s apart in the worst case, which leaves no real margin inside "
+        f"the relay's {ttl}s lease TTL — long tasks would be reclaimed while running perfectly")
+
+
+def test_a_slow_beat_does_not_push_the_next_renewal_out_by_its_own_duration(renewals):
+    """The period is measured from the start of an iteration, not from the end of its work.
+
+    With a fixed sleep after the work, every second the tree spends is a second the lease is older
+    before its next renewal — so the feature that is supposed to cost nothing sets the cadence. Here
+    a beat that takes several intervals is absorbed rather than added: renewals keep landing on the
+    interval, and only a beat slower than the whole interval delays anything.
+    """
+    from remote import task_lease
+
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=0.05, on_beat=lambda: time.sleep(0.04))
+    renewer.attach(_FakeProc(alive=True))
+    started = time.monotonic()
+    renewer.start()
+    try:
+        assert _wait_for(lambda: len(renewals) >= 4)
+    finally:
+        renewer.close()
+    elapsed = time.monotonic() - started
+
+    # Four renewals at a 0.05s period is ~0.2s. Adding the 0.04s beat to every period instead would
+    # be ~0.36s, so the bound below separates the two without pinning a wall-clock cadence.
+    assert elapsed < 0.30, f"the beat's duration is being added to the renewal period ({elapsed:.2f}s)"
+
+
+def test_the_whole_listing_shares_one_budget_rather_than_one_each(monkeypatch, tmp_path):
+    """`list_files` makes TWO git calls, and the lease arithmetic counts the function, not the call.
+
+    A per-call ceiling makes the real worst case double the figure the safety test checks against,
+    and it does so invisibly: every test still passes, the comment still reads as though it were one
+    budget, and the margin is simply gone. Asserted on what git is actually handed.
+    """
+    import subprocess
+
+    from remote import task_repo
+
+    spent_by_the_first_call = 0.5
+    handed = []
+    real = subprocess.run
+
+    def _recording(argv, **kwargs):
+        handed.append(kwargs.get("timeout"))
+        if len(handed) == 1:
+            time.sleep(spent_by_the_first_call)
+        return real(argv, **kwargs)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_repo._ensure_repo(workspace)
+    monkeypatch.setattr(subprocess, "run", _recording)
+
+    task_repo.list_files(workspace, timeout=5.0)
+
+    assert len(handed) == 2, f"expected two git calls, got {len(handed)}"
+    # The second call's ceiling is what the first one LEFT, not a fresh one. Asserted this way round
+    # rather than on the sum of the two figures: the second budget is computed once the first call
+    # has returned, so the two never actually overlap on the clock — what a per-call ceiling would
+    # break is precisely this, that time already spent is deducted.
+    assert handed[1] <= 5.0 - spent_by_the_first_call, (
+        f"the second git call was handed {handed[1]}s after the first had already spent "
+        f"{spent_by_the_first_call}s — a budget each, so the listing's real ceiling is twice what "
+        f"the lease arithmetic assumes")
+
+
+def test_a_beat_is_never_started_after_close_was_called(monkeypatch):
+    """`close()` waits a bounded time and then gives up, and the beat must respect that.
+
+    The bound cannot cover an iteration: `_renew_once`'s own round trip is bounded at
+    `relay._TASK_EVENT_TIMEOUT`, which is already three times the join. So the honest guarantee is
+    not "no work is in flight" but "no NEW work is started" — and without this check a `close()` that
+    timed out while a renewal was parked would be followed by a full tree snapshot, on a task whose
+    terminal report is already being written.
+    """
+    import threading
+
+    from remote import task_lease
+
+    monkeypatch.setattr(task_lease, "_CLOSE_JOIN_SECONDS", 0.1)
+    inside_the_relay = threading.Event()
+    release = threading.Event()
+    beats = []
+
+    def _parked_renewal(_url, _token, _task_id):
+        inside_the_relay.set()
+        release.wait(5.0)
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", _parked_renewal)
+    renewer = task_lease.LeaseRenewer(
+        _FakeState(), "t-1", interval=0.01, on_beat=lambda: beats.append(1))
+    renewer.attach(_FakeProc(alive=True))
+    renewer.start()
+    try:
+        assert inside_the_relay.wait(5.0)
+        renewer.close()
+    finally:
+        release.set()
+    assert _wait_for(lambda: not renewer._thread.is_alive())
+
+    assert beats == [], "a snapshot was started after the renewer had been closed"
+
+
+def _relay_config_constant(name):
+    """A default out of grid-src's `config.py`, parsed rather than imported. See `_relay_constant`."""
+    import ast
+    import pathlib
+
+    source = pathlib.Path(
+        "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
+        "/grid_cli/private_server/config.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    for node in ast.walk(ast.parse(source.read_text())):
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == name:
+            # `int(os.getenv("TASK_LEASE_SECONDS", "120"))` — the default is the literal the fleet
+            # runs on, and it is the second argument of the `getenv` call.
+            for sub in ast.walk(node.value):
+                if (isinstance(sub, ast.Call)
+                        and getattr(getattr(sub, "func", None), "attr", None) == "getenv"
+                        and len(sub.args) == 2):
+                    return int(ast.literal_eval(sub.args[1]))
+    raise AssertionError(f"{name} is no longer defined with a default in grid-src's config.py")
+
+
 def _relay_constant(name):
     """Read a constant out of grid-src's tasks module by parsing it, never by importing it.
 

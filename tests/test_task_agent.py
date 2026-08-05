@@ -1245,7 +1245,7 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
 
 class _NullPublisher:
     def publish(self, *_a, **_k):
-        pass
+        return True
 
     def close(self):
         pass
@@ -1396,8 +1396,11 @@ class _RecordingPublisher:
     def __init__(self):
         self.published = []
 
-    def publish(self, kind, **fields):
+    def publish(self, kind, *, blocking=True, **fields):
+        # `True` is part of the real publisher's shape: it answers whether it ACCEPTED the event, and
+        # `task_tree.WorkspaceTree` only stops re-sending a snapshot once it hears yes.
         self.published.append((kind, fields))
+        return True
 
     def close(self):
         pass
@@ -1609,6 +1612,79 @@ def test_a_task_with_no_git_plane_reports_normally_and_pushes_nothing(agent, mon
 
     assert reported["state"] == "completed"
     assert reported["result_commit"] is None
+
+
+# --- issue 08: the live workspace tree -----------------------------------------------------------
+
+def _fast_heartbeat(monkeypatch, interval=0.05):
+    """Beat the lease at test speed, with the wire stubbed out.
+
+    The interval is forced at CONSTRUCTION rather than by patching `RENEW_INTERVAL_SECONDS`: that
+    constant is a default argument, bound when the module was imported, so patching it afterwards
+    changes nothing and the test would pass a 30-second wait it never actually took.
+    """
+    from remote import task_lease
+
+    real = task_lease.LeaseRenewer
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        task_lease, "LeaseRenewer",
+        lambda state, task_id, **kw: real(state, task_id, **{**kw, "interval": interval}))
+
+
+def test_the_client_sees_the_workspace_change_while_the_task_runs(agent, tmp_path, monkeypatch):
+    """The issue's demo, end to end through the real loop: a file the agent creates mid-run reaches
+    the event log BEFORE the task ends.
+
+    That "before" is the whole feature. The provider commits only at terminal boundaries (ADR 0032
+    D-e), so between claim and terminal the repository holds nothing new and this stream is the only
+    live view there is.
+    """
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    _fast_heartbeat(monkeypatch)
+    agent("echo made > made.py\n"
+          "sleep 1\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    publisher = _RecordingPublisher()
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_a, **_k: publisher)
+    monkeypatch.setattr(tasks, "report_once", lambda *_a, **_k: None)
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    trees = [fields for kind, fields in publisher.published if kind == "task.tree"]
+    assert trees, f"no tree snapshot was published at all: {publisher.published}"
+    assert "made.py" in trees[-1]["paths"]
+    assert "a.txt" in trees[-1]["paths"], "the task's input should be in the view too"
+
+
+def test_a_tree_that_cannot_be_read_at_all_still_lets_the_task_finish(agent, tmp_path, monkeypatch):
+    """The isolation criterion at the level that matters: the RESULT.
+
+    The unit tests prove `WorkspaceTree.beat` swallows its failures. This proves the wiring does too
+    — a tree that cannot even be constructed must cost a view of a directory and nothing else.
+    """
+    from remote import task_tree, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    _fast_heartbeat(monkeypatch)
+
+    def _refuse(*_a, **_k):
+        raise RuntimeError("no tree for you")
+
+    monkeypatch.setattr(task_tree, "WorkspaceTree", _refuse)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *_a, **_k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "completed"
+    assert reported["result_commit"] not in (None, "", commit)
 
 
 # --- issue 05: `grid task fetch` ------------------------------------------------------------------

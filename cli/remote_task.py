@@ -203,6 +203,9 @@ def _task_follow(args: argparse.Namespace) -> int:
     cursor = int(getattr(args, "after_seq", -1) or -1)
     terminal: dict | None = None
     attempts_left = _RECONNECT_ATTEMPTS
+    # Outlives the reconnect loop deliberately: a reattach resumes at the cursor, so the tree the
+    # follower already showed is still the tree the user is looking at.
+    tree = _TreeView()
 
     while terminal is None:
         made_progress = False
@@ -211,7 +214,7 @@ def _task_follow(args: argparse.Namespace) -> int:
                     base, token, args.task_id, after_seq=cursor):
                 cursor = seq
                 made_progress = True
-                _render(seq, event, as_json=as_json)
+                _render(seq, event, as_json=as_json, tree=tree)
                 if event.get("type") == "task.terminal":
                     terminal = event
                     break
@@ -265,18 +268,120 @@ def _is_answer_not_blip(status: int | None) -> bool:
     return status is not None and 400 <= status < 500
 
 
-def _render(seq: int, event: dict, *, as_json: bool) -> None:
+# How many path lines one tree snapshot may print. The provider's own cap protects the WIRE; this
+# one protects the terminal, where the tree shares a screen with the tool-call lines a user is
+# actually reading. A capped snapshot is still five hundred paths.
+_TREE_LINES = 40
+# What every path line is indented by, so a tree is visibly subordinate to the `[seq]` line above it.
+_TREE_INDENT = "      "
+
+
+class _TreeView:
+    """The last workspace snapshot this follower saw, so later ones can be shown as changes.
+
+    The provider re-sends the WHOLE tree every time — it has to, because a client can attach at any
+    `after_seq` and a requeue can move the task to a provider that never saw the earlier events
+    (ADR 0032 D-d). Snapshots are the right thing on the wire and the wrong thing on a screen:
+    reprinting two hundred unchanged paths every thirty seconds buries everything else. So the
+    difference is computed here, at the only end that has somewhere to keep it.
+
+    **A delta is only computed between two COMPLETE snapshots**, and "complete" is judged rather than
+    assumed. A truncated snapshot shows a prefix; so does one whose `paths` was not a list, or held
+    an entry that was not a string, or whose `total` disagrees with what arrived. In every one of
+    those cases a path missing from this snapshot may simply be a path we were not given — and
+    reporting it as `- src/main.py` would be a confident, wrong statement that the agent deleted the
+    user's file. Listing the snapshot again is noisier and true, which is the correct way round.
+    """
+
+    def __init__(self) -> None:
+        # The last COMPLETE snapshot, or `None` for "no baseline worth diffing against" — which is
+        # both the initial state and what a partial snapshot leaves behind.
+        self._paths: frozenset[str] | None = None
+
+    def lines(self, seq: int, event: dict) -> list[str]:
+        """The lines one `task.tree` event prints. Never raises — the event came off the wire."""
+        paths, well_formed = _tree_paths(event)
+        total = event.get("total")
+        # `bool` is an `int` in Python, and `True` is not a file count.
+        counted = isinstance(total, int) and not isinstance(total, bool) and total >= len(paths)
+        truncated = bool(event.get("truncated"))
+        # Complete means: everything the tree holds is in this event, and we can prove it. A `total`
+        # that disagrees with the paths delivered is as partial as a flag saying so.
+        complete = well_formed and counted and not truncated and total == len(paths)
+
+        if counted:
+            head = f"[{seq}] workspace: {total} files"
+            if truncated:
+                head += f" (truncated, showing {len(paths)} of {total})"
+        else:
+            # No usable count arrived, so none is claimed: "showing 2 of 2" under a `truncated` flag
+            # is a line that contradicts itself, and it is built entirely out of a recovered number.
+            head = f"[{seq}] workspace: {len(paths)} files listed"
+            if truncated:
+                head += " (truncated; the total was not reported)"
+
+        previous = self._paths
+        self._paths = frozenset(paths) if complete else None
+        if previous is None or not complete:
+            # Nothing honest to compare against: either the user attached mid-run and has no idea
+            # what is in there, or one of the two snapshots is part of a tree we never saw whole.
+            return [head, *_bounded([f"{_TREE_INDENT}{path}" for path in paths])]
+
+        added = sorted(frozenset(paths) - previous)
+        removed = sorted(previous - frozenset(paths))
+        if not added and not removed:
+            return [head]
+        counts = ([f"+{len(added)}"] if added else []) + ([f"-{len(removed)}"] if removed else [])
+        head += f" ({', '.join(counts)})"
+        return [head, *_bounded(
+            [f"{_TREE_INDENT}+ {path}" for path in added]
+            + [f"{_TREE_INDENT}- {path}" for path in removed])]
+
+
+def _tree_paths(event: dict) -> tuple[list[str], bool]:
+    """The event's `paths`, and whether they arrived intact.
+
+    Defended at the boundary — a relay that is newer, older, or simply wrong must not be able to turn
+    `grid task follow` into a traceback. The second half of the answer is what stops the defence from
+    becoming its own bug: silently dropping an entry we could not read leaves a SHORTER list that
+    looks complete, and `_TreeView` would then report the missing entry as a deleted file.
+    """
+    raw = event.get("paths")
+    if not isinstance(raw, list):
+        return [], False
+    usable = [path for path in raw if isinstance(path, str)]
+    return usable, len(usable) == len(raw)
+
+
+def _bounded(lines: list[str]) -> list[str]:
+    """At most `_TREE_LINES` of them, and a line saying so when there were more.
+
+    Saying so is the part that matters: a listing silently cut at forty reads as a workspace that
+    holds forty files, which is exactly the wrong thing to believe about a dependency install.
+    """
+    if len(lines) <= _TREE_LINES:
+        return lines
+    return [*lines[:_TREE_LINES], f"{_TREE_INDENT}… and {len(lines) - _TREE_LINES} more"]
+
+
+def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = None) -> None:
     """One event, printed. Unknown types are shown rather than dropped.
 
-    Event types grow — issue 08 adds `task.tree` — and a follower that rendered only the types it
-    knew would show a user nothing while the relay faithfully streamed them what they asked for.
+    Event types grow, and a follower that rendered only the types it knew would show a user nothing
+    while the relay faithfully streamed them what they asked for.
     """
     if as_json:
         print(json.dumps({"seq": seq, "event": event}))
         return
 
     kind = event.get("type") or "event"
-    if kind == "task.output":
+    if kind == "task.tree":
+        # The only live view of a running task's working directory: the provider commits at terminal
+        # boundaries only (ADR 0032 D-e), so between claim and terminal the repository holds nothing
+        # new and there is nothing else to look at.
+        for line in (tree or _TreeView()).lines(seq, event):
+            print(line)
+    elif kind == "task.output":
         print(event.get("text", ""))
     elif kind == "task.tool_use":
         # The line a user reads most of — a task is minutes of tool calls and a sentence of prose.

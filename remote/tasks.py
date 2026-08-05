@@ -324,9 +324,11 @@ def _drain(stream, sink: _Tail, queued: "queue.Queue | None" = None) -> None:
     buffer blocks on write and looks exactly like a hang.
 
     Lines are also handed to `queued` when one is given, so the MAIN loop can publish them. Nothing
-    is published from this thread: `TaskEventPublisher` buffers into a plain list with no lock, and a
-    second thread appending to it while the stdout pump flushes it is a corrupted batch — silently,
-    and only under load.
+    is published from this thread, and the reason is ORDERING rather than safety: the publisher is
+    lock-guarded since issue 08 (the lease heartbeat publishes tree snapshots through it too), so a
+    direct publish from here would no longer corrupt a batch — it would simply interleave stderr with
+    stdout in whichever order two threads happened to reach the lock. The one queue is what keeps the
+    task's log in the order the child actually wrote it.
     """
     try:
         for line in stream:
@@ -705,7 +707,7 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
     # task (ADR 0032 D-c). Started BEFORE `run_task` because the pre-spawn checkout is real work
     # whose own ceiling (300s) outruns the 120s lease TTL, and closed in the `finally` below so a
     # supervisor that moved on cannot still be vouching for a child it no longer has.
-    renewer = _lease_renewer(state, task_id)
+    renewer = _lease_renewer(state, task_id, on_beat=_tree_beat(job, publisher))
     try:
         outcome = run_task(job, publisher.publish, remote=remote,
                            on_spawn=lambda proc: _spawned(spawned, renewer, proc))
@@ -806,7 +808,8 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
             state.tasks_stop.wait(_REPORT_BACKOFF_SECONDS)
 
 
-def _lease_renewer(state: Any, task_id: str) -> Any:
+def _lease_renewer(state: Any, task_id: str, *,
+                   on_beat: Callable[[], None] | None = None) -> Any:
     """This attempt's lease renewer, already started. Never raises.
 
     Guarded for the same reason `_publisher_for` is: a task that runs without renewal is reclaimed
@@ -815,15 +818,35 @@ def _lease_renewer(state: Any, task_id: str) -> Any:
     loop from starting at all.
     """
     try:
-        from .task_lease import LeaseRenewer
+        from . import task_lease
 
-        renewer = LeaseRenewer(state, task_id)
+        renewer = task_lease.LeaseRenewer(state, task_id, on_beat=on_beat)
         renewer.start()
         return renewer
     except (Exception, SystemExit) as exc:
         _warn(f"could not set up lease renewal for task {task_id} ({exc!r}); the task still runs, "
               f"but its lease will lapse and another provider may retry it")
         return _NoRenewal()
+
+
+def _tree_beat(job: dict[str, Any], publisher: Any) -> Callable[[], None] | None:
+    """The workspace snapshot this task's heartbeat carries, or `None` if it cannot be set up.
+
+    Built here rather than inside `run_task` because the beat has to exist before the checkout does:
+    the renewer starts first, and `LeaseRenewer._beat` is what holds the snapshot back until there is
+    an agent to snapshot for. Guarded end to end and returning `None` on any fault, so a task whose
+    tree could not be wired runs exactly as it did before issue 08 — the degrade rule this repo
+    applies to every optional signal.
+    """
+    try:
+        from . import task_tree
+
+        workspace = task_agent.workspace_for(str(job.get("project_id") or ""))
+        return task_tree.WorkspaceTree(workspace, publisher).beat
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not set up workspace tree snapshots for task {job.get('task_id')} ({exc!r}); "
+              f"the task runs normally, but its live file view will be missing")
+        return None
 
 
 class _NoRenewal:

@@ -1030,6 +1030,29 @@ leaves the provider.
 The agent authenticates with **the provider's own Claude subscription** — not with the grid token,
 and not with the requesting user's. Nothing about the grid is put into its environment.
 
+### Watching the workspace change
+
+`follow` also shows the **shape of the working directory** as the agent builds it, on a `task.tree`
+event the provider folds into the heartbeat it already sends. This is the only live view there is:
+the result is committed at the end of the task, so between claim and terminal the repository holds
+nothing new and files cannot be downloaded mid-run.
+
+```
+[12] workspace: 3 files
+      README.md
+      src/main.py
+      tests/test_main.py
+[31] workspace: 4 files (+1)
+      + src/util.py
+```
+
+The first snapshot is listed in full and later ones show only what changed. What you see respects
+**your project's own ignore rules** — a `.gitignore`d `node_modules/` never appears — and is capped,
+so a very large workspace arrives truncated and says so (`workspace: 12431 files (truncated, showing
+500 of 12431)`); a truncated snapshot is listed rather than diffed, because a path missing from a
+prefix has not necessarily been deleted. A snapshot is only sent when the tree actually changed, so
+an idle task produces no tree lines at all, and `--json` carries every path rather than the summary.
+
 ### Continuing a conversation
 
 A project's second and later tasks **continue the first one's Claude Code session** instead of

@@ -21,10 +21,21 @@ Two consequences follow, and they are why this is a class rather than a function
 
 The wire itself stays in `remote/relay.py`, which is this repo's one stateless relay boundary; a
 client per flush (not per event) is what the coalescing above buys.
+
+**Two threads call this, so it is locked.** Until issue 08 there was exactly one caller — the thread
+running the child — and being single-caller was a convention `tasks._drain` states out loud rather
+than a property of this class. Issue 08's tree snapshot rides the lease heartbeat (ADR 0032 D-f), so
+the renewal thread publishes too, and the convention had to become a lock. It is held across the wire
+call and not only across the buffer swap, which is the part worth stating: the relay assigns `seq` on
+arrival, so two batches released to overtake each other are two batches whose events are numbered out
+of order. Out-of-order agent output is a real regression; a tree snapshot arriving a beat late is
+not. The cost is that one caller can wait on the other for at most one `_TASK_EVENT_TIMEOUT` (15s),
+and a blocking POST inside the child-supervision loop is already how this works.
 """
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from typing import Any
 
@@ -64,18 +75,45 @@ class TaskEventPublisher:
         # Latched by a verdict (403/404/422, or a 401 we cannot refresh past). Once set, this
         # publisher is inert for the rest of the task — see the module docstring.
         self._stopped = False
+        # Guards the buffer, the latch, AND the wire call. NOT re-entrant, so nothing under it may
+        # call back in: `publish` reaches `flush` through `_locked_flush`, never through the public
+        # `flush`, which takes the lock itself.
+        self._lock = threading.Lock()
 
-    def publish(self, event_type: str, **fields: Any) -> None:
-        """Buffer one event, flushing if the buffer is full or has been sitting too long."""
-        if self._stopped:
-            return
-        self._buffer.append({"type": event_type, **fields})
-        if (len(self._buffer) >= _FLUSH_AT_EVENTS
-                or time.monotonic() - self._last_flush >= _FLUSH_AFTER_SECONDS):
-            self.flush()
+    def publish(self, event_type: str, *, blocking: bool = True, **fields: Any) -> bool:
+        """Buffer one event, flushing if the buffer is full or has been sitting too long.
+
+        Returns whether the event was ACCEPTED. "Never raises" hides two different outcomes — queued,
+        and dropped because this publisher latched off after a verdict — and a caller that cannot
+        tell them apart will record a lost event as delivered. Every caller may ignore the answer;
+        the one that must not is `task_tree.WorkspaceTree`, which stops re-sending a snapshot once it
+        believes it landed.
+
+        `blocking=False` declines to wait for the lock instead of parking on it. The lock is held
+        across a POST bounded only by `relay._TASK_EVENT_TIMEOUT`, and the lease heartbeat publishes
+        through here (ADR 0032 D-f): waiting there costs the LEASE, and a task reclaimed mid-run is a
+        far worse outcome than a progress event skipped for one beat.
+        """
+        if not self._lock.acquire(blocking=blocking):
+            return False
+        try:
+            if self._stopped:
+                return False
+            self._buffer.append({"type": event_type, **fields})
+            if (len(self._buffer) >= _FLUSH_AT_EVENTS
+                    or time.monotonic() - self._last_flush >= _FLUSH_AFTER_SECONDS):
+                self._locked_flush()
+            return True
+        finally:
+            self._lock.release()
 
     def flush(self) -> None:
         """Send whatever is buffered. Swallows every failure — deliberately, see the docstring."""
+        with self._lock:
+            self._locked_flush()
+
+    def _locked_flush(self) -> None:
+        """`flush`'s body, for callers that already hold the lock. See `_lock` for why that matters."""
         if self._stopped or not self._buffer:
             return
         batch, self._buffer = self._buffer, []

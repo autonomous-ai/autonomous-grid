@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,16 @@ _GIT_TIMEOUT_SECONDS = 120
 # and a packfile, not by the milliseconds a local plumbing command takes, and reusing the local
 # figure would turn an ordinary slow push into a lost result.
 _GIT_NETWORK_TIMEOUT_SECONDS = 300
+# Wall-clock ceiling for the workspace listing (ADR 0032 issue 08). Much SHORTER than the local one,
+# and that is the whole reason it exists rather than reusing it: this call runs on the lease
+# renewer's beat, and `_GIT_TIMEOUT_SECONDS` is 120s — the relay's entire lease TTL. A listing
+# allowed to run that long would push the next renewal past the point where the task is reclaimed,
+# so the observability feature would cost the task. See `tests/test_task_lease.py` for the
+# arithmetic this figure has to satisfy: it is ADDED to the renewal interval in the worst case, and
+# the sum has to stay three beats inside the relay's lease TTL. Generous for what it bounds — reading
+# the index and walking the working tree — and a workspace pathological enough to exceed it loses a
+# snapshot, which is the correct trade against risking the lease.
+LS_FILES_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -211,6 +222,43 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
     # a nested repository a previous agent may have cloned, and `-e` spares the one directory that
     # is ours rather than the task's.
     _run(workspace, "clean", "--quiet", "-ffdx", "-e", RESERVED_DIR)
+
+
+def list_files(workspace: Path, *,
+               timeout: float = LS_FILES_TIMEOUT_SECONDS) -> list[str]:
+    """Every file in `workspace` the project's own ignore rules keep, sorted (ADR 0032 issue 08).
+
+    Asked of git rather than walked, because "the project's ignore rules" is precisely what
+    `--exclude-standard` means: the repository's tracked `.gitignore` files plus the
+    `$GIT_DIR/info/exclude` `_ensure_repo` writes — so `.grid/` is excluded here for free, by the
+    same one rule rather than by a second copy of it. Hand-rolling the match would be a second,
+    worse implementation of gitignore semantics, and its errors would be silent: a file wrongly
+    hidden from the client looks exactly like a file the agent never created.
+
+    Reusing `_run` matters as much as reusing the exclude. The environment it builds is what keeps a
+    listing from being a code-execution seam — `core.hooksPath` pointed at nothing, `HOME` at a
+    directory that does not exist, and `GIT_CONFIG_GLOBAL` at `/dev/null`. That last one also has a
+    visible consequence worth stating: the provider *operator's* personal global gitignore cannot
+    hide files from the user watching their own task.
+    """
+    # ONE budget across both invocations, not one each. This runs on the lease renewer's thread, and
+    # what has to stay bounded is the whole listing — a per-call ceiling would quietly make the real
+    # worst case twice the figure the lease arithmetic in `tests/test_task_lease.py` checks against.
+    deadline = time.monotonic() + timeout
+    tracked_and_new = _split(_run(workspace, "ls-files", "-z", "--cached", "--others",
+                                  "--exclude-standard", timeout=timeout))
+    # Subtracted, because `--cached` is the INDEX and the index outlives the file. An agent that
+    # deletes a file leaves it staged until the terminal commit, so without this the snapshot would
+    # keep showing a file that is no longer there — for the rest of the run, in the one view whose
+    # entire job is to say what is there now.
+    deleted = set(_split(_run(workspace, "ls-files", "-z", "--deleted",
+                              timeout=max(0.0, deadline - time.monotonic()))))
+    return sorted(path for path in tracked_and_new if path not in deleted)
+
+
+def _split(output: str) -> list[str]:
+    """git's `-z` output as paths. NUL-separated, so a path with a newline in it stays one path."""
+    return [path for path in output.split("\0") if path]
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,

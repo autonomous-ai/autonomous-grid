@@ -21938,13 +21938,18 @@ def test_task_follow_json_emits_one_object_per_line(monkeypatch, tmp_path, capsy
 
 
 def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tmp_path, capsys):
-    """Event types grow (issue 08's `task.tree`). A follower that only rendered known types would
-    show a user nothing while the relay faithfully streamed them the thing they asked for."""
+    """Event types grow. A follower that only rendered known types would show a user nothing while
+    the relay faithfully streamed them the thing they asked for.
+
+    The fixture is a type this build genuinely does not know — `task.tree` used to stand in for one
+    and cannot any more, now that issue 08 renders it. A test whose "unknown" type has since become
+    known asserts the fallback while never reaching it.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
 
     body = _sse(
-        _block(0, {"type": "task.tree", "paths": ["a/b.py"]}),
+        _block(0, {"type": "task.rate_limit", "resets_at": 1785832800}),
         _block(1, {"type": "task.terminal", "state": "completed"}),
     )
     _mock_relay(monkeypatch, lambda r: httpx.Response(
@@ -21952,7 +21957,226 @@ def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tm
 
     cli.main(["task", "follow", "T1"])
 
-    assert "task.tree" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "task.rate_limit" in out
+    assert "1785832800" in out, "the fields must be shown too, not just the type"
+
+
+def test_task_follow_shows_the_workspace_and_then_only_what_changed(monkeypatch, tmp_path, capsys):
+    """Issue 08's criterion at the CLIENT end: the user sees the file tree, and sees it grow.
+
+    The first snapshot is the listing, because a user attaching mid-run has no idea what is in there.
+    Every later one is a DELTA, because the provider re-sends the whole tree — it has to, since a
+    client can attach at any seq or a requeue can move the task to a provider that never saw the
+    earlier events — and reprinting two hundred unchanged paths every thirty seconds would bury the
+    tool-call lines a user is actually reading.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["README.md", "src/main.py"],
+                   "total": 2, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["README.md", "src/util.py"],
+                   "total": 2, "truncated": False, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "workspace: 2 files" in out
+    assert "README.md" in out and "src/main.py" in out
+    assert "+ src/util.py" in out
+    assert "- src/main.py" in out
+    assert out.count("README.md") == 1, "an unchanged path must not be reprinted on every snapshot"
+
+
+def test_task_follow_says_when_a_tree_was_truncated(monkeypatch, tmp_path, capsys):
+    """"500 files" and "500 of 12,431 files" are different facts, and only the second one tells a
+    user that what they are looking at is a dependency install rather than their project."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": 12431, "truncated": True, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "12431" in out
+    assert "truncated" in out.lower()
+
+
+def test_task_follow_never_reports_a_truncated_tree_as_deleted_files(monkeypatch, tmp_path, capsys):
+    """A delta is only honest between two COMPLETE snapshots.
+
+    A truncated snapshot shows a prefix, so a path that was in the last one and is not in this one
+    may simply be past the cap — and printing it as `- src/main.py` tells the user the agent deleted
+    their file. That is a worse failure than showing the listing again: it is a confident, wrong
+    statement about their work.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["README.md", "src/main.py"],
+                   "total": 2, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["README.md"],
+                   "total": 9000, "truncated": True, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "- src/main.py" not in out
+    assert "9000" in out
+
+
+def test_task_follow_shows_the_listing_again_after_a_truncated_tree(monkeypatch, tmp_path, capsys):
+    """The other side of the same rule: once the baseline is incomplete there is nothing honest to
+    diff against, so the next complete snapshot re-establishes one by listing itself."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py"],
+                   "total": 9000, "truncated": True, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": 2, "truncated": False, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "+ b.py" not in out, "there was no complete baseline to call b.py an addition against"
+    assert out.count("a.py") == 2, "the complete snapshot should list itself in full"
+
+
+def test_task_follow_never_calls_a_file_deleted_because_one_ENTRY_was_malformed(
+        monkeypatch, tmp_path, capsys):
+    """The same rule truncation already gets, extended to the case that reaches it sideways.
+
+    A snapshot with one non-string entry is a snapshot we have only PART of. Dropping the bad entry
+    and diffing the remainder against a complete baseline reports a file that still exists as
+    deleted — a confident, false claim about the user's work, and exactly what the truncated-baseline
+    rule exists to prevent.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py", "c.py"],
+                   "total": 3, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["a.py", None, "c.py"],
+                   "total": 3, "truncated": False, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    assert "- b.py" not in capsys.readouterr().out
+
+
+def test_task_follow_does_not_claim_a_count_it_was_never_given(monkeypatch, tmp_path, capsys):
+    """`showing 2 of 2` under a `truncated` flag is a line that contradicts itself.
+
+    It comes from recovering an unusable `total` as `len(paths)` and then building the truncation
+    clause out of the recovered number. A count that was not reported must not be presented as one.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": "many", "truncated": True, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "showing 2 of 2" not in out
+    assert "truncated" in out
+    assert "a.py" in out and "b.py" in out, "what we DO have should still be listed"
+
+
+def test_task_follow_does_not_print_a_wall_of_paths_for_a_huge_first_tree(
+        monkeypatch, tmp_path, capsys):
+    """A capped tree is still five hundred paths. The provider's cap protects the WIRE; this one
+    protects the terminal the user is trying to read tool calls in."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    paths = [f"generated/file{n:04d}.txt" for n in range(500)]
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": paths,
+                   "total": 500, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert len(out.splitlines()) < 100, "the listing was not bounded for the terminal"
+    assert "more" in out, "a bounded listing must say that it was bounded"
+
+
+def test_task_follow_json_still_carries_the_whole_tree(monkeypatch, tmp_path, capsys):
+    """`--json` is the machine surface and is not summarized: a script that wants the tree wants all
+    of it, and the delta view exists for the human one."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": 2, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1", "--json"])
+    first = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][0])
+
+    assert first["event"]["paths"] == ["a.py", "b.py"]
+
+
+def test_task_follow_survives_a_tree_event_with_nothing_in_it(monkeypatch, tmp_path, capsys):
+    """The event came off the wire. A relay that is newer, older, or simply wrong must not be able to
+    turn `grid task follow` into a traceback — the same rule every other branch here follows."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree"}),
+        _block(1, {"type": "task.tree", "paths": "not-a-list", "total": "many"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    assert cli.main(["task", "follow", "T1"]) == 0
+    assert "workspace" in capsys.readouterr().out
 
 
 def test_task_follow_renders_tool_activity_as_a_tool_and_a_path(monkeypatch, tmp_path, capsys):
@@ -22516,6 +22740,112 @@ def test_publisher_flushes_on_its_own_once_the_buffer_fills(monkeypatch):
 
     assert len(sent) == 1
     assert len(sent[0]) == task_events._FLUSH_AT_EVENTS
+
+
+def test_publisher_says_whether_an_event_was_actually_accepted(monkeypatch):
+    """"Never raises" has two silent outcomes, and a caller that cannot tell them apart is wrong.
+
+    A publisher that has latched off after a verdict drops the event and returns normally — identical,
+    from the caller's side, to one that queued it. `WorkspaceTree` records a snapshot as DELIVERED on
+    that answer, so without a real one it would remember a tree the relay never saw and never send it
+    again.
+    """
+    from remote import task_events
+
+    _capture_publishes(monkeypatch)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    assert pub.publish("task.output", text="a") is True
+
+    pub._stop("latched off by a verdict")
+    assert pub.publish("task.output", text="b") is False
+
+
+def test_publisher_can_decline_to_wait_for_a_channel_that_is_busy(monkeypatch):
+    """The lease heartbeat publishes through this object, and waiting here costs the LEASE.
+
+    The lock is held across a POST bounded only by `_TASK_EVENT_TIMEOUT`, so a caller that blocked on
+    it could sit for 15 seconds — twice that if a refresh is retried — on the one thread whose whole
+    job is to renew before the relay reclaims the task. A snapshot skipped now is republished on the
+    next beat; a lease missed now is a task redone on another provider.
+    """
+    from remote import task_events
+
+    in_the_relay = threading.Event()
+    release = threading.Event()
+
+    def fake_publish(_base, _token, _task_id, _events):
+        in_the_relay.set()
+        release.wait(5.0)
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", fake_publish)
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 0.0)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    parked = threading.Thread(target=lambda: pub.publish("task.output", text="a"), daemon=True)
+    parked.start()
+    assert in_the_relay.wait(5.0)
+
+    started = time.monotonic()
+    accepted = pub.publish("task.tree", paths=[], blocking=False)
+    waited = time.monotonic() - started
+
+    release.set()
+    parked.join(timeout=5.0)
+
+    assert accepted is False, "a busy channel must be declined, not waited for"
+    assert waited < 1.0, f"the caller waited {waited:.1f}s for a lock it asked not to wait for"
+
+
+def test_publisher_serializes_two_threads_so_batches_cannot_overtake_each_other(monkeypatch):
+    """One publisher, two callers: the task thread and the lease heartbeat's tree beat (issue 08).
+
+    Before issue 08 this class was single-caller by convention — `tasks._drain` says so out loud —
+    and the convention was load-bearing: an unsynchronized `batch, self._buffer = self._buffer, []`
+    lets two flushes capture the SAME list, sending one batch twice and dropping whatever landed in
+    the other. The lock has to cover the wire call too, not just the buffer swap: the relay assigns
+    `seq` on arrival, so two batches released to overtake each other are two batches whose events are
+    numbered out of order — and out-of-order agent output is a real regression where an out-of-order
+    tree snapshot would not be.
+
+    Deterministic in both directions rather than timing-based: the relay's first call parks, the
+    second caller is released only once that has happened, and the batches record themselves as they
+    COMPLETE. Serialized, the order is first-in first-out; unserialized, the second batch finishes
+    first and the assertion says so.
+    """
+    from remote import task_events
+
+    in_the_relay = threading.Event()
+    release = threading.Event()
+    completed = []
+
+    def fake_publish(_base, _token, _task_id, events):
+        if not in_the_relay.is_set():
+            in_the_relay.set()
+            release.wait(5.0)
+        completed.append([event["text"] for event in events])
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", fake_publish)
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 0.0)  # every publish flushes at once
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    first = threading.Thread(target=lambda: pub.publish("task.output", text="a"), daemon=True)
+    first.start()
+    assert in_the_relay.wait(5.0), "the first publish never reached the relay"
+
+    second = threading.Thread(target=lambda: pub.publish("task.output", text="b"), daemon=True)
+    second.start()
+    # The second caller is now either blocked on the lock (correct) or already on the wire (the bug).
+    # Either way the first one is parked, so releasing it settles the question by completion order.
+    second.join(timeout=0.5)
+    release.set()
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+
+    assert completed == [["a"], ["b"]], (
+        "the second batch overtook the first — the publisher's lock does not cover the wire call")
 
 
 def test_publisher_never_raises_when_the_relay_is_unreachable(monkeypatch, capsys):
