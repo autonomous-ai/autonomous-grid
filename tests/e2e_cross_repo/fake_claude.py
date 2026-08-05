@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""A stand-in for Claude Code that speaks the real `stream-json` wire.
+
+It exists so the cross-repo E2E can drive the REAL provider and the REAL relay without spending a
+subscription. Two things about it are deliberate:
+
+* It parses the argv the provider actually builds (`-p`, `--output-format stream-json`, `--verbose`,
+  `--permission-mode`, optional `--resume`) and refuses anything else. A fake that accepted whatever
+  it was handed would keep passing after `agent_argv` changed shape.
+* It computes its transcript directory from ITS OWN `getcwd`, by the vendor's measured rule
+  (`[^A-Za-z0-9]` -> `-`), and never from anything the provider tells it. That is the one property a
+  self-consistent test suite cannot check: issue 06's silent bug was the provider planting its
+  symlink at the UNRESOLVED path while the real binary wrote at the resolved one, and every unit
+  test agreed with the bug because each compared our own computation against itself.
+
+The prompt is the script. Directives are separated by `;`:
+
+    WRITE <relative path> <content>   create a file in the workspace
+    READ <relative path>              read one back and echo it as assistant text
+    SLEEP <seconds>                   stay alive (a task that takes a while)
+    FAIL <message>                    write to stderr and exit 1
+    SAY <text>                        assistant text
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import sys
+import time
+import uuid
+
+_TRANSCRIPT_NAME = re.compile(r"[^A-Za-z0-9]")
+
+
+def _emit(record: dict) -> None:
+    sys.stdout.write(json.dumps(record) + "\n")
+    sys.stdout.flush()
+
+
+def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
+    verbose = False
+    takes_a_value = {"-p": "prompt", "--output-format": "fmt",
+                     "--permission-mode": "mode", "--resume": "resume"}
+    seen: dict[str, str] = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in takes_a_value:
+            seen[takes_a_value[arg]] = argv[i + 1]
+            i += 2
+        elif arg == "--verbose":
+            verbose = True
+            i += 1
+        else:
+            sys.stderr.write(f"fake claude: unexpected argument {arg!r}\n")
+            raise SystemExit(64)
+    prompt, fmt = seen.get("prompt"), seen.get("fmt")
+    mode, resume = seen.get("mode"), seen.get("resume")
+    if prompt is None or fmt != "stream-json" or not verbose or not mode:
+        sys.stderr.write(f"fake claude: argv is not the shape the provider builds: {argv!r}\n")
+        raise SystemExit(64)
+    return prompt, resume
+
+
+def _transcript_dir() -> pathlib.Path | None:
+    """Where the REAL binary would write, derived from this process's own resolved cwd."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config:
+        return None
+    # `getcwd` has already followed every symlink on the way in — which is the whole point.
+    return pathlib.Path(config) / "projects" / _TRANSCRIPT_NAME.sub("-", os.getcwd())
+
+
+def main() -> int:
+    prompt, resume = _parse_argv(sys.argv[1:])
+    session = resume or str(uuid.uuid4())
+    _emit({"type": "system", "subtype": "init", "session_id": session})
+
+    transcript = _transcript_dir()
+    if transcript is not None:
+        transcript.mkdir(parents=True, exist_ok=True)
+        # Appended, never rewritten: a resume continues the same file and keeps the same id.
+        with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
+
+    said: list[str] = []
+    turns = 0
+    for directive in [d.strip() for d in prompt.split(";") if d.strip()]:
+        verb, _, rest = directive.partition(" ")
+        turns += 1
+        if verb == "WRITE":
+            where, _, content = rest.partition(" ")
+            target = pathlib.Path(where)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            _emit({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": f"toolu_{turns}", "name": "Write",
+                 "input": {"file_path": str(target)}}]}})
+            _emit({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": f"toolu_{turns}", "is_error": False}]}})
+        elif verb == "READ":
+            target = pathlib.Path(rest.strip())
+            _emit({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": f"toolu_{turns}", "name": "Read",
+                 "input": {"file_path": str(target)}}]}})
+            body = target.read_text(encoding="utf-8") if target.exists() else "<missing>"
+            said.append(body)
+            _emit({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": body}]}})
+        elif verb == "SLEEP":
+            time.sleep(float(rest))
+        elif verb == "SAY":
+            said.append(rest)
+            _emit({"type": "assistant", "message": {"content": [{"type": "text", "text": rest}]}})
+        elif verb == "FAIL":
+            sys.stderr.write(f"{rest}\n")
+            sys.stderr.flush()
+            return 1
+        else:
+            sys.stderr.write(f"fake claude: unknown directive {verb!r}\n")
+            return 2
+
+    _emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": turns,
+           "duration_ms": 1234, "session_id": session, "result": " ".join(said) or "done"})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
