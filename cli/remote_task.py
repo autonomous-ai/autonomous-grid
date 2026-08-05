@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 # Bounded reattach: a relay that is genuinely gone must end the command rather than spin. The budget
 # is per OUTAGE, not per task — any event received resets it, so a long task that blips repeatedly
@@ -364,6 +366,23 @@ def _bounded(lines: list[str]) -> list[str]:
     return [*lines[:_TREE_LINES], f"{_TREE_INDENT}… and {len(lines) - _TREE_LINES} more"]
 
 
+def _resets_note(resets_at: Any) -> str:
+    """" — resets <local time>", or nothing at all when the stamp is not one.
+
+    A raw epoch is not a time anyone can read, and this line exists to tell a user when they can
+    submit their next task. Every field on the event is optional — it is built from a subprocess's
+    stdout — so an unusable stamp is simply left out rather than shown as `None` or raised on.
+    """
+    if isinstance(resets_at, bool) or not isinstance(resets_at, (int, float)):
+        return ""
+    try:
+        return f" — resets {datetime.datetime.fromtimestamp(resets_at):%b %-d at %H:%M}"
+    except (OverflowError, OSError, ValueError):
+        # A stamp far enough out of range that the platform cannot render it. The rest of the line
+        # is still worth printing; a follower may never die on a diagnostic.
+        return ""
+
+
 def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = None) -> None:
     """One event, printed. Unknown types are shown rather than dropped.
 
@@ -403,6 +422,16 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         # ignoring everything they established in earlier tasks.
         reason = event.get("reason") or "the transcript could not be used"
         print(f"[{seq}] starting a fresh session ({reason})", file=sys.stderr)
+    elif kind == "task.rate_limit":
+        # The provider's own Claude subscription, reporting itself (ADR 0032 issue 09). On stderr
+        # with the other diagnostics: it says nothing about this task's result, and it is the only
+        # copy of the reason that reaches the person who submitted the task — the provider's own
+        # warning goes to the provider's log, which they cannot read. So when their NEXT task sits
+        # queued, this is what explains it.
+        print(f"[{seq}] rate limit: the provider's "
+              f"{event.get('limit_type') or 'subscription'} window is "
+              f"{event.get('status') or 'in an unknown state'}"
+              + _resets_note(event.get("resets_at")), file=sys.stderr)
     elif kind == "task.attempt_started":
         provider = event.get("provider_id")
         where = f" on {provider}" if provider else ""

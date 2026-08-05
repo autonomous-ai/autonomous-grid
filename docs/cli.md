@@ -1030,6 +1030,44 @@ leaves the provider.
 The agent authenticates with **the provider's own Claude subscription** — not with the grid token,
 and not with the requesting user's. Nothing about the grid is put into its environment.
 
+### How much a provider takes on
+
+Two things bound it, and whichever runs out first is the one that stops a provider claiming.
+
+`GRID_MAX_TASKS` is how many tasks that provider runs at once — **1 by default**, so turning task
+serving on does not also change how much of the operator's subscription it spends. There is no upper
+limit: the number is the operator's to choose, and a machine that runs out of threads says so and
+keeps the workers it did start.
+
+> ⚠️ **Anything above 1 is unverified.** No value greater than 1 has been run against a real relay,
+> and the specific unknown is **two Claude Code children sharing one `CLAUDE_CONFIG_DIR`** — the
+> issue-01 spike listed it as an open question and never measured it. The parts that can be reasoned
+> about hold: workspaces are per project and the relay allows only one active task per project, so
+> two concurrent tasks are always in different directories. What has not been observed is the agent
+> itself under concurrency. Raise this only on a provider you can watch, and expect to be the first
+> to find out.
+
+The other bound is the subscription itself, and nobody configures it. Every agent child a provider
+spawns draws on the same Claude subscription, so that subscription's rate limit — not memory, not
+CPU, and not the inference `max_concurrency` — is the real ceiling. Claude Code reports it in the
+same stream the provider is already reading, so the provider learns its own pressure from work it was
+doing anyway. When a run says the window is spent, the provider **stops claiming new tasks and
+starts again when the vendor's window resets**; you see it as a `task.rate_limit` line in
+`grid task follow`, which is what explains a next task that sits queued.
+
+Three properties of that are worth knowing:
+
+- **Tasks already running are never interrupted.** The limit is consulted before a claim and nowhere
+  else, so hitting the wall mid-run costs nothing that was already in flight.
+- **A provider that cannot read the signal keeps serving.** An unreadable payload, a status this
+  build has never seen, a reset stamp that is missing or absurd — none of them stop a provider, and
+  an unrecognised status is named in the provider's log so the gap can be closed. A fleet that
+  quietly withdrew because the vendor added a status string is a far worse failure than one that
+  claims a task and reports the refusal.
+- **Task capacity and inference capacity are independent.** A provider with no task headroom left is
+  still a perfectly good provider of inference, and nothing about this reaches the heartbeat or the
+  relay's routing. A provider saturated with inference can still take a task.
+
 ### Watching the workspace change
 
 `follow` also shows the **shape of the working directory** as the agent builds it, on a `task.tree`
@@ -1099,6 +1137,7 @@ The environment variables that tune a provider, all optional:
 | variable | default | what it does |
 |---|---|---|
 | `GRID_TASKS` | off | `1` to claim tasks at all |
+| `GRID_MAX_TASKS` | `1` | how many tasks this provider runs at once. **Anything above 1 is unverified** — two Claude Code children sharing one config directory has never been measured (see [How much a provider takes on](#how-much-a-provider-takes-on)). No upper limit is imposed: the ceiling that actually binds is the provider's own Claude subscription, which is read at runtime rather than guessed at. A value that is not a positive whole number falls back to `1` and says so |
 | `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
 | `GRID_TASK_PERMISSION_MODE` | `bypassPermissions` | any mode `claude --permission-mode` accepts |

@@ -12532,13 +12532,14 @@ def test_serve_loop_starts_no_task_worker_by_default(monkeypatch, tmp_path):
 
     serve._serve_loop(state)
 
-    assert not any(t.name == "task-worker" for t in threading.enumerate())
+    assert not any(t.name.startswith("task-worker") for t in threading.enumerate())
 
 
 def test_serve_loop_starts_one_task_worker_when_enabled(monkeypatch, tmp_path):
     from remote import serve, tasks
 
     monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.delenv("GRID_MAX_TASKS", raising=False)
     names: list[str] = []
     started = threading.Event()
 
@@ -12554,8 +12555,145 @@ def test_serve_loop_starts_one_task_worker_when_enabled(monkeypatch, tmp_path):
 
     serve._serve_loop(state)
 
-    assert names == ["task-worker"]
+    # One by default — turning task serving on may not also change how much of the operator's
+    # subscription it spends. `GRID_MAX_TASKS` is the only thing that does.
+    assert names == ["task-worker-1"]
     assert state.tasks_stop.is_set()  # teardown retires it, or the thread outlives the engine
+
+
+# --- issue 09: how many tasks at once -------------------------------------------------------------
+
+
+def _count_task_workers(monkeypatch, tmp_path):
+    """Start the task workers with the loop stubbed out, and report the thread names they ran under."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    names: list[str] = []
+    lock = threading.Lock()
+
+    def fake_task_loop(state):
+        with lock:
+            names.append(threading.current_thread().name)
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threads = serve._start_task_worker(state)
+    for thread in threads:
+        thread.join(timeout=5)
+    return names, state
+
+
+def test_a_provider_runs_as_many_tasks_at_once_as_it_was_configured_to(monkeypatch, tmp_path):
+    """The per-provider ceiling ADR 0032 calls for: configured by the operator who owns the
+    subscription, never benchmarked. It binds alongside the subscription's own signal — whichever
+    runs out first is the one that stops this provider claiming."""
+    monkeypatch.setenv("GRID_MAX_TASKS", "3")
+
+    names, _state = _count_task_workers(monkeypatch, tmp_path)
+
+    assert sorted(names) == ["task-worker-1", "task-worker-2", "task-worker-3"]
+
+
+@pytest.mark.parametrize("value", ["", "0", "-2", "lots", "1.5", "1e3000"])
+def test_a_misconfigured_task_ceiling_falls_back_instead_of_retiring_task_serving(
+        monkeypatch, tmp_path, capsys, value):
+    """Same rule as `tasks.task_timeout()`: a provider that refused to serve tasks because an
+    operator typed `three` would take task serving down for the life of the process, which is a far
+    worse answer than running with the default and saying so."""
+    monkeypatch.setenv("GRID_MAX_TASKS", value)
+
+    names, state = _count_task_workers(monkeypatch, tmp_path)
+
+    assert names == ["task-worker-1"]
+    assert not state.tasks_stop.is_set()
+    if value:
+        assert "GRID_MAX_TASKS" in capsys.readouterr().err
+
+
+def test_one_worker_that_cannot_start_does_not_cost_the_others(monkeypatch, tmp_path, capsys):
+    """`RuntimeError: can't start new thread` under exhaustion is the reason there is no upper clamp
+    on the count: the operator's number is honoured, and the machine's own limit is discovered rather
+    than guessed at. Discovering it must leave the workers that DID start running."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "3")
+    real_thread = threading.Thread
+    attempts = []
+
+    def flaky_thread(*args, **kwargs):
+        attempts.append(kwargs.get("name"))
+        if len(attempts) == 2:
+            raise RuntimeError("can't start new thread")
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(tasks, "task_loop", lambda state: None)
+    monkeypatch.setattr(serve.threading, "Thread", flaky_thread)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threads = serve._start_task_worker(state)
+
+    assert len(threads) == 2                     # the third and first started; the second did not
+    assert not state.tasks_stop.is_set()         # task serving is still on
+    assert "can't start new thread" in capsys.readouterr().err
+
+
+def test_task_serving_retires_only_when_no_worker_could_start(monkeypatch, tmp_path, capsys):
+    """Nothing is claiming, so saying so is the honest record — the same retirement a relay with no
+    tasks plane produces, and it still leaves inference alone."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "2")
+    monkeypatch.setattr(tasks, "task_loop", lambda state: None)
+    monkeypatch.setattr(serve.threading, "Thread", _raise(RuntimeError("can't start new thread")))
+    state = _serve_state(monkeypatch, tmp_path)
+
+    assert serve._start_task_worker(state) == []
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()
+
+
+def test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON(monkeypatch, tmp_path):
+    """Task capacity is client-side and stops at this process's edge. It deliberately adds nothing to
+    the heartbeat: the relay routes inference on `load`, and a provider out of TASK headroom is still
+    a perfectly good provider of inference. Publishing it would also make it a cross-repo lockstep
+    value, and there is nothing on the other side that needs one — a provider that stops claiming is
+    simply not handed a task."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+    before = state.load()
+
+    gate = task_capacity.TaskCapacity()
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+
+    assert gate.pause_seconds() > 0.0        # this provider really is out of task headroom
+    assert state.load() == before            # ...and the inference plane's wire payload is untouched
+
+
+def test_a_provider_saturated_with_inference_can_still_take_a_task(monkeypatch):
+    """The other direction of the same independence. The task loop reads nothing from the inference
+    counters — a box with every poll slot busy is a box whose Claude subscription is untouched, and
+    the two ceilings are not the same ceiling (ADR 0032)."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    state.max_concurrency = 4
+    state.enter_inference = state.exit_inference = lambda: None
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=_scripted_gate([], []))
+
+    assert reported == ["T1"]
 
 
 def test_serve_loop_task_worker_death_does_not_stop_the_engine(monkeypatch, tmp_path):
@@ -12621,8 +12759,9 @@ def test_task_worker_death_is_logged_and_retires_task_serving(monkeypatch, tmp_p
     monkeypatch.setattr(tasks, "task_loop", _raise(RuntimeError("task plane exploded")))
     state = _serve_state(monkeypatch, tmp_path)
 
-    thread = serve._start_task_worker(state)
-    thread.join(timeout=5)
+    threads = serve._start_task_worker(state)
+    for thread in threads:
+        thread.join(timeout=5)
 
     err = capsys.readouterr().err
     assert "task-worker" in err and "task plane exploded" in err
@@ -21748,6 +21887,80 @@ def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch
     assert "attempt 2 started" in captured.out
 
 
+def test_task_follow_says_when_the_provider_hit_its_subscriptions_wall(monkeypatch, tmp_path, capsys):
+    """A user whose next task sits queued is owed the reason (ADR 0032 issue 09). The provider's own
+    `_warn` goes to the PROVIDER's log, which the person who submitted the task cannot read — so the
+    durable event log is the only copy that reaches them.
+
+    On stderr with the other diagnostics: this says nothing about the task's result, and
+    `grid task follow > out.txt` has to keep the task's own output clean.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.output", "text": "working"}),
+        _block(1, {"type": "task.rate_limit", "status": "rejected",
+                   "limit_type": "five_hour", "resets_at": 1785832800}),
+        _block(2, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "rate limit" in captured.err.lower(), captured.err
+    assert "five_hour" in captured.err
+    assert "1785832800" not in captured.err, "a raw epoch is not a time anyone can read"
+    assert "working" in captured.out            # the task's own output is untouched
+
+
+def test_task_follow_renders_a_rate_limit_it_cannot_fully_read(monkeypatch, tmp_path, capsys):
+    """Every field on this event is optional — it is built from a subprocess's stdout. A follower
+    that raised on a null would take the whole stream down over a diagnostic."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.rate_limit", "status": None,
+                   "limit_type": None, "resets_at": None}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 0
+    assert "rate limit" in capsys.readouterr().err.lower()
+
+
+def test_task_follow_survives_a_reset_stamp_no_calendar_can_hold(monkeypatch, tmp_path, capsys):
+    """Reachable, not theoretical: the provider forwards the vendor's `resetsAt` to the client
+    UNBOUNDED — the 14-day sanity bound is the capacity gate's, and the event does not go through it.
+    A milliseconds-for-seconds stamp therefore arrives here intact, and `fromtimestamp` raises
+    `OverflowError` on it. A follower may never die on a diagnostic."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.rate_limit", "status": "rejected",
+                   "limit_type": "five_hour", "resets_at": 1785832800000}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert "five_hour" in err        # the rest of the line is still worth printing
+    assert "resets" not in err       # ...minus the part nobody could read
+
+
 def test_task_follow_exits_non_zero_when_the_task_failed(monkeypatch, tmp_path, capsys):
     """The exit code is what a script watching a task branches on — a failed task that exits 0 is
     a silent failure by any other name."""
@@ -21941,15 +22154,16 @@ def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tm
     """Event types grow. A follower that only rendered known types would show a user nothing while
     the relay faithfully streamed them the thing they asked for.
 
-    The fixture is a type this build genuinely does not know — `task.tree` used to stand in for one
-    and cannot any more, now that issue 08 renders it. A test whose "unknown" type has since become
-    known asserts the fallback while never reaching it.
+    The fixture must be a type this build genuinely does not know, and picking a REAL one that has
+    not landed yet has now failed twice: `task.tree` stood in for it until issue 08 rendered it, and
+    `task.rate_limit` until issue 09 did. Each time the test kept passing while no longer reaching
+    the fallback at all. So the fixture is now a name no issue can ever claim.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
 
     body = _sse(
-        _block(0, {"type": "task.rate_limit", "resets_at": 1785832800}),
+        _block(0, {"type": "task.a_type_no_issue_will_ever_add", "detail": 1785832800}),
         _block(1, {"type": "task.terminal", "state": "completed"}),
     )
     _mock_relay(monkeypatch, lambda r: httpx.Response(
@@ -21958,7 +22172,7 @@ def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tm
     cli.main(["task", "follow", "T1"])
 
     out = capsys.readouterr().out
-    assert "task.rate_limit" in out
+    assert "task.a_type_no_issue_will_ever_add" in out
     assert "1785832800" in out, "the fields must be shown too, not just the type"
 
 
@@ -23317,6 +23531,154 @@ def test_task_loop_stops_when_the_engine_stops(monkeypatch):
         lambda _s: pytest.fail("must not claim after the engine has stopped"))
 
     tasks.task_loop(state)
+
+
+# --- issue 09: how many tasks a provider can actually take ---------------------------------------
+
+
+class _RecordingTaskStop(threading.Event):
+    """The task loop's stop event, recording what it was asked to wait for and never sleeping.
+
+    A capacity pause is a real five-hour window; a test that sat through one would be a test nobody
+    runs. Waiting for zero keeps the event's own semantics — `wait` still answers whether the loop
+    has been told to stop — while making the DURATION the loop chose the thing under test.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.waits = []
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return super().wait(0)
+
+
+def _scripted_gate(pauses, log):
+    """A capacity gate answering `pauses` in order, writing to `log` so the ORDER can be asserted."""
+    def pause_seconds():
+        value = pauses.pop(0) if pauses else 0.0
+        log.append(f"gate:{value}")
+        return value
+
+    return SimpleNamespace(pause_seconds=pause_seconds, observe=lambda _info: None)
+
+
+def test_a_spent_subscription_stops_the_provider_claiming_until_the_window_resets(monkeypatch):
+    """The provider withdraws by not asking. There is nothing to tell the relay: a task is claimed
+    from a durable queue at poll time (ADR 0032 D-a), so a provider that does not claim is simply not
+    given one, and the task waits for a provider that can run it."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    state.tasks_stop = _RecordingTaskStop()
+    log = []
+    reported = []
+
+    def claim(inner_state):
+        log.append("claim")
+        return fake_claim(inner_state)
+
+    monkeypatch.setattr(tasks, "claim_once", claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=_scripted_gate([1800.0], log))
+
+    # Not one claim while the window was spent, and the wait was the window the VENDOR named — not a
+    # poll interval of ours, which would ask the relay for work this provider still cannot do.
+    assert log[:3] == ["gate:1800.0", "gate:0.0", "claim"]
+    assert 1800.0 in state.tasks_stop.waits
+    assert reported == ["T1"]              # and it resumed on its own once the window reset
+
+
+def test_a_capacity_pause_never_stops_inference(monkeypatch):
+    """Task capacity and inference capacity are independent (ADR 0032). A provider with no task
+    headroom left is still a provider — `state.stop` tears the engine down and is never this
+    plane's to set, and `tasks_stop` retires task serving, which a pause is not."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    state.tasks_stop = _RecordingTaskStop()
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state, capacity=_scripted_gate([600.0], []))
+
+    assert not state.stop.is_set()
+
+
+def test_a_gate_that_cannot_answer_leaves_the_provider_claiming(monkeypatch, capsys):
+    """The fail-open rule reaches the LOOP, not only the gate's own reading. A provider that stopped
+    taking work because its own throttle had a bug would be capacity the grid lost silently — the one
+    outcome this feature may never produce."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    reported = []
+
+    def boom():
+        raise RuntimeError("gate exploded")
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=SimpleNamespace(pause_seconds=boom, observe=lambda _i: None))
+
+    assert reported == ["T1"]
+    assert "gate exploded" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("answer", [None, "1800", True, float("nan"), object()])
+def test_a_gate_that_answers_with_something_that_is_not_a_number_is_ignored(monkeypatch, answer):
+    """The other half of the same guard, and the half that would not raise anywhere useful: a gate
+    returning `None` compares fine against `> 0` in some Python versions and not others, and `True`
+    is an `int` — so "is it a number" has to be asked rather than assumed. Any answer that is not
+    one leaves the provider claiming, exactly as a raise does."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=SimpleNamespace(
+        pause_seconds=lambda: answer, observe=lambda _i: None))
+
+    assert reported == ["T1"]
+
+
+def test_the_task_loop_defaults_to_the_processs_own_subscription_gate(monkeypatch):
+    """`serve.py` starts the workers and passes nothing; the loop finds the shared gate itself, which
+    is what makes N workers throttle on ONE reading of one subscription."""
+    from remote import task_capacity
+
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    seen = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(task_capacity.shared(), "pause_seconds", lambda: seen.append(1) or 0.0)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state)
+
+    assert seen                                 # the shared gate was the one consulted
+
+
+def test_the_gate_reaches_the_agents_stream(monkeypatch):
+    """The signal only exists inside a running agent's output, so the gate has to travel from the
+    loop all the way down to the translator or it never learns anything."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    gate = _scripted_gate([], [])
+    handed = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task",
+        lambda job, *_a, capacity=None, **_k: handed.append(capacity)
+        or tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state, capacity=gate)
+
+    assert handed == [gate]
 
 
 def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):

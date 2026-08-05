@@ -2700,8 +2700,44 @@ def _task_serving_enabled() -> bool:
     return os.getenv("GRID_TASKS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _start_task_worker(state: _ServeState) -> threading.Thread | None:
-    """Start the distributed-tasks claim loop, if enabled. Returns the thread, or None.
+TASK_WORKERS_ENV = "GRID_MAX_TASKS"
+# The count that changes nothing. Turning task serving on may not also change how much of the
+# operator's subscription it spends, so the pool starts where it has always been and only the
+# operator moves it. Deliberately NOT a benchmarked ceiling — the ceiling that matters is the
+# subscription's own, read at runtime by `remote/task_capacity.py` (ADR 0032 issue 09).
+_DEFAULT_TASK_WORKERS = 1
+
+
+def _task_worker_count() -> int:
+    """How many tasks this provider runs at once (ADR 0032 issue 09).
+
+    Misconfiguration falls back rather than failing, the same rule `tasks.task_timeout()` states: a
+    provider that refused to serve tasks because an operator typed `three` would take task serving
+    down for the life of the process, which is a far worse answer than running with the default and
+    saying so.
+
+    There is **no upper clamp**, and that is deliberate. A number picked here would be exactly the
+    guessed constant this issue exists to remove, and it would be guessed about the wrong thing —
+    what binds is the operator's own subscription, not this process's opinion of their machine. The
+    machine's real limit is discovered instead: a thread that cannot start is reported, and the
+    workers that did start keep serving.
+    """
+    raw = (os.getenv(TASK_WORKERS_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_TASK_WORKERS
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 0
+    if count < 1:
+        print(f"\n[tasks] {TASK_WORKERS_ENV}={raw!r} is not a positive whole number of tasks; "
+              f"using {_DEFAULT_TASK_WORKERS}", file=sys.stderr)
+        return _DEFAULT_TASK_WORKERS
+    return count
+
+
+def _start_task_worker(state: _ServeState) -> list[threading.Thread]:
+    """Start the distributed-tasks claim loops, if enabled. Returns the threads that started.
 
     Deliberately NOT wrapped in ``_supervise`` — the same exemption ``_reload_loop`` has, for the
     same reason. ``_supervise`` sets ``state.stop`` on any fault, which is right for a poll worker
@@ -2716,20 +2752,39 @@ def _start_task_worker(state: _ServeState) -> threading.Thread | None:
     can't start new thread` under exhaustion — would escape to the top-level handler, unregister the
     node and kill the process. Every other fault in this plane is isolated; a startup fault must be
     too, or the isolation is only true once the thread already exists.
+
+    Each worker is guarded on its OWN, so a machine that runs out of threads part way through keeps
+    the ones it managed to start. Task serving is retired only when NONE started, because that is the
+    only case where nothing is claiming and saying so is the honest record.
+
+    Nothing is passed to `task_loop`: it finds the process-wide capacity gate itself, which is what
+    makes every worker throttle on ONE reading of the one subscription they all spend.
     """
     try:
         if not _task_serving_enabled():
-            return None
+            return []
         from . import tasks
 
-        thread = threading.Thread(
-            target=_supervise_tasks, args=(tasks.task_loop, state), daemon=True, name="task-worker")
-        thread.start()
-        return thread
+        count = _task_worker_count()
     except (Exception, SystemExit) as exc:
         print(f"\nCould not start task serving ({exc!r}); inference is unaffected.", file=sys.stderr)
         state.tasks_stop.set()
-        return None
+        return []
+
+    threads: list[threading.Thread] = []
+    for index in range(count):
+        try:
+            thread = threading.Thread(
+                target=_supervise_tasks, args=(tasks.task_loop, state), daemon=True,
+                name=f"task-worker-{index + 1}")
+            thread.start()
+            threads.append(thread)
+        except (Exception, SystemExit) as exc:
+            print(f"\nCould not start task worker {index + 1} of {count} ({exc!r}); "
+                  f"inference is unaffected.", file=sys.stderr)
+    if not threads:
+        state.tasks_stop.set()
+    return threads
 
 
 def _supervise_tasks(loop: Callable[[_ServeState], None], state: _ServeState) -> None:

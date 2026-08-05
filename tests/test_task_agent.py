@@ -510,17 +510,101 @@ def test_a_tool_finishing_is_reported_without_its_payload():
 
 
 @pytest.mark.parametrize("record", [
-    {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}},
     {"type": "stream_event", "event": {"type": "content_block_delta"}},
     {"type": "something_a_future_version_added"},
     {"no_type_at_all": 1},
 ])
 def test_a_record_this_build_does_not_know_is_ignored_rather_than_guessed_at(record):
-    """Ignoring is what makes a new record type free to arrive — including `rate_limit_event`, which
-    issue 09 consumes and which this slice's only obligation is not to choke on."""
+    """Ignoring is what makes a new record type free to arrive: an old provider narrates a little
+    less, and nothing breaks."""
     from remote import task_stream
 
     assert task_stream.StreamTranslator().feed(_line(record)) == []
+
+
+# --- issue 09: the provider reads its own subscription's pressure -------------------------------
+
+
+_RATE_LIMIT = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
+                        "resetsAt": 1785832800, "overageStatus": "rejected",
+                        "isUsingOverage": False},
+}
+
+
+def test_the_subscriptions_own_pressure_reaches_the_provider_and_the_client():
+    """The signal the agent emits for free is the one the provider throttles on, so it goes two
+    places at once: to whatever is deciding whether to claim another task, and into the task's log —
+    a user whose task sat queued is owed the reason."""
+    from remote import task_stream
+
+    seen = []
+    translator = task_stream.StreamTranslator(on_rate_limit=seen.append)
+
+    events = translator.feed(_line(_RATE_LIMIT))
+
+    assert seen == [_RATE_LIMIT["rate_limit_info"]]
+    assert events == [("task.rate_limit", {"status": "rejected", "limit_type": "five_hour",
+                                           "resets_at": 1785832800})]
+
+
+def test_a_rate_limit_record_still_narrates_when_nobody_is_listening():
+    """The hook is optional — `run_task` is callable without a gate wired, and was before this
+    slice existed."""
+    from remote import task_stream
+
+    assert task_stream.StreamTranslator().feed(_line(_RATE_LIMIT)) == [
+        ("task.rate_limit", {"status": "rejected", "limit_type": "five_hour",
+                             "resets_at": 1785832800})]
+
+
+def test_a_gate_that_raises_never_costs_the_task_its_run(capsys):
+    """`feed` is documented never to raise and is called from the loop running the child. A capacity
+    gate is an observer of that run; a fault in one may not end it."""
+    from remote import task_stream
+
+    def boom(_info):
+        raise RuntimeError("gate exploded")
+
+    translator = task_stream.StreamTranslator(on_rate_limit=boom)
+
+    events = translator.feed(_line(_RATE_LIMIT))       # must not raise
+
+    assert events[0][0] == "task.rate_limit"           # the client is narrated regardless
+    assert "gate exploded" in capsys.readouterr().err
+
+
+def test_a_broken_gate_is_reported_once_per_run_not_once_per_record(capsys):
+    """`rate_limit_event` arrives with every turn of the agent's output, so a warning per record
+    would bury the one line that matters under its own repetition — the lesson `_Reporter._complain`
+    already records for the identical "documented never to raise" situation."""
+    from remote import task_stream
+
+    def boom(_info):
+        raise RuntimeError("gate exploded")
+
+    translator = task_stream.StreamTranslator(on_rate_limit=boom)
+
+    for _ in range(6):
+        translator.feed(_line(_RATE_LIMIT))
+
+    assert capsys.readouterr().err.count("gate exploded") == 1
+
+
+@pytest.mark.parametrize("info", [None, [], "rejected", 7, {}])
+def test_a_rate_limit_record_with_no_readable_body_is_not_guessed_at(info):
+    """The gate itself decides what an unreadable payload means (it keeps serving). What must not
+    happen here is this translator inventing a field, or raising on a shape it did not expect."""
+    from remote import task_stream
+
+    seen = []
+    translator = task_stream.StreamTranslator(on_rate_limit=seen.append)
+
+    events = translator.feed(_line({"type": "rate_limit_event", "rate_limit_info": info}))
+
+    assert seen == [info]                              # handed on verbatim; reading it is not our job
+    assert events == [("task.rate_limit", {"status": None, "limit_type": None, "resets_at": None})]
 
 
 # --------------------------------------------------------------------------------------------
@@ -1219,7 +1303,10 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
 
     captured = {}
 
-    def fake_run(job, publish=None, on_spawn=None, remote=None):
+    def fake_run(job, publish=None, on_spawn=None, remote=None, capacity=None):
+        # Spelled out rather than `**kwargs` on purpose: absorbing whatever it is handed would
+        # re-open the hole this test's comment below describes — a mismatch that raises inside
+        # `_run_and_report`'s guard and leaves the test green while exercising nothing.
         captured["remote"] = remote
         return tasks.TaskOutcome("completed", "ok", None)
 
@@ -2568,3 +2655,158 @@ def test_a_task_that_resumed_cleanly_reports_no_reset_reason(agent, monkeypatch)
     tasks._run_and_report(_FakeState(), _job())  # no `resume_session_id` at all
 
     assert reported["session_reset_reason"] is None
+
+
+# --- issue 09: how many tasks a provider can actually take ---------------------------------------
+
+
+# A run that hits the subscription's wall PART WAY THROUGH and carries on working — which is what
+# actually happens: `rate_limit_event` rides along with the agent's ordinary output.
+_SPENT_MID_RUN = """\
+printf '{"type":"system","subtype":"init","session_id":"sess-1"}\\n'
+printf '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":%s}}\\n' "$(( $(date +%s) + 3600 ))"
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"still working"}]}}\\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done"}\\n'
+"""
+
+
+def test_a_task_already_running_is_not_interrupted_by_the_limit_being_reached(agent):
+    """The gate is consulted before a CLAIM and nowhere else, so hitting the wall mid-run costs
+    nothing that was already in flight. Killing the child instead would throw away minutes of work —
+    and the relay would hand the same task to another provider to redo."""
+    from remote import task_capacity, tasks
+
+    agent(_SPENT_MID_RUN)
+    capacity = task_capacity.TaskCapacity()
+
+    outcome = tasks.run_task(_job(), capacity=capacity)
+
+    assert outcome.state == "completed"          # the run finished, wall or no wall
+    assert outcome.output == "done"
+    assert capacity.pause_seconds() > 0.0        # and the NEXT claim is the one that waits
+
+
+def test_the_limit_a_run_discovers_is_what_stops_the_next_claim(agent):
+    """End to end through a real child: the provider's ceiling comes out of the agent's own stream,
+    not out of a number anyone benchmarked. Nothing in this path knows how many tasks a subscription
+    is worth — it only knows what the subscription just said."""
+    from remote import task_capacity, tasks
+
+    agent(_SPENT_MID_RUN)
+    capacity = task_capacity.TaskCapacity()
+
+    tasks.run_task(_job(), capacity=capacity)
+
+    pause = capacity.pause_seconds()
+    assert 3500.0 < pause <= 3600.0              # the vendor's own window, to the second
+
+
+def test_an_ordinary_run_never_pauses_the_provider(agent):
+    """The common case has to stay free. A run that says nothing about rate limits leaves the
+    provider claiming exactly as it did before this slice."""
+    from remote import task_capacity, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    capacity = task_capacity.TaskCapacity()
+
+    tasks.run_task(_job(), capacity=capacity)
+
+    assert capacity.pause_seconds() == 0.0
+
+
+def test_a_run_with_no_gate_wired_behaves_exactly_as_it_did_before(agent):
+    """`capacity` is optional all the way down — the child is the point and the gate observes it."""
+    from remote import tasks
+
+    agent(_SPENT_MID_RUN)
+
+    assert tasks.run_task(_job()).state == "completed"
+
+
+def test_two_workers_never_run_two_tasks_in_one_projects_workspace(monkeypatch, capsys):
+    """A workspace is per PROJECT and persists between tasks, and preparing one runs `reset --hard`
+    and `clean` over it. Two supervisors inside one workspace is therefore not a race that produces a
+    confusing log — it is one agent's work being deleted underneath it while it runs.
+
+    The relay's `tasks_one_active_per_project` unique index means this cannot happen. This is here
+    because a provider may now run several tasks at once, and the cost of the invariant being wrong
+    ONCE is destroyed work rather than a retry.
+    """
+    import threading
+
+    from remote import tasks
+
+    inside = threading.Event()
+    finish = threading.Event()
+    reported = []
+
+    def run(job, *_a, **_k):
+        inside.set()
+        finish.wait(5)
+        return tasks.TaskOutcome("completed", "", None)
+
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *a, **k: tasks._NoRenewal())
+
+    first = threading.Thread(
+        target=tasks._run_and_report, args=(_FakeState(), _job(task_id="T1")), daemon=True)
+    first.start()
+    assert inside.wait(5), "the first task never started"
+
+    tasks._run_and_report(_FakeState(), _job(task_id="T2"))   # same project, while T1 is running
+
+    finish.set()
+    first.join(5)
+    # Checked, not assumed. The reservation this test creates is process-global and is released in
+    # the background thread's `finally`; a join that timed out would leave the default project held
+    # for the rest of the session, and every later test using it would fail instead of this one.
+    assert not first.is_alive(), "the first task's supervisor never finished"
+
+    # No terminal report for T2 — reporting one would mark it finished with nothing done. Left
+    # `running`, its lease lapses and the relay hands it to a provider that can actually run it.
+    assert reported == ["T1"]
+    assert "already running" in capsys.readouterr().err
+
+
+def test_a_projects_workspace_is_free_again_once_its_task_ends(monkeypatch):
+    """The reservation is the LIFE of one call, not a latch. A project stuck reserved after its task
+    ended would refuse every follow-up task on it for the life of the process."""
+    from remote import tasks
+
+    reported = []
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *a, **k: tasks._NoRenewal())
+
+    tasks._run_and_report(_FakeState(), _job(task_id="T1"))
+    tasks._run_and_report(_FakeState(), _job(task_id="T2"))   # same project, one after the other
+
+    assert reported == ["T1", "T2"]
+
+
+def test_a_project_is_freed_even_when_the_task_blows_up(monkeypatch):
+    """Released in a `finally`: a supervisor that raised on its way out must not take the project's
+    workspace with it, or one bad task locks that project out until the provider restarts."""
+    from remote import tasks
+
+    reported = []
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    monkeypatch.setattr(tasks, "_lease_renewer", lambda *a, **k: tasks._NoRenewal())
+
+    monkeypatch.setattr(tasks, "run_task", _raising(RuntimeError("supervisor exploded")))
+    tasks._run_and_report(_FakeState(), _job(task_id="T1"))
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    tasks._run_and_report(_FakeState(), _job(task_id="T2"))
+
+    assert [tid for tid in reported] == ["T1", "T2"]
+
+
+def _raising(exc):
+    def _run(*_a, **_k):
+        raise exc
+
+    return _run

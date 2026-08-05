@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+from collections.abc import Callable
 from typing import Any
 
 from .task_events import MAX_EVENT_BYTES
@@ -82,7 +84,15 @@ def bounded(text: str) -> str:
 class StreamTranslator:
     """One task child's stream. Feed it lines; publish what it returns."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_rate_limit: Callable[[Any], None] | None = None) -> None:
+        #: Where a `rate_limit_event`'s body goes: the provider's own capacity gate (issue 09).
+        #: Optional, because the child is the point and this is an observer of it — a caller with no
+        #: gate wired runs a task exactly as it did before the gate existed.
+        self._on_rate_limit = on_rate_limit
+        #: Whether the gate has already been reported as broken. `rate_limit_event` arrives with
+        #: every turn of the agent's output, so a gate that raises would otherwise print one warning
+        #: per turn for the rest of the run — the same flood `_Reporter._complain` exists to stop.
+        self._gate_broken = False
         #: The conversation this run opened, so the project's next task can `--resume` it (issue 06).
         self.session_id: str | None = None
         #: The agent's final message — what the task stores as its `output`.
@@ -128,10 +138,65 @@ class StreamTranslator:
             return self._tool_results(record)
         if kind == "result":
             return self._result(record)
-        # Everything else — `rate_limit_event` (issue 09's), `stream_event`, whatever a future
-        # version adds — is ignored rather than guessed at. That is what makes a new record type free
-        # to arrive: an old provider narrates a little less, and nothing breaks.
+        if kind == "rate_limit_event":
+            return self._rate_limit(record)
+        # Everything else — `stream_event`, whatever a future version adds — is ignored rather than
+        # guessed at. That is what makes a new record type free to arrive: an old provider narrates a
+        # little less, and nothing breaks.
         return []
+
+    def _rate_limit(self, record: dict[str, Any]) -> list[Event]:
+        """The provider's own subscription, reporting itself (ADR 0032 issue 09).
+
+        It goes two places, and they want different things. The GATE wants the vendor's body
+        verbatim — deciding what a payload means is `task_capacity`'s job, and a second reading here
+        is a second place to disagree with it. The CLIENT wants three flat fields: a user whose task
+        sat queued is owed the reason, and the rest of the vendor's object says nothing they can act
+        on.
+
+        Nothing here is believed enough to fail on. The record arrived off a subprocess's stdout, so
+        every field is optional and every type is a guess; a shape this build has never seen becomes
+        an event with nulls in it, never an exception in the loop running the child.
+        """
+        info = record.get("rate_limit_info")
+        self._tell_the_gate(info)
+        fields = info if isinstance(info, dict) else {}
+        status = fields.get("status")
+        limit_type = fields.get("rateLimitType")
+        resets_at = fields.get("resetsAt")
+        return [("task.rate_limit", {
+            "status": bounded(status) if isinstance(status, str) else None,
+            "limit_type": bounded(limit_type) if isinstance(limit_type, str) else None,
+            # A bool is an `int` in Python, and `"resets_at": true` in a rendered event reads as a
+            # timestamp nobody can parse rather than as the junk it is.
+            "resets_at": resets_at
+            if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool) else None,
+        })]
+
+    def _tell_the_gate(self, info: Any) -> None:
+        """Hand the reading to the capacity gate. A fault there may never reach the child's loop.
+
+        The gate is documented never to raise; this does not rest on that. `feed`'s whole contract is
+        that a line is a line and never an incident, and an escape here would unwind past the
+        supervisor and fail a task that is running perfectly — over an observer.
+        """
+        if self._on_rate_limit is None:
+            return
+        try:
+            self._on_rate_limit(info)
+        except (Exception, SystemExit) as exc:
+            # `SystemExit` is this repo's clean-error idiom and is NOT an `Exception`; a guard naming
+            # only `Exception` would let it kill the thread running the child.
+            #
+            # Said ONCE per run, the lesson `_Reporter._complain` already records: this record
+            # arrives with every turn of the agent's output, so a warning per record would bury the
+            # one line that matters under its own repetition.
+            if self._gate_broken:
+                return
+            self._gate_broken = True
+            print(f"\n[tasks] the task capacity gate raised on a rate-limit reading ({exc!r}) — it "
+                  f"is documented never to. This provider keeps claiming tasks and the running task "
+                  f"is unaffected; readings are being dropped from here on.", file=sys.stderr)
 
     def _tool_results(self, record: dict[str, Any]) -> list[Event]:
         """A `user` record is a tool RESULT. Only the fact and the outcome travel.

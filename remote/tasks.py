@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from . import relay, task_agent, task_repo, task_stream
+from . import relay, task_agent, task_capacity, task_repo, task_stream
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -460,7 +460,8 @@ class _ChildFailed(Exception):
 def run_task(job: dict[str, Any],
              publish: Callable[..., None] | None = None,
              on_spawn: Callable[[subprocess.Popen], None] | None = None,
-             remote: task_repo.GitRemote | None = None) -> TaskOutcome:
+             remote: task_repo.GitRemote | None = None,
+             capacity: Any = None) -> TaskOutcome:
     """Run one task's agent and return how it went.
 
     The contract that matters is this one: **every** failure mode returns a `failed` outcome.
@@ -478,10 +479,16 @@ def run_task(job: dict[str, Any],
     lease renewal (`task_lease`). `remote` is the project's git repository on the relay, used only when
     the claim named an `input_commit` — a relay predating the git plane sends none, and a provider
     talking to one runs in an empty workspace exactly as it did then.
+
+    `capacity` is the provider's subscription gate (issue 09). The signal it feeds on exists ONLY
+    inside a running agent's output, so it is wired to the translator here — a run is how this
+    provider learns its own pressure. Optional, like `publish`: a caller with no gate wired runs a
+    task exactly as it did before the gate existed.
     """
     # Built first so every `return` below can go through `_failed`, which is what makes the scrub
     # and the session id impossible to forget on a path someone adds later.
-    translator = task_stream.StreamTranslator()
+    translator = task_stream.StreamTranslator(
+        on_rate_limit=capacity.observe if capacity is not None else None)
     # Why this run started a fresh conversation, once that is known. Held here and threaded through
     # `failed` below rather than passed at each call site, so a failure path someone adds later
     # carries it without having to remember — the same property `_failed` gives the scrub.
@@ -637,14 +644,28 @@ def _no_publish(*_args: Any, **_kwargs: Any) -> None:
     """The default sink: a task with no channel attached still runs."""
 
 
-def task_loop(state: Any) -> None:
+def task_loop(state: Any, capacity: Any = None) -> None:
     """Claim, run, report — until the engine stops or the task plane retires.
 
     Retiring (`tasks_stop`) rather than stopping (`state.stop`) is the whole point: every exit path
     below leaves inference serving. `state.stop` is only ever read here, never written.
+
+    `capacity` is this provider's reading of its own Claude subscription (issue 09), consulted before
+    every claim. It defaults to the PROCESS-wide gate, which is what makes several task workers
+    throttle on one reading of the one subscription they all spend. Withdrawing is simply not asking:
+    a task is claimed from a durable queue at poll time (D-a), so a provider that does not claim is
+    not given one, and the task waits for a provider that can run it.
     """
+    capacity = capacity if capacity is not None else task_capacity.shared()
     consecutive_404s = 0
     while not (state.stop.is_set() or state.tasks_stop.is_set()):
+        pause = _capacity_pause(capacity)
+        if pause > 0:
+            # Waiting on `tasks_stop` rather than sleeping, so teardown does not have to sit out a
+            # five-hour window. `continue` re-reads the gate: a task still running elsewhere in this
+            # process can lift the block early by observing a healthy reading.
+            state.tasks_stop.wait(pause)
+            continue
         try:
             job = claim_once(state)
         except relay.RelayUnauthorized:
@@ -681,11 +702,39 @@ def task_loop(state: Any) -> None:
         if job is None:  # 204 — nothing queued; claim again
             continue
 
-        _run_and_report(state, job)
+        _run_and_report(state, job, capacity)
 
 
-def _run_and_report(state: Any, job: dict[str, Any]) -> None:
-    """One claimed task, start to terminal report. Guarded so no single task can end the loop."""
+def _capacity_pause(capacity: Any) -> float:
+    """How long this provider should hold off claiming. `0.0` means claim now. Never raises.
+
+    Guarded, and the guard's direction is the whole point: a throttle that cannot answer must leave
+    the provider CLAIMING. The alternative — treating a fault as "no headroom" — is a provider that
+    silently withdrew from the fleet over a bug in its own bookkeeping, with the symptom being tasks
+    that queue forever and a log that says nothing. A non-number is treated the same way, because a
+    gate returning `None` would otherwise raise on the comparison below.
+    """
+    try:
+        pause = capacity.pause_seconds()
+        return float(pause) if isinstance(pause, (int, float)) and not isinstance(pause, bool) else 0.0
+    except (Exception, SystemExit) as exc:
+        _warn(f"the task capacity gate raised ({exc!r}) — it is documented never to. This provider "
+              f"keeps claiming tasks: an unreadable limit is not evidence of one.")
+        return 0.0
+
+
+def _run_and_report(state: Any, job: dict[str, Any], capacity: Any = None) -> None:
+    """One claimed task, start to terminal report. Guarded so no single task can end the loop.
+
+    The workspace reservation around it exists because a provider may now run several tasks at once
+    (`GRID_MAX_TASKS`). A workspace belongs to a PROJECT and persists between that project's tasks,
+    and preparing one runs `reset --hard` and `clean` across it — so two supervisors inside one
+    workspace is not a confusing log, it is one agent's work being deleted underneath it mid-run.
+
+    The relay's `tasks_one_active_per_project` unique index means this cannot happen. It is checked
+    anyway because the two failures are not comparable: refusing a task the relay will hand to
+    someone else costs a lease TTL, and being wrong once about the invariant costs the work.
+    """
     task_id = str(job.get("task_id") or "")
     if not task_id:
         # The relay always sends one, so this is wire drift. It is already claimed server-side, and
@@ -694,6 +743,58 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
               f"is locked until an operator clears it: {job!r}")
         return
 
+    project_id = str(job.get("project_id") or "")
+    if not _reserve_workspace(project_id):
+        # DELIBERATELY no terminal report, the same policy as a result that could not be pushed:
+        # terminal is the one state nothing retries, and nothing has been done. Left `running`, its
+        # lease lapses and the relay hands it to a provider that can actually run it.
+        _warn(f"refusing task {task_id}: this provider is already running a task in project "
+              f"{project_id}'s workspace, and two agents in one workspace would destroy each "
+              f"other's work. No terminal state is reported, so the task's lease lapses and the "
+              f"relay reclaims it. The relay is supposed to make this impossible — if it recurs, "
+              f"its one-active-task-per-project index is not holding.")
+        return
+    try:
+        _supervise_one_task(state, job, task_id, capacity)
+    finally:
+        # In a `finally`, and unconditional: a supervisor that raised on its way out must not take
+        # the project's workspace with it, or one bad task locks that project out of this provider
+        # for the life of the process.
+        _release_workspace(project_id)
+
+
+# The projects this process is running a task in, so two workers can never share a workspace. A set
+# rather than a lock per project: the collection is tiny, it is only ever touched at the two ends of
+# a task, and a dict of locks would need its own lock to grow safely anyway.
+_WORKSPACES_IN_USE: set[str] = set()
+_WORKSPACES_LOCK = threading.Lock()
+
+
+def _reserve_workspace(project_id: str) -> bool:
+    """Take this project's workspace for the caller. False means another worker already has it.
+
+    An empty project id reserves nothing and always succeeds: `run_task` refuses such a job with a
+    readable message of its own, and there is no workspace to protect.
+    """
+    if not project_id:
+        return True
+    with _WORKSPACES_LOCK:
+        if project_id in _WORKSPACES_IN_USE:
+            return False
+        _WORKSPACES_IN_USE.add(project_id)
+        return True
+
+
+def _release_workspace(project_id: str) -> None:
+    """Give the project's workspace back. `discard`, so releasing twice is not an error."""
+    if not project_id:
+        return
+    with _WORKSPACES_LOCK:
+        _WORKSPACES_IN_USE.discard(project_id)
+
+
+def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity: Any) -> None:
+    """`_run_and_report`'s body, with this project's workspace already reserved for it."""
     publisher = _publisher_for(state, task_id, job)
     remote = _git_remote(state, job)
     landed = True
@@ -710,7 +811,8 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
     renewer = _lease_renewer(state, task_id, on_beat=_tree_beat(job, publisher))
     try:
         outcome = run_task(job, publisher.publish, remote=remote,
-                           on_spawn=lambda proc: _spawned(spawned, renewer, proc))
+                           on_spawn=lambda proc: _spawned(spawned, renewer, proc),
+                           capacity=capacity)
         outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
     except (Exception, SystemExit) as exc:
         # `run_task` is written not to raise; if it ever does, the task still owes the relay a

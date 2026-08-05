@@ -2,6 +2,8 @@
 
 Everything here exists to stop a test reaching something real. Nothing here sets up a feature.
 """
+import sys
+
 import pytest
 
 
@@ -24,3 +26,28 @@ def _claude_config_dir_is_never_the_real_one(monkeypatch, tmp_path_factory, requ
     monkeypatch.setenv(
         "GRID_TASK_CLAUDE_CONFIG_DIR",
         str(tmp_path_factory.mktemp(f"claude-config-{request.node.name[:40]}")))
+
+
+@pytest.fixture(autouse=True)
+def _no_test_leaves_a_project_workspace_reserved():
+    """`tasks._WORKSPACES_IN_USE` is process-global, and a leak from one test breaks OTHERS.
+
+    A reservation held past a test makes `_reserve_workspace` refuse that project for the rest of the
+    session — and refusing is deliberately quiet on the wire (no terminal report, the lease lapses),
+    so the symptom is unrelated tests failing on a missing report with nothing pointing back here.
+    Almost every task test uses the same default `project_id`, which is exactly the collision that
+    would spread.
+
+    So the check fails in the test that leaked, and clears the set so one failure does not become
+    fifty. Keyed off `sys.modules` rather than importing: a suite that never touched `remote.tasks`
+    pays nothing.
+    """
+    yield
+    tasks = sys.modules.get("remote.tasks")
+    if tasks is None:
+        return
+    leaked = set(tasks._WORKSPACES_IN_USE)
+    tasks._WORKSPACES_IN_USE.clear()
+    assert not leaked, (
+        f"this test left {sorted(leaked)} reserved in tasks._WORKSPACES_IN_USE — a supervisor "
+        f"thread it started is still running, or a release was skipped")
