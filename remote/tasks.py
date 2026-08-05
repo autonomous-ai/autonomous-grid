@@ -77,12 +77,17 @@ _MAX_COLLECTED_CHARS = 256 * 1024
 # unrelated blips spread over days never accumulate into a retirement.
 _MISSING_PLANE_404_BUDGET = 3
 # Attempts to land a terminal report before giving up. Worth retrying at all because this is the one
-# stranding that is salvageable: the child already ran, so only the last message was lost, and until
-# lease expiry exists (issue 07) a lost report strands the task AND locks its project. Bounded and
-# small — a provider that cannot reach the relay at all is not going to be rescued by a fourth try,
-# and the loop still owes its attention to the next task.
+# loss that is salvageable cheaply: the child already ran, so only the last message went missing, and
+# a report that lands here saves a whole second attempt on another provider. Bounded and small — a
+# provider that cannot reach the relay at all is not going to be rescued by a fourth try, the lease
+# reclaim recovers the task anyway, and the loop still owes its attention to the next one.
 _REPORT_ATTEMPTS = 3
 _REPORT_BACKOFF_SECONDS = 2.0
+# LOCKSTEP with the relay's `_MAX_SESSION_RESET_REASON_CHARS` (grid-src `private_server/tasks.py`).
+# Bounded on THIS side too, not only server-side, because the relay's answer to an over-long reason
+# is a 422 that refuses the entire terminal report — so an auxiliary diagnostic could cost a task
+# every one of its attempts. Same reasoning as `task_events.MAX_EVENT_BYTES`.
+_MAX_SESSION_RESET_REASON_CHARS = 2_000
 
 
 def _warn(message: str) -> None:
@@ -102,6 +107,11 @@ class TaskOutcome:
     #: The commit the pushed task branch ended on. Set for EVERY terminal outcome, success and
     #: failure alike (ADR 0032 D-e) — only the relay decides whether `main` follows it.
     result_commit: str | None = None
+    #: Why this run started a FRESH conversation instead of continuing the project's (issue 07).
+    #: Reported to the relay so it lands on the task row and in the durable log: the matching
+    #: `task.session_reset` progress event travels through a publisher that latches off permanently
+    #: on a 403/404, so it is the one disclosure that could not be relied on to arrive.
+    session_reset_reason: str | None = None
 
 
 def task_timeout() -> float:
@@ -141,7 +151,8 @@ def claim_once(state: Any) -> dict[str, Any] | None:
 
 def report_once(serve_state: Any, task_id: str, *, state: str, output: str | None,
                 error: str | None, session_id: str | None = None,
-                result_commit: str | None = None) -> None:
+                result_commit: str | None = None,
+                session_reset_reason: str | None = None) -> None:
     """Report a terminal result; on 401 refresh the token and retry exactly once.
 
     The serve state is named `serve_state` here only because `state` is the wire's name for the
@@ -152,14 +163,14 @@ def report_once(serve_state: Any, task_id: str, *, state: str, output: str | Non
         relay.report_task_result(
             serve_state.signaling_url, token, task_id,
             state=state, output=output, error=error, session_id=session_id,
-            result_commit=result_commit)
+            result_commit=result_commit, session_reset_reason=session_reset_reason)
     except relay.RelayUnauthorized:
         if not serve_state.refresh(stale_token=token):
             raise
         relay.report_task_result(
             serve_state.signaling_url, serve_state.token(), task_id,
             state=state, output=output, error=error, session_id=session_id,
-            result_commit=result_commit)
+            result_commit=result_commit, session_reset_reason=session_reset_reason)
 
 
 class _Collected:
@@ -350,7 +361,7 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
     child would keep the provider's CPU — and its Claude subscription.
 
     `on_spawn` receives the `Popen` the instant it exists. That handle is the supervisor's ONLY grip
-    on the child: issue 07's lease renewal proves liveness with `poll() is None`, never by reading a
+    on the child: `task_lease.LeaseRenewer` proves liveness with `poll() is None`, never by reading a
     pid back from a record and signalling it — the hazard ADRs 0020 and 0026 removed from the
     run-record seams and which is not reintroduced here.
     """
@@ -462,18 +473,25 @@ def run_task(job: dict[str, Any],
 
     `publish` is optional: the child is the point and the stream is an observer, so a caller with no
     channel wired runs a task exactly as before. `on_spawn` hands the caller the child's `Popen` for
-    issue 07's lease renewal. `remote` is the project's git repository on the relay, used only when
+    lease renewal (`task_lease`). `remote` is the project's git repository on the relay, used only when
     the claim named an `input_commit` — a relay predating the git plane sends none, and a provider
     talking to one runs in an empty workspace exactly as it did then.
     """
     # Built first so every `return` below can go through `_failed`, which is what makes the scrub
     # and the session id impossible to forget on a path someone adds later.
     translator = task_stream.StreamTranslator()
+    # Why this run started a fresh conversation, once that is known. Held here and threaded through
+    # `failed` below rather than passed at each call site, so a failure path someone adds later
+    # carries it without having to remember — the same property `_failed` gives the scrub.
+    reset_reason: str | None = None
+
+    def failed(error: str) -> TaskOutcome:
+        return _failed(translator, error, session_reset_reason=reset_reason)
 
     prompt = job.get("prompt")
     if not isinstance(prompt, str):
         # The job dict came off the wire; a missing or mistyped prompt is bad input, not a crash.
-        return _failed(translator, f"task has no usable prompt (got {type(prompt).__name__})")
+        return failed(f"task has no usable prompt (got {type(prompt).__name__})")
 
     sink = publish if publish is not None else _no_publish
     timeout = task_timeout()
@@ -486,7 +504,7 @@ def run_task(job: dict[str, Any],
     except (Exception, SystemExit) as exc:
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
-        return _failed(translator, f"could not start the agent: {exc}")
+        return failed(f"could not start the agent: {exc}")
 
     # BEFORE the spawn, and fatal if it fails. An agent run against input that never arrived
     # produces a confidently wrong result with nothing anywhere indicating why — the precise
@@ -500,15 +518,14 @@ def run_task(job: dict[str, Any],
             # per-project workspace already held — stale from a prior task, or empty. Issues 05 and
             # 07 both assemble job dicts for this path, so the guard lives in the function rather
             # than in the convention today's only caller happens to follow.
-            return _failed(
-                translator,
+            return failed(
                 f"the task names input commit {input_commit} but no git remote was wired")
         try:
             task_repo.materialize(
                 workspace, url=remote.url, token=remote.token,
                 branch=str(job.get("branch") or ""), input_commit=str(input_commit))
         except (Exception, SystemExit) as exc:
-            return _failed(translator, f"could not prepare the task's workspace: {exc}")
+            return failed(f"could not prepare the task's workspace: {exc}")
 
     # AFTER the checkout, for two reasons that both bite: the link's target has to survive
     # `reset --hard`/`clean`, and the transcript this task may resume only exists once the input
@@ -517,7 +534,7 @@ def run_task(job: dict[str, Any],
     try:
         task_agent.link_transcript(workspace)
     except (Exception, SystemExit) as exc:
-        return _failed(translator, f"could not prepare the agent's transcript directory: {exc}")
+        return failed(f"could not prepare the agent's transcript directory: {exc}")
 
     resume = task_agent.resumable_session(workspace, job.get("resume_session_id"))
     if resume.session_id:
@@ -532,6 +549,23 @@ def run_task(job: dict[str, Any],
         _publish_safely(sink, "task.session_reset",
                         requested_session_id=str(job.get("resume_session_id") or ""),
                         reason=resume.reason)
+        # THE durable copy (issue 07). Neither of the two lines above can be relied on to reach the
+        # person who submitted the task: `_warn` writes to the PROVIDER's log, and `_publish_safely`
+        # goes through a publisher that latches off permanently on a 403/404 and then silently drops
+        # everything. Carried out on the outcome instead, so it rides the terminal report onto the
+        # task row — where `grid task get` shows it long after the run is over.
+        #
+        # Scrubbed like every other message that leaves this process: the reason is built from a
+        # session id that arrived off the wire and from a filesystem error's own words.
+        #
+        # And BOUNDED, which every other free-text field that leaves here already is. The relay
+        # refuses an over-long reason with a 422 — and a 422 rejects the WHOLE terminal report, state
+        # and output and all. The report loop treats a 4xx as a verdict, so it would not retry; the
+        # task would be left `running`, reclaimed, and retried from scratch by a provider that hits
+        # the identical reason and the identical 422. A diagnostic field would have burned every
+        # attempt on a task whose agent succeeded every time, and the durable log would blame
+        # `lease_expired`. One truncation is worth more than that whole failure mode.
+        reset_reason = task_stream.redact(resume.reason)[:_MAX_SESSION_RESET_REASON_CHARS]
 
     argv = task_agent.agent_argv(binary, prompt, resume=resume.session_id)
 
@@ -540,19 +574,20 @@ def run_task(job: dict[str, Any],
             argv, timeout=timeout, publish=sink, cwd=str(workspace),
             env=task_agent.child_env(), translator=translator, on_spawn=on_spawn)
     except subprocess.TimeoutExpired:
-        return _failed(translator, f"task timed out after {timeout:.0f}s")
+        return failed(f"task timed out after {timeout:.0f}s")
     except _ChildFailed as exc:
-        return _failed(translator, f"the agent exited {exc.returncode}: {exc.stderr[-500:].strip()}")
+        return failed(f"the agent exited {exc.returncode}: {exc.stderr[-500:].strip()}")
     except (Exception, SystemExit) as exc:
-        return _failed(translator, f"could not run the agent: {exc}")
+        return failed(f"could not run the agent: {exc}")
 
     if translator.is_error:
         # Exit 0 and the agent saying it did not finish (`error_max_turns`,
         # `error_during_execution`). Believed, because it only ever fails a run that would otherwise
         # have been reported as a success the agent itself disclaims.
-        return _failed(translator, f"the agent reported {translator.subtype or 'an error'}")
+        return failed(f"the agent reported {translator.subtype or 'an error'}")
     return TaskOutcome(
-        "completed", _output(translator), None, session_id=translator.session_id)
+        "completed", _output(translator), None, session_id=translator.session_id,
+        session_reset_reason=reset_reason)
 
 
 def _publish_safely(sink: Callable[..., None], event_type: str, **fields: Any) -> None:
@@ -569,7 +604,8 @@ def _publish_safely(sink: Callable[..., None], event_type: str, **fields: Any) -
         _warn(f"the event publisher raised on {event_type} ({exc!r}) — it is documented never to")
 
 
-def _failed(translator: task_stream.StreamTranslator, error: str) -> TaskOutcome:
+def _failed(translator: task_stream.StreamTranslator, error: str, *,
+            session_reset_reason: str | None = None) -> TaskOutcome:
     """The one constructor for every failed outcome `run_task` returns.
 
     One place, so the two things that must be true of a failure are true of ALL of them — including
@@ -580,11 +616,13 @@ def _failed(translator: task_stream.StreamTranslator, error: str) -> TaskOutcome
         written verbatim into the durable `task.terminal` event the requesting user reads back.
       * **It still carries what the run produced** — the session id especially. A run that timed out
         or was killed still opened a conversation, and issue 06 resumes the PROJECT's session, so
-        dropping it here would strand every later task on that project.
+        dropping it here would strand every later task on that project. The same applies to
+        `session_reset_reason`: a run that started a fresh conversation and THEN failed is exactly
+        the run whose owner most needs to know the project's history was not in it.
     """
     return TaskOutcome(
         "failed", _output(translator), task_stream.redact(error),
-        session_id=translator.session_id)
+        session_id=translator.session_id, session_reset_reason=session_reset_reason)
 
 
 def _output(translator: task_stream.StreamTranslator) -> str | None:
@@ -663,9 +701,14 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
     # and the checks that look like it (does the workspace exist, is it a git repo) are
     # true for the whole life of a project regardless of what this attempt managed.
     spawned = {"yes": False}
+    # The lease this attempt holds, kept alive for exactly as long as this call is working on the
+    # task (ADR 0032 D-c). Started BEFORE `run_task` because the pre-spawn checkout is real work
+    # whose own ceiling (300s) outruns the 120s lease TTL, and closed in the `finally` below so a
+    # supervisor that moved on cannot still be vouching for a child it no longer has.
+    renewer = _lease_renewer(state, task_id)
     try:
         outcome = run_task(job, publisher.publish, remote=remote,
-                           on_spawn=lambda _proc: spawned.update(yes=True))
+                           on_spawn=lambda proc: _spawned(spawned, renewer, proc))
         outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
     except (Exception, SystemExit) as exc:
         # `run_task` is written not to raise; if it ever does, the task still owes the relay a
@@ -679,6 +722,13 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
         outcome = TaskOutcome(
             "failed", None, task_stream.redact(f"task runner raised: {exc!r}"))
     finally:
+        # Renewal stops FIRST, and before the terminal report below. A renewal still in flight while
+        # the state changes underneath it is refused with a 404 that reads as a fault rather than as
+        # the race this call just created — and the work it was vouching for is over either way.
+        try:
+            renewer.close()
+        except (Exception, SystemExit) as exc:
+            _warn(f"could not stop lease renewal for task {task_id} ({exc!r})")
         # Flush the tail BEFORE reporting terminal: the relay appends `task.terminal` as part of the
         # state change, and a batch arriving after that is refused (the task is no longer running),
         # so the last lines of output would be exactly the ones lost.
@@ -687,51 +737,119 @@ def _run_and_report(state: Any, job: dict[str, Any]) -> None:
         except (Exception, SystemExit) as exc:
             _warn(f"could not flush the last progress events for task {task_id} ({exc!r})")
 
+    if getattr(renewer, "lost", False):
+        # The renewer learned, mid-run, that another provider had taken this task over — and it is
+        # the ONLY thing that knows why everything after it failed. Without this line the operator
+        # sees a bare "could not push the task's result" or a bare 403 on the report, with no
+        # indication that the cause was decided minutes earlier and is not their problem to fix.
+        _warn(f"task {task_id} was taken over by another provider while this one was still running "
+              f"it, so this attempt's work was never going to land. The other provider's attempt is "
+              f"the live one; `grid task get {task_id}` follows it.")
+
     if not landed:
         # DELIBERATELY no terminal report. The result is not in the repository, so reporting one
         # would mark the task terminal with nothing to fetch — and terminal is precisely the state
-        # nothing retries. Left `running`, its lease lapses and issue 07's reclaim hands it to
+        # nothing retries. Left `running`, its lease lapses and the relay's reclaim hands it to
         # another provider, which is the only path that can still produce the result the user asked
         # for. The reason has already gone to the user as a `task.stderr` event.
         _warn(f"task {task_id}'s result could not be pushed, so no terminal state was reported — "
-              f"the task is left `running` so its lease can lapse and another provider can retry "
-              f"it. Until lease reclaim ships (issue 07) it stays `running` until its deadline, "
-              f"holding its project's lock; `grid task get {task_id}` shows where it stands.")
+              f"the task is left `running` so its lease can lapse. The relay reclaims it within "
+              f"roughly the lease TTL and hands it to another provider, up to the task's retry cap; "
+              f"after that it fails with `retries_exhausted` and its project unlocks. "
+              f"`grid task get {task_id}` shows where it stands.")
         return
 
     for attempt in range(1, _REPORT_ATTEMPTS + 1):
         try:
             report_once(state, task_id, state=outcome.state, output=outcome.output,
                         error=outcome.error, session_id=outcome.session_id,
-                        result_commit=outcome.result_commit)
+                        result_commit=outcome.result_commit,
+                        session_reset_reason=outcome.session_reset_reason)
             return
         except (Exception, SystemExit) as exc:
             status = getattr(exc, "status", None)
             if status == 404:
-                # NOT a loss, and the old message said it was. 404 means the task is no longer
-                # `running` — and the most likely way to reach it after a failed attempt is that an
-                # EARLIER attempt of ours landed and only its ack was lost. Telling an operator to
-                # go clear a task that actually completed correctly is worse than saying nothing.
-                _warn(f"task {task_id} was already terminal when reporting (404) — most likely an "
-                      f"earlier attempt landed and only its acknowledgement was lost. Confirm with "
-                      f"`grid task get {task_id}`; no action is needed if it reads terminal.")
+                # NOT a loss. 404 means the task is no longer `running` on this provider, and it now
+                # has TWO ordinary causes, which is why this says "or" rather than diagnosing:
+                #
+                #   * an EARLIER attempt of ours landed and only its acknowledgement was lost, or
+                #   * the relay reclaimed the task — its lease had lapsed — and it is queued for, or
+                #     already running on, another provider. A reclaimed row is `queued` with a NULL
+                #     `provider_id`, which `_refuse_unleased` answers 404 to, exactly as it does for
+                #     a task that ended.
+                #
+                # Both need the same thing from this loop (stop, and do not report again) and the
+                # same thing from a human (look, do not intervene). Naming only the first would send
+                # an operator hunting for a completed task that is in fact still being worked on.
+                _warn(f"the relay would not accept a result for task {task_id} (404): either an "
+                      f"earlier attempt of ours landed and only its acknowledgement was lost, or "
+                      f"the task's lease lapsed and it has been reclaimed for another provider. "
+                      f"Either way this attempt is finished and no action is needed — "
+                      f"`grid task get {task_id}` says which.")
                 return
             if _is_answer_not_blip(status) or attempt == _REPORT_ATTEMPTS:
-                # Losing one result must not cost the loop — but say what actually happens, which is
-                # NOT "it will be requeued": nothing renews or expires a lease in this build, so the
-                # task stays `running` forever, and `running` is inside the one-active-task index
-                # predicate, so the PROJECT is locked with it. Naming the status separates incidents
-                # the relay already distinguishes: 403 means another provider holds the lease and may
-                # have run this task too; 404 means it was already terminal (possibly our own earlier
-                # attempt, which did land); a bare transport failure means nobody knows.
+                # Losing one result must not cost the loop. What happens next is a RETRY, not a
+                # stranding: renewal stopped before this loop began, so the lease lapses and the
+                # relay reclaims the task for another provider. What is lost is this attempt's work,
+                # not the task. Naming the status separates incidents the relay already
+                # distinguishes: 403 means another provider already holds the lease and may have run
+                # this task too; 404 means it was already terminal (possibly our own earlier attempt,
+                # which did land); a bare transport failure means nobody knows.
                 _warn(f"could not report task {task_id} after {attempt} attempt(s) "
-                      f"(status={status}, {exc}) — the result is lost and the task is stuck "
-                      f"`running`, locking its project, until an operator clears it "
-                      f"(lease expiry and requeue are not implemented in this build)")
+                      f"(status={status}, {exc}) — this attempt's result is lost. Its lease is no "
+                      f"longer being renewed, so the relay reclaims the task and another provider "
+                      f"retries it, up to the task's retry cap; `grid task get {task_id}` shows "
+                      f"where it stands.")
                 return
             _warn(f"report attempt {attempt}/{_REPORT_ATTEMPTS} for task {task_id} failed "
                   f"({exc}); retrying")
             state.tasks_stop.wait(_REPORT_BACKOFF_SECONDS)
+
+
+def _lease_renewer(state: Any, task_id: str) -> Any:
+    """This attempt's lease renewer, already started. Never raises.
+
+    Guarded for the same reason `_publisher_for` is: a task that runs without renewal is reclaimed
+    and retried, which is recoverable, while a task that never runs because its renewer could not be
+    constructed is simply lost. The import is local so a fault in that module cannot stop the task
+    loop from starting at all.
+    """
+    try:
+        from .task_lease import LeaseRenewer
+
+        renewer = LeaseRenewer(state, task_id)
+        renewer.start()
+        return renewer
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not set up lease renewal for task {task_id} ({exc!r}); the task still runs, "
+              f"but its lease will lapse and another provider may retry it")
+        return _NoRenewal()
+
+
+class _NoRenewal:
+    """The renewer's shape, doing nothing. Lets every caller below stay unconditional."""
+
+    lost = False
+
+    def attach(self, _proc: Any) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _spawned(spawned: dict[str, bool], renewer: Any, proc: subprocess.Popen) -> None:
+    """The one `on_spawn` callback, doing both jobs the child's handle is needed for.
+
+    Guarded around the renewer half only: recording that the agent STARTED decides whether the
+    result is pushed at all, so it must happen whatever the renewer does with the handle.
+    """
+    spawned["yes"] = True
+    try:
+        renewer.attach(proc)
+    except (Exception, SystemExit) as exc:
+        _warn(f"could not hand the agent's process to lease renewal ({exc!r}); the task runs on, "
+              f"but its lease may lapse and another provider may retry it")
 
 
 def _git_remote(state: Any, job: dict[str, Any]) -> task_repo.GitRemote | None:

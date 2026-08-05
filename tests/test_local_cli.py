@@ -21714,6 +21714,40 @@ def test_task_follow_renders_events_as_they_arrive(monkeypatch, tmp_path, capsys
     assert "completed" in out
 
 
+def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch, tmp_path, capsys):
+    """A client attached across a reclaim sees the retry, and its cursor never means something else.
+
+    The disclosure is the point (ADR 0032 D-d). Effects inside git are undone — the relay resets the
+    branch to the input commit — but effects OUTSIDE it are not, so a user watching an agent start
+    over needs to be told that is what is happening rather than left to infer it from the output
+    repeating. On stderr, beside the other diagnostics, so `grid task follow > out.txt` keeps the
+    task's own output clean.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.attempt_started", "attempt": 1, "provider_id": "node-2"}),
+        _block(1, {"type": "task.output", "text": "half a result"}),
+        _block(2, {"type": "task.retry", "reason": "lease_expired", "attempt": 1,
+                   "max_attempts": 3, "previous_provider_id": "node-2"}),
+        _block(3, {"type": "task.attempt_started", "attempt": 2, "provider_id": "node-9"}),
+        _block(4, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "retry" in captured.err.lower() or "retrying" in captured.err.lower(), captured.err
+    assert "lease" in captured.err.lower(), "the user is never told WHY the attempt was redone"
+    # The sequence continues across the retry rather than restarting, so a reattaching client's
+    # cursor still means what it meant.
+    assert "attempt 2 started" in captured.out
+
+
 def test_task_follow_exits_non_zero_when_the_task_failed(monkeypatch, tmp_path, capsys):
     """The exit code is what a script watching a task branches on — a failed task that exits 0 is
     a silent failure by any other name."""
@@ -22788,7 +22822,8 @@ def test_task_loop_claims_runs_and_reports(monkeypatch):
     # The session id rides the terminal report, which is the only durable record of it: the relay
     # stores it on the task so the project's NEXT task can `--resume` the conversation (issue 06).
     assert reported == [("T1", {"state": "completed", "output": "say hello\n", "error": None,
-                                "session_id": "sess-1", "result_commit": None})]
+                                "session_id": "sess-1", "result_commit": None,
+                                "session_reset_reason": None})]
 
 
 def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
@@ -22969,7 +23004,7 @@ def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
     # so the relay reads nothing and the column is left as it is (the old-relay degrade).
     assert reported == [
         {"state": "failed", "output": None, "error": "exit 127", "session_id": None,
-         "result_commit": None}]
+         "result_commit": None, "session_reset_reason": None}]
 
 
 def test_task_loop_survives_a_failure_to_report(monkeypatch):
@@ -22997,11 +23032,12 @@ def test_task_loop_survives_a_failure_to_report(monkeypatch):
 
 
 def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypatch, capsys):
-    """The one salvageable stranding: the work is done and only the last message was lost.
+    """The one loss worth salvaging cheaply: the work is done and only the last message was lost.
 
-    A dead provider still strands its task until lease expiry exists (issue 07) — this does not
-    pretend otherwise. It recovers the case where the provider is alive and the network blipped,
-    which is the difference between losing a completed agent run and not.
+    A dead provider's task is recovered by the relay's reclaim, at the cost of a whole second
+    attempt on another provider. This recovers the much commoner case — the provider is alive and
+    the network blipped — for the price of two retries, which is the difference between spending a
+    fresh agent run and not.
     """
     from remote import relay, tasks as tasks_mod
 
@@ -23024,7 +23060,7 @@ def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypat
     assert len(attempts) == 3
     assert attempts[-1] == {
         "state": "completed", "output": "done", "error": None, "session_id": None,
-        "result_commit": None}
+        "result_commit": None, "session_reset_reason": None}
     assert "stuck" not in capsys.readouterr().err     # it landed; nothing was stranded
 
 
@@ -23072,16 +23108,21 @@ def test_a_report_that_never_lands_gives_up_after_a_bounded_number_of_attempts(m
     tasks.task_loop(state)
 
     assert len(attempts) == tasks_mod._REPORT_ATTEMPTS   # bounded, not forever
-    assert "stuck" in capsys.readouterr().err.lower()    # and honest about the outcome
+    # ...and honest about the outcome, which is now a RETRY rather than a stranding: renewal
+    # stopped before this loop began, so the lease lapses and the relay hands the task on.
+    assert "retr" in capsys.readouterr().err.lower()
 
 
-def test_a_lost_report_says_the_task_is_stuck_not_that_it_will_be_requeued(monkeypatch, capsys):
-    """The log must describe what THIS build does, not what a later slice will do.
+def test_a_lost_report_says_the_task_will_be_retried_not_that_an_operator_must_clear_it(
+        monkeypatch, capsys):
+    """The log must describe what THIS build does — and what it does changed under this test.
 
-    Nothing renews or expires a lease yet, and nothing requeues: a task whose result is lost stays
-    `running` forever, and because `running` is inside the one-active-task index predicate, the
-    PROJECT is locked with it. Telling an operator "it will be requeued" points them away from the
-    only thing that can actually clear it.
+    It used to be true that a lost report stranded the task `running` forever, locking its project,
+    so the message said "until an operator clears it" and this test asserted the word "requeued"
+    never appeared. Lease renewal and reclaim make the opposite true: renewal stopped before this
+    report was attempted, so the lease lapses, the relay reclaims the task and another provider
+    retries it. Sending an operator to clear a task that recovers on its own is now the misleading
+    half, which is why the assertion is inverted rather than deleted.
     """
     from remote import relay
 
@@ -23094,8 +23135,9 @@ def test_a_lost_report_says_the_task_is_stuck_not_that_it_will_be_requeued(monke
     tasks.task_loop(state)
 
     err = capsys.readouterr().err
-    assert "requeued" not in err
-    assert "T1" in err and "stuck" in err.lower()
+    assert "T1" in err
+    assert "retries" in err.lower() or "retr" in err.lower(), err
+    assert "operator" not in err.lower(), "it still tells someone to go clear a self-healing task"
 
 
 def test_a_lost_report_records_which_kind_of_failure_it_was(monkeypatch, capsys):

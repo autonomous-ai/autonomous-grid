@@ -323,6 +323,7 @@ def report_task_result(
     error: str | None,
     session_id: str | None = None,
     result_commit: str | None = None,
+    session_reset_reason: str | None = None,
 ) -> None:
     """Report a task's terminal outcome (``POST /relay/v1/tasks/{id}/result``).
 
@@ -339,12 +340,20 @@ def report_task_result(
     branch it actually holds and refuses the report (409) if they disagree, which is what stops a
     push that silently failed from being recorded as a finished task. Omitted, like ``session_id``,
     when there is none — a run that never got as far as pushing lets the relay read the tip itself.
+
+    ``session_reset_reason`` says why this run started a fresh conversation rather than continuing
+    the project's (issue 07). It rides the terminal report because the matching progress event
+    cannot be relied on: ``TaskEventPublisher`` latches off permanently after a 403/404 and then
+    drops everything, so the only copy that reaches the task's owner is the one the relay writes
+    from here. Omitted when nothing reset, so a later clean attempt cannot blank an earlier reason.
     """
     body: dict[str, Any] = {"state": state, "output": output, "error": error}
     if session_id:
         body["session_id"] = session_id
     if result_commit:
         body["result_commit"] = result_commit
+    if session_reset_reason:
+        body["session_reset_reason"] = session_reset_reason
     try:
         with _client(signaling_url, access_token, timeout=_TASK_RESULT_TIMEOUT) as client:
             resp = client.post(
@@ -369,6 +378,32 @@ def git_remote_url(signaling_url: str, project_id: str) -> str:
     """
     # The id came off the wire and is being interpolated into a URL.
     return f"{signaling_url.rstrip('/')}/relay/v1/git/{quote(project_id, safe='')}"
+
+
+def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> None:
+    """Push this task's lease out (``POST /relay/v1/tasks/{id}/lease``).
+
+    The relay renews on the LEASE alone — `state='running'` and this node recorded as the holder —
+    and asks no liveness question of its own. That is deliberate (ADR 0032 D-c): a relay that pinged
+    back would be inferring the agent from the network, which is the substitution the whole design
+    refuses. What a renewal actually proves lives on this side, in `remote/task_lease.py`, which
+    renews only while it holds a live `Popen`.
+
+    Lease-fenced like the other two provider writes, so ``.status`` matters: 403 means the lease
+    moved to another provider and 404 means the task already ended — both verdicts no retry can
+    change, unlike a 5xx or a bare transport failure.
+    """
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
+            resp = client.post(
+                # The id came off the wire and is being interpolated into a path.
+                f"/relay/v1/tasks/{quote(task_id, safe='')}/lease")
+    except httpx.HTTPError as exc:
+        raise RelayError(f"renew_task_lease transport error: {exc}") from None
+    # The body carries the new expiry, and nothing here reads it: this side already knows its own
+    # renewal cadence, and treating the relay's clock as authoritative would make a clock skew look
+    # like a lease that had already lapsed. The STATUS is the whole answer.
+    _guard(resp, "renew_task_lease")
 
 
 def publish_task_events(

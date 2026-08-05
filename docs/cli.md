@@ -992,9 +992,28 @@ as well as a successful one — and reports the commit it pushed. The relay chec
 branch it actually holds, so a push that silently failed cannot be recorded as a finished task. If
 the push cannot be made at all, the provider deliberately reports **nothing**: a terminal state is
 one nothing retries, so the task is left `running` for its lease to lapse and another provider to
-pick it up, and the git error is published to the task's event stream instead. Until lease reclaim
-ships, such a task stays `running` until its deadline and holds its project's lock — `grid task get`
-shows it, and `grid task follow` shows the reason.
+pick it up, and the git error is published to the task's event stream instead.
+
+### When a provider disappears
+
+**A task survives the provider running it.** While a provider is serving a task it keeps renewing
+that task's lease, and it renews only while the agent process it started is still alive — not while
+the machine is merely reachable, which would let a task whose agent had died hold its project
+forever. A task that produces no output for ten minutes is not assumed to be stuck: silence is
+normal while a build or a test suite runs, so nothing infers a hang from quiet.
+
+If the renewals stop — the provider was killed, lost power, or its agent died and it could not
+report — the lease lapses and the relay **reclaims** the task: it goes back to the queue, its branch
+is reset to exactly the input you uploaded, and the next provider to claim it starts from there. You
+see this in `grid task follow` as a retry line, and it says what the reset does and does not cover:
+**changes the lost attempt made in git are undone; anything it did outside git is not.** The event
+log keeps one sequence across the whole task, so a client attached across a retry loses nothing and
+never sees its cursor come to mean something else.
+
+Retries are capped (3 attempts by default). A task that exhausts them fails with
+`retries_exhausted`, and its project unlocks so you can create the next task on it. Separately, any
+task that outlives its deadline — including one sitting `queued` on a grid with no provider at all —
+is ended as `timed_out`, so a project can never be locked indefinitely by work nothing is doing.
 
 One case worth knowing: if the agent clones another repository into the workspace, git records it as
 a submodule reference whose objects the relay does not have, and the push fails with git's own
@@ -1030,8 +1049,12 @@ Two consequences worth knowing:
   next task is cut from `main`, so a project resumes from its last *successful* state rather than
   from a broken one.
 - **If the transcript is missing or unreadable, the task starts a fresh session rather than
-  failing** — and says so, as a `starting a fresh session (…)` line in `grid task follow` and in the
-  task's durable event log. The commonest cause is the previous task having failed.
+  failing** — and says so, in three places, deliberately: as a `starting a fresh session (…)` line
+  in `grid task follow`, in the task's durable event log, and on the task itself as
+  `session_reset_reason`, which `grid task get --json` reports. The last of those is the one that
+  survives everything: progress events stop if the provider loses the task's lease mid-run, so the
+  reason is also carried on the final report and recorded by the relay. The commonest cause is the
+  previous task having failed.
 
 The conversation is written only by the provider: the relay refuses any uploaded file under
 `.grid/`. The provider's credential never goes near it — the config directory is required to be an

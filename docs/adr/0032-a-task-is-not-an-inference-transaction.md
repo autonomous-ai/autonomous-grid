@@ -164,5 +164,24 @@ correlate replies. Publishing keeps one direction and one reader.
   under `.grid/`, so the conversation is written by the provider alone.
   The cost is that the repository grows by a transcript per task (105 KB–2 MB measured), which is
   the same cost D-e already accepted when it rejected per-checkpoint commits.
+- **A reclaim clears the lease holder BEFORE it touches git, and the branch reset is the relay's
+  alone.** Two facts about D-c and D-e meet badly and the ordering is what resolves them. First, the
+  git plane authorizes a push on `state = 'running' AND provider_id = <node>` and deliberately does
+  *not* consult lease expiry — expiry is the reaper's business — so a reclaim that reset the branch
+  before clearing `provider_id` leaves a window in which the losing provider can push over the
+  reset. Second, `receive.denyNonFastForwards` means a provider can never take a branch backwards:
+  if a lost attempt pushed its result and then failed to report it, the next attempt commits from
+  the input commit and its push is refused as a non-fast-forward — so without a server-side reset
+  the task could never land a result however many attempts it were given. The relay's own
+  `update-ref` does not go through receive-pack, which is precisely why only it can do this and a
+  provider must not be able to. The reclaim therefore runs in three phases across two transactions —
+  clear the holder, reset the branch, then move the state — and a relay that dies between them
+  leaves `running` with a NULL lease, which the next sweep treats as its own signal to finish the
+  job.
+- **The reason a task started a fresh conversation is recorded on the task, not only published.**
+  Progress events travel through a publisher that latches off permanently when the relay refuses a
+  batch, which is exactly what happens to a provider that has lost its lease — so the disclosure
+  least likely to arrive was the one about work being redone without the project's history. It rides
+  the terminal report instead, and the relay writes both the column and the log entry.
 - Deferred, with the shape kept open: mid-run checkpoints, task cancellation, per-task
   `retryable: false`, and git-LFS for large inputs.

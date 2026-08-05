@@ -302,6 +302,18 @@ def _render(seq: int, event: dict, *, as_json: bool) -> None:
         provider = event.get("provider_id")
         where = f" on {provider}" if provider else ""
         print(f"[{seq}] attempt {event.get('attempt')} started{where}")
+    elif kind == "task.retry":
+        # On stderr with the other disclosures, and worded so the asymmetry is unmissable: the
+        # relay resets the task's branch to its input commit before the next attempt, so anything
+        # the lost attempt did INSIDE git is undone — and anything it did outside git is not
+        # (ADR 0032 D-d). A user who is not told this reads a repeated run as the agent looping.
+        attempt = event.get("attempt")
+        of = event.get("max_attempts")
+        reason = event.get("reason") or "its lease lapsed"
+        print(f"[{seq}] attempt {attempt}"
+              + (f" of {of}" if of else "")
+              + f" was lost ({reason}); retrying from the task's input. Changes the lost attempt "
+                f"made in git are undone; anything it did outside git is not.", file=sys.stderr)
     elif kind == "task.terminal":
         error = event.get("error")
         print(f"[{seq}] {event.get('state')}" + (f": {error}" if error else ""))

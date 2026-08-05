@@ -80,8 +80,8 @@ class PushError(RuntimeError):
     Deliberately NOT a `CheckoutError`, because the two demand opposite handling. A checkout that
     fails must fail the task — an agent run against input that never arrived produces a confidently
     wrong answer. A push that fails must **not** report anything at all: the task stays `running`,
-    its lease lapses, and issue 07 hands it to another provider. Reporting `failed` would be
-    terminal, and a terminal task is one nothing will ever retry.
+    its lease lapses, and the relay's reaper hands it to another provider. Reporting `failed` would
+    be terminal, and a terminal task is one nothing will ever retry.
     """
 
 

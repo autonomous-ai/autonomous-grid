@@ -1278,10 +1278,12 @@ def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(mon
 
     monkeypatch.setattr(tasks, "run_task", explode)
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    # `**_rest` rather than every keyword spelled out: this test is about the SCRUB, and a double
+    # that pinned the report's exact signature would fail every time a field was added to the wire
+    # — which is a different test's job, and one nobody would look for here.
     monkeypatch.setattr(
         tasks, "report_once",
-        lambda _s, _t, *, state, output, error, session_id=None, result_commit=None:
-        reported.update(error=error))
+        lambda _s, _t, *, error, **_rest: reported.update(error=error))
 
     tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1"})
 
@@ -2366,3 +2368,127 @@ def test_a_transcript_that_is_a_symlink_is_never_followed(monkeypatch, tmp_path)
 
     assert decision.session_id is None
     assert "symlink" in decision.reason, decision.reason
+
+
+# --- issue 07: the lease the supervisor keeps alive -----------------------------------------------
+
+def test_the_supervisor_renews_the_lease_around_the_whole_task(agent, monkeypatch):
+    """A claimed task keeps its lease for as long as the supervisor is working on it, and stops
+    keeping it the moment that call returns.
+
+    The renewer is created and closed by `_run_and_report`, so its life IS that call's — which is
+    what makes "renewal proves the child" true even in the window BEFORE the child exists, where
+    there is no handle to poll and a real `git fetch` can outrun the lease TTL.
+    """
+    from remote import task_lease, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: None)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    events = []
+    monkeypatch.setattr(task_lease.LeaseRenewer, "start",
+                        lambda self: events.append(("start", self._task_id)))
+    monkeypatch.setattr(task_lease.LeaseRenewer, "close",
+                        lambda self: events.append(("close", self._task_id)))
+
+    tasks._run_and_report(_FakeState(), _job())
+
+    assert events == [("start", "T1"), ("close", "T1")]
+
+
+def test_the_renewer_is_given_the_very_child_the_task_spawned(agent, monkeypatch):
+    """The handle, not a pid — and the REAL one, taken at spawn.
+
+    `on_spawn` already carried the "did anything run" flag; this proves the same callback hands the
+    renewer the live `Popen`, which is the only thing it is allowed to treat as evidence (D-c).
+    """
+    from remote import task_lease, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: None)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    attached = []
+    monkeypatch.setattr(task_lease.LeaseRenewer, "start", lambda self: None)
+    monkeypatch.setattr(task_lease.LeaseRenewer, "attach", lambda self, proc: attached.append(proc))
+
+    tasks._run_and_report(_FakeState(), _job())
+
+    assert len(attached) == 1
+    assert hasattr(attached[0], "poll"), "the renewer was handed something that is not a child"
+    assert attached[0].returncode == 0, "it was handed a different process than the one that ran"
+
+
+def test_renewal_has_stopped_before_the_terminal_result_is_reported(agent, monkeypatch):
+    """Ordering, and it is not cosmetic: a renewal in flight while the state changes underneath it
+    is refused with a 404 that reads as a fault rather than as the race the caller just created."""
+    from remote import task_lease, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    order = []
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: order.append("report"))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    monkeypatch.setattr(task_lease.LeaseRenewer, "start", lambda self: None)
+    monkeypatch.setattr(task_lease.LeaseRenewer, "close", lambda self: order.append("close"))
+
+    tasks._run_and_report(_FakeState(), _job())
+
+    assert order == ["close", "report"]
+
+
+def test_a_renewer_that_blows_up_never_costs_the_task_its_result(agent, monkeypatch):
+    """The renewer is an observer of the task, exactly as the event publisher is. A fault in it must
+    not unwind past the agent, past the push, and turn a finished run into a reported failure."""
+    from remote import task_lease, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    def explode(self, *_a, **_k):
+        raise RuntimeError("the renewer is broken")
+
+    monkeypatch.setattr(task_lease.LeaseRenewer, "start", explode)
+    monkeypatch.setattr(task_lease.LeaseRenewer, "close", explode)
+
+    tasks._run_and_report(_FakeState(), _job())
+
+    assert reported["state"] == "completed"
+
+
+def test_the_reason_a_fresh_session_was_started_travels_on_the_terminal_report(
+        agent, monkeypatch, tmp_path):
+    """Issue 06's accepted HIGH, closed from this end.
+
+    The reason was published as a progress event and NOWHERE else — and `TaskEventPublisher` latches
+    off permanently on a 403/404, after which it drops everything. Carrying it on the terminal report
+    means the relay records it, so the owner can read it after the fact whatever the publisher did.
+    """
+    from remote import tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    # The relay named a session this workspace has never seen, so the agent starts fresh.
+    tasks._run_and_report(_FakeState(), _job(resume_session_id="sess-nobody-has"))
+
+    assert reported["state"] == "completed"
+    assert reported["session_reset_reason"], "the owner is never told why the conversation restarted"
+    assert "sess-nobody-has" in reported["session_reset_reason"]
+
+
+def test_a_task_that_resumed_cleanly_reports_no_reset_reason(agent, monkeypatch):
+    """Absent means "there was no reset". Sending an empty reason on every ordinary task would make
+    the field meaningless — and would overwrite a real reason recorded by an earlier attempt."""
+    from remote import tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job())  # no `resume_session_id` at all
+
+    assert reported["session_reset_reason"] is None
