@@ -1095,16 +1095,19 @@ def test_a_previous_tasks_leftovers_are_gone_but_the_reserved_directory_survives
     """The workspace is per-PROJECT and persists across tasks — the transcript path depends on it.
 
     So the reset has to be exact: a previous task's file left lying about is indistinguishable from
-    this task's input. `.grid/` is the one exception, and deliberately so — it is where issue 06's
-    symlinked transcript directory lives, and a `git clean` that deleted it would delete the
-    project's whole conversation on every task.
+    this task's input. `.grid/` is the one exception, and deliberately so — it holds the project's
+    conversation (issue 06), and a `git clean` that deleted it would destroy that conversation on
+    every task. `-e .grid` covers the whole reserved directory, so the provider's own untracked
+    state under it survives too.
     """
     from remote import task_agent, tasks
 
     workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
     (workspace / "stale.txt").write_text("from the last task\n")
-    (workspace / ".grid").mkdir()
-    (workspace / ".grid" / "transcript.jsonl").write_text("the project's conversation\n")
+    transcript = task_agent.transcript_dir(workspace)
+    transcript.mkdir(parents=True)
+    (transcript / "sess-1.jsonl").write_text("the project's conversation\n")
+    (workspace / ".grid" / "scratch.txt").write_text("the provider's own\n")
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"fresh.txt": "new\n"})
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
@@ -1115,7 +1118,8 @@ def test_a_previous_tasks_leftovers_are_gone_but_the_reserved_directory_survives
     assert outcome.state == "completed", outcome.error
     assert not (workspace / "stale.txt").exists(), "a previous task's file survived the reset"
     assert (workspace / "fresh.txt").read_text() == "new\n"
-    assert (workspace / ".grid" / "transcript.jsonl").read_text() == "the project's conversation\n"
+    assert (transcript / "sess-1.jsonl").read_text() == "the project's conversation\n"
+    assert (workspace / ".grid" / "scratch.txt").read_text() == "the provider's own\n"
 
 
 def test_the_workspace_is_left_on_the_task_branch_for_the_push(agent, tmp_path):
@@ -1220,8 +1224,14 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
         return tasks.TaskOutcome("completed", "ok", None)
 
     monkeypatch.setattr(tasks, "run_task", fake_run)
-    monkeypatch.setattr(tasks, "_push_result", lambda _j, outcome, _r, _p: (outcome, True))
-    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: None)
+    # `*a` rather than a fixed parameter list. The previous spelling took four positional arguments
+    # while `_run_and_report` passes five (`spawned` was added by issue 05), so every call raised a
+    # TypeError that `_run_and_report`'s own `except (Exception, SystemExit)` swallowed — and the
+    # test still passed, because its assertion reads what `fake_run` recorded BEFORE the raise. It
+    # was green while exercising none of the path past `run_task`.
+    monkeypatch.setattr(tasks, "_push_result", lambda *a: (a[1], True))
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
 
     tasks._run_and_report(_FakeState(), {"task_id": "T-42", "prompt": "p",
@@ -1229,6 +1239,8 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
 
     assert captured["remote"].url == "http://relay/relay/v1/git/proj-1"
     assert captured["remote"].token == "tok"
+    # Proves the swallowed TypeError is really gone: a report only happens if the whole path ran.
+    assert reported["state"] == "completed", reported
 
 
 class _NullPublisher:
@@ -1394,22 +1406,30 @@ def _job_with_input(commit, branch="task/T1"):
             "branch": branch, "input_commit": commit}
 
 
-def test_the_agents_work_is_pushed_and_the_reserved_directory_is_not(
+def test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the_reserved_directory(
         agent, tmp_path, monkeypatch):
     """The issue's demo from the provider's end: the agent writes a file, and that file is in the
-    commit the relay is told about.
+    commit the relay is told about — and so is the conversation it had.
 
-    `.grid/` staying OUT is the other half, and it is not tidiness. It is where issue 06's symlinked
-    transcript lives — the provider's own state, holding the conversation the agent had — and
-    committing it would push the provider's internals into the requesting user's repository, once
-    per task, permanently.
+    `.grid/agent/` rides along; the rest of `.grid/` does not. The transcript and the agent's
+    `memory/` ARE the project's conversation, and the ordinary result commit is how they reach the
+    project's next task and its next provider (issue 06). Anything else under `.grid/` is the
+    provider's own state and belongs in nobody else's repository.
+
+    **This reverses issue 05**, which excluded all of `.grid/` on the reasoning that the transcript
+    was provider internals. That exclusion makes cross-provider resume impossible — the whole of
+    issue 06 — and contradicts ADR 0032 D-b, which describes the transcript as "then committed back
+    to the user's repo". The relay's refusal to accept an UPLOAD anywhere under `.grid/` is
+    unchanged, so the conversation is still written only by the provider.
     """
     from remote import tasks
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     _relay_git_url(monkeypatch, remote.url)
-    agent("mkdir -p .grid\n"
-          "echo transcript > .grid/session.jsonl\n"
+    agent("mkdir -p .grid/agent/memory\n"
+          "echo transcript > .grid/agent/sess-1.jsonl\n"
+          "echo remembered > .grid/agent/memory/note.md\n"
+          "echo provider-only > .grid/scratch.txt\n"
           "echo fixed > fix.py\n"
           "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
     reported = {}
@@ -1423,7 +1443,74 @@ def test_the_agents_work_is_pushed_and_the_reserved_directory_is_not(
     assert pushed and pushed != commit, "nothing new was pushed"
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
     assert "fix.py" in listing
-    assert not [path for path in listing if path.startswith(".grid")], listing
+    assert ".grid/agent/sess-1.jsonl" in listing, listing
+    assert ".grid/agent/memory/note.md" in listing, listing
+    assert ".grid/scratch.txt" not in listing, listing
+
+
+def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
+        agent, tmp_path, monkeypatch):
+    """A **tracked** `.gitignore` outranks `$GIT_DIR/info/exclude`, so the conversation is
+    force-added rather than merely un-excluded.
+
+    Entirely plausible input: the requesting user's repository is an AI-agent project that ignores
+    `*.jsonl` or `memory/`, or the agent — running under `bypassPermissions` — writes a `.gitignore`
+    itself. The failure it produces is the silent kind this feature is most exposed to: the task
+    still reports `completed` with a session id, the transcript simply never enters the commit, and
+    nothing surfaces until a *different* provider finds no conversation to resume and reports the
+    misleading "no transcript for session X in this workspace".
+
+    The same provider masks it for a while, too — its local `.grid/agent/` survives
+    `clean -ffdx -e .grid` whether or not it was ever pushed.
+    """
+    from remote import tasks
+
+    remote, commit = _remote_for(
+        tmp_path, "task/T1",
+        {"a.txt": "x\n", ".gitignore": ".grid/agent/\n*.jsonl\nmemory/\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("mkdir -p .grid/agent/memory\n"
+          "echo transcript > .grid/agent/sess-1.jsonl\n"
+          "echo remembered > .grid/agent/memory/note.md\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "completed"
+    listing = _git(remote.url, "ls-tree", "-r", "--name-only", reported["result_commit"]).stdout.split()
+    assert ".grid/agent/sess-1.jsonl" in listing, listing
+    assert ".grid/agent/memory/note.md" in listing, listing
+
+
+def test_a_task_whose_agent_left_no_transcript_still_commits_and_pushes(
+        agent, tmp_path, monkeypatch):
+    """The forced add names a path that need not exist — `git add` calls an unmatched pathspec an
+    error, and a run that died before the agent wrote anything must still push (ADR 0032 D-e: a
+    failed attempt is committed and pushed too, so the user can see what happened)."""
+    from remote import task_agent, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("echo fixed > fix.py\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    # Remove the directory `link_transcript` created, so the pathspec genuinely matches nothing.
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+    outcome = tasks.run_task(_job(input_commit=commit, branch="task/T1"), remote=remote)
+    assert outcome.state == "completed", outcome.error
+    workspace = task_agent.workspace_for("proj-1")
+    import shutil
+    shutil.rmtree(task_agent.transcript_dir(workspace))
+
+    from remote import task_repo
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
+
+    listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
+    assert "fix.py" in listing, listing
 
 
 def test_a_failed_task_still_commits_and_pushes_its_branch(agent, tmp_path, monkeypatch):
@@ -1703,3 +1790,579 @@ def test_a_push_failure_is_reported_locally_even_when_the_event_channel_is_dead(
 
     err = capsys.readouterr().err
     assert "the relay refused (403)" in err, err
+
+
+# --- issue 06: the project's conversation travels with the repository -----------------------------
+
+# MEASURED against a real Claude Code (2.1.222, macOS, 2026-08-05), not derived from documentation:
+# a session was run in `/private/tmp/grid_enc/a_b.c-d` and the transcript landed in
+# `~/.claude/projects/-private-tmp-grid-enc-a-b-c-d`. The underscore is what makes this table worth
+# keeping — it is the ONLY character that distinguishes "replace the separators `/` and `.`" from
+# "replace everything that is not alphanumeric", and the two rules disagree on any operator whose
+# `GRID_TASK_ROOT` contains one. The other rows were read off the same machine's existing
+# `~/.claude/projects/` entries.
+#
+# Every row is a path that is its own realpath, so this table tests the ENCODING alone — resolution
+# is a separate rule with its own test below. A `/var/...` row would silently exercise both here and
+# fail on macOS, where `/var` is a symlink to `/private/var`.
+_MEASURED_TRANSCRIPT_DIR_NAMES = [
+    ("/private/tmp/grid_enc/a_b.c-d", "-private-tmp-grid-enc-a-b-c-d"),
+    ("/Users/macbookpro/.grid", "-Users-macbookpro--grid"),
+    ("/private/tmp/one/workspaces/abc.com", "-private-tmp-one-workspaces-abc-com"),
+]
+
+
+@pytest.mark.parametrize("cwd,expected", _MEASURED_TRANSCRIPT_DIR_NAMES)
+def test_the_transcript_directory_name_is_the_agent_cwd_with_every_separator_flattened(
+        cwd, expected):
+    """Claude Code derives a session's transcript directory from the ABSOLUTE working directory.
+
+    This function has to reproduce the agent's own naming byte-for-byte: get it wrong and the
+    provider symlinks a directory the agent never writes to, the transcript never reaches the
+    repository, and every follow-up task silently starts a fresh conversation while looking healthy.
+    Hence a table of measurements rather than a rule someone reasoned out.
+    """
+    from pathlib import Path
+
+    from remote import task_agent
+
+    assert task_agent.transcript_dir_name(Path(cwd)) == expected
+
+
+def test_a_workspace_reached_through_a_symlink_is_named_by_its_real_path(tmp_path):
+    """The name comes from the cwd the CHILD reports, and `getcwd` has already followed every
+    symlink on the way in.
+
+    Found by a live two-task run, not by a test: on macOS `/var` is a symlink to `/private/var`, so
+    a workspace under `/var/folders/...` is `-private-var-folders-...` to the agent while a caller
+    that trusted the string computed `-var-folders-...`, planted its symlink there, and watched
+    Claude Code write the transcript somewhere else entirely. The task still succeeded and the
+    session id still came back — nothing failed, the conversation was simply never captured.
+
+    Every earlier unit test compared our own computation against itself and agreed, which is why
+    this one is written against a symlink rather than against a string.
+    """
+    from remote import task_agent
+
+    real = tmp_path / "real-root" / "workspace"
+    real.mkdir(parents=True)
+    (tmp_path / "via-link").symlink_to(tmp_path / "real-root", target_is_directory=True)
+
+    through_link = task_agent.transcript_dir_name(tmp_path / "via-link" / "workspace")
+
+    assert through_link == task_agent.transcript_dir_name(real)
+    assert "via-link" not in through_link
+
+
+def test_what_the_agent_writes_to_its_transcript_directory_lands_in_the_workspace(
+        monkeypatch, tmp_path):
+    """The whole mechanic of issue 06, in one assertion.
+
+    Claude Code writes through a symlink (measured by the issue-01 spike), so pointing its
+    per-cwd transcript folder at a directory inside the git worktree captures the transcript *and*
+    the agent's `memory/` with no copying step — the repository that already carries the project's
+    files carries its conversation too.
+    """
+    from remote import task_agent
+
+    config = tmp_path / "provider-config"
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(config))
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    target = task_agent.link_transcript(workspace)
+
+    link = config / "projects" / task_agent.transcript_dir_name(workspace)
+    assert link.is_symlink(), f"{link} is not a symlink"
+    # Writing THROUGH the link is exactly what the agent does; asserting on the link's own target
+    # would prove the call, not the behaviour that makes the feature work.
+    (link / "sess-1.jsonl").write_text('{"type":"system"}\n', encoding="utf-8")
+    (link / "memory").mkdir()
+    (link / "memory" / "note.md").write_text("remembered", encoding="utf-8")
+
+    assert target == workspace / ".grid" / "agent"
+    assert (target / "sess-1.jsonl").read_text(encoding="utf-8") == '{"type":"system"}\n'
+    assert (target / "memory" / "note.md").read_text(encoding="utf-8") == "remembered"
+
+
+def test_a_real_directory_where_the_symlink_belongs_is_refused_and_nothing_is_deleted(
+        monkeypatch, tmp_path):
+    """Not hypothetical: every provider that ran tasks before this slice has one.
+
+    Issues 03-05 spawned the agent with no symlink in place, so Claude Code created that directory
+    itself and filled it with the project's conversation. Replacing it blind would delete exactly
+    the history this feature exists to preserve, so the provider refuses and names the path — an
+    operator moves it once. A symlink is different and IS replaced: it holds no data.
+    """
+    from remote import task_agent
+
+    config = tmp_path / "provider-config"
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(config))
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    squatter = config / "projects" / task_agent.transcript_dir_name(workspace)
+    squatter.mkdir(parents=True)
+    (squatter / "older-session.jsonl").write_text("a conversation from before 06\n", encoding="utf-8")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.link_transcript(workspace)
+
+    # A bare `FileExistsError` from `symlink_to` would also carry the path and would also be an
+    # OSError — and it would tell an operator nothing about what to do. The refusal has to be the
+    # provider's own, and it has to say how to clear it, or every task on this project fails with a
+    # message that reads like a bug in grid.
+    message = str(excinfo.value)
+    assert str(squatter) in message, message
+    assert "move or remove" in message.lower(), message
+    assert (squatter / "older-session.jsonl").exists(), "an operator's transcript was destroyed"
+
+
+def test_a_config_directory_inside_the_workspace_is_refused(monkeypatch, tmp_path):
+    """ADR 0032 D-b's hazard, reached from the provider's own side rather than a client's upload.
+
+    The config directory holds the provider's Claude subscription credential. Inside the workspace
+    it is inside the git worktree, and the result push commits it into the requesting user's
+    repository — the one leak this whole design is arranged to prevent.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(workspace / "provider-config"))
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.link_transcript(workspace)
+
+    assert "credential" in str(excinfo.value).lower(), excinfo.value
+
+
+def test_an_operator_who_configures_nothing_gets_claude_codes_own_default(monkeypatch, tmp_path):
+    """The commonest production configuration, and the one the suite's safety net hides.
+
+    `tests/conftest.py` points `GRID_TASK_CLAUDE_CONFIG_DIR` at a temp directory for every test, so
+    that nothing plants symlinks in the developer's real `~/.claude` — which means no other test
+    exercises the fallback that almost every real provider actually uses. Proved here against a
+    stubbed home rather than the real one, so the coverage costs nothing.
+    """
+    from pathlib import Path
+
+    from remote import task_agent
+
+    monkeypatch.delenv("GRID_TASK_CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: fake_home))
+
+    assert task_agent.configured_claude_config_dir() is None
+    assert task_agent.claude_config_dir() == fake_home / ".claude"
+
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    task_agent.link_transcript(workspace)
+
+    link = fake_home / ".claude" / "projects" / task_agent.transcript_dir_name(workspace)
+    assert link.is_symlink(), f"{link} was not created under the default config directory"
+
+
+def test_a_relative_config_directory_is_refused(monkeypatch, tmp_path):
+    """`child_env` hands the value to the child verbatim, and the child resolves it against ITS
+    working directory — which is the workspace. So a relative config directory is the previous test's
+    leak wearing a different spelling, and it is refused where the value is read."""
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", "provider-config")
+
+    with pytest.raises(ValueError) as excinfo:
+        task_agent.claude_config_dir()
+
+    assert "absolute" in str(excinfo.value).lower(), excinfo.value
+
+
+def test_a_follow_up_task_asks_the_agent_to_continue_the_projects_conversation(monkeypatch):
+    """`--resume <id>`, appended to the argv issue 03 pinned — nothing else about the child changes.
+
+    A resume appends to the same transcript and keeps the same session id (measured), which is what
+    makes one stored id per project reusable forever rather than a chain to walk.
+    """
+    from remote import task_agent
+
+    monkeypatch.delenv("GRID_TASK_PERMISSION_MODE", raising=False)
+
+    argv = task_agent.agent_argv(
+        "/usr/local/bin/claude", "and now write the tests", resume="012c9e09-abcd")
+
+    assert argv == [
+        "/usr/local/bin/claude",
+        "-p", "and now write the tests",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--permission-mode", "bypassPermissions",
+        "--resume", "012c9e09-abcd",
+    ]
+
+
+def _transcript(workspace, session_id, body='{"type":"summary"}\n'):
+    """Put a transcript for `session_id` where a checkout would have left one."""
+    from remote import task_agent
+
+    directory = task_agent.transcript_dir(workspace)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.jsonl"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_a_session_whose_transcript_arrived_with_the_checkout_is_resumable(monkeypatch, tmp_path):
+    """The relay says WHICH session; the workspace says WHETHER it is here. Both, or no resume.
+
+    The relay's answer alone is not enough: it names the project's last conversation, but the
+    transcript only reaches this provider if the commit carrying it was fast-forwarded onto `main`.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    _transcript(workspace, "012c9e09-abcd")
+
+    decision = task_agent.resumable_session(workspace, "012c9e09-abcd")
+
+    assert decision.session_id == "012c9e09-abcd"
+    assert decision.reason is None
+
+
+def test_a_project_with_no_conversation_yet_starts_fresh_and_says_nothing(monkeypatch, tmp_path):
+    """The project's FIRST task. Not a degraded outcome, so there is nothing to report."""
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    decision = task_agent.resumable_session(workspace, None)
+
+    assert decision.session_id is None
+    assert decision.reason is None
+
+
+@pytest.mark.parametrize("hostile", [
+    "../../../etc/passwd",   # climbs out of the transcript directory
+    "a/b",                   # a separator invents a level
+    "/etc/passwd",           # absolute: `dir / "/etc/passwd"` IS `/etc/passwd`, silently
+    "..",
+    ".hidden",               # a leading dot, refused the way `workspace_for` refuses `.` and `..`
+    "-rf",                   # would reach `--resume` as a flag rather than as its value
+    "x" * 300,               # past the relay's own bound
+])
+def test_a_session_id_that_is_not_a_safe_filename_never_reaches_the_filesystem(
+        monkeypatch, tmp_path, hostile):
+    """The id is used to BUILD A PATH, so it gets `workspace_for`'s allowlist rule.
+
+    It arrives from the relay rather than directly from a user, which makes it one hop further away
+    — not trustworthy. A provider that followed `../../../` here would read, and then commit into
+    the requesting user's repository, a file from outside the workspace entirely.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    decision = task_agent.resumable_session(workspace, hostile)
+
+    assert decision.session_id is None
+    # The REASON matters as much as the verdict: without the allowlist these ids also return None,
+    # simply because nothing happens to exist where they point. Asserting only "no resume" passes
+    # just as happily with the guard deleted, which is how a path-escape check rots into decoration.
+    assert "not a safe id" in (decision.reason or ""), decision.reason
+
+
+@pytest.mark.parametrize("wrong_type", [7, True, ["s"], {"a": 1}, 3.5])
+def test_a_session_id_of_the_wrong_type_degrades_instead_of_killing_the_task(
+        monkeypatch, tmp_path, wrong_type):
+    """`claim_task` returns `resp.json()` verbatim, so this field can be any JSON type.
+
+    `re.match` raises `TypeError` on a non-string, and this call sits outside `run_task`'s
+    try/except blocks — so a relay that serialized the field wrong would not merely lose the
+    resume, it would lose the whole attempt: the raise unwinds past `_push_result`, so nothing is
+    committed or pushed, and the user gets "task runner raised: TypeError(...)" instead of the
+    agent's work. Every other wire-sourced value in `run_task` is already `str()`-cast or
+    `isinstance`-checked; this one gets the same rule.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    decision = task_agent.resumable_session(workspace, wrong_type)
+
+    assert decision.session_id is None
+    assert "not a safe id" in (decision.reason or ""), decision.reason
+
+
+def test_a_session_id_cannot_reach_a_file_outside_the_transcript_directory(monkeypatch, tmp_path):
+    """The escape the allowlist actually exists to stop, with a real file at the far end.
+
+    `.grid/` holds provider-local state that is deliberately NOT committed. A relay — or anything
+    that reached one — naming `../something` would have the provider read that file as a transcript
+    and hand it to `--resume`. Planting a readable file there is what makes this test fail when the
+    guard is removed, rather than passing on the accident that the path was empty.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    task_agent.transcript_dir(workspace).mkdir(parents=True, exist_ok=True)
+    outside = workspace / task_agent.task_repo.RESERVED_DIR / "sneaky.jsonl"
+    outside.write_text('{"type": "summary"}\n', encoding="utf-8")
+
+    decision = task_agent.resumable_session(workspace, "../sneaky")
+
+    assert decision.session_id is None, "a session id climbed out of the transcript directory"
+    assert "not a safe id" in (decision.reason or ""), decision.reason
+
+
+def test_a_follow_up_task_spawns_the_agent_with_the_projects_session(agent, tmp_path, monkeypatch):
+    """End to end through `run_task`: the claim names a session, the checkout carries its
+    transcript, and the child is asked to continue it.
+
+    Asserted through what the CHILD actually received, not through the argv builder — the point of
+    this slice is the wiring, and a test that re-read `agent_argv` would pass with the two never
+    connected.
+    """
+    from remote import task_agent, tasks
+
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-config"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    _transcript(workspace, "012c9e09-abcd")
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    seen = tmp_path / "argv.txt"
+    agent(f'printf "%s" "$*" > {seen}\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    publisher = _RecordingPublisher()
+
+    outcome = tasks.run_task(
+        _job(input_commit=commit, branch="task/T1", resume_session_id="012c9e09-abcd"),
+        publish=publisher.publish, remote=remote)
+
+    assert outcome.state == "completed", outcome.error
+    assert "--resume 012c9e09-abcd" in seen.read_text(encoding="utf-8")
+    # Said out loud, too: "resumed" and "started fresh" are the two outcomes a user needs to tell
+    # apart, and only one of them is visible in the answer the agent gives.
+    resumed = [f for kind, f in publisher.published if kind == "task.session_resumed"]
+    assert resumed == [{"session_id": "012c9e09-abcd"}], publisher.published
+
+
+def test_a_session_the_workspace_cannot_supply_starts_fresh_and_says_so_in_the_log(
+        agent, tmp_path, monkeypatch):
+    """The acceptance criterion: missing or corrupt starts fresh WITH A SIGNAL, never fails.
+
+    Reachable the moment a task fails — a failed attempt's transcript is never fast-forwarded onto
+    `main`, so the next task's checkout does not carry it while the relay still remembers the id
+    that attempt reported. Passing `--resume` at that point would fail the task outright; starting
+    over is the only useful answer, and the user has to be told, because an agent that has silently
+    forgotten the project is indistinguishable from one that ignored them.
+    """
+    from remote import task_agent, tasks
+
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-config"))
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    seen = tmp_path / "argv.txt"
+    agent(f'printf "%s" "$*" > {seen}\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    publisher = _RecordingPublisher()
+
+    outcome = tasks.run_task(
+        _job(input_commit=commit, branch="task/T1", resume_session_id="012c9e09-abcd"),
+        publish=publisher.publish, remote=remote)
+
+    assert outcome.state == "completed", outcome.error
+    assert "--resume" not in seen.read_text(encoding="utf-8")
+    reset = [fields for kind, fields in publisher.published if kind == "task.session_reset"]
+    assert len(reset) == 1, publisher.published
+    assert reset[0]["requested_session_id"] == "012c9e09-abcd"
+    assert "no transcript" in reset[0]["reason"]
+
+
+def test_a_publisher_that_raises_on_the_session_event_does_not_fail_the_task(
+        agent, tmp_path, monkeypatch):
+    """A progress event must never be able to fail the task — `_Reporter._emit`'s rule, applied to
+    the two publishes that happen BEFORE the spawn.
+
+    That position is what makes it matter more here than elsewhere: a raise from these two would
+    unwind past the agent and past the push, and `_run_and_report` would report "task runner
+    raised: ..." for a task that never ran — a message indistinguishable, to the user, from the
+    agent itself failing. `TaskEventPublisher` is documented never to raise; reaching this guard
+    means it has a bug, and a bug there must cost one event, not the work.
+    """
+    from remote import task_agent, tasks
+
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    agent("echo done > out.txt\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    def exploding(kind, **fields):
+        raise RuntimeError(f"the publisher is broken ({kind})")
+
+    outcome = tasks.run_task(
+        _job(input_commit=commit, branch="task/T1", resume_session_id="012c9e09-abcd"),
+        publish=exploding, remote=remote)
+
+    assert outcome.state == "completed", outcome.error
+    assert (task_agent.workspace_for("proj-1") / "out.txt").exists(), "the agent never ran"
+
+
+def test_a_relay_that_names_no_session_runs_fresh_without_reporting_anything(
+        agent, tmp_path, monkeypatch):
+    """A relay predating issue 06 sends no `resume_session_id`, and so does the FIRST task on every
+    project. Neither is a degraded outcome, so neither says anything — exactly how a missing
+    `input_commit` degrades to the pre-git-plane behaviour rather than to a new failure."""
+    from remote import task_agent, tasks
+
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-config"))
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    seen = tmp_path / "argv.txt"
+    agent(f'printf "%s" "$*" > {seen}\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    publisher = _RecordingPublisher()
+
+    outcome = tasks.run_task(
+        _job(input_commit=commit, branch="task/T1"), publish=publisher.publish, remote=remote)
+
+    assert outcome.state == "completed", outcome.error
+    assert "--resume" not in seen.read_text(encoding="utf-8")
+    assert not [kind for kind, _ in publisher.published if kind.startswith("task.session_")], \
+        publisher.published
+
+
+def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repository(
+        agent, tmp_path, monkeypatch):
+    """The acceptance criterion, and the reason the transcript is committed at all.
+
+    A single-host rehearsal of the issue-01 spike: provider A runs a task and pushes; its workspace
+    is then **deleted entirely** and a **different config directory** takes over, which is what
+    provider B has — no workspace, no transcript, nothing but the repository. The workspace PATH
+    stays identical, because that is the lockstep value Claude Code derives the transcript
+    directory from.
+
+    What this does NOT prove is a genuinely different machine, OS, or Claude Code version. Providers
+    should stay version-pinned until a two-host run says otherwise (PRD, "still unproven").
+    """
+    import shutil
+
+    from remote import task_agent, tasks
+
+    # --- provider A -------------------------------------------------------------------------
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-a-config"))
+    workspace = task_agent.workspace_for("proj-1")
+    link = (task_agent.claude_config_dir() / "projects"
+            / task_agent.transcript_dir_name(workspace))
+    remote, first_input = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    # Writes THROUGH the config-directory path, exactly as the real agent does. Writing to
+    # `$PWD/.grid/agent` instead would land in the right place while proving nothing about the link.
+    monkeypatch.setenv("GRID_TEST_LINK", str(link))
+    agent('mkdir -p "$GRID_TEST_LINK/memory"\n'
+          'printf \'{"type":"summary"}\\n\' > "$GRID_TEST_LINK/sess-1.jsonl"\n'
+          'echo remembered > "$GRID_TEST_LINK/memory/note.md"\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    first = tasks.run_task(_job(input_commit=first_input, branch="task/T1"), remote=remote)
+    assert first.state == "completed", first.error
+    pushed = task_repo_commit_and_push(workspace, remote, "task/T1")
+
+    # --- everything provider A had, gone ----------------------------------------------------
+    shutil.rmtree(workspace)
+    shutil.rmtree(tmp_path / "provider-a-config")
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-b-config"))
+
+    # --- provider B: the project's next task, cut from what A pushed ------------------------
+    _git(remote.url, "branch", "task/T2", pushed)
+    seen = tmp_path / "argv-b.txt"
+    agent(f'printf "%s" "$*" > {seen}\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    second = tasks.run_task(
+        _job(task_id="T2", input_commit=pushed, branch="task/T2",
+             resume_session_id="sess-1"),
+        remote=remote)
+
+    assert second.state == "completed", second.error
+    assert "--resume sess-1" in seen.read_text(encoding="utf-8"), \
+        "provider B started a fresh session instead of continuing the project's"
+    # The conversation itself arrived, not merely the id — including the agent's own memory.
+    rebuilt = task_agent.transcript_dir(task_agent.workspace_for("proj-1"))
+    assert (rebuilt / "sess-1.jsonl").exists()
+    assert (rebuilt / "memory" / "note.md").read_text(encoding="utf-8") == "remembered\n"
+
+
+def task_repo_commit_and_push(workspace, remote, branch):
+    """Commit and push what the agent left, the way `_push_result` does."""
+    from remote import task_repo
+
+    return task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch=branch, message="task T1 (completed)")
+
+
+@pytest.mark.parametrize("body,expected_in_reason", [
+    ("", "empty"),
+    ("   \n", "empty"),
+    ("this is not json\n", "JSON"),
+    ("[1, 2, 3]\n", "JSON"),          # valid JSON, but no record Claude Code ever wrote
+    ('{"type": "summary"' + "\n", "JSON"),   # truncated mid-object: a push that died halfway
+])
+def test_a_transcript_that_cannot_be_read_starts_a_fresh_session_with_a_reason(
+        monkeypatch, tmp_path, body, expected_in_reason):
+    """Corrupt is a fresh start, never a failed task — and never a silent one.
+
+    `--resume` against a broken transcript fails the whole task, so the check happens here where the
+    answer can still be "start over and tell the user", which is what the acceptance criterion asks
+    for.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    _transcript(workspace, "sess-1", body=body)
+
+    decision = task_agent.resumable_session(workspace, "sess-1")
+
+    assert decision.session_id is None
+    assert expected_in_reason in decision.reason, decision.reason
+
+
+def test_a_transcript_that_never_arrived_starts_a_fresh_session_with_a_reason(
+        monkeypatch, tmp_path):
+    """The reachable case: the project's previous task FAILED, so its transcript was never
+    fast-forwarded onto `main` and this checkout legitimately does not carry it — while the relay
+    still remembers the session id that attempt reported."""
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+
+    decision = task_agent.resumable_session(workspace, "012c9e09-abcd")
+
+    assert decision.session_id is None
+    assert "no transcript" in decision.reason, decision.reason
+
+
+def test_a_transcript_that_is_a_symlink_is_never_followed(monkeypatch, tmp_path):
+    """Nothing legitimate plants one — the agent writes through OUR symlink, and a checkout cannot
+    create one (`core.symlinks=false`). Following it would read, and then commit, its target."""
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    secret = tmp_path / "credentials.json"
+    secret.write_text('{"access_token": "the provider\'s own"}\n', encoding="utf-8")
+    directory = task_agent.transcript_dir(workspace)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "sess-1.jsonl").symlink_to(secret)
+
+    decision = task_agent.resumable_session(workspace, "sess-1")
+
+    assert decision.session_id is None
+    assert "symlink" in decision.reason, decision.reason

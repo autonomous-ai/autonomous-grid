@@ -23156,15 +23156,23 @@ def _child(argv, *, timeout=5.0, publish=None, translator=None):
         translator=translator)
 
 
-def test_run_task_reports_failure_rather_than_raising(monkeypatch):
+def test_run_task_reports_failure_rather_than_raising(monkeypatch, tmp_path):
     """Every failure mode of the child is a FAILED task, never an exception into the loop.
 
     Patches `Popen` rather than `run`: the child is spawned and streamed now, so a spawn that
-    cannot even start is the failure this pins."""
-    from remote import task_agent, tasks
+    cannot even start is the failure this pins.
 
+    A real (temporary) workspace root rather than a stubbed `ensure_workspace`: preparing a
+    workspace is two steps now — the directory and the agent's transcript link — and stubbing only
+    the first left the second failing on `/var/grid` before the spawn was ever reached, so the test
+    passed on the wrong error. Letting both run for real keeps the child's failure the only one
+    available to assert on.
+    """
+    from remote import tasks
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
-    monkeypatch.setattr(task_agent, "ensure_workspace", lambda path: path)
     monkeypatch.setattr(tasks.subprocess, "Popen", _raise(OSError("no such binary")))
 
     outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "prompt": "x"})
@@ -23173,15 +23181,15 @@ def test_run_task_reports_failure_rather_than_raising(monkeypatch):
     assert "no such binary" in outcome.error
 
 
-def test_run_task_times_out_into_a_failed_state(monkeypatch):
+def test_run_task_times_out_into_a_failed_state(monkeypatch, tmp_path):
     """The fast unit form of the deadline. `test_a_child_that_writes_nothing_still_times_out`
     proves it against a real wedged child; this one pins the mapping to a failed outcome."""
     import subprocess as _subprocess
 
     from remote import task_agent, tasks
 
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
-    monkeypatch.setattr(task_agent, "ensure_workspace", lambda path: path)
     monkeypatch.setattr(
         tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="claude", timeout=1)))
 

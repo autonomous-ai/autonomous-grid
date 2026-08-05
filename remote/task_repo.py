@@ -15,8 +15,13 @@ Two properties are worth stating because they are easy to lose:
     task. A previous task's leftover file is therefore indistinguishable from this task's input
     unless the reset removes it.
   * **`.grid/` survives the clean.** It is the reserved internal directory (and the one the relay
-    refuses on upload for exactly this reason): issue 06's symlinked transcript lives there, and a
-    clean that deleted it would destroy the project's conversation on every task.
+    refuses on upload for exactly this reason): issue 06's transcript lives there, and a clean that
+    deleted it would destroy the project's conversation on every task.
+  * **`.grid/agent/` is the one part of it that is COMMITTED** (issue 06). The transcript and the
+    agent's `memory/` are how a project's conversation reaches its next task and its next provider,
+    and the ordinary result commit is the only path they travel. The rest of `.grid/` stays the
+    provider's own. The relay still refuses to accept an upload anywhere under `.grid/`, so the
+    conversation is written by the provider and by nobody else.
 """
 from __future__ import annotations
 
@@ -29,6 +34,12 @@ from pathlib import Path
 # refuses any path inside it — the two halves of one rule: nothing may be uploaded here, and nothing
 # here may be deleted.
 RESERVED_DIR = ".grid"
+# The one directory INSIDE `.grid/` that is committed: the Claude Code transcript and the agent's
+# `memory/`, which is how a project's conversation reaches the next task and the next provider
+# (ADR 0032, issue 06). Everything else under `.grid/` stays the provider's own business. Named here
+# rather than in `task_agent` because this module owns the repository's layout — it is what writes
+# the exclude that carves this one subdirectory back in.
+TRANSCRIPT_DIR = "agent"
 # Written inside a directory `grid task fetch` created, holding the project it holds. The CLI
 # requires it before checking anything out over an existing directory: `.git` alone proves only
 # that SOME repository is there, and the user's own is the one that must not be written into.
@@ -146,14 +157,21 @@ def _run(workspace: Path, *args: str, token: str | None = None,
 
 
 def _ensure_repo(workspace: Path) -> None:
-    """Make `workspace` a git working copy, and keep `.grid/` out of every commit made from it.
+    """Make `workspace` a git working copy, and keep `.grid/` out of every commit made from it —
+    except `.grid/agent/`, which is the project's conversation and has to travel.
 
-    The exclude is written on every call rather than only at init, because it is what stops issue
-    06's transcript symlink — the provider's own state, living inside the workspace — from being
-    committed into the requesting user's repository by `git add -A`. It is the third face of one
-    rule whose other two are already in place: the relay refuses `.grid/` on upload, and the clean
-    below spares it. A file that only got written at init would go missing the first time a
-    workspace was restored from anywhere else.
+    The exclude is written on every call rather than only at init, because it is what keeps the
+    provider's own state out of the requesting user's repository under `git add -A`. A file that
+    only got written at init would go missing the first time a workspace was restored from
+    anywhere else.
+
+    The whole of `.grid/` is excluded here, and the issue-06 carve-out is made by `commit_and_push`
+    **force-adding** `.grid/agent/` instead of by a `!` negation in this file. That is not a style
+    choice: a *tracked* `.gitignore` outranks `$GIT_DIR/info/exclude`, so a project whose repository
+    ignores (say) `*.jsonl` or `memory/` would silently defeat a negation written here — the task
+    would still report `completed`, the transcript would simply never be committed, and the loss
+    would only surface when a different provider found no conversation to resume. A forced add
+    overrides every ignore source, so the rule cannot be shadowed by the repository's own contents.
     """
     if not (workspace / ".git").exists():
         _run(workspace, "init", "--quiet", f"--initial-branch={DEFAULT_BRANCH}", ".")
@@ -217,6 +235,17 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
 
     try:
         _run(workspace, "add", "-A")
+        # The project's conversation, added explicitly and by force (ADR 0032, issue 06). `-f`
+        # because EVERY ignore source has to be overridden, not just the one we wrote: `.grid/` is
+        # excluded wholesale by `_ensure_repo`, and a tracked `.gitignore` in the user's own
+        # repository outranks that file anyway. `-A` within the pathspec so a memory file the agent
+        # deleted is staged as a deletion rather than lingering forever.
+        #
+        # Guarded on existence because `git add` treats a pathspec matching nothing as an error, and
+        # a task whose agent never started has no transcript directory to add — that outcome must
+        # still commit and push, since a failed attempt is pushed too.
+        if (workspace / RESERVED_DIR / TRANSCRIPT_DIR).is_dir():
+            _run(workspace, "add", "-f", "-A", "--", f"{RESERVED_DIR}/{TRANSCRIPT_DIR}")
         _run(workspace, "commit", "--quiet", "--allow-empty", "-m", message)
         commit = _run(workspace, "rev-parse", "HEAD").strip()
     except CheckoutError as exc:

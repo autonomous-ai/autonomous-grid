@@ -480,7 +480,9 @@ def run_task(job: dict[str, Any],
     try:
         workspace = task_agent.ensure_workspace(
             task_agent.workspace_for(str(job.get("project_id") or "")))
-        argv = task_agent.agent_argv(task_agent.resolve_binary(), prompt)
+        # Resolved HERE rather than with the argv below, which is now built after the checkout: a
+        # provider with no Claude Code installed must fail before it fetches anything, not after.
+        binary = task_agent.resolve_binary()
     except (Exception, SystemExit) as exc:
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
@@ -508,6 +510,31 @@ def run_task(job: dict[str, Any],
         except (Exception, SystemExit) as exc:
             return _failed(translator, f"could not prepare the task's workspace: {exc}")
 
+    # AFTER the checkout, for two reasons that both bite: the link's target has to survive
+    # `reset --hard`/`clean`, and the transcript this task may resume only exists once the input
+    # commit has been materialized. Fatal if it fails — an agent spawned without the link writes its
+    # transcript outside the repository, so the conversation is silently lost from that task on.
+    try:
+        task_agent.link_transcript(workspace)
+    except (Exception, SystemExit) as exc:
+        return _failed(translator, f"could not prepare the agent's transcript directory: {exc}")
+
+    resume = task_agent.resumable_session(workspace, job.get("resume_session_id"))
+    if resume.session_id:
+        _publish_safely(sink, "task.session_resumed", session_id=resume.session_id)
+    elif resume.reason:
+        # The relay named a session and this workspace cannot use it. Starting fresh is correct —
+        # `--resume` against a missing transcript fails the whole task — but it must never be
+        # silent: from the user's side an agent that has forgotten the project looks like an agent
+        # that ignored them. Published to the durable log AND to the provider's own stderr, because
+        # the two have different readers.
+        _warn(f"task {job.get('task_id')}: starting a fresh session ({resume.reason})")
+        _publish_safely(sink, "task.session_reset",
+                        requested_session_id=str(job.get("resume_session_id") or ""),
+                        reason=resume.reason)
+
+    argv = task_agent.agent_argv(binary, prompt, resume=resume.session_id)
+
     try:
         _returncode, _raw = _run_child(
             argv, timeout=timeout, publish=sink, cwd=str(workspace),
@@ -526,6 +553,20 @@ def run_task(job: dict[str, Any],
         return _failed(translator, f"the agent reported {translator.subtype or 'an error'}")
     return TaskOutcome(
         "completed", _output(translator), None, session_id=translator.session_id)
+
+
+def _publish_safely(sink: Callable[..., None], event_type: str, **fields: Any) -> None:
+    """Publish a progress event that must never be able to fail the task.
+
+    The same rule `_Reporter._emit` applies, and for the same reason: the publisher is documented
+    never to raise, but `run_task`'s contract cannot rest on another module keeping a promise. These
+    two calls sit BEFORE the spawn, where a raise would not merely lose an event — it would unwind
+    past the agent, past the push, and report "task runner raised: ..." for a task that never ran.
+    """
+    try:
+        sink(event_type, **fields)
+    except (Exception, SystemExit) as exc:
+        _warn(f"the event publisher raised on {event_type} ({exc!r}) — it is documented never to")
 
 
 def _failed(translator: task_stream.StreamTranslator, error: str) -> TaskOutcome:

@@ -148,5 +148,21 @@ correlate replies. Publishing keeps one direction and one reader.
   the repo it is synced through. Per-project isolation is already provided by the cwd-derived
   transcript path, and `memory/` sits in that same directory, so one symlink captures both.
 - The one-active-task-per-project rule is enforced by a partial unique index, not by convention.
+- **`.grid/agent/` is committed; the rest of `.grid/` is not.** The reserved directory holds the
+  provider's own state and stays out of the user's repository, with one carve-out: the Claude Code
+  transcript and the agent's `memory/`, which are the project's conversation. They ride the ordinary
+  result commit, because that is the only path by which a *different* provider — one that has done
+  nothing but clone the repository — can continue the session. Recorded here because issue 05 read
+  the rule the other way, excluding all of `.grid/` on the reasoning that the transcript was
+  provider internals; that made cross-provider resume impossible, which is the whole of issue 06,
+  and contradicted D-b above ("routes its Claude subscription credential into the transcript,
+  **which is then committed back to the user's repo**"). The carve-out is a **forced add** of
+  `.grid/agent/` rather than a `!` negation in `$GIT_DIR/info/exclude`, because a *tracked*
+  `.gitignore` outranks that file — a project whose own repository ignores `*.jsonl` or `memory/`
+  would otherwise defeat the rule silently, reporting a completed task whose conversation was never
+  committed. The fence that makes all of this safe is unchanged: the relay still refuses any upload
+  under `.grid/`, so the conversation is written by the provider alone.
+  The cost is that the repository grows by a transcript per task (105 KB–2 MB measured), which is
+  the same cost D-e already accepted when it rejected per-checkpoint commits.
 - Deferred, with the shape kept open: mid-run checkpoints, task cancellation, per-task
   `retryable: false`, and git-LFS for large inputs.

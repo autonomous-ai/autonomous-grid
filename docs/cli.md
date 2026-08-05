@@ -981,9 +981,11 @@ A claimed task first brings the project's workspace to the task's input commit: 
 branch from the relay over the same git-over-HTTP front the client uses, and resets the workspace to
 it exactly, so a previous task's leftovers can never be mistaken for this task's input. **`git` must
 be installed on the provider.** The one directory spared is `.grid/`, which is the provider's own
-state — it is why nothing may be uploaded there, and it is excluded from the result commit as well.
-If the input cannot be checked out the task fails **without spawning the agent** — an agent run
-against input that never arrived produces a confidently wrong answer.
+state — it is why nothing may be uploaded there, and it is excluded from the result commit too, with
+one exception: `.grid/agent/` holds the project's conversation and *is* committed (see
+[Continuing a conversation](#continuing-a-conversation) below). If the input cannot be checked out
+the task fails **without spawning the agent** — an agent run against input that never arrived
+produces a confidently wrong answer.
 
 When the agent exits, the provider commits the workspace and pushes `task/<id>` — for a failed run
 as well as a successful one — and reports the commit it pushed. The relay checks that against the
@@ -1001,11 +1003,45 @@ a submodule reference whose objects the relay does not have, and the push fails 
 Once the workspace is ready the task spawns **Claude Code** in print mode against it, and its
 `stream-json` output is republished as the task's events while it runs: `task.session` (the
 conversation id), `task.tool_use` (a tool name and the file it targets), `task.output` (what the
-agent says), `task.stderr`, and `task.result`. Anything credential-shaped is stripped before an
-event leaves the provider.
+agent says), `task.stderr`, and `task.result`. Two more bracket the start of a follow-up task:
+`task.session_resumed` (this task is continuing the project's conversation) and
+`task.session_reset` (it could not, and why). Anything credential-shaped is stripped before an event
+leaves the provider.
 
 The agent authenticates with **the provider's own Claude subscription** — not with the grid token,
 and not with the requesting user's. Nothing about the grid is put into its environment.
+
+### Continuing a conversation
+
+A project's second and later tasks **continue the first one's Claude Code session** instead of
+starting cold, and they do so even when a different provider serves them.
+
+The mechanism is the repository. Claude Code keeps a session's transcript — and the agent's own
+`memory/` — in a folder named after its working directory, and it writes through a symlink, so the
+provider points that folder at `.grid/agent/` inside the project's workspace. The transcript is then
+carried by the ordinary result commit, with no separate synchronization step: a provider that has
+done nothing but clone the repository has the conversation the moment it checks the task out. This
+is why every provider must agree on `GRID_TASK_ROOT` — the folder's name is derived from the
+*absolute* path, so a different root is a different conversation.
+
+Two consequences worth knowing:
+
+- **A failed task's conversation does not carry forward.** `main` only advances on success, and the
+  next task is cut from `main`, so a project resumes from its last *successful* state rather than
+  from a broken one.
+- **If the transcript is missing or unreadable, the task starts a fresh session rather than
+  failing** — and says so, as a `starting a fresh session (…)` line in `grid task follow` and in the
+  task's durable event log. The commonest cause is the previous task having failed.
+
+The conversation is written only by the provider: the relay refuses any uploaded file under
+`.grid/`. The provider's credential never goes near it — the config directory is required to be an
+absolute path outside the workspace, and a provider refuses to run rather than place it inside the
+repository it pushes.
+
+If `GRID_TASK_CLAUDE_CONFIG_DIR` names a directory that already holds a real (non-symlink)
+transcript folder for a project — which is the case for any provider that served tasks before this
+existed — the task fails with a message naming the exact path. Move or remove it once; grid will not
+delete a conversation it did not create.
 
 The task runs with `--permission-mode bypassPermissions` by default: print mode cannot answer a
 permission prompt, so any narrower mode silently denies the tools a coding task needs. This assumes
@@ -1020,7 +1056,7 @@ The environment variables that tune a provider, all optional:
 | `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
 | `GRID_TASK_PERMISSION_MODE` | `bypassPermissions` | any mode `claude --permission-mode` accepts |
-| `GRID_TASK_CLAUDE_CONFIG_DIR` | unset | a fixed `CLAUDE_CONFIG_DIR` for every task this provider runs. Fixed **per provider**, never per user — a fresh config directory has no credential of its own and the agent will refuse to start |
+| `GRID_TASK_CLAUDE_CONFIG_DIR` | unset | a fixed `CLAUDE_CONFIG_DIR` for every task this provider runs. Must be an **absolute** path outside the workspace, or the provider refuses to run — the agent resolves a relative one against its working directory, which would commit the provider's credential into the user's repository. Fixed **per provider**, never per user: a fresh config directory has no credential of its own and the agent will refuse to start |
 
 The default root `/var/grid` needs privileges an ordinary account does not have. **Do not reach for
 `sudo` first** — point `GRID_TASK_ROOT` at a directory the provider's own account can write, or

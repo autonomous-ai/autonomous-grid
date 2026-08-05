@@ -290,6 +290,14 @@ def _render(seq: int, event: dict, *, as_json: bool) -> None:
         print(f"[{seq}] {event.get('text', '')}", file=sys.stderr)
     elif kind == "task.session":
         print(f"[{seq}] session {event.get('session_id')}")
+    elif kind == "task.session_resumed":
+        print(f"[{seq}] resuming session {event.get('session_id')}")
+    elif kind == "task.session_reset":
+        # On stderr with the other diagnostics: the agent is about to answer without any of the
+        # project's history, and a user who does not know that reads the result as the agent
+        # ignoring everything they established in earlier tasks.
+        reason = event.get("reason") or "the transcript could not be used"
+        print(f"[{seq}] starting a fresh session ({reason})", file=sys.stderr)
     elif kind == "task.attempt_started":
         provider = event.get("provider_id")
         where = f" on {provider}" if provider else ""
