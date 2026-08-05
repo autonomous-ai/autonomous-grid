@@ -12809,6 +12809,65 @@ def test_serve_state_exposes_an_independent_task_stop_event(monkeypatch, tmp_pat
     assert not state.stop.is_set()
 
 
+def test_a_task_and_an_inference_job_are_in_flight_at_the_same_moment(monkeypatch, tmp_path):
+    """Issue 03's last criterion, asserted on the two planes being busy AT ONCE.
+
+    Its three siblings each RETIRE one plane and watch the other keep going — task loop retires and
+    inference still dispatches, inference saturates and a task is still claimable, a capacity pause
+    leaves inference untouched. Every one of them is a statement about a plane that has STOPPED, and
+    all three would still pass if the two planes ran strictly one after the other. What ADR 0032
+    actually claims is concurrency: a provider serves inference *while* a task is running, for the
+    hour that task takes.
+
+    The failure this closes is not hypothetical — issue 01's review found `_start_task_worker`
+    running unguarded on the main thread, ahead of `_serve_loop`'s try/finally. A task loop that
+    blocked there would starve inference completely, and nothing in the suite would have said so:
+    here the poll worker never observes a task in flight, and the test fails on a bounded wait
+    instead of hanging.
+
+    A two-way handshake, not a pair of flags. The obvious version — the poll worker checking that
+    the task "has not finished yet" — passes even when the planes ARE serialized: a task loop that
+    ran first and gave up on its own timeout has still never been marked finished, so the check reads
+    True with nothing overlapping. What must be recorded is the TASK's own observation that inference
+    reached it while it was still inside its loop, because that is the only statement a serialized
+    run cannot make.
+    """
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    task_in_flight = threading.Event()
+    inference_dispatched = threading.Event()
+    recorded = threading.Event()
+    overlapped: list[bool] = []
+
+    def fake_task_loop(state):
+        task_in_flight.set()
+        # A task runs for minutes. Hold the plane open and see whether inference gets served here.
+        overlapped.append(inference_dispatched.wait(5))
+        recorded.set()
+        state.tasks_stop.set()
+
+    def poll(state):
+        if task_in_flight.wait(5):
+            inference_dispatched.set()
+        state.stop.set()
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    monkeypatch.setattr(serve, "_poll_loop", poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    # `_serve_loop` deliberately does NOT join the task thread — a task runs for minutes and the
+    # drain budget belongs to in-flight inference — so it can return before the observation above is
+    # recorded. Without this wait the test passes or fails on scheduling luck.
+    assert recorded.wait(5), "the task loop never finished recording what it saw"
+    assert overlapped == [True], (
+        "no inference was dispatched while the task loop was still running — the two planes are "
+        "taking turns, not running side by side")
+
+
 def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
     """A job that finishes within the drain budget submits its result before _serve_loop returns —
     'drain', not 'kill on stop'."""
@@ -22417,6 +22476,109 @@ def test_task_follow_renders_tool_activity_as_a_tool_and_a_path(monkeypatch, tmp
     assert "Edit src/app.py" in out
     assert "Bash" in out          # a tool with no path still says something happened
     assert "012c9e09" in out
+
+
+def test_task_follow_stays_quiet_about_a_tool_that_worked(monkeypatch, tmp_path, capsys):
+    """A `task.tool_result` arrives for EVERY tool call, and a real task makes hundreds of them.
+
+    Falling through to the verbatim branch is not a data loss — issue 02 designed that fallback on
+    purpose — but it doubles the length of `grid task follow` with a line per tool call whose only
+    content is an opaque `toolu_…` id the user cannot act on, printed directly under the readable
+    `[n] Edit src/app.py` that already said what ran. The tool's identity is the `task.tool_use`
+    line's job; this event's only news is whether it FAILED.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tool_use", "tool": "Edit", "path": "src/app.py", "id": "t1"}),
+        _block(1, {"type": "task.tool_result", "id": "toolu_01ABCDEF", "is_error": False}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    captured = capsys.readouterr()
+    assert "Edit src/app.py" in captured.out
+    everything = captured.out + captured.err
+    assert "toolu_01ABCDEF" not in everything, (
+        "a tool call that succeeded is narrated with its internal id — that is one extra line per "
+        "tool call for the whole task")
+    assert "task.tool_result" not in everything
+
+
+def test_task_follow_says_which_tool_call_failed(monkeypatch, tmp_path, capsys):
+    """The one bit of news a tool result carries. On stderr with the other diagnostics.
+
+    Kept even though the terminal event reports the task's own outcome: a task can fail a dozen tool
+    calls and still complete, and without this the user watching sees an unbroken run of tool names
+    with no hint that any of them did not work.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tool_use", "tool": "Bash", "path": None, "id": "t1"}),
+        _block(1, {"type": "task.tool_result", "id": "toolu_01ABCDEF", "is_error": True}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    err = capsys.readouterr().err
+    assert "failed" in err.lower()
+    assert "toolu_01ABCDEF" in err, "a failed tool call must be traceable to the call that made it"
+
+
+def test_task_follow_summarises_how_the_agent_finished(monkeypatch, tmp_path, capsys):
+    """`task.result` is the agent's own account of the run — one event, at the end.
+
+    Rendered rather than dumped as JSON because it answers the question a user asks the moment a
+    task ends: how many turns, how long, and did the agent itself think it went wrong. `is_error`
+    here is the AGENT's claim; the task's actual outcome is `task.terminal`'s, which prints after it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.result", "subtype": "success", "is_error": False,
+                   "num_turns": 12, "duration_ms": 34_500}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "12" in out and "turn" in out.lower()
+    assert "34.5" in out, f"the run's duration is not shown in seconds: {out!r}"
+    assert "duration_ms" not in out, "the raw wire field is being printed instead of a rendered line"
+
+
+def test_task_follow_renders_a_result_event_with_nothing_in_it(monkeypatch, tmp_path, capsys):
+    """Every field on the event is optional — it is built from a subprocess's JSON, and issue 09
+    already had `_resets_note` blow up on a field nobody bounded. A missing count must not become a
+    `None turns`, and it must never raise inside the render."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.result"}),
+        _block(1, {"type": "task.result", "num_turns": "lots", "duration_ms": [1]}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "None" not in out, f"a missing field is being printed as None: {out!r}"
 
 
 def test_task_follow_is_refused_in_local_mode(monkeypatch, tmp_path):

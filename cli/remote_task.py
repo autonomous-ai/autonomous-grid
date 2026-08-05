@@ -383,6 +383,31 @@ def _resets_note(resets_at: Any) -> str:
         return ""
 
 
+def _result_note(event: dict) -> str:
+    """": success (12 turns, 34.5s)" — with each part dropped unless it is usable.
+
+    Same contract as `_resets_note`: the fields come off a subprocess's stdout, nothing bounds them,
+    and a follower may never die on a diagnostic. `num_turns` excludes `bool` because `True` is an
+    `int` in Python and "1 turns" from a boolean is a confident lie about the run.
+    """
+    parts = []
+    turns = event.get("num_turns")
+    if isinstance(turns, int) and not isinstance(turns, bool):
+        parts.append(f"{turns} turns")
+    duration = event.get("duration_ms")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        try:
+            parts.append(f"{duration / 1000:.1f}s")
+        except (OverflowError, ValueError):
+            # A JSON number is an unbounded int; dividing one long enough overflows the float.
+            pass
+    subtype = event.get("subtype")
+    head = f": {subtype}" if isinstance(subtype, str) and subtype else ""
+    if event.get("is_error"):
+        head += " (the agent reports it went wrong)"
+    return head + (f" ({', '.join(parts)})" if parts else "")
+
+
 def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = None) -> None:
     """One event, printed. Unknown types are shown rather than dropped.
 
@@ -408,6 +433,13 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         # during a ten-minute test run would read as a hang.
         path = event.get("path")
         print(f"[{seq}] {event.get('tool') or 'tool'}" + (f" {path}" if path else ""))
+    elif kind == "task.tool_result":
+        # One of these arrives for EVERY tool call, and a real task makes hundreds. The call's
+        # identity was already printed by its `task.tool_use` line, so the only news here is a
+        # failure — narrating the successes would double the length of a follow with a line whose
+        # sole content is an id the user cannot act on. Silence is the right render for "it worked".
+        if event.get("is_error"):
+            print(f"[{seq}] tool call failed ({event.get('id') or 'unknown call'})", file=sys.stderr)
     elif kind == "task.stderr":
         # The agent's own diagnostics, on OUR stderr — so `grid task follow > out.txt` keeps the
         # task's output separable from the noise around it.
@@ -448,6 +480,12 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
               + (f" of {of}" if of else "")
               + f" was lost ({reason}); retrying from the task's input. Changes the lost attempt "
                 f"made in git are undone; anything it did outside git is not.", file=sys.stderr)
+    elif kind == "task.result":
+        # The agent's own account of the run, one event at the end. `is_error` here is the AGENT's
+        # claim about itself; the task's real outcome is `task.terminal`'s, which prints after it.
+        # Every field is optional and none is bounded (it is built from a subprocess's JSON), so
+        # each part is dropped unless it is usable rather than printed as `None`.
+        print(f"[{seq}] agent finished{_result_note(event)}")
     elif kind == "task.terminal":
         error = event.get("error")
         print(f"[{seq}] {event.get('state')}" + (f": {error}" if error else ""))

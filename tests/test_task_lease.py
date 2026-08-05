@@ -502,6 +502,35 @@ def test_the_reset_reason_is_bounded_to_what_the_relay_will_accept(monkeypatch, 
         f"relay that refuses anything over {relay_cap} — with the whole report")
 
 
+def test_the_event_ceiling_is_the_one_the_relay_actually_enforces():
+    """`MAX_EVENT_BYTES` is a lockstep value, and every other test measures it against OUR copy.
+
+    `task_stream.bounded`, `task_tree`'s byte budget and the agent's output cap are all asserted
+    against `task_events.MAX_EVENT_BYTES` — which keeps them consistent with each other and says
+    nothing at all about the relay. So the two halves could drift apart with the whole suite green:
+    lower the relay's `_MAX_EVENT_BYTES` alone and every one of those tests still passes while the
+    fleet starts refusing events.
+
+    What that costs is worse than a refused event. The relay answers **422**, and
+    `TaskEventPublisher` treats a 422 as a dropped BATCH rather than a latch — so the agent output
+    coalesced alongside the offending event goes with it, every beat, for the rest of the task. The
+    task still completes, the log is simply missing most of what happened, and nothing anywhere says
+    so.
+
+    Read from grid-src rather than restated, for the same reason the lease TTL is
+    (`test_the_worst_case_gap_between_two_renewals_stays_inside_the_relays_lease_ttl`). This test
+    lives beside the other parsed checks rather than beside the event code, because `_relay_constant`
+    is the thing being reused and one home for it beats a second copy.
+    """
+    from remote import task_events
+
+    relay_ceiling = _relay_constant("_MAX_EVENT_BYTES")
+    assert task_events.MAX_EVENT_BYTES <= relay_ceiling, (
+        f"the provider builds events up to {task_events.MAX_EVENT_BYTES} bytes for a relay that "
+        f"refuses anything over {relay_ceiling} — and a refusal drops the whole batch, so the "
+        f"agent's output goes with it")
+
+
 def test_the_heartbeat_carries_a_tree_snapshot_while_the_agent_works(renewals):
     """ADR 0032 D-f's tracer bullet: the workspace view rides the beat that already exists.
 
@@ -798,5 +827,34 @@ def _relay_constant(name):
     for node in ast.parse(source.read_text()).body:
         if isinstance(node, ast.Assign) and any(
                 getattr(t, "id", None) == name for t in node.targets):
-            return ast.literal_eval(node.value)
+            return _numeric(node.value, name)
     raise AssertionError(f"{name} is no longer defined in grid-src's tasks.py")
+
+
+# `ast.literal_eval` accepts `+` and `-` only (for complex literals), so a size written the way
+# sizes are normally written — `64 * 1024` — raises rather than evaluating. That is not a nuisance:
+# it is why `_MAX_EVENT_BYTES` had no lockstep check at all while the two constants that happen to
+# be plain integers did. A helper that silently cannot read half the register is a register that is
+# only half checked, so this evaluates the small arithmetic a constant is allowed to be.
+# Keyed by the operator node's class NAME so this module keeps `ast` a local import, the way every
+# other helper here does.
+_OPERATORS = {"Mult": lambda a, b: a * b, "Add": lambda a, b: a + b,
+              "Sub": lambda a, b: a - b, "FloorDiv": lambda a, b: a // b}
+
+
+def _numeric(node, name):
+    """The value of an integer constant expression, refusing anything that is not one.
+
+    Deliberately not `eval`: the input is another repository's source file, and the point of parsing
+    rather than importing is that nothing in it runs here.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op).__name__ in _OPERATORS:
+        return _OPERATORS[type(node.op).__name__](
+            _numeric(node.left, name), _numeric(node.right, name))
+    raise AssertionError(
+        f"{name} in grid-src's tasks.py is no longer a numeric constant expression "
+        f"({ast.dump(node)[:120]}) — the lockstep check cannot read it, so it is not checking it")

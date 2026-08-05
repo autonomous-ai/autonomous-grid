@@ -1021,8 +1021,12 @@ a submodule reference whose objects the relay does not have, and the push fails 
 
 Once the workspace is ready the task spawns **Claude Code** in print mode against it, and its
 `stream-json` output is republished as the task's events while it runs: `task.session` (the
-conversation id), `task.tool_use` (a tool name and the file it targets), `task.output` (what the
-agent says), `task.stderr`, and `task.result`. Two more bracket the start of a follow-up task:
+conversation id), `task.tool_use` (a tool name and the file it targets), `task.tool_result` (how
+that call ended), `task.output` (what the agent says), `task.stderr`, and `task.result` (the agent's
+own account of the run — turns and duration). `follow` prints a `task.tool_result` **only when the
+call failed**: one arrives for every tool call, and a task makes hundreds, so narrating the
+successful ones would bury the output under an id nobody can act on. Two more bracket the start of a
+follow-up task:
 `task.session_resumed` (this task is continuing the project's conversation) and
 `task.session_reset` (it could not, and why). Anything credential-shaped is stripped before an event
 leaves the provider.
