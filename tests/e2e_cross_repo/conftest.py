@@ -24,7 +24,27 @@ _HERE = Path(__file__).resolve().parent
 
 
 @pytest.fixture(scope="session")
-def relay(tmp_path_factory):
+def relay_home(tmp_path_factory):
+    """Where the relay keeps its database and its project repositories.
+
+    Split out of `relay` so a test can reach the relay's own `users` table (ADR 0033 issue 21).
+    That is not a shortcut around the API: there IS no API for it. A member row is written by
+    `grid_auth._upsert_identity` when a grid token is verified, and this harness runs the relay with
+    `GRID_MODE=false` — the plain-JWT branch, which never touches `users`. Without seeding, an
+    author test here would exercise the anonymous fallback and agree with a relay that resolved
+    nothing at all.
+    """
+    return tmp_path_factory.mktemp("relay")
+
+
+@pytest.fixture(scope="session")
+def relay_db(relay_home):
+    """The relay's SQLite file, addressable with the stdlib. This repo has no SQLAlchemy."""
+    return relay_home / "e2e.db"
+
+
+@pytest.fixture(scope="session")
+def relay(relay_home):
     """grid-src's `server:app` under a real `uvicorn`, in a subprocess, run by ITS OWN interpreter.
 
     A subprocess and not a thread, and grid-src's interpreter and not this one: the two repositories
@@ -36,7 +56,7 @@ def relay(tmp_path_factory):
     import httpx
 
     H.require_relay_repo()
-    root = tmp_path_factory.mktemp("relay")
+    root = relay_home
     port = H.free_port()
     env = {
         **os.environ,

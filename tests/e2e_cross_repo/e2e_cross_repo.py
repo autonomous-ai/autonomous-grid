@@ -204,3 +204,56 @@ def test_07_a_member_who_is_not_a_provider_cannot_claim_a_task(relay, owner_toke
 
     assert resp.status_code == 403, (
         f"an unregistered member claimed another user's task: {resp.status_code} {resp.text}")
+
+
+def test_08_both_commits_of_a_task_name_the_member_who_asked_for_it(
+        relay, relay_db, owner_token, spawn_provider, tmp_path):
+    """ADR 0033 D-m / issue 21, at the ONE place both halves of the rule exist together.
+
+    The relay authors the input commit; this repo's provider authors the result commit. Each
+    repository's own suite proves its own half and would stay perfectly green if the two disagreed
+    about the claim payload's key names — which is the whole failure this file exists to catch.
+
+    The member row is seeded directly, because there is no API that writes one: `users` is filled by
+    `grid_auth._upsert_identity` when a GRID token is verified, and this harness runs the relay with
+    `GRID_MODE=false`. Seeding is what makes the assertion mean something; without it the test would
+    pass against a relay that resolved nothing and committed `grid`.
+    """
+    import sqlite3
+    import subprocess
+
+    from remote import relay as relay_client, task_repo
+
+    with sqlite3.connect(relay_db) as db:
+        db.execute(
+            "INSERT OR REPLACE INTO users (user_id, email, name, google_sub, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            ("alice", "alice@example.com", "Alice Nguyen", "sub-alice"))
+
+    spawn_provider("A")
+    created = H.create(relay, owner_token, "WRITE authored.txt YES-4417", project="p-author")
+    done = H.await_state(relay, owner_token, created["id"], {"completed"})
+
+    dest = tmp_path / "authored"
+    dest.mkdir(parents=True, exist_ok=True)
+    url = relay_client.git_remote_url(relay, done["project_id"])
+    task_repo.checkout_result(
+        dest, url=url, token=owner_token, branch=done["branch"],
+        commit=done["result_commit"], project_id=done["project_id"])
+
+    def idents(rev):
+        """Read by git itself, in a clone the client fetched — not through either repo's code."""
+        return subprocess.run(
+            ["git", "log", "-1", "--format=%an|%ae|%cn|%ce", rev],
+            cwd=str(dest), capture_output=True, text=True, check=True).stdout.strip()
+
+    # The relay's half and the provider's half, asserted with one expectation — because the point
+    # is that they AGREE. A committer of anything but `grid` would mean the split was lost.
+    assert idents(created["input_commit"]) == "Alice Nguyen|alice@example.com|grid|grid@invalid"
+    assert idents(done["result_commit"]) == "Alice Nguyen|alice@example.com|grid|grid@invalid"
+
+    # And the thing a person actually asks: who wrote this line the agent produced.
+    blamed = subprocess.run(
+        ["git", "blame", "--line-porcelain", "authored.txt"],
+        cwd=str(dest), capture_output=True, text=True, check=True).stdout
+    assert "author Alice Nguyen" in blamed, blamed

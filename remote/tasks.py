@@ -1042,7 +1042,14 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         commit = task_repo.commit_and_push(
             workspace, url=remote.url, token=remote.token,
             branch=str(job.get("branch") or ""),
-            message=f"task {job.get('task_id')} ({outcome.state})")
+            message=f"task {job.get('task_id')} ({outcome.state})",
+            # Who asked for this task (ADR 0033 D-m). Straight off the claim payload and NOT
+            # coerced here: `identity_or_default` is the boundary, and it is the one place that
+            # knows git's rules — an empty name is a refusal, a NUL never reaches git at all.
+            # Neither key present is the pre-0033 `grid <grid@invalid>`, which is exactly what an
+            # older relay produces, so this is free to roll out in either direction.
+            author=task_repo.identity_or_default(
+                job.get("author_name"), job.get("author_email")))
     except (Exception, SystemExit) as exc:
         # SCRUBBED like every other message that leaves this process: it is built from git's own
         # stderr, and it travels into the durable event log the requesting user reads back.

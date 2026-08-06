@@ -81,6 +81,77 @@ class GitRemote:
     token: str
 
 
+@dataclass(frozen=True)
+class GitIdentity:
+    """Who a commit names. One value rather than two loose strings, so a call site cannot pair a
+    name with somebody else's address."""
+
+    name: str
+    email: str
+
+
+# What a commit is authored by when the claim named no member, and what every commit here is
+# COMMITTED by. `commit` refuses to run without an identity, so this is the floor, not a nicety.
+# HAND-DUPLICATED with the relay's `task_repo.DEFAULT_IDENTITY` — the two halves of one task's
+# history have to agree on what anonymous looks like.
+DEFAULT_IDENTITY = GitIdentity("grid", "grid@invalid")
+# Ceiling on either half of an identity. git accepts a 5000-character name and writes every byte of
+# it into the commit object, permanently. This one arrives off the wire, so the bound is input
+# validation rather than tidiness.
+MAX_IDENT_CHARS = 200
+# `<` and `>` frame the address in git's ident line. git strips them itself, along with `\n`; it
+# keeps `\r` and `\t`. Measured on git 2.54.0.
+#
+# A NUL is the sharpest of them and `_clean` below is the ONLY thing standing in front of it: git
+# never even gets a chance to be lenient, because Python refuses to build an environment containing
+# one, and that `ValueError` is not an `OSError` — so it would escape `_run`'s handler, become a
+# `PushError`, and fail the push. Unreachable through `identity_or_default` by construction; stated
+# because a future caller that hand-builds a `GitIdentity` has no such guard.
+_IDENT_STRIP = "<>"
+
+
+def _clean(value: str | None) -> str:
+    """One half of an identity, reduced to something git will accept and store verbatim.
+
+    Never raises and never refuses: the caller is on its way to a commit, and there is no
+    attribution worth failing a task for. See `commit_and_push` for why failing here is far worse
+    than losing a name.
+    """
+    # Wrong TYPE, not merely a wrong value: this arrives as JSON off the wire, and nothing upstream
+    # promises a string. Treated as absent rather than coerced with `str()`, which would author a
+    # commit `12345` or `{'name': 'Alice'}` — the address's local part still names the member.
+    if not isinstance(value, str) or not value:
+        return ""
+    # `isprintable()` is the whole control-character rule: it is False for every Unicode "Other"
+    # and "Separator" except the ASCII space — so NUL, `\n`, `\r`, `\t`, a zero-width space and a
+    # non-breaking space all go, and an ordinary space in a real name stays.
+    kept = "".join(c for c in value if c.isprintable() and c not in _IDENT_STRIP)
+    # Trimmed AGAIN after the cut: truncating mid-name can leave a trailing space, and git refuses a
+    # name that consists only of characters it disallows.
+    return kept.strip()[:MAX_IDENT_CHARS].strip()
+
+
+def identity_or_default(name: str | None, email: str | None) -> GitIdentity:
+    """The claim payload's author fields as an identity git can commit with.
+
+    **This is a system boundary.** Both fields arrive over the wire, and the relay is authenticated
+    rather than trusted — so the same two fallbacks the relay applies are applied again here, and
+    for a reason that is this side's own (measured on git 2.54.0):
+
+      * **No usable address ⇒ the whole `DEFAULT_IDENTITY`.** An old relay sends neither field, and
+        that has to look exactly like today's behaviour.
+      * **No usable name ⇒ the address's local part, then `grid`.** `commit` REFUSES an empty or
+        whitespace-only author name outright, and a refusal here is not a lost name — it is a
+        `PushError`, a task left `running`, a lapsed lease, and a retry that fails identically on
+        every provider in the fleet, forever.
+    """
+    clean_email = _clean(email)
+    if not clean_email:
+        return DEFAULT_IDENTITY
+    clean_name = _clean(name) or clean_email.split("@")[0] or DEFAULT_IDENTITY.name
+    return GitIdentity(clean_name, clean_email)
+
+
 class CheckoutError(RuntimeError):
     """The workspace could not be brought to the task's input commit."""
 
@@ -96,8 +167,16 @@ class PushError(RuntimeError):
     """
 
 
-def _env(token: str | None = None) -> dict[str, str]:
+def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[str, str]:
     """The environment every git child gets.
+
+    **Author and committer are different people, and that is the point** (ADR 0033 D-m). The author
+    is the project member whose task this is, carried on the claim payload; the committer is always
+    the grid. `author=None` gives the pre-0033 behaviour exactly: `grid` on both.
+
+    Through the environment rather than `git commit --author=`, matching the relay — whose
+    `commit-tree` has no such flag — and for this side's own reason too: argv is world-readable
+    through `/proc/<pid>/cmdline`, which is the same reason the token below is not passed there.
 
     `HOME` points at a directory that does not exist, and `GIT_CONFIG_NOSYSTEM` covers
     `/etc/gitconfig`: between them, no configuration file on the provider can reach these commands.
@@ -114,16 +193,17 @@ def _env(token: str | None = None) -> dict[str, str]:
     `http.followRedirects=false` rides along for a reason of its own: `http.extraHeader` is sent to
     whatever host git ends up talking to, so a redirect would hand the grid token to a third party.
     """
+    author = author or DEFAULT_IDENTITY
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "HOME": "/nonexistent",
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_AUTHOR_NAME": "grid",
-        "GIT_AUTHOR_EMAIL": "grid@invalid",
-        "GIT_COMMITTER_NAME": "grid",
-        "GIT_COMMITTER_EMAIL": "grid@invalid",
+        "GIT_AUTHOR_NAME": author.name,
+        "GIT_AUTHOR_EMAIL": author.email,
+        "GIT_COMMITTER_NAME": DEFAULT_IDENTITY.name,
+        "GIT_COMMITTER_EMAIL": DEFAULT_IDENTITY.email,
     }
     if token:
         env.update({
@@ -137,7 +217,8 @@ def _env(token: str | None = None) -> dict[str, str]:
 
 
 def _run(workspace: Path, *args: str, token: str | None = None,
-         timeout: float = _GIT_TIMEOUT_SECONDS) -> str:
+         timeout: float = _GIT_TIMEOUT_SECONDS,
+         author: GitIdentity | None = None) -> str:
     """One git invocation inside `workspace`, or `CheckoutError` carrying git's own words.
 
     `-c core.symlinks=false` and `-c core.hooksPath=` are set on EVERY call rather than once at
@@ -154,7 +235,7 @@ def _run(workspace: Path, *args: str, token: str | None = None,
         proc = subprocess.run(
             ["git", "-c", "core.symlinks=false", "-c", "core.hooksPath=/nonexistent/hooks",
              "-C", str(workspace), *args],
-            capture_output=True, text=True, env=_env(token), timeout=timeout)
+            capture_output=True, text=True, env=_env(token, author), timeout=timeout)
     except subprocess.TimeoutExpired:
         raise CheckoutError(f"git {args[0]} timed out after {timeout:.0f}s") from None
     except OSError as exc:
@@ -262,8 +343,12 @@ def _split(output: str) -> list[str]:
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
-                    message: str) -> str:
+                    message: str, author: GitIdentity | None = None) -> str:
     """Commit whatever the agent left and push `branch`. Returns the result commit.
+
+    `author` is the project member the claim named (ADR 0033 D-m); the committer is `grid` whatever
+    it says. `None` gives the pre-0033 identity on both — what an older relay's payload produces,
+    and the reason this key is free to roll out in either direction.
 
     Run for **every** terminal outcome, success and failure alike (ADR 0032 D-e): a failed attempt
     still commits and still pushes, so the user can see what the agent did before it broke and
@@ -294,7 +379,8 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
         # still commit and push, since a failed attempt is pushed too.
         if (workspace / RESERVED_DIR / TRANSCRIPT_DIR).is_dir():
             _run(workspace, "add", "-f", "-A", "--", f"{RESERVED_DIR}/{TRANSCRIPT_DIR}")
-        _run(workspace, "commit", "--quiet", "--allow-empty", "-m", message)
+        # The ONE invocation here that writes an identity, so the author travels no further than it.
+        _run(workspace, "commit", "--quiet", "--allow-empty", "-m", message, author=author)
         commit = _run(workspace, "rev-parse", "HEAD").strip()
     except CheckoutError as exc:
         raise PushError(f"could not commit the result: {exc}") from None
