@@ -4,6 +4,9 @@ Split out of `test_local_cli.py` rather than appended to it: these cover the two
 (`remote/task_agent.py`, `remote/task_stream.py`) whose subject is the agent child itself, while the
 claim/run/report loop's own tests stay beside the rest of the task-loop suite.
 """
+import json
+from pathlib import Path
+
 import pytest
 
 
@@ -116,17 +119,24 @@ def test_the_agent_is_spawned_in_print_mode_with_a_machine_readable_stream(monke
 
     monkeypatch.delenv("GRID_TASK_PERMISSION_MODE", raising=False)
 
-    argv = task_agent.agent_argv("/usr/local/bin/claude", "fix the flaky test")
+    argv = task_agent.agent_argv(
+        "/usr/local/bin/claude", "fix the flaky test", workspace=Path("/var/grid/p/workspace"))
 
-    assert argv == [
+    # `--settings` carries a whole JSON policy, so it is checked by name and parsed rather than
+    # compared as a literal — `tests/test_task_sandbox.py` owns what is inside it, and
+    # `tests/e2e_agent_sandbox.py` owns whether it does anything.
+    settings = argv[argv.index("--settings") + 1]
+    assert json.loads(settings)["sandbox"]["enabled"] is True
+    assert argv[:argv.index("--settings")] == [
         "/usr/local/bin/claude",
         "-p", "fix the flaky test",
         "--output-format", "stream-json",
         "--verbose",
-        "--permission-mode", "bypassPermissions",
+        "--permission-mode", "acceptEdits",
         "--setting-sources", "user",
         "--strict-mcp-config",
     ]
+    assert len(argv) == argv.index("--settings") + 2
 
 
 def test_the_repositorys_settings_are_dropped_but_the_operators_own_are_kept(monkeypatch):
@@ -140,28 +150,73 @@ def test_the_repositorys_settings_are_dropped_but_the_operators_own_are_kept(mon
     """
     from remote import task_agent
 
-    argv = task_agent.agent_argv("claude", "x")
+    argv = task_agent.agent_argv("claude", "x", workspace=Path("/var/grid/p/workspace"))
 
     assert argv[argv.index("--setting-sources") + 1] == "user"
 
 
-def test_the_permission_mode_is_bypass_by_default_and_overridable_per_provider(monkeypatch):
-    """`bypassPermissions` because print mode cannot answer a prompt — it denies it silently.
+def test_the_permission_mode_is_accept_edits_by_default_and_overridable_per_provider(monkeypatch):
+    """`acceptEdits`, not `bypassPermissions` — and that is a measured requirement, not a posture.
 
-    ADR 0032 scopes untrusted providers out ("the current design assumes an internally operated
-    fleet"), so the default is the one that lets a task actually do work. An operator who wants a
-    narrower posture sets the variable; nothing else in the argv changes.
+    Print mode cannot answer a permission prompt, so the default has to be one that lets a task do
+    work; `acceptEdits` plus the sandbox's `autoAllowBashIfSandboxed` is that combination, and a
+    real build-and-test task was measured completing under it.
+
+    The mode it replaces is not merely broader. Measured on 2.1.223: with `bypassPermissions` and
+    the entire sandbox policy in force, the agent read a file outside the workspace without
+    difficulty — the `Read` tool runs inside the Claude Code process, which the sandbox does not
+    confine. See `test_bypass_permissions_is_refused_while_the_agent_is_confined`.
     """
     from remote import task_agent
 
-    monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "acceptEdits")
+    monkeypatch.delenv("GRID_TASK_PERMISSION_MODE", raising=False)
+    assert task_agent.permission_mode() == "acceptEdits"
+
+    monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "plan")
 
     # Read by NAME rather than off the end of the list. This assertion used to be `[-1]`, which was
     # true only for as long as `--permission-mode` happened to be the last flag — it stopped being
     # so the moment issue 22 appended two more, and a positional assertion that breaks on an
     # unrelated change is one somebody eventually "fixes" by re-pinning the index.
-    argv = task_agent.agent_argv("claude", "x")
-    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    argv = task_agent.agent_argv("claude", "x", workspace=Path("/var/grid/p/workspace"))
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+
+def test_bypass_permissions_is_refused_while_the_agent_is_confined(monkeypatch):
+    """The one mode that makes the whole policy decoration, refused where it can be explained.
+
+    Measured (2.1.223, macOS): `--permission-mode bypassPermissions` with `sandbox.enabled`,
+    `denyRead` and `credentials.files` all set, asked for a file outside the workspace — and got it.
+    The sandbox confines the commands the MODEL runs; the `Read` tool is run by the Claude Code
+    process itself, and `bypassPermissions` is exactly the setting that stops the permission layer
+    from refusing it.
+
+    So this combination cannot be accepted quietly: it would leave a provider looking configured and
+    confining nothing, which is the same failure as a deny rule with one slash. The operator either
+    drops the mode or turns confinement off deliberately — and the message says both.
+    """
+    from remote import task_agent, task_sandbox
+
+    monkeypatch.delenv(task_sandbox.SANDBOX_ENV, raising=False)
+    monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissions")
+
+    with pytest.raises(ValueError) as excinfo:
+        task_agent.permission_mode()
+
+    message = str(excinfo.value)
+    assert "bypassPermissions" in message
+    assert task_sandbox.SANDBOX_ENV in message, "the operator is not told how to proceed either way"
+
+
+def test_bypass_permissions_is_still_available_to_a_provider_that_is_not_confined(monkeypatch):
+    """Turning confinement off is a decision an operator is allowed to make, and then the old mode
+    is the right one again — print mode still cannot answer a prompt."""
+    from remote import task_agent, task_sandbox
+
+    monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "0")
+    monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissions")
+
+    assert task_agent.permission_mode() == "bypassPermissions"
 
 
 def test_an_unknown_permission_mode_is_refused_rather_than_handed_to_the_binary(monkeypatch):
@@ -175,26 +230,27 @@ def test_an_unknown_permission_mode_is_refused_rather_than_handed_to_the_binary(
     monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "bypassPermissons")  # missing an `i`
 
     with pytest.raises(ValueError) as excinfo:
-        task_agent.agent_argv("claude", "x")
+        task_agent.agent_argv("claude", "x", workspace=Path("/var/grid/p/workspace"))
 
     assert "bypassPermissons" in str(excinfo.value)
 
 
-def test_the_binary_is_found_through_the_shared_resolver(monkeypatch):
+def test_the_binary_is_found_through_the_shared_resolver(monkeypatch, tmp_path):
     """One answer to "where is Claude Code" per machine, not two.
 
     `shared/launch/claude_install` already searches PATH and both conventional install locations and
     reports what it could not check; a second search here would drift from it.
-    """
-    from shared.launch import claude_install
 
+    A real (fake) executable rather than a made-up path, since issue 23: `resolve_binary` now also
+    asks the binary its version, so a name that cannot be executed is no longer a resolution this
+    function can complete.
+    """
     from remote import task_agent
 
-    monkeypatch.setattr(
-        claude_install, "resolve",
-        lambda: claude_install.Resolution(binary="/opt/claude", unchecked=()))
+    binary, _ = _claude_reporting(tmp_path, "2.1.223 (Claude Code)", name="resolver-claude")
+    _resolving_to(monkeypatch, binary)
 
-    assert task_agent.resolve_binary() == "/opt/claude"
+    assert task_agent.resolve_binary() == binary
 
 
 def test_a_provider_without_claude_code_says_how_to_install_it(monkeypatch):
@@ -222,21 +278,252 @@ def test_a_provider_without_claude_code_says_how_to_install_it(monkeypatch):
     assert "~/.local/bin (unreadable)" in message
 
 
-def test_the_child_environment_is_the_providers_own_and_the_cli_process_is_untouched(monkeypatch):
-    """ADR 0028's rule: the child's environment is set on the CHILD, never exported anywhere.
+def _claude_reporting(tmp_path, version_output, *, name="fake-claude"):
+    """A stand-in binary whose `--version` says `version_output`, counting how often it is asked."""
+    script = tmp_path / name
+    calls = tmp_path / f"{name}-version-calls"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "--version" ]; then echo x >> {calls}; printf "%s\\n" \'{version_output}\'; '
+        "exit 0; fi\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(script), calls
 
-    The agent authenticates with the PROVIDER's own Claude subscription — nothing about the grid's
-    relay or the requesting user's token belongs in here.
+
+def _resolving_to(monkeypatch, binary):
+    from shared.launch import claude_install
+
+    monkeypatch.setattr(
+        claude_install, "resolve", lambda: claude_install.Resolution(binary=binary, unchecked=()))
+
+
+def test_a_claude_too_old_for_the_sandbox_is_refused_instead_of_running_unconfined(
+        monkeypatch, tmp_path):
+    """`--settings` is the one flag in this argv that does NOT fail closed, so a version is checked.
+
+    Issue 22's flags are safe to add unconditionally because a binary that does not know an option
+    refuses the whole invocation — the provider fails loudly and nothing runs unprotected. That
+    property does not extend here: `--settings` is a flag every version knows, carrying settings
+    KEYS, and unknown keys are dropped in silence. A binary too old for `sandbox.*` would therefore
+    accept the policy, ignore it, and report `completed` on every task with the agent unconfined and
+    no signal anywhere saying so.
+
+    So the version is the gate, and it names both numbers — an operator reading one failed task
+    should not have to find out what "too old" meant.
+    """
+    from remote import task_agent
+
+    binary, _ = _claude_reporting(tmp_path, "2.1.99 (Claude Code)")
+    _resolving_to(monkeypatch, binary)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        task_agent.resolve_binary()
+
+    message = str(excinfo.value)
+    assert "2.1.99" in message
+    assert "2.1.221" in message
+
+
+def test_a_claude_new_enough_is_used_and_asked_for_its_version_only_once(monkeypatch, tmp_path):
+    """The gate runs on the task path, so it must not shell out once per task forever."""
+    from remote import task_agent
+
+    binary, calls = _claude_reporting(tmp_path, "2.1.223 (Claude Code)")
+    _resolving_to(monkeypatch, binary)
+
+    assert task_agent.resolve_binary() == binary
+    assert task_agent.resolve_binary() == binary
+
+    assert calls.read_text(encoding="utf-8").count("x") == 1
+
+
+def test_the_cached_version_does_not_survive_the_binary_changing_underneath_it(
+        monkeypatch, tmp_path):
+    """A provider runs for weeks; Claude Code updates itself in place while it does.
+
+    The cache above is what keeps the gate off the per-task hot path, and a cache keyed on the path
+    alone would answer for a binary that is no longer there. The direction that matters is the
+    dangerous one: a *downgrade* remembered as new enough would run unconfined for the life of the
+    process, silently — which is the failure this whole gate exists to prevent.
+    """
+    from remote import task_agent
+
+    binary, _ = _claude_reporting(tmp_path, "2.1.223 (Claude Code)", name="rolling-claude")
+    _resolving_to(monkeypatch, binary)
+    assert task_agent.resolve_binary() == binary
+
+    _claude_reporting(tmp_path, "2.0.9 (Claude Code)", name="rolling-claude")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        task_agent.resolve_binary()
+    assert "2.0.9" in str(excinfo.value)
+
+
+def test_a_version_that_cannot_be_read_is_refused_rather_than_assumed_good(monkeypatch, tmp_path):
+    """A third-party wrapper on `PATH` is a supported install (`claude_install.resolve` says so
+    deliberately), and one that does not answer `--version` in the vendor's shape cannot be assumed
+    to honour the policy. Failing closed here is loud and fixable; failing open is neither.
+    """
+    from remote import task_agent
+
+    binary, _ = _claude_reporting(tmp_path, "a wrapper, not a version")
+    _resolving_to(monkeypatch, binary)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        task_agent.resolve_binary()
+
+    assert "a wrapper, not a version" in str(excinfo.value)
+    assert binary in str(excinfo.value)
+
+
+def test_the_version_gate_only_applies_while_the_agent_is_confined(monkeypatch, tmp_path):
+    """The gate exists to protect a control that fails open. Turn the control off deliberately and
+    the gate has nothing to protect — an old binary is then the operator's own decision, and the
+    provider goes back to behaving exactly as it did before issue 23."""
+    from remote import task_agent, task_sandbox
+
+    binary, _ = _claude_reporting(tmp_path, "2.0.1 (Claude Code)")
+    _resolving_to(monkeypatch, binary)
+    monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "0")
+
+    assert task_agent.resolve_binary() == binary
+
+
+def test_the_child_environment_is_an_allowlist_not_the_providers_whole_environment(monkeypatch):
+    """Issue 23 layer 1. The agent gets what it needs to run, not what this process happens to hold.
+
+    This test used to assert the OPPOSITE — that an arbitrary marker variable reached the child —
+    because `child_env` was `dict(os.environ)`. That is the rule being overturned: the process this
+    copies from also serves inference and holds the grid access token, and a task is arbitrary code
+    execution by another person. `env` in a task prompt should not be a credential dump.
+
+    An allowlist rather than a deny list, for the reason `_SAFE_PROJECT_ID` gives: a deny list has
+    to anticipate every name worth hiding, and the next provider integration invents one.
     """
     from remote import task_agent
 
     monkeypatch.delenv("GRID_TASK_CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("A_MARKER_THE_PROVIDER_SET", "kept")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI")
+    monkeypatch.setenv("GRID_TOKEN", "eyJhbGciOiJSUzI1NiJ9")
+    monkeypatch.setenv("A_MARKER_THE_PROVIDER_SET", "dropped")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = task_agent.child_env()
+
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GRID_TOKEN" not in env, "the grid's own bearer token reached the task agent"
+    assert "A_MARKER_THE_PROVIDER_SET" not in env
+    # What a program needs to run at all still arrives, or nothing works and the allowlist is a
+    # different bug wearing the same clothes.
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert "HOME" in env
+
+
+def test_the_operator_can_declare_the_extra_variables_a_task_needs(monkeypatch):
+    """An allowlist that cannot be extended is an allowlist an operator works around.
+
+    A provider serving a team with a private package registry needs its token in the build; the
+    supported answer is to name it, not to give up and go back to handing the agent everything. The
+    variable holding the list is itself withheld — the child has no use for grid's own configuration,
+    and this is the one name we know for certain reveals what a provider considers sensitive.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ENV_PASSTHROUGH", "MY_REGISTRY_TOKEN, ABSENT_ON_THIS_BOX")
+    monkeypatch.setenv("MY_REGISTRY_TOKEN", "npm-tok")
+
+    env = task_agent.child_env()
+
+    assert env["MY_REGISTRY_TOKEN"] == "npm-tok"
+    # A name the operator listed but never set is an ordinary state, not an error: the same
+    # provider configuration is deployed to boxes that do not all have the same tooling.
+    assert "ABSENT_ON_THIS_BOX" not in env
+    assert "GRID_TASK_ENV_PASSTHROUGH" not in env
+
+
+def test_a_passthrough_entry_that_is_not_a_variable_name_is_refused(monkeypatch):
+    """`FOO=bar` is the mistake this list invites, and it must be explained once, not forever.
+
+    Accepted silently it matches nothing, so the variable the operator meant to pass never arrives —
+    and the symptom is a build failing inside a task on every provider, with the actual cause sitting
+    in a provider's service file. The same rule `permission_mode` applies to a typo'd mode.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ENV_PASSTHROUGH", "GOOD_ONE, FOO=bar")
+
+    with pytest.raises(ValueError) as excinfo:
+        task_agent.child_env()
+
+    assert "FOO=bar" in str(excinfo.value)
+    assert task_agent.ENV_PASSTHROUGH_ENV in str(excinfo.value)
+
+
+def test_an_ambient_claude_config_dir_never_reaches_the_child(monkeypatch):
+    """The one variable that must come from `configured_claude_config_dir()` or not at all.
+
+    An operator with `CLAUDE_CONFIG_DIR` exported in their own shell would otherwise send the child
+    somewhere `claude_config_dir()` knows nothing about — so `link_transcript` plants the symlink in
+    one directory while the agent writes its transcript in another. Nothing fails: the task
+    completes, the transcript is simply not in the repository, and every following task on the
+    project starts a fresh conversation while every other signal looks healthy. Exactly the shape of
+    issue 06's bug, reached from the provider's own environment.
+    """
+    from remote import task_agent
+
+    monkeypatch.delenv("GRID_TASK_CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/home/operator/.claude-personal")
+    # Listed by the operator, which is the route that actually reaches the guard: the passthrough is
+    # applied AFTER the allowlist and does not consult it, so an operator naming this variable —
+    # reasonably, having read that it configures the agent — would silently break every conversation
+    # on the project. Without this line the test passes on the allowlist alone and proves nothing.
+    monkeypatch.setenv("GRID_TASK_ENV_PASSTHROUGH", "CLAUDE_CONFIG_DIR")
+
+    env = task_agent.child_env()
+
+    assert "CLAUDE_CONFIG_DIR" not in env
+    # And when the operator DID fix one, that is the value — the existing contract, restated here so
+    # the exclusion above can never be "simplified" into dropping it in both cases.
+    monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", "/etc/grid/claude")
+    assert task_agent.child_env()["CLAUDE_CONFIG_DIR"] == "/etc/grid/claude"
+
+
+def test_the_operators_own_git_configuration_does_not_reach_a_tree_from_the_wire(monkeypatch):
+    """ADR 0033 D-f, named there and not closed until here.
+
+    The provider's own git calls are hardened per invocation (`task_repo._env`:
+    `-c core.symlinks=false -c core.hooksPath=`). The AGENT's are not — it runs `git` itself, in a
+    checkout that arrived over the wire, with the operator's real `HOME`. So a `core.hooksPath` in
+    the operator's `~/.gitconfig` applies to that tree, and `git commit` there runs whatever it
+    points at. `HOME` cannot simply be withheld (Claude Code's credential lives under it), so the
+    floor is set on git's own variables instead.
+
+    Measured: `git` tolerates an unreadable global config — warns, exits 0 — so this is about which
+    configuration applies, not about making git work. A second effect is deliberate: the agent no
+    longer inherits the operator's `user.name`/`user.email`, so an agent asked to commit fails
+    loudly rather than silently authoring a stranger's repository as the human running the provider.
+    """
+    import os as _os
+
+    from remote import task_agent
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/home/operator/.gitconfig")
+
+    env = task_agent.child_env()
+
+    assert env["GIT_CONFIG_GLOBAL"] == _os.devnull
+    assert env["GIT_CONFIG_SYSTEM"] == _os.devnull
+
+
+def test_the_cli_process_environment_is_untouched(monkeypatch):
+    """ADR 0028's rule: whatever we set is set on the CHILD, never exported anywhere."""
+    from remote import task_agent
+
+    monkeypatch.delenv("GRID_TASK_CLAUDE_CONFIG_DIR", raising=False)
     before = dict(__import__("os").environ)
 
     env = task_agent.child_env()
 
-    assert env["A_MARKER_THE_PROVIDER_SET"] == "kept"
     assert env is not __import__("os").environ
     assert dict(__import__("os").environ) == before
 
@@ -700,18 +987,109 @@ def test_a_task_runs_the_agent_in_its_projects_workspace(agent, tmp_path):
     assert outcome.session_id == "sess-1"
 
 
-def test_the_prompt_and_the_streaming_flags_reach_the_binary(agent):
+def test_the_prompt_and_the_streaming_flags_reach_the_binary(agent, tmp_path):
     """Pinned through a real spawn, not by inspecting a list: a flag the binary never receives is
-    the failure this catches, and only the child can report what it was actually given."""
+    the failure this catches, and only the child can report what it was actually given.
+
+    argv goes to a FILE rather than out through the result record it used to use. Since issue 23 it
+    carries `--settings` with a JSON policy, and echoing that back inside a JSON string produced an
+    unparseable line — the test then failed on a `None` output, which says nothing about flags.
+    """
     from remote import tasks
 
-    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"%s\"}\\n' \"$*\"\n")
+    seen = tmp_path / "argv.txt"
+    agent(f'printf "%s" "$*" > {seen}\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
 
     outcome = tasks.run_task(_job(prompt="fix the flaky test"))
 
-    assert outcome.output == (
+    assert outcome.state == "completed", outcome.error
+    argv = seen.read_text(encoding="utf-8")
+    assert argv.startswith(
         "-p fix the flaky test --output-format stream-json --verbose "
-        "--permission-mode bypassPermissions --setting-sources user --strict-mcp-config")
+        "--permission-mode acceptEdits --setting-sources user --strict-mcp-config")
+    # And the confinement policy went with it — through the real spawn, so this covers the wiring
+    # that a list-inspecting test cannot: `--settings` present, and carrying a sandbox that is on.
+    assert '--settings {"sandbox":{"enabled":true' in argv
+
+
+@pytest.mark.parametrize("variable, value, must_name", [
+    # Each of `preflight()`'s three checks, through the door an operator actually misconfigures.
+    ("GRID_TASK_PERMISSION_MODE", "bypassPermissions", "GRID_TASK_SANDBOX"),
+    ("GRID_TASK_ENV_PASSTHROUGH", "FOO=bar", "GRID_TASK_ENV_PASSTHROUGH"),
+    ("HOME", ".", "absolute"),
+])
+def test_a_misconfigured_provider_fails_before_it_fetches_anything(
+        agent, monkeypatch, tmp_path, variable, value, must_name):
+    """The property `preflight()` exists for, asserted on the fetch rather than on the message.
+
+    All three of these are checked anyway by the functions that need them — but those run from
+    `agent_argv` and `child_env`, AFTER the checkout and outside `run_task`'s guards. So without the
+    pre-flight the operator's reward for a typo is a repository fetched into a workspace and then a
+    raise about the task runner, once per task, forever.
+
+    **The spy is the point.** An earlier version of this test asserted only the outcome and the
+    message, and passed a job with no `input_commit` — so no checkout would have happened either
+    way and the "before it fetches anything" in its name was decoration. Watching `materialize` is
+    what makes it evidence: drop `task_agent.preflight()` from `run_task` and these go red, which is
+    the regression that would otherwise reintroduce a silently mistargeted sandbox (`HOME=.`) with
+    every unit test still green.
+    """
+    from remote import task_repo, tasks
+
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    fetched: list[str] = []
+    monkeypatch.setattr(task_repo, "materialize",
+                        lambda *args, **kwargs: fetched.append("fetched"))
+    monkeypatch.setenv(variable, value)
+
+    outcome = tasks.run_task(
+        _job(input_commit="0" * 40, branch="task/T1"),
+        remote=task_repo.GitRemote(url="file:///nowhere", token="tok"))
+
+    assert outcome.state == "failed"
+    assert "could not start the agent" in outcome.error, (
+        f"the refusal arrived from somewhere that cannot name the fix: {outcome.error!r}")
+    assert must_name in outcome.error, (
+        f"the failure does not say what to change: {outcome.error!r}")
+    assert not fetched, (
+        "the provider fetched the repository before noticing its own configuration was broken")
+
+
+def test_the_agent_child_cannot_read_the_providers_own_stdin(agent, tmp_path):
+    """Whatever is on the provider's stdin is not part of the task (ADR 0033 D-n).
+
+    `claude -p` reads a non-TTY stdin as ADDITIONAL PROMPT INPUT — measured the hard way while
+    taking this issue's other measurements: a heredoc feeding the harness turned up inside the
+    agent's answer, and the agent acted on it. So a provider started by a supervisor that leaves a
+    pipe on fd 0 hands its contents to every task it runs, mixed into a prompt written by somebody
+    else, with no record anywhere that it happened.
+
+    Tested by putting a real pipe on this process's own fd 0, because that is what a child inherits
+    — `sys.stdin` is a Python object and a subprocess never sees it.
+    """
+    import os as _os
+
+    from remote import tasks
+
+    seen = tmp_path / "stdin.txt"
+    read_fd, write_fd = _os.pipe()
+    _os.write(write_fd, b"SECRET-ON-THE-PROVIDERS-STDIN\n")
+    _os.close(write_fd)
+    saved = _os.dup(0)
+    try:
+        _os.dup2(read_fd, 0)
+        _os.close(read_fd)
+        agent(f'cat > {seen}\n'
+              "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+        outcome = tasks.run_task(_job())
+    finally:
+        _os.dup2(saved, 0)
+        _os.close(saved)
+
+    assert outcome.state == "completed", outcome.error
+    assert seen.read_text(encoding="utf-8") == "", (
+        "the agent read the provider's stdin, which `claude -p` treats as more prompt")
 
 
 def test_a_non_zero_exit_is_a_failure_however_cheerful_the_stream_was(agent):
@@ -2182,14 +2560,17 @@ def test_a_follow_up_task_asks_the_agent_to_continue_the_projects_conversation(m
     monkeypatch.delenv("GRID_TASK_PERMISSION_MODE", raising=False)
 
     argv = task_agent.agent_argv(
-        "/usr/local/bin/claude", "and now write the tests", resume="012c9e09-abcd")
+        "/usr/local/bin/claude", "and now write the tests",
+        workspace=Path("/var/grid/projects/p/workspace"), resume="012c9e09-abcd")
 
-    assert argv == [
+    # Everything up to the confinement policy, which `tests/test_task_sandbox.py` owns. `--resume`
+    # keeps its place: it is appended before `--settings`, so a change to either is visible here.
+    assert argv[:argv.index("--settings")] == [
         "/usr/local/bin/claude",
         "-p", "and now write the tests",
         "--output-format", "stream-json",
         "--verbose",
-        "--permission-mode", "bypassPermissions",
+        "--permission-mode", "acceptEdits",
         "--setting-sources", "user",
         "--strict-mcp-config",
         "--resume", "012c9e09-abcd",
@@ -2458,10 +2839,14 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
     remote, first_input = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     # Writes THROUGH the config-directory path, exactly as the real agent does. Writing to
     # `$PWD/.grid/agent` instead would land in the right place while proving nothing about the link.
-    monkeypatch.setenv("GRID_TEST_LINK", str(link))
-    agent('mkdir -p "$GRID_TEST_LINK/memory"\n'
-          'printf \'{"type":"summary"}\\n\' > "$GRID_TEST_LINK/sess-1.jsonl"\n'
-          'echo remembered > "$GRID_TEST_LINK/memory/note.md"\n'
+    #
+    # Interpolated into the script rather than handed over as an environment variable, the way the
+    # `seen` path below already is: since issue 23 `child_env()` is an allowlist, so an invented
+    # variable no longer reaches the child. Baking the path in keeps this test about the transcript
+    # link instead of quietly making it a second test of the environment.
+    agent(f'mkdir -p "{link}/memory"\n'
+          f'printf \'{{"type":"summary"}}\\n\' > "{link}/sess-1.jsonl"\n'
+          f'echo remembered > "{link}/memory/note.md"\n'
           "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
 
     first = tasks.run_task(_job(input_commit=first_input, branch="task/T1"), remote=remote)

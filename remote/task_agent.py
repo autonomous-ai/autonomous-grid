@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import task_repo
+from . import task_repo, task_sandbox
 
 # LOCKSTEP (PRD `.scratch/distributed-tasks/PRD.md`): **every provider must use the identical
 # absolute path**, because Claude Code derives a session's transcript directory from the working
@@ -47,14 +47,25 @@ _SAFE_SESSION_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 _DIR_MODE = 0o755
 
 
-# Print mode cannot answer a permission prompt — it denies it — so the default is the mode that lets
-# a task do work. ADR 0032 scopes untrusted providers out ("the current design assumes an internally
-# operated fleet"); an operator who wants a narrower posture sets `GRID_TASK_PERMISSION_MODE`.
-DEFAULT_PERMISSION_MODE = "bypassPermissions"
+# Print mode cannot answer a permission prompt — it denies it — so the default has to be a mode that
+# lets a task do work. `acceptEdits` is that mode once the agent is confined: the sandbox's
+# `autoAllowBashIfSandboxed` approves Bash *because* the command is confined, and edits are accepted,
+# which a real build-and-test task was measured completing under.
+#
+# It was `bypassPermissions` until issue 23, and the change is a measured requirement rather than a
+# tightening for its own sake — see `_BYPASS_MODE` below.
+DEFAULT_PERMISSION_MODE = "acceptEdits"
 PERMISSION_MODE_ENV = "GRID_TASK_PERMISSION_MODE"
 # The binary's own accepted set (`claude --permission-mode`, 2.1.221). Validated here so a typo is
 # explained once, rather than becoming "the agent failed" on every task for the life of the process.
 _PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan")
+# The mode that turns the confinement into decoration (ADR 0033 D-n, issue 23). MEASURED on 2.1.223:
+# with `--permission-mode bypassPermissions` and the entire sandbox policy in force — `enabled`,
+# `denyRead`, `credentials.files` — an agent asked for a file outside its workspace was handed it.
+# The sandbox confines the commands the MODEL runs; the `Read` tool is run by the Claude Code process
+# itself, and this mode is precisely what stops the permission layer from refusing it. So the two are
+# refused together rather than silently coexisting.
+_BYPASS_MODE = "bypassPermissions"
 
 # The agent's own variable, and the knob an operator sets to point every task at one fixed config
 # directory. Two names because they are two different things: ours is grid configuration, theirs is
@@ -73,16 +84,85 @@ CLAUDE_CONFIG_DIR_ENV = "GRID_TASK_CLAUDE_CONFIG_DIR"
 # with no permission prompt, as the provider's own user with its real `HOME` — and this flag stops
 # it while leaving the config directory's own settings loading.
 #
-# It is the *repository's settings* that are refused, never its instructions: `CLAUDE.md`,
-# `.claude/agents/` and `.claude/skills/` still load (measured), and are meant to. Their trust level
-# is that of the source code the agent was asked to modify, which this design already accepts. The
-# line is narrower: **no shell command runs before the model has said anything.**
+# It is the *repository's settings* that are refused. Its instructions stay READABLE — `CLAUDE.md`,
+# `.claude/agents/` and `.claude/skills/` are all still on disk in the workspace, and an agent that
+# looks finds them. The line this draws is narrow and firm: **no shell command runs before the model
+# has said anything.**
+#
+# **Corrected while building issue 23**, because the original claim here was stronger and wrong. It
+# said those files still *load*. Measured on 2.1.223 with a prompt that forbids tools, so that only
+# auto-loaded context can answer: with `--setting-sources user` the model answered `UNKNOWN`, and
+# with no `--setting-sources` at all it answered from `CLAUDE.md`. So this flag DOES stop the
+# workspace's `CLAUDE.md` being auto-discovered, and the earlier measurement was watching the model
+# open the file with the `Read` tool. ADR 0033 D-f and `docs/cli.md` carry the same wrong sentence.
+# The flag is not changed here: it is what closes the execution hole, and buying memory discovery
+# back by reopening that is issue 22's decision to take, not a side effect of this one.
 _SETTING_SOURCES = "user"
 # `.mcp.json` is the same hole wearing a different name — a stdio server is a command line, and it is
 # STARTED at session start (measured: the control run's server process ran; with this flag the init
 # event's `mcp_servers` is empty). It also drops the operator's own MCP servers, which is right for a
 # task agent: nothing about the provider's desktop belongs in a stranger's repository.
 _STRICT_MCP_CONFIG = "--strict-mcp-config"
+
+
+# What the agent child inherits from this process, by NAME (ADR 0033 D-n, issue 23 layer 1).
+# Everything here is either "a program cannot run without it" or "the vendor's own configuration";
+# an allowlist rather than a deny list for the reason `_SAFE_PROJECT_ID` gives — a deny list has to
+# anticipate every name worth hiding, and the next tool an operator installs invents one.
+_ENV_ALLOWLIST = frozenset({
+    # Without these nothing runs, or runs somewhere unintended.
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "TZ", "LANG",
+    # TLS trust and egress, which a provider behind a corporate proxy or a private CA needs.
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+})
+# `LC_*` completes `LANG`. `ANTHROPIC_*` is the vendor's own configuration — the model an operator
+# pinned, and the API key a provider that does not use a subscription authenticates with. It reaches
+# the PROCESS deliberately and is withheld from the process's own sandboxed commands by
+# `task_sandbox`'s `credentials.envVars`, which is the split issue 23 asks for: the allowlist governs
+# what the agent gets, the sandbox governs what its children see.
+_ENV_ALLOWED_PREFIXES = ("LC_", "ANTHROPIC_")
+
+# The operator's own extension to the allowlist — comma- or space-separated names. It exists because
+# an allowlist nobody can extend is one a provider works around by not upgrading: a team with a
+# private package registry needs its token in a build, and "hand the agent the whole environment
+# again" must not be the only way to get it.
+ENV_PASSTHROUGH_ENV = "GRID_TASK_ENV_PASSTHROUGH"
+
+# The operator's own git configuration must not apply to a tree that arrived over the wire
+# (ADR 0033 D-f). `task_repo._env` hardens the PROVIDER's git calls with
+# `-c core.symlinks=false -c core.hooksPath=`; the agent's own are unhardened, run in the checkout,
+# and see the operator's real `HOME` — so a `core.hooksPath` in `~/.gitconfig` is a shell command
+# waiting for the agent's first `git commit`. `HOME` cannot be withheld instead: Claude Code's
+# credential lives under it.
+#
+# Two consequences, both wanted. Git tolerates the missing config (measured: warns, exits 0). And
+# the agent no longer inherits `user.name`/`user.email`, so an agent asked to commit fails loudly
+# instead of quietly authoring a stranger's repository as the human who runs the provider — the
+# identity issue 21 exists to get right.
+#
+# This does NOT complete D-f's floor: the other half is `core.symlinks=false` written into the
+# workspace's own config, which belongs with import (issue 16b) where a packfile can carry a
+# `120000` object in the first place.
+_GIT_CONFIG_FLOOR = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+# POSIX's own shape for a variable name, so a value that could never have been a variable is caught
+# where it can be explained rather than becoming a child that behaves oddly for the life of a fleet.
+_ENV_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _passthrough_env_names() -> tuple[str, ...]:
+    """The extra variables this operator declared, validated."""
+    declared = (os.getenv(ENV_PASSTHROUGH_ENV) or "").replace(",", " ").split()
+    for name in declared:
+        if not _ENV_NAME.match(name):
+            raise ValueError(
+                f"{ENV_PASSTHROUGH_ENV} names {name!r}, which is not an environment variable name; "
+                f"list names only, separated by commas or spaces")
+    return tuple(declared)
+
+
+def _is_allowed_env(name: str) -> bool:
+    return name in _ENV_ALLOWLIST or name.startswith(_ENV_ALLOWED_PREFIXES)
 
 
 def workspace_root() -> Path:
@@ -334,15 +414,28 @@ def resumable_session(workspace: Path, requested: str | None) -> ResumeDecision:
 
 
 def permission_mode() -> str:
-    """The `--permission-mode` this provider runs its agents with."""
+    """The `--permission-mode` this provider runs its agents with.
+
+    Refuses one combination, and it is the whole reason this function is not a one-line `getenv`:
+    `bypassPermissions` **with the sandbox on** is a provider that looks confined and is not.
+    """
     mode = (os.getenv(PERMISSION_MODE_ENV) or "").strip() or DEFAULT_PERMISSION_MODE
     if mode not in _PERMISSION_MODES:
         raise ValueError(
             f"{PERMISSION_MODE_ENV}={mode!r} is not one of {', '.join(_PERMISSION_MODES)}")
+    if mode == _BYPASS_MODE and task_sandbox.enabled():
+        raise ValueError(
+            f"{PERMISSION_MODE_ENV}={mode!r} cannot be combined with the agent sandbox: the Read "
+            f"tool runs inside the Claude Code process, which the sandbox does not confine, and "
+            f"this mode is what stops the permission layer refusing it — measured on 2.1.223, a "
+            f"task read a file outside its workspace with the whole policy in force. Remove "
+            f"{PERMISSION_MODE_ENV}, or set {task_sandbox.SANDBOX_ENV}=0 to run agents unconfined "
+            f"deliberately.")
     return mode
 
 
-def agent_argv(binary: str, prompt: str, *, resume: str | None = None) -> list[str]:
+def agent_argv(binary: str, prompt: str, *, workspace: Path,
+               resume: str | None = None) -> list[str]:
     """The child that runs one task.
 
     `resume` is the project's existing Claude Code session, when there is one and its transcript is
@@ -368,6 +461,12 @@ def agent_argv(binary: str, prompt: str, *, resume: str | None = None) -> list[s
     Claude Code is upgraded BEFORE this is deployed. 2.1.221 is the oldest version measured to know
     and honour both; feature-detecting instead would leave the hole open on exactly the least
     maintained provider, silently.
+
+    `--settings` carries the confinement policy (`task_sandbox`, issue 23), and it does **not**
+    inherit the property above. It is a flag every version knows, carrying settings KEYS — and
+    unknown keys are dropped in silence, so a binary too old for `sandbox.*` accepts the policy,
+    ignores it, and reports `completed` with the agent unconfined. That is why `resolve_binary`
+    checks a minimum version, which the argv alone cannot enforce here.
     """
     argv = [
         binary,
@@ -380,11 +479,71 @@ def agent_argv(binary: str, prompt: str, *, resume: str | None = None) -> list[s
     ]
     if resume:
         argv += ["--resume", resume]
+    if task_sandbox.enabled():
+        # Last, and only when confinement is on: an operator who turned it off gets the argv this
+        # provider built before issue 23, rather than an empty policy that would read as configured.
+        argv += ["--settings", task_sandbox.settings_argument(workspace, claude_config_dir())]
     return argv
 
 
+# The oldest Claude Code measured to know and honour everything this provider's argv depends on:
+# issue 22's `--setting-sources` and `--strict-mcp-config`, and issue 23's whole `sandbox.*` settings
+# schema (checked against the 2.1.221, 2.1.222 and 2.1.223 bundles). Checked at runtime because
+# `--settings` — unlike every other flag here — fails OPEN on a binary that does not understand its
+# contents: unknown settings keys are dropped in silence, so an old agent would run unconfined and
+# report success. The flags refuse themselves; the policy cannot.
+MIN_CLAUDE_VERSION = (2, 1, 221)
+_VERSION_TIMEOUT_SECONDS = 10
+# `claude --version` answers `2.1.223 (Claude Code)`. Anchored at the start so a wrapper that prints
+# its own banner first is treated as unreadable rather than having a number picked out of its prose.
+_VERSION_PATTERN = re.compile(r"\A(\d+)\.(\d+)\.(\d+)")
+# One subprocess per binary per process, not one per task: this sits on the task path, and a
+# provider claiming tasks all day should not pay a process launch to re-learn a constant.
+#
+# Keyed on what the file IS, not only where it is. Claude Code updates itself in place and a provider
+# runs for weeks, so a path-keyed cache would keep answering for a binary that has been replaced. The
+# direction that decides this is the dangerous one: a downgrade remembered as new enough would run
+# every task unconfined for the life of the process, which is precisely what the gate exists to stop.
+# A `stat` costs microseconds; a process launch does not.
+_VERSION_CACHE: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+
+
+def _version_cache_key(binary: str) -> tuple[str, int, int] | None:
+    """`(path, mtime, size)`, or `None` when the file cannot be stat'd and nothing may be cached."""
+    try:
+        info = os.stat(binary)  # follows the installer's symlink to the version actually installed
+    except OSError:
+        return None
+    return (binary, info.st_mtime_ns, info.st_size)
+
+
+def _binary_version(binary: str) -> tuple[int, int, int]:
+    """What `binary --version` reports, or a refusal naming what it said instead."""
+    key = _version_cache_key(binary)
+    cached = _VERSION_CACHE.get(key) if key is not None else None
+    if cached is not None:
+        return cached
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, errors="replace",
+            timeout=_VERSION_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"could not ask {binary} for its version: {exc}") from exc
+    reported = (proc.stdout or proc.stderr or "").strip()
+    match = _VERSION_PATTERN.match(reported)
+    if match is None:
+        raise RuntimeError(
+            f"{binary} --version said {reported!r}, which is not a version this provider can check")
+    version = (int(match[1]), int(match[2]), int(match[3]))
+    if key is not None:
+        _VERSION_CACHE[key] = version
+    return version
+
+
 def resolve_binary() -> str:
-    """Claude Code on this machine, or a refusal that says how to get it.
+    """Claude Code on this machine, new enough to honour the confinement, or a refusal.
 
     `claude_install.resolve()` rather than a second search of our own, and deliberately NOT
     `resolve_or_install()`: that one offers to run the vendor's installer and prompts for consent.
@@ -398,6 +557,7 @@ def resolve_binary() -> str:
 
     resolution = claude_install.resolve()
     if resolution.binary is not None:
+        _require_version_for_the_sandbox(resolution.binary)
         return resolution.binary
     unchecked = ("; ".join(resolution.unchecked)) if resolution.unchecked else ""
     raise RuntimeError(
@@ -407,12 +567,58 @@ def resolve_binary() -> str:
     )
 
 
+def preflight() -> None:
+    """Everything about this provider's own configuration that can be checked before work starts.
+
+    All of it is checked anyway, later, by the functions that need it — but `agent_argv` and
+    `child_env` are called AFTER the task's checkout and outside `run_task`'s guards, so a provider
+    misconfiguration would arrive as a raise out of the task runner having already fetched a
+    repository. Called from the guarded pre-spawn block, each of these becomes an ordinary
+    "could not start the agent: …" naming the variable to change, on a task that cost nothing.
+
+    Every call here is pure and cheap, so doing it twice costs nothing worth measuring.
+    """
+    permission_mode()
+    _passthrough_env_names()
+    if task_sandbox.enabled():
+        task_sandbox.preflight()
+
+
+def _require_version_for_the_sandbox(binary: str) -> None:
+    """Refuse a binary that would accept the confinement policy and ignore it.
+
+    Only while the sandbox is on, and that is the whole shape of the rule rather than a convenience:
+    the check exists to protect a control that fails open, so an operator who turns the control off
+    deliberately gets the provider that existed before issue 23 — including its tolerance for an
+    older agent.
+    """
+    if not task_sandbox.enabled():
+        return
+    from shared.launch import claude_install
+
+    version = _binary_version(binary)
+    if version < MIN_CLAUDE_VERSION:
+        current = ".".join(str(part) for part in version)
+        minimum = ".".join(str(part) for part in MIN_CLAUDE_VERSION)
+        raise RuntimeError(
+            f"{binary} is Claude Code {current}, and the task sandbox needs at least {minimum}: an "
+            f"older one accepts `--settings` and silently ignores the `sandbox` keys in it, so "
+            f"every task would run unconfined and still report success. Upgrade it with: "
+            f"{claude_install.install_instruction()}, or set {task_sandbox.SANDBOX_ENV}=0 to run "
+            f"agents unconfined deliberately.")
+
+
 def child_env() -> dict[str, str]:
-    """The environment the agent child is handed.
+    """The environment the agent child is handed — an ALLOWLIST (ADR 0033 D-n, issue 23 layer 1).
 
     ADR 0028's rule, applied here: whatever we set is set **on the child process only** — never
     exported to the provider's shell, never written to a config file, never into this process's own
-    `os.environ`. Hence a copy.
+    `os.environ`. Hence a fresh dict.
+
+    It used to be `dict(os.environ)`. The process it copies from also serves inference and holds the
+    grid access token, and a task is arbitrary code execution written by somebody else — so `env` in
+    a task prompt was a credential dump: the provider's cloud keys, its CI tokens, `GRID_TOKEN`.
+    None of that is anything an agent needs to edit a repository.
 
     Nothing about the grid goes in. Unlike `grid launch claude`, which points the app at the relay,
     a task's agent authenticates with the PROVIDER's own Claude subscription: the requesting user's
@@ -424,7 +630,23 @@ def child_env() -> dict[str, str]:
     demands its own credential material, which a per-user directory would then carry into the repo
     it is synced through.
     """
-    env = dict(os.environ)
+    # Read BEFORE the comprehension, so a malformed list refuses the whole call rather than being
+    # applied to some names and not others.
+    declared = _passthrough_env_names()
+    env = {name: value for name, value in os.environ.items()
+           if _is_allowed_env(name) or name in declared}
+    # `CLAUDE_CONFIG_DIR` comes from `configured_claude_config_dir()` or from nowhere — dropped HERE,
+    # after everything else has been collected, so no route can carry an ambient one in: not the
+    # allowlist, not a prefix somebody widens later, and not the operator's own passthrough list.
+    # An inherited value would send the child to a directory `claude_config_dir()` knows nothing
+    # about, so `link_transcript` would plant its symlink in one place while the agent wrote its
+    # transcript in another. Nothing fails — the task completes, the transcript simply never reaches
+    # the repository, and every following task on the project starts a fresh conversation while
+    # every other signal looks healthy. That is issue 06's bug, reached from the environment.
+    env.pop(_CLAUDE_CONFIG_DIR, None)
+    # The git floor (ADR 0033 D-f). Forced rather than allowlisted, because the danger here is not a
+    # variable being inherited — it is `~/.gitconfig` being found. See the constant.
+    env.update(_GIT_CONFIG_FLOOR)
     # Through the same validated read `link_transcript` uses, so the directory this process plants
     # the symlink in and the one the child writes to can never be two different places.
     config_dir = configured_claude_config_dir()

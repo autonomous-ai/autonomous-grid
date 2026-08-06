@@ -43,11 +43,19 @@ def _emit(record: dict) -> None:
     sys.stdout.flush()
 
 
+# What this fake claims to be when asked. `resolve_binary()` gates on a minimum version since issue
+# 23, because `--settings` is the one flag that fails OPEN on a binary too old to understand its
+# contents — so a stand-in that could not answer `--version` would fail every task here for a reason
+# that has nothing to do with what these tests are about.
+_VERSION = "2.1.223 (Claude Code)"
+
+
 def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
     verbose = False
     strict_mcp = False
     takes_a_value = {"-p": "prompt", "--output-format": "fmt", "--permission-mode": "mode",
-                     "--setting-sources": "sources", "--resume": "resume"}
+                     "--setting-sources": "sources", "--resume": "resume",
+                     "--settings": "settings"}
     seen: dict[str, str] = {}
     i = 0
     while i < len(argv):
@@ -72,7 +80,44 @@ def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
             or seen.get("sources") != "user" or not strict_mcp):
         sys.stderr.write(f"fake claude: argv is not the shape the provider builds: {argv!r}\n")
         raise SystemExit(64)
+    _require_the_confinement(seen.get("settings"), mode)
     return prompt, resume
+
+
+def _require_the_confinement(settings: str | None, mode: str | None) -> None:
+    """Issue 23's half, checked the only way this process honestly can.
+
+    A fake cannot honour a sandbox — it has no kernel confinement, and pretending to would be a test
+    agreeing with itself. What it CAN check is that the provider asked: `--settings` present, valid
+    JSON, and a `sandbox` that is switched on. That makes dropping the policy break this free
+    cross-repo run and not only the paid one in `tests/e2e_agent_sandbox.py`, which is the same
+    bargain `--setting-sources` and `--strict-mcp-config` are held to above.
+
+    `bypassPermissions` is refused for the same reason: measured on the real binary, that mode reads
+    files outside the workspace with the whole policy in force, so an argv carrying both is a
+    provider that looks confined and is not.
+    """
+    if settings is None:
+        sys.stderr.write("fake claude: no --settings; the provider sent no confinement policy\n")
+        raise SystemExit(64)
+    try:
+        policy = json.loads(settings)
+    except ValueError as exc:
+        sys.stderr.write(f"fake claude: --settings is not JSON ({exc}): {settings!r}\n")
+        raise SystemExit(64) from exc
+    if not policy.get("sandbox", {}).get("enabled"):
+        sys.stderr.write(f"fake claude: --settings carries no enabled sandbox: {settings!r}\n")
+        raise SystemExit(64)
+    if mode == "bypassPermissions":
+        # Checked, not merely described. This paragraph used to claim the refusal while `_parse_argv`
+        # only tested that a mode was PRESENT — so the free cross-repo run would have stayed green
+        # with the real guard weakened, which is the exact "claims to guard something, doesn't" shape
+        # the rest of this file exists to catch.
+        sys.stderr.write(
+            "fake claude: --permission-mode bypassPermissions with a sandbox policy — measured on "
+            "the real binary, that mode reads files outside the workspace with the whole policy in "
+            "force, so this argv is a provider that looks confined and is not\n")
+        raise SystemExit(64)
 
 
 def _transcript_dir() -> pathlib.Path | None:
@@ -85,6 +130,11 @@ def _transcript_dir() -> pathlib.Path | None:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--version"]:
+        # Answered before anything else, and without the argv check: this is how the provider's
+        # version gate learns whether the binary understands `sandbox.*` settings at all.
+        sys.stdout.write(f"{_VERSION}\n")
+        return 0
     prompt, resume = _parse_argv(sys.argv[1:])
     session = resume or str(uuid.uuid4())
     _emit({"type": "system", "subtype": "init", "session_id": session})

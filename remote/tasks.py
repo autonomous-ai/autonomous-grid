@@ -367,13 +367,19 @@ def _run_child(argv: list[str], *, timeout: float, publish: Callable[..., None],
     pid back from a record and signalling it — the hazard ADRs 0020 and 0026 removed from the
     run-record seams and which is not reintroduced here.
     """
+    # `stdin=DEVNULL`, never inherited (ADR 0033 D-n). `claude -p` reads a non-TTY stdin as MORE
+    # PROMPT — measured while taking issue 23's other measurements, when a heredoc feeding the
+    # harness turned up inside the agent's answer and was acted on. A provider started by anything
+    # that leaves a pipe on fd 0 would otherwise mix its contents into a prompt written by somebody
+    # else, silently, on every task.
+    #
     # `errors="replace"`, not the default strict decode: one non-UTF-8 byte from the child would
     # otherwise raise `UnicodeDecodeError` inside the reader thread, where the broad guard swallows
     # it — the thread ends, EOF is queued, and the task reports `completed` having LOST its output
     # (measured: the whole of it, not just the tail). The same fix this repo already applies to
     # `orphan_sweep`'s process-list subprocess, for the same reason.
     proc = subprocess.Popen(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, errors="replace", bufsize=1, cwd=cwd, env=env)
     if on_spawn is not None:
         on_spawn(proc)
@@ -510,6 +516,12 @@ def run_task(job: dict[str, Any],
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
         binary = task_agent.resolve_binary()
+        # And the rest of what the argv and the child's environment need, for the same reason: they
+        # are built AFTER the checkout and outside these guards, so a provider misconfiguration
+        # would arrive as "task runner raised" having already fetched the repository. Here it is an
+        # ordinary "could not start the agent: …" naming the variable to change, on a task that cost
+        # nothing.
+        task_agent.preflight()
     except (Exception, SystemExit) as exc:
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
@@ -576,7 +588,9 @@ def run_task(job: dict[str, Any],
         # `lease_expired`. One truncation is worth more than that whole failure mode.
         reset_reason = task_stream.redact(resume.reason)[:_MAX_SESSION_RESET_REASON_CHARS]
 
-    argv = task_agent.agent_argv(binary, prompt, resume=resume.session_id)
+    # The workspace goes in because the confinement policy is built around it: it is the one
+    # directory the agent must be able to read and write while `$HOME` around it is denied.
+    argv = task_agent.agent_argv(binary, prompt, workspace=workspace, resume=resume.session_id)
 
     try:
         _returncode, _raw = _run_child(

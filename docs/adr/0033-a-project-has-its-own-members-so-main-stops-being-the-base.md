@@ -334,6 +334,25 @@ There is a bigger hammer (`CLAUDE_CODE_SIMPLE=1`) that also disables `CLAUDE.md`
 unusable here: its help text states auth becomes *"strictly `ANTHROPIC_API_KEY` or `apiKeyHelper` —
 OAuth and keychain are never read"*, and the provider's subscription is exactly OAuth.
 
+> **Correction, 2026-08-06 (issue 23).** The paragraph above implies that `--setting-sources user`
+> leaves `CLAUDE.md` discovery alone and only the bigger hammer takes it away. **It does not.**
+> Measured on 2.1.223 with a prompt that forbids tools, so that only auto-loaded context can answer:
+> with `--setting-sources user` the model replies `UNKNOWN`, and with no `--setting-sources` at all
+> it answers from the workspace's `CLAUDE.md`. The original measurement was watching the model open
+> the file with the `Read` tool, which is why issue 22's own test for this was intermittently red.
+>
+> What survives unchanged is the decision and everything it rests on: the *execution* class must not
+> load, the flag is what stops it, and the import validator must still not refuse `.claude/`. What is
+> wrong is the claim about the *instruction* class. Corrected: a repository's instructions stay
+> **readable** — they are on disk in the workspace and an agent that looks finds them — but they are
+> **not loaded into the model's context**. A task prompt that depends on a repository's conventions
+> has to say so.
+>
+> The flag stays. Recovering automatic discovery means loading the repository's settings again, which
+> is the hole this decision exists to close; the option that keeps it closed is reading the
+> workspace's `CLAUDE.md` and passing it through `--append-system-prompt`, and that is a decision for
+> whoever picks it up rather than a side effect of issue 23.
+
 Related, and inherited without re-examination: `_require_provider` checks only that the caller is a
 provider **on the grid**, so any registered provider node may claim any task in any project. ADR
 0032 bought that with its "internally operated fleet" assumption, when every repository was one the
@@ -584,6 +603,29 @@ one the relay had grown from empty.
 
 The measurement was made on macOS/seatbelt. Providers run Linux/bubblewrap, a different backend that
 must be installed — so this is re-measured on the fleet before it is relied on.
+
+> **Re-measured on Linux, 2026-08-06 (issue 23)**, on a dev VM (Ubuntu 24.04, kernel 6.8, Claude Code
+> 2.1.223), isolated in a temp directory. Four things the macOS run could not have shown, and the
+> second one would have been a fleet-wide outage:
+>
+> - **The dependency is `bubblewrap` AND `socat`.** Every note in this feature said bubblewrap alone;
+>   with only that, the run still refuses. A stock provider VM has neither, and no Claude Code.
+> - **Ubuntu 24.04 breaks the sandbox by default.** It ships
+>   `kernel.apparmor_restrict_unprivileged_userns=1`, and the sandbox nests a user namespace per
+>   command, so *every Bash call in every task* failed — while the read denial still passed, which is
+>   precisely the shape that reads as success. Reproduced beneath Claude Code: one `bwrap` works,
+>   `bwrap` inside `bwrap` does not. Root does not help; the capability is dropped by the outer
+>   namespace. Fixed with `sandbox.enableWeakerNestedSandbox`, set on Linux only — undocumented and
+>   named "weaker", so measured rather than trusted: with it on, a denied path still comes back
+>   absent from `cat` and `pip install` works.
+> - **`failIfUnavailable` is genuinely fail-closed on Linux** — exit 1 naming the missing packages,
+>   before any model call. That is what made shipping ahead of this measurement safe.
+> - **The macOS certificate-trust failure does not reproduce on Linux**, so the egress allowlist is
+>   viable on the fleet. On macOS a task cannot install dependencies (`trustd` is blocked inside the
+>   sandbox); that stays a documented development-box limitation rather than a fleet one.
+>
+> The decision is unchanged; what changed is what has to be installed, and one setting that Linux
+> cannot work without.
 
 ### D-m — A commit says who asked for it, and the grid says it made it
 

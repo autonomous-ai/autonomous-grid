@@ -1147,16 +1147,83 @@ hooks on the provider before the model had said anything. Two rules close that
   refuses `.git/` and `.grid/`. `--file ./x.json:.claude/settings.json` comes back as a 422 naming
   the directory.
 
-**Instructions are not configuration and are not blocked.** A `CLAUDE.md` in the workspace still
-reaches the model, and `.claude/agents/` and `.claude/skills/` still load when they arrive as part of
-a repository. The line is narrower than "the agent ignores the repository": no *shell command* runs
-before the model has said anything. Put per-task guidance in `CLAUDE.md`, not in a settings file.
+**Instructions are not configuration and are not blocked.** A `CLAUDE.md` in the workspace, and
+`.claude/agents/` and `.claude/skills/`, arrive with the repository and stay readable — an agent that
+looks finds them. The line is narrower than "the agent ignores the repository": no *shell command*
+runs before the model has said anything. Put per-task guidance in `CLAUDE.md`, not in a settings file.
+
+⚠️ **A workspace `CLAUDE.md` is not loaded automatically.** Measured on Claude Code 2.1.223:
+`--setting-sources user` also turns off project-memory discovery, so the repository's `CLAUDE.md`
+reaches the model only if the agent opens it. Ask for it in the task prompt when it matters
+("follow the repository's CLAUDE.md"). Recovering automatic discovery would mean loading the
+repository's settings again, which is the hole this closes, so it is deliberately not done here.
 
 This needs a Claude Code new enough to know `--setting-sources` — 2.1.221 is the oldest version
 measured to know and honour it. An older one refuses the whole invocation (`error: unknown option`,
 before it runs anything), so a provider on a stale binary fails every task with that message in
 `grid task get <id>` rather than quietly running unprotected. **Upgrade the fleet's Claude Code
 before upgrading grid.**
+
+### What a task can reach on the provider
+
+A task is arbitrary code execution as the provider's user — that is the product, not a flaw. What
+the provider controls is the blast radius, in three layers
+([ADR 0033](./adr/0033-a-project-has-its-own-members-so-main-stops-being-the-base.md) D-n).
+
+**The agent's environment is an allowlist**, not a copy of the provider's. It gets `PATH`, `HOME`,
+`SHELL`, `TMPDIR`, the locale, the TLS and proxy settings, and anything named `ANTHROPIC_*` or
+`LC_*`. Everything else is dropped — the grid's own access token, cloud keys, CI tokens. Add what a
+build genuinely needs with `GRID_TASK_ENV_PASSTHROUGH`. The operator's git configuration is dropped
+too (`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` point at `/dev/null`), so a `core.hooksPath` in
+`~/.gitconfig` cannot run against a repository that arrived over the wire — and an agent asked to
+`git commit` fails for want of an identity rather than silently authoring as the operator.
+
+**The agent runs sandboxed** — seatbelt on macOS, bubblewrap on Linux — with the policy delivered per
+invocation, so a repository cannot weaken it. `$HOME`, `~/.grid` and the Claude configuration
+directory are unreadable to the task; package-manager caches are re-allowed by name; the workspace
+is the only writable place. Network egress is an allowlist of the usual package registries, and a
+task that needs another host says so with a clear `curl` error — extend it with
+`GRID_TASK_ALLOWED_DOMAINS`.
+
+⚠️ **On macOS, a task cannot install dependencies.** The sandbox blocks the system service that
+verifies TLS certificates, so anything using the system trust store fails — measured, `pip install`
+returns `SSLCertVerificationError (OSStatus -26276)` even with `pypi.org` on the egress allowlist,
+while `curl` to the same host succeeds. Providers are expected to run Linux, where the setting that
+governs this does not apply; a macOS box used for development can set `GRID_TASK_SANDBOX=0` to run
+tasks unconfined. Whether the Linux backend has an equivalent limitation is unmeasured.
+
+**Run the provider as a dedicated unprivileged user.** This is the layer that actually bounds the
+damage, and it is operational rather than code: the sandbox confines the commands the model runs, but
+it does not confine Claude Code itself, which must be able to read the subscription credential. A
+task can still take *that*. Give the provider its own account with its own `CLAUDE_CONFIG_DIR`, or a
+container per task — the design suits it, since the workspace is a fixed path and all state travels
+in git.
+
+Stated plainly, because it follows from the relay's own authorization and not from anything above:
+**any member of a grid can execute code on any provider in it.** A provider is authorized as a
+provider, not for a particular project. That is a decision an internally operated fleet can make; it
+should be made rather than inherited.
+
+**Rollout order, and it is not optional.** On every provider, *before* upgrading grid:
+
+```bash
+apt install bubblewrap socat        # both — the sandbox needs socat as well as bwrap
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code 2.1.221 or newer
+```
+
+Both halves fail closed, which is why the order matters rather than merely being tidy. The sandbox
+is configured to refuse to start instead of running unconfined, so a provider missing either package
+fails every task with `sandbox required but unavailable: … bubblewrap (bwrap) not installed, socat
+not installed` — measured on Ubuntu 24.04. And a Claude Code too old for the sandbox settings would
+accept them, ignore them, and report success, which is why the provider checks the version and
+refuses to run at all below 2.1.221.
+
+Nothing else is needed on Ubuntu 24.04. It restricts unprivileged user namespaces by default
+(`kernel.apparmor_restrict_unprivileged_userns=1`), which stops the sandbox nesting the namespace it
+uses to run each command — the provider handles that in the policy it sends, and it was measured on
+a 24.04 host that a task can then read its workspace, install a dependency from PyPI, and still not
+read a file outside the workspace. **Do not** turn that sysctl off to "fix" a task that fails to run
+commands; check `bubblewrap` and `socat` first.
 
 The environment variables that tune a provider, all optional:
 
@@ -1166,8 +1233,16 @@ The environment variables that tune a provider, all optional:
 | `GRID_MAX_TASKS` | `1` | how many tasks this provider runs at once. **Anything above 1 is unverified** — two Claude Code children sharing one config directory has never been measured (see [How much a provider takes on](#how-much-a-provider-takes-on)). No upper limit is imposed: the ceiling that actually binds is the provider's own Claude subscription, which is read at runtime rather than guessed at. A value that is not a positive whole number falls back to `1` and says so |
 | `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
-| `GRID_TASK_PERMISSION_MODE` | `bypassPermissions` | any mode `claude --permission-mode` accepts |
+| `GRID_TASK_PERMISSION_MODE` | `acceptEdits` | any mode `claude --permission-mode` accepts, **except `bypassPermissions` while the sandbox is on** — the provider refuses that combination. Measured: with that mode the agent reads files outside its workspace even with the whole policy in force, because the `Read` tool runs inside Claude Code, which the sandbox does not confine |
+| `GRID_TASK_SANDBOX` | on | `0` runs agents **unconfined** — no filesystem or network confinement, and the Claude Code version check is skipped with it |
+| `GRID_TASK_ENV_PASSTHROUGH` | empty | extra environment variable names the agent may inherit, comma- or space-separated (e.g. a private registry token) |
+| `GRID_TASK_ALLOWED_DOMAINS` | the common package registries | replaces the egress allowlist wholesale, comma- or space-separated. An empty value denies all network access to the task's own commands |
 | `GRID_TASK_CLAUDE_CONFIG_DIR` | unset | a fixed `CLAUDE_CONFIG_DIR` for every task this provider runs. Must be an **absolute** path outside the workspace, or the provider refuses to run — the agent resolves a relative one against its working directory, which would commit the provider's credential into the user's repository. Fixed **per provider**, never per user: a fresh config directory has no credential of its own and the agent will refuse to start |
+
+**Keep the root short.** On macOS the sandbox profile is built into a single command-line argument
+that grows with the workspace path; past roughly 120 characters it exceeds the exec limit and every
+command a task runs fails with `E2BIG`. The provider warns on stderr when it sees one that long.
+`/var/grid` and anything like it is far inside the limit.
 
 The default root `/var/grid` needs privileges an ordinary account does not have. **Do not reach for
 `sudo` first** — point `GRID_TASK_ROOT` at a directory the provider's own account can write, or

@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,7 @@ _STRICT_MCP = "--strict-mcp-config"
 # each pair without inspecting the value — see `_strip_the_guard`. A flag added to `agent_argv` later
 # and forgotten here is safe in the direction that matters: the control keeps it, and the pair still
 # differs only by the guard.
-_TAKES_A_VALUE = frozenset({"-p", "--output-format", "--permission-mode", "--resume"})
+_TAKES_A_VALUE = frozenset({"-p", "--output-format", "--permission-mode", "--resume", "--settings"})
 
 
 @pytest.fixture
@@ -67,17 +68,24 @@ def live(tmp_path, monkeypatch):
         pytest.skip("Claude Code is not on PATH; this check needs the real binary")
 
     monkeypatch.delenv("GRID_TASK_CLAUDE_CONFIG_DIR", raising=False)
-    root = tmp_path / "root"
+    # NOT under `tmp_path`, since issue 23 turned the sandbox on. macOS builds the seatbelt profile
+    # into a single exec argument that grows with the workspace path, and pytest's temp directory is
+    # deep enough (157 characters here) that every command the agent runs dies with `E2BIG`
+    # (see `task_sandbox.WORKSPACE_PATH_WARNING_CHARS`). A task whose agent cannot run a command
+    # still *looks* confined, which is the one way this module could go quietly wrong.
+    root = Path("/private/tmp") / f"grid-e2e-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv("GRID_TASK_ROOT", str(root))
     monkeypatch.setenv("GRID_TASK_TIMEOUT_SECONDS", "300")
     monkeypatch.delenv("GRID_TASK_PERMISSION_MODE", raising=False)
-    # Reaches the CHILD only — `child_env()` copies this process's environment, and ADR 0028's rule
-    # is that nothing grid sets is exported to the provider's own shell.
+    # Reaches the CHILD only, and it gets there because `child_env()`'s allowlist carries the
+    # `ANTHROPIC_` prefix (issue 23). ADR 0028's rule still holds in the other direction: nothing
+    # grid sets is exported to the provider's own shell.
     monkeypatch.setenv("ANTHROPIC_MODEL", _MODEL)
 
     yield root
 
     H.sweep_transcript_links(root)
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -163,8 +171,8 @@ def _strip_the_guard(task_agent) -> None:
     """
     original = task_agent.agent_argv
 
-    def unguarded(binary, prompt, *, resume=None):
-        argv = original(binary, prompt, resume=resume)
+    def unguarded(binary, prompt, *, workspace, resume=None):
+        argv = original(binary, prompt, workspace=workspace, resume=resume)
         out: list[str] = []
         i = 0
         while i < len(argv):
@@ -269,6 +277,26 @@ def test_the_instruction_class_still_reaches_the_model(live, tmp_path):
 
     The agent and skill files are present for the same reason: `--setting-sources` is a settings
     flag, and a future change that reached further would fail this test rather than ship quietly.
+
+    **What this asserts is weaker than it was, because the stronger claim turned out to be false.**
+    Measured on 2.1.223 while building issue 23, with a prompt that FORBIDS tools so that only
+    auto-loaded context can answer:
+
+    | argv | answer |
+    |---|---|
+    | `--setting-sources user` — what the provider sends | `UNKNOWN` |
+    | no `--setting-sources` at all | `ZEBRA-9911` |
+
+    So `--setting-sources user` **does** stop the workspace's `CLAUDE.md` being auto-loaded. This
+    test passed before only because the model chose to open the file with the `Read` tool, and asked
+    plainly it did so about half the time — measured, pass and fail in the identical configuration.
+
+    That contradicts ADR 0033 D-f, `docs/cli.md`, and `task_agent._SETTING_SOURCES`, all of which
+    say the instruction class still loads. The flag is NOT being changed here: it is what closes the
+    execution hole, and reopening that to recover memory discovery is a decision for issue 22's
+    owner, not a side effect of this one. What is asserted instead is the property that is both true
+    and still worth defending — the instructions remain REACHABLE, so an agent that looks finds
+    them, and nothing in the provider's argv hides the repository's own guidance from it.
     """
     outcome = _run(
         tmp_path,
@@ -278,13 +306,15 @@ def test_the_instruction_class_still_reaches_the_model(live, tmp_path):
              "---\nname: reviewer\ndescription: Reviews code\n---\n\nYou review code.\n",
          ".claude/skills/greet/SKILL.md":
              "---\nname: greet\ndescription: Greets\n---\n\nSay hello.\n"},
-        "What is the project codename? Reply with just the codename. Create no file.",
+        "What is the project codename? Look in the repository's own CLAUDE.md if you need to. "
+        "Reply with just the codename. Create no file.",
         guarded=True, project="instructions")
 
     assert outcome.state == "completed", outcome.error
     assert "ZEBRA-9911" in (outcome.output or ""), (
-        f"the workspace's CLAUDE.md never reached the model — the instruction class has been "
-        f"blocked along with the execution class: {outcome.output!r}")
+        f"the workspace's CLAUDE.md is not even READABLE by the agent — the guard has gone beyond "
+        f"refusing the repository's settings and is now hiding its instructions too, which is not "
+        f"what ADR 0033 D-f decided: {outcome.output!r}")
 
 
 def test_a_flag_the_binary_does_not_know_fails_the_task_instead_of_running_unprotected(
@@ -307,8 +337,8 @@ def test_a_flag_the_binary_does_not_know_fails_the_task_instead_of_running_unpro
 
     marker = tmp_path / "HOOK_RAN"
     original = task_agent.agent_argv
-    task_agent.agent_argv = lambda binary, prompt, *, resume=None: (
-        original(binary, prompt, resume=resume) + ["--not-a-real-flag"])
+    task_agent.agent_argv = lambda binary, prompt, *, workspace, resume=None: (
+        original(binary, prompt, workspace=workspace, resume=resume) + ["--not-a-real-flag"])
 
     outcome = _run(tmp_path, {".claude/settings.json": _hook_settings(marker), "a.txt": "x\n"},
                    "Reply with exactly OK.", guarded=True, project="unknown-flag")
