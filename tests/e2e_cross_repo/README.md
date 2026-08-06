@@ -17,7 +17,13 @@ The modules are `e2e_*.py`, not `test_*.py` — the same convention as `tests/e2
 ```bash
 .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_cross_repo.py -q   # ~2 min, free
 .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_live_agent.py  -q   # ~45 s, SPENDS A SUBSCRIPTION
+.venv/bin/python -m pytest tests/e2e_agent_settings.py -q               # ~45 s, SPENDS A SUBSCRIPTION
 ```
+
+`tests/e2e_agent_settings.py` lives one directory up because it needs no relay — the real binary and
+`run_task` are the whole seam. It borrows `_harness.sweep_transcript_links` from here, because every
+module that drives the real binary writes into the operator's own `~/.claude` and they must all clean
+up the same way.
 
 ## What it stands up
 
@@ -27,6 +33,7 @@ The modules are `e2e_*.py`, not `test_*.py` — the same convention as `tests/e2
 | provider | this repo's `remote.tasks.task_loop`, in its own **process** (`provider_process.py`) so one can be `kill -9`ed |
 | client | `remote.relay` and `remote.task_repo`, called directly |
 | agent | `fake_claude.py` (free), or the real Claude Code (`e2e_live_agent.py`) |
+| agent config | `fake_claude.py` REQUIRES `--setting-sources user --strict-mcp-config` (issue 22) — dropping either from `agent_argv` breaks this free run, not only the paid one |
 | auth | a real HS256 token minted with `hmac` — nothing here can reach into the relay to patch a verifier |
 
 The lease is 6s against a 0.5s renewal rather than the production 120s/30s. The **ratio** is what is

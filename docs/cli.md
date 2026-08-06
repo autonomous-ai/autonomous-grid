@@ -1136,6 +1136,28 @@ permission prompt, so any narrower mode silently denies the tools a coding task 
 an **internally operated fleet** ([ADR 0032](./adr/0032-a-task-is-not-an-inference-transaction.md)) —
 a provider runs a prompt written by someone else, with its own credentials, on its own machine.
 
+**A task's files cannot configure the agent that reads them.** Print mode skips Claude Code's
+workspace-trust dialog, so a `.claude/settings.json` arriving with a task would otherwise run its
+hooks on the provider before the model had said anything. Two rules close that
+([ADR 0033](./adr/0033-a-project-has-its-own-members-so-main-stops-being-the-base.md) D-f):
+
+- the agent is spawned with `--setting-sources user --strict-mcp-config`, so only the *provider's
+  own* settings load — never the workspace's, and never its `.mcp.json`;
+- the relay refuses an uploaded path under `.claude/`, or named `.mcp.json`, the way it already
+  refuses `.git/` and `.grid/`. `--file ./x.json:.claude/settings.json` comes back as a 422 naming
+  the directory.
+
+**Instructions are not configuration and are not blocked.** A `CLAUDE.md` in the workspace still
+reaches the model, and `.claude/agents/` and `.claude/skills/` still load when they arrive as part of
+a repository. The line is narrower than "the agent ignores the repository": no *shell command* runs
+before the model has said anything. Put per-task guidance in `CLAUDE.md`, not in a settings file.
+
+This needs a Claude Code new enough to know `--setting-sources` — 2.1.221 is the oldest version
+measured to know and honour it. An older one refuses the whole invocation (`error: unknown option`,
+before it runs anything), so a provider on a stale binary fails every task with that message in
+`grid task get <id>` rather than quietly running unprotected. **Upgrade the fleet's Claude Code
+before upgrading grid.**
+
 The environment variables that tune a provider, all optional:
 
 | variable | default | what it does |

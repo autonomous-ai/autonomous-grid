@@ -58,16 +58,8 @@ def live_workspace_root(tmp_path_factory):
 def spawn_live_provider(relay, provider_nodes, live_workspace_root, monkeypatch):
     """A provider running the REAL binary, with the operator's own config directory.
 
-    Teardown sweeps that directory by reading each symlink's TARGET, and removes the ones pointing
-    inside this run's workspace root. Deriving the expected NAMES instead does not work and quietly
-    half-works, which is worse: the resume test deletes its workspace on purpose, so by teardown
-    there is nothing left to derive a name from, and that run leaves its link behind. Reading targets
-    also needs no opinion about how the vendor encodes a path — and being wrong about that encoding
-    is the bug this module exists to catch, so a cleanup that depended on it would fail in exactly
-    the case worth knowing about.
-
-    The target test is what makes this safe: everything under a `tmp_path_factory` root belongs to
-    this run, so nothing of the operator's can match.
+    Teardown sweeps that directory through `_harness.sweep_transcript_links` — see it for why the
+    sweep reads each symlink's TARGET rather than deriving the names it expects to find.
     """
     if not shutil.which("claude"):
         pytest.skip("Claude Code is not on PATH; the live agent checks need the real binary")
@@ -113,17 +105,7 @@ def spawn_live_provider(relay, provider_nodes, live_workspace_root, monkeypatch)
     for provider in started:
         provider.stop()
 
-    from remote import task_agent
-
-    projects = task_agent.claude_config_dir() / "projects"
-    ours = {str(live_workspace_root), os.path.realpath(live_workspace_root)}
-    for entry in projects.iterdir() if projects.is_dir() else ():
-        # Only ever a symlink; a real directory there is somebody's data.
-        if not entry.is_symlink():
-            continue
-        target = os.path.realpath(os.readlink(entry))
-        if any(target.startswith(root + os.sep) for root in ours):
-            entry.unlink()
+    H.sweep_transcript_links(live_workspace_root)
 
 
 def test_a_real_agent_run_reports_tool_activity_while_it_is_still_working(

@@ -153,3 +153,36 @@ def await_state(relay_base, bearer, task_id, states, timeout=60.0):
 
 def b64_file(content: str) -> str:
     return base64.b64encode(content.encode()).decode()
+
+
+# --------------------------------------------------------- the operator's own config directory
+
+def sweep_transcript_links(workspace_root) -> None:
+    """Remove the transcript symlinks a live run planted in the operator's real `~/.claude`.
+
+    Every module that drives the REAL binary has to write there — issue 01's spike measured a custom
+    `CLAUDE_CONFIG_DIR` yielding `Not logged in` even on macOS, where the token is in the Keychain —
+    so every one of them has to clean up, and they must clean up the same way.
+
+    By TARGET, never by deriving the expected link names. Deriving them quietly half-works: a test
+    that deletes its workspace on purpose leaves nothing to derive a name from, so that run's link
+    survives. Reading targets also needs no opinion about how the vendor encodes a path into a
+    directory name — and being wrong about that encoding is the bug this whole E2E layer exists to
+    catch, so a cleanup that depended on it would fail in exactly the case worth knowing about.
+
+    Safe because of the target test: everything under a `tmp_path_factory` root belongs to the run
+    that asked, so nothing of the operator's own can match.
+    """
+    from remote import task_agent
+
+    projects = task_agent.claude_config_dir() / "projects"
+    if not projects.is_dir():
+        return
+    ours = {str(workspace_root), os.path.realpath(workspace_root)}
+    for entry in projects.iterdir():
+        # Only ever a symlink; a real directory there is somebody's data.
+        if not entry.is_symlink():
+            continue
+        target = os.path.realpath(os.readlink(entry))
+        if any(target.startswith(root + os.sep) for root in ours):
+            entry.unlink()

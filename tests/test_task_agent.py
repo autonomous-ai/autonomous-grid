@@ -101,11 +101,16 @@ def test_a_workspace_that_cannot_be_created_says_where_and_why(monkeypatch, tmp_
 
 
 def test_the_agent_is_spawned_in_print_mode_with_a_machine_readable_stream(monkeypatch):
-    """The four flags this whole slice rests on, pinned as a wire contract with the binary.
+    """The flags this whole slice rests on, pinned as a wire contract with the binary.
 
     Verified against Claude Code 2.1.221: `--output-format stream-json` needs `--print`, and this
     repo's existing seat pairs it with `--verbose` (`shared/agent/seats/claude.py`). The prompt is an
     argv ELEMENT — nothing here reaches a shell, so a prompt containing `; rm -rf /` is just text.
+
+    The last two are issue 22's, and they are a security boundary rather than a preference: `-p`
+    SKIPS the workspace-trust dialog, so without them a `.claude/settings.json` in a workspace that
+    arrived over the wire runs a shell command before the model has said anything. The proof that
+    they WORK is a side effect, not this list — `tests/e2e_agent_settings.py` runs the real binary.
     """
     from remote import task_agent
 
@@ -119,7 +124,25 @@ def test_the_agent_is_spawned_in_print_mode_with_a_machine_readable_stream(monke
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "bypassPermissions",
+        "--setting-sources", "user",
+        "--strict-mcp-config",
     ]
+
+
+def test_the_repositorys_settings_are_dropped_but_the_operators_own_are_kept(monkeypatch):
+    """`user`, and never `none` — which half of this flag is load-bearing is easy to lose.
+
+    The directory the agent runs in arrived over the wire; the operator's `CLAUDE_CONFIG_DIR` did
+    not. Dropping every source would also drop the provider operator's own settings, which is not
+    what this defends against and would silently change how every task on that provider behaves.
+    Measured on 2.1.223: with `--setting-sources user`, a `SessionStart` hook in the config
+    directory's own `settings.json` still runs while the workspace's does not.
+    """
+    from remote import task_agent
+
+    argv = task_agent.agent_argv("claude", "x")
+
+    assert argv[argv.index("--setting-sources") + 1] == "user"
 
 
 def test_the_permission_mode_is_bypass_by_default_and_overridable_per_provider(monkeypatch):
@@ -133,7 +156,12 @@ def test_the_permission_mode_is_bypass_by_default_and_overridable_per_provider(m
 
     monkeypatch.setenv("GRID_TASK_PERMISSION_MODE", "acceptEdits")
 
-    assert task_agent.agent_argv("claude", "x")[-1] == "acceptEdits"
+    # Read by NAME rather than off the end of the list. This assertion used to be `[-1]`, which was
+    # true only for as long as `--permission-mode` happened to be the last flag — it stopped being
+    # so the moment issue 22 appended two more, and a positional assertion that breaks on an
+    # unrelated change is one somebody eventually "fixes" by re-pinning the index.
+    argv = task_agent.agent_argv("claude", "x")
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
 
 
 def test_an_unknown_permission_mode_is_refused_rather_than_handed_to_the_binary(monkeypatch):
@@ -683,7 +711,7 @@ def test_the_prompt_and_the_streaming_flags_reach_the_binary(agent):
 
     assert outcome.output == (
         "-p fix the flaky test --output-format stream-json --verbose "
-        "--permission-mode bypassPermissions")
+        "--permission-mode bypassPermissions --setting-sources user --strict-mcp-config")
 
 
 def test_a_non_zero_exit_is_a_failure_however_cheerful_the_stream_was(agent):
@@ -2162,6 +2190,8 @@ def test_a_follow_up_task_asks_the_agent_to_continue_the_projects_conversation(m
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "bypassPermissions",
+        "--setting-sources", "user",
+        "--strict-mcp-config",
         "--resume", "012c9e09-abcd",
     ]
 

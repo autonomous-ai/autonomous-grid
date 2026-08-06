@@ -5,8 +5,12 @@ It exists so the cross-repo E2E can drive the REAL provider and the REAL relay w
 subscription. Two things about it are deliberate:
 
 * It parses the argv the provider actually builds (`-p`, `--output-format stream-json`, `--verbose`,
-  `--permission-mode`, optional `--resume`) and refuses anything else. A fake that accepted whatever
-  it was handed would keep passing after `agent_argv` changed shape.
+  `--permission-mode`, `--setting-sources user`, `--strict-mcp-config`, optional `--resume`) and
+  refuses anything else — **and refuses argv that is MISSING any of them**. A fake that accepted
+  whatever it was handed would keep passing after `agent_argv` changed shape. The last two are
+  issue 22's, and requiring them here is what makes their removal break the cross-repo E2E: this
+  process cannot honour a `.claude/settings.json` the way the real binary does, so the only thing it
+  can honestly check is that the provider asked for the protection at all.
 * It computes its transcript directory from ITS OWN `getcwd`, by the vendor's measured rule
   (`[^A-Za-z0-9]` -> `-`), and never from anything the provider tells it. That is the one property a
   self-consistent test suite cannot check: issue 06's silent bug was the provider planting its
@@ -41,8 +45,9 @@ def _emit(record: dict) -> None:
 
 def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
     verbose = False
-    takes_a_value = {"-p": "prompt", "--output-format": "fmt",
-                     "--permission-mode": "mode", "--resume": "resume"}
+    strict_mcp = False
+    takes_a_value = {"-p": "prompt", "--output-format": "fmt", "--permission-mode": "mode",
+                     "--setting-sources": "sources", "--resume": "resume"}
     seen: dict[str, str] = {}
     i = 0
     while i < len(argv):
@@ -53,12 +58,18 @@ def _parse_argv(argv: list[str]) -> tuple[str, str | None]:
         elif arg == "--verbose":
             verbose = True
             i += 1
+        elif arg == "--strict-mcp-config":
+            strict_mcp = True
+            i += 1
         else:
             sys.stderr.write(f"fake claude: unexpected argument {arg!r}\n")
             raise SystemExit(64)
     prompt, fmt = seen.get("prompt"), seen.get("fmt")
     mode, resume = seen.get("mode"), seen.get("resume")
-    if prompt is None or fmt != "stream-json" or not verbose or not mode:
+    # `sources == "user"` and not merely present: `--setting-sources project` would satisfy a
+    # presence check while loading the very files issue 22 exists to keep out.
+    if (prompt is None or fmt != "stream-json" or not verbose or not mode
+            or seen.get("sources") != "user" or not strict_mcp):
         sys.stderr.write(f"fake claude: argv is not the shape the provider builds: {argv!r}\n")
         raise SystemExit(64)
     return prompt, resume

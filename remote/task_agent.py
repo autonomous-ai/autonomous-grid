@@ -62,6 +62,28 @@ _PERMISSION_MODES = ("acceptEdits", "auto", "bypassPermissions", "manual", "dont
 _CLAUDE_CONFIG_DIR = "CLAUDE_CONFIG_DIR"
 CLAUDE_CONFIG_DIR_ENV = "GRID_TASK_CLAUDE_CONFIG_DIR"
 
+# Which settings files the agent may load (ADR 0033 D-f, issue 22). `user` — the operator's own
+# `CLAUDE_CONFIG_DIR`, on the operator's own machine — and deliberately NOT `project` or `local`,
+# which are read out of the WORKSPACE: a tree that arrived over the wire.
+#
+# This is a security boundary, not a preference. `-p` **skips the workspace-trust dialog** ("Only use
+# this in directories you trust" — `claude --help`, 2.1.223) and stdout is a pipe, so both halves of
+# the binary's own protection are already off by the time the child starts. Measured on 2.1.223: a
+# `.claude/settings.json` carrying a `SessionStart` hook RUNS — before the model has said anything,
+# with no permission prompt, as the provider's own user with its real `HOME` — and this flag stops
+# it while leaving the config directory's own settings loading.
+#
+# It is the *repository's settings* that are refused, never its instructions: `CLAUDE.md`,
+# `.claude/agents/` and `.claude/skills/` still load (measured), and are meant to. Their trust level
+# is that of the source code the agent was asked to modify, which this design already accepts. The
+# line is narrower: **no shell command runs before the model has said anything.**
+_SETTING_SOURCES = "user"
+# `.mcp.json` is the same hole wearing a different name — a stdio server is a command line, and it is
+# STARTED at session start (measured: the control run's server process ran; with this flag the init
+# event's `mcp_servers` is empty). It also drops the operator's own MCP servers, which is right for a
+# task agent: nothing about the provider's desktop belongs in a stranger's repository.
+_STRICT_MCP_CONFIG = "--strict-mcp-config"
+
 
 def workspace_root() -> Path:
     return Path(os.getenv(WORKSPACE_ROOT_ENV) or DEFAULT_WORKSPACE_ROOT)
@@ -335,6 +357,17 @@ def agent_argv(binary: str, prompt: str, *, resume: str | None = None) -> list[s
     The prompt is an argv ELEMENT and never a shell word. A task's prompt is arbitrary text from a
     user on another machine, so the one thing that must be structurally impossible here is for it to
     be interpreted rather than read.
+
+    `--setting-sources` and `--strict-mcp-config` are unconditional — see the constants for what they
+    defend against. That is only safe because the binary **refuses an argv it does not understand**
+    rather than ignoring the flag and running on unprotected, which would report `completed` on every
+    task with the hole open and no signal anywhere saying so. Measured, not assumed: an unknown option
+    is `error: unknown option '…'` and exit 1, before the model or any hook runs
+    (`tests/e2e_agent_settings.py` pins it, and pays nothing to — the binary exits during argv
+    parsing). So a provider too old for these flags fails every task loudly, which is why the fleet's
+    Claude Code is upgraded BEFORE this is deployed. 2.1.221 is the oldest version measured to know
+    and honour both; feature-detecting instead would leave the hole open on exactly the least
+    maintained provider, silently.
     """
     argv = [
         binary,
@@ -342,6 +375,8 @@ def agent_argv(binary: str, prompt: str, *, resume: str | None = None) -> list[s
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", permission_mode(),
+        "--setting-sources", _SETTING_SOURCES,
+        _STRICT_MCP_CONFIG,
     ]
     if resume:
         argv += ["--resume", resume]
