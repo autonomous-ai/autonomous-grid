@@ -22668,6 +22668,55 @@ def test_task_fetch_refuses_a_task_that_has_not_finished(monkeypatch, tmp_path, 
     assert "follow" in str(caught.value)
 
 
+def test_task_fetch_says_a_pruned_branch_is_gone_rather_than_letting_git_be_confusing(
+        monkeypatch, tmp_path):
+    """A task whose ref the relay has collected is refused with the reason (ADR 0033 issue 16a).
+
+    Everything else about an old task still looks fetchable — `result_commit` and `branch` are both
+    still on the row — so without this the user's reward is git's own `couldn't find remote ref`,
+    which reads as corruption or as a permissions fault and sends them hunting for a break that is a
+    retention policy working correctly.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "a" * 40, "branch_pruned": True}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "dest")])
+
+    assert "no longer kept" in str(caught.value), caught.value
+    assert "T1" in str(caught.value)
+
+
+def test_task_fetch_on_a_relay_that_never_heard_of_pruning_still_fetches(
+        monkeypatch, tmp_path):
+    """The degrade direction. An older relay sends no `branch_pruned` key at all, and a missing key
+    must read as "not pruned" — that relay collects no branches, so every one of them is there.
+
+    Reading absence as `True` would refuse every fetch against every relay that has not redeployed,
+    which is the inversion of this repo's rule: an absent feature falls back to the OLD behaviour,
+    never to a new failure.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reached = {}
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "a" * 40}))
+    monkeypatch.setattr(
+        "remote.task_repo.checkout_result",
+        lambda dest, **kw: reached.update(kw))
+
+    rc = cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "dest")])
+
+    assert rc == 0
+    assert reached.get("branch") == "task/T1", reached
+
+
 def test_task_fetch_refuses_to_check_out_over_somebody_elses_directory(
         monkeypatch, tmp_path, capsys):
     """`--into` names a directory the USER chose, so a checkout that overwrote a same-named file

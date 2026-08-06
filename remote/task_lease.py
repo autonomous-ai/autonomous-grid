@@ -22,13 +22,18 @@ A genuinely stuck task is caught by its own `deadline_at` on the relay, and by `
 here — never by an idle timer.
 
 **Before the child exists, it renews anyway**, and that is a deliberate exception rather than an
-oversight. The pre-spawn phase is a real `git fetch` whose own ceiling is 300s
-(`task_repo._GIT_NETWORK_TIMEOUT_SECONDS`), more than double the relay's 120s lease TTL — so a
-renewer that waited for a child would guarantee a reclaim mid-checkout on every slow clone, and the
-task would be handed to another provider that has to do the same slow clone again. What renewal
-proves in that window is narrower but still true: the supervisor is inside `run_task` for this task.
-`_run_and_report` creates this object and closes it in a `finally`, so the renewer's life IS that
-call's, and it cannot outlive a supervisor that moved on.
+oversight. The pre-spawn phase is a real `git fetch` whose own ceiling is
+`task_repo._GIT_NETWORK_TIMEOUT_SECONDS` — **many times** the relay's 120s lease TTL, and more so
+since ADR 0033 issue 16a raised it to 900s so a provider outwaits a relay willing to spend ten
+minutes packing a real repository. A renewer that waited for a child would therefore guarantee a
+reclaim mid-checkout on every slow clone, and the task would be handed to another provider that has
+to do the same slow clone again. What renewal proves in that window is narrower but still true: the
+supervisor is inside `run_task` for this task. `_run_and_report` creates this object and closes it
+in a `finally`, so the renewer's life IS that call's, and it cannot outlive a supervisor that moved
+on.
+
+The figure is deliberately not restated here. It has now moved once, and a comment naming a constant
+that lives one import away is how the two stop agreeing.
 
 When it stops
 -------------
@@ -212,9 +217,10 @@ class LeaseRenewer:
             being written. Nothing is corrupted either way; what is saved is a beat's work and a 404
             in the log that reads as a fault rather than as a race the caller created.
           * **Only once a child is attached.** The renewer starts before `run_task` and covers a
-            checkout that can run for 300s; the workspace is per-project and persists, so a snapshot
-            taken then would show the PREVIOUS task's files labelled as this task's. Renewal in that
-            window is honest — the supervisor really is inside `run_task` — but the tree would not be.
+            checkout that can run for the whole of `task_repo._GIT_NETWORK_TIMEOUT_SECONDS`; the
+            workspace is per-project and persists, so a snapshot taken then would show the PREVIOUS
+            task's files labelled as this task's. Renewal in that window is honest — the supervisor
+            really is inside `run_task` — but the tree would not be.
           * **Guarded, and never allowed to matter.** `WorkspaceTree.beat` is written never to raise;
             this does not rest on that. An escape here ends the renewal thread, the lease lapses, and
             the task is reclaimed mid-run — a result lost to a progress feature.

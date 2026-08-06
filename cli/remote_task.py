@@ -522,6 +522,19 @@ def _task_fetch(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"Task {args.task_id} finished as {state} but recorded no result to fetch. "
             f"`grid task get {args.task_id}` shows what it did report.")
+    if task.get("branch_pruned"):
+        # Refused HERE rather than letting git answer, because everything else about an old task
+        # still looks fetchable — the commit and the branch name are both on the row. git's own
+        # `couldn't find remote ref` reads as corruption or as a permissions problem, and sends the
+        # user hunting for a break that is a retention policy working exactly as intended.
+        #
+        # `.get` with a falsy default is the degrade: a relay predating ADR 0033 issue 16a sends no
+        # such key AND collects no branches, so absent must mean "still there". Reading absence the
+        # other way would refuse every fetch against every relay that has not redeployed.
+        raise SystemExit(
+            f"Task {args.task_id}'s branch is no longer kept on the relay — its files were "
+            f"collected after the project's retention window. "
+            f"`grid task get {args.task_id}` still shows what it did and why.")
 
     dest = Path(args.into) if getattr(args, "into", None) else Path(args.task_id)
     if dest.exists() and not dest.is_dir():

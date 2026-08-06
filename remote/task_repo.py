@@ -56,7 +56,17 @@ _GIT_TIMEOUT_SECONDS = 120
 # Separate from, and much larger than, the local one: those two are bounded by a relay round trip
 # and a packfile, not by the milliseconds a local plumbing command takes, and reusing the local
 # figure would turn an ordinary slow push into a lost result.
-_GIT_NETWORK_TIMEOUT_SECONDS = 300
+#
+# LOCKSTEP with the relay's `task_repo.GIT_RPC_TIMEOUT_SECONDS` (600s, grid-src), and it must stay
+# ABOVE it: a fetch the relay is still willing to serve is one this provider would otherwise have
+# already abandoned — the relay does the packing anyway and the failure surfaces here, blaming a
+# timeout the relay never saw. It must also stay well BELOW the relay's `task_deadline_seconds`
+# (3600s), or one checkout can eat the task's whole budget and the reaper ends it before the agent
+# runs. `tests/test_task_lease.py` pins both inequalities against grid-src's own source.
+#
+# Raised from 300s for ADR 0033 issue 16a: a real 581 MiB / 29,133-commit repository takes ~11s to
+# fetch on a fast local disk, and the relay is allowed ten minutes for the case that is not fast.
+_GIT_NETWORK_TIMEOUT_SECONDS = 900
 # Wall-clock ceiling for the workspace listing (ADR 0032 issue 08). Much SHORTER than the local one,
 # and that is the whole reason it exists rather than reusing it: this call runs on the lease
 # renewer's beat, and `_GIT_TIMEOUT_SECONDS` is 120s — the relay's entire lease TTL. A listing
@@ -154,6 +164,25 @@ def identity_or_default(name: str | None, email: str | None) -> GitIdentity:
 
 class CheckoutError(RuntimeError):
     """The workspace could not be brought to the task's input commit."""
+
+
+class InputFetchError(CheckoutError):
+    """The input could not be FETCHED from the relay — the one checkout failure worth retrying.
+
+    A subclass rather than a sibling, deliberately: every `except CheckoutError` already written
+    stays correct, so adding this cannot quietly change how an existing call site behaves. Only the
+    one place that wants the distinction has to ask for it.
+
+    **What separates it from its parent is where the failure happened, not what it looked like.**
+    A timeout, a relay at its git concurrency limit answering 503, a connection dropped mid-pack: all
+    facts about THIS attempt against THIS relay at THIS moment, and another provider may well
+    succeed. So the supervisor reports nothing at all, the lease lapses, and the relay's reclaim
+    hands the task on — the same mechanism `PushError` uses, for the same reason.
+
+    An ordinary `CheckoutError` — no branch on the claim, no input commit, no remote wired, a `clean`
+    that cannot remove a leftover — is not that. Retrying those spends every attempt to arrive at
+    `retries_exhausted`, which does not even carry the real reason (ADR 0033 issue 16a, criterion 4).
+    """
 
 
 class PushError(RuntimeError):
@@ -291,8 +320,15 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
         raise CheckoutError("the claim gave no git remote to fetch the input from")
 
     _ensure_repo(workspace)
-    _run(workspace, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
-         token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+    try:
+        _run(workspace, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
+             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+    except CheckoutError as exc:
+        # The ONE line in this function that talks to the relay, and so the only one whose failure
+        # another provider might not repeat. Re-raised as the retryable subclass — see
+        # `InputFetchError`. Everything above is validation and everything below is local, and both
+        # stay terminal on purpose.
+        raise InputFetchError(str(exc)) from None
 
     # `symbolic-ref` rather than `checkout -B`: the workspace may hold a previous task's modified
     # files, and `checkout` REFUSES to move a branch when that would overwrite local changes. Here

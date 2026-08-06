@@ -545,6 +545,32 @@ def run_task(job: dict[str, Any],
             task_repo.materialize(
                 workspace, url=remote.url, token=remote.token,
                 branch=str(job.get("branch") or ""), input_commit=str(input_commit))
+        except task_repo.InputFetchError as exc:
+            # BEFORE the blanket handler below, and that order is the whole change (ADR 0033 issue
+            # 16a, criterion 4). The fetch is the one step whose failure is about this attempt
+            # rather than about the task, and `failed` is TERMINAL — so treating it like the rest
+            # meant an imported history the relay could not pack in time failed every task in that
+            # project instantly, with nothing to retry it.
+            #
+            # The reason goes out TWICE, to two audiences, and neither is redundant — this is the
+            # rule issue 05 established for the failed-push path, which this one now shares:
+            #
+            #   * to the durable event log, for the person who submitted the task. No terminal
+            #     report will carry it, so this is their only copy;
+            #   * to the provider's OWN stderr, unconditionally. `TaskEventPublisher` latches off
+            #     permanently on a 403/404 and then drops everything in silence — and a lost lease
+            #     is both a common cause of a failed fetch AND exactly what silences that channel,
+            #     so the run where the reason matters most is the run most likely to lose it.
+            #
+            # `_supervise_one_task`'s own warning names the PHASE but not the detail; the timeout
+            # figure and git's words are here.
+            detail = task_stream.redact(str(exc))
+            _publish_safely(sink, "task.stderr",
+                            text=f"could not fetch the task's input: {detail}")
+            _warn(f"task {job.get('task_id')}: could not fetch its input from the relay "
+                  f"({detail}) — no terminal state will be reported, so the relay reclaims it "
+                  f"and another provider retries.")
+            raise
         except (Exception, SystemExit) as exc:
             return failed(f"could not prepare the task's workspace: {exc}")
 
@@ -812,6 +838,12 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
     publisher = _publisher_for(state, task_id, job)
     remote = _git_remote(state, job)
     landed = True
+    # Which half of the git round trip gave up, for the operator's log. Two things can now leave a
+    # task unreported, and they call for opposite reading: a push that did not land means this
+    # provider ran the agent and lost the result, while an input that never arrived means it never
+    # started. Naming only the first — as this did — sends an operator hunting for an agent run that
+    # never happened.
+    abandoned_because = "'s result could not be pushed"
     # Whether the agent was actually SPAWNED — a dict because the callback closes over it.
     # `on_spawn` has been plumbed through `run_task` since issue 03 and had no caller; this
     # is it. It is the only precise answer to "is there anything of the agent's to push",
@@ -820,14 +852,26 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
     spawned = {"yes": False}
     # The lease this attempt holds, kept alive for exactly as long as this call is working on the
     # task (ADR 0032 D-c). Started BEFORE `run_task` because the pre-spawn checkout is real work
-    # whose own ceiling (300s) outruns the 120s lease TTL, and closed in the `finally` below so a
-    # supervisor that moved on cannot still be vouching for a child it no longer has.
+    # whose own ceiling (`task_repo._GIT_NETWORK_TIMEOUT_SECONDS`) far outruns the 120s lease TTL,
+    # and closed in the `finally` below so a supervisor that moved on cannot still be vouching for a
+    # child it no longer has.
     renewer = _lease_renewer(state, task_id, on_beat=_tree_beat(job, publisher))
     try:
         outcome = run_task(job, publisher.publish, remote=remote,
                            on_spawn=lambda proc: _spawned(spawned, renewer, proc),
                            capacity=capacity)
         outcome, landed = _push_result(job, outcome, spawned["yes"], remote, publisher)
+    except task_repo.InputFetchError:
+        # The input never arrived, so this attempt has produced no evidence about the task at all —
+        # not even a failed one. Routed to the same silence a failed push takes: report nothing,
+        # let the lease lapse, let the relay's reclaim try another provider (ADR 0033 issue 16a).
+        #
+        # `landed` is the existing name for "there is nothing in the repository worth reporting",
+        # which is exactly true here and for a second reason: nothing was ever pushed. Reusing it
+        # keeps ONE no-report path rather than two that have to be kept in step.
+        landed = False
+        abandoned_because = "'s input could not be fetched from the relay"
+        outcome = TaskOutcome("failed", None, None)
     except (Exception, SystemExit) as exc:
         # `run_task` is written not to raise; if it ever does, the task still owes the relay a
         # terminal report — silence would hold the project's lock until the lease expires.
@@ -865,12 +909,13 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
               f"the live one; `grid task get {task_id}` follows it.")
 
     if not landed:
-        # DELIBERATELY no terminal report. The result is not in the repository, so reporting one
-        # would mark the task terminal with nothing to fetch — and terminal is precisely the state
-        # nothing retries. Left `running`, its lease lapses and the relay's reclaim hands it to
-        # another provider, which is the only path that can still produce the result the user asked
-        # for. The reason has already gone to the user as a `task.stderr` event.
-        _warn(f"task {task_id}'s result could not be pushed, so no terminal state was reported — "
+        # DELIBERATELY no terminal report. Nothing this attempt produced is in the repository, so
+        # reporting one would mark the task terminal with nothing to fetch — and terminal is
+        # precisely the state nothing retries. Left `running`, its lease lapses and the relay's
+        # reclaim hands it to another provider, which is the only path that can still produce the
+        # result the user asked for. The reason has already gone to the user as a `task.stderr`
+        # event, from whichever half failed.
+        _warn(f"task {task_id} {abandoned_because}, so no terminal state was reported — "
               f"the task is left `running` so its lease can lapse. The relay reclaims it within "
               f"roughly the lease TTL and hands it to another provider, up to the task's retry cap; "
               f"after that it fails with `retries_exhausted` and its project unlocks. "

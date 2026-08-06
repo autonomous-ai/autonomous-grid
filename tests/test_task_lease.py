@@ -809,19 +809,55 @@ def _relay_config_constant(name):
     raise AssertionError(f"{name} is no longer defined with a default in grid-src's config.py")
 
 
-def _relay_constant(name):
-    """Read a constant out of grid-src's tasks module by parsing it, never by importing it.
+def test_the_provider_outwaits_the_relay_on_a_fetch_and_both_fit_inside_the_deadline():
+    """The git transport ceilings, in the one order that works (ADR 0033 issue 16a, item 3).
+
+        relay GIT_RPC_TIMEOUT_SECONDS  <  provider _GIT_NETWORK_TIMEOUT_SECONDS  <  deadline
+
+    Each `<` is a different failure if it is broken, and neither is visible from one repository:
+
+      * **provider below the relay's** — the relay is still willing to serve a fetch the provider has
+        already given up on. Every large import fails on the client side while the server does the
+        work anyway, and the provider's logs blame a timeout the relay never saw.
+      * **provider above the task's deadline** — a single fetch can consume the whole wallclock
+        budget, so `task_reaper.reap_past_deadline` ends the task while it is still checking out and
+        the agent never runs at all.
+
+    Read out of grid-src rather than restated, for the same reason the lease TTL is: a value
+    duplicated by hand drifts, and this is the only place that can notice.
+    """
+    from remote import task_repo
+
+    relay_rpc = _relay_constant("GIT_RPC_TIMEOUT_SECONDS", module="task_repo.py")
+    deadline = _relay_config_constant("task_deadline_seconds")
+    provider = task_repo._GIT_NETWORK_TIMEOUT_SECONDS
+
+    assert relay_rpc < provider, (
+        f"the relay serves a fetch for up to {relay_rpc}s but this provider gives up at "
+        f"{provider}s — a fetch the relay is still willing to serve is one the provider has already "
+        f"abandoned, so every large import fails client-side while the relay does the work anyway")
+    assert provider < deadline, (
+        f"a single fetch may take {provider}s out of the task's whole {deadline}s budget — the "
+        f"reaper would end the task mid-checkout and the agent would never run")
+
+
+def _relay_constant(name, module="tasks.py"):
+    """Read a constant out of a grid-src module by parsing it, never by importing it.
 
     The two repositories share no code and are not installed together; the value is duplicated by
     hand on purpose (see CLAUDE.md's lockstep table). Parsing is how a test can check the duplicate
     still agrees without pretending there is an import path between them.
+
+    `module` defaults to `tasks.py` because that is where the first lockstep values lived; the git
+    transport ceiling (ADR 0033 issue 16a) is in `task_repo.py`, so the file is a parameter rather
+    than a second copy of this function.
     """
     import ast
     import pathlib
 
     source = pathlib.Path(
         "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
-        "/grid_cli/private_server/tasks.py")
+        "/grid_cli/private_server") / module
     if not source.exists():
         pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
     for node in ast.parse(source.read_text()).body:

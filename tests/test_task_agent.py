@@ -1561,6 +1561,49 @@ def _remote_for(tmp_path, branch, files, name="origin.git"):
     return GitRemote(url=str(bare), token="tok"), _git(bare, "rev-parse", branch).stdout.strip()
 
 
+def test_a_second_task_on_a_project_fetches_only_the_delta(agent, tmp_path):
+    """The workspace persists, so the second task must not re-download the project (issue 16a).
+
+    The relay's side of this is proved in grid-src against a real 581 MiB history; this is the half
+    that lives here, and it is the half that can regress silently. `materialize` fetches into a
+    workspace `task_agent.workspace_for` derives from the project id — change it to clone into a
+    fresh directory and every functional test in this file still passes, while every task on a real
+    repository costs a fresh full clone of it.
+
+    Asserted on OBJECTS rather than on wall clock: a timing assertion on a repository small enough
+    to build in a fixture would be noise, and the object store is the thing that actually moved.
+    """
+    from remote import task_agent, task_repo, tasks
+
+    remote, first_commit = _remote_for(tmp_path, "task/T1", {"a.txt": "one\n"})
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    workspace = task_agent.workspace_for("proj-1")
+
+    assert tasks.run_task(
+        _job(input_commit=first_commit, branch="task/T1"), remote=remote).state == "completed"
+    objects_after_first = {p.name for p in (workspace / ".git" / "objects").rglob("*")
+                           if p.is_file()}
+    assert objects_after_first, "the first task fetched nothing, so this proves nothing"
+
+    # A second task branch on the SAME repository, sharing the first's history.
+    _git(remote.url, "branch", "task/T2", "task/T1")
+    second_commit = _git(remote.url, "rev-parse", "task/T2").stdout.strip()
+
+    assert tasks.run_task(
+        _job(input_commit=second_commit, branch="task/T2"), remote=remote).state == "completed"
+
+    objects_after_second = {p.name for p in (workspace / ".git" / "objects").rglob("*")
+                            if p.is_file()}
+    assert objects_after_first <= objects_after_second, (
+        "the workspace's object store was rebuilt rather than added to — the project is being "
+        "re-cloned per task")
+    # And it really is the same directory, which is what makes the comparison above meaningful at
+    # all: two clones into two paths would each look like a clean superset of nothing.
+    assert task_agent.workspace_for("proj-1") == workspace
+    assert task_repo.fetched_project(workspace) is None, (
+        "the provider's workspace was turned into a `grid task fetch` destination")
+
+
 def test_the_agent_reads_the_exact_file_the_client_uploaded(agent, tmp_path, monkeypatch):
     """The issue's demo, end to end: upload a file, the agent reads THAT file.
 
@@ -1627,11 +1670,22 @@ def test_the_workspace_is_left_on_the_task_branch_for_the_push(agent, tmp_path):
     assert _git(workspace, "rev-parse", "HEAD").stdout.strip() == commit
 
 
-def test_input_that_cannot_be_checked_out_fails_the_task_without_spawning_the_agent(
+def test_input_that_cannot_be_fetched_stops_before_the_spawn_and_stays_retryable(
         agent, tmp_path):
     """An agent that ran against missing input produces a confidently wrong result, which is the
-    exact failure ADR 0032 D-b exists to prevent. Failing before the spawn is the only safe answer."""
-    from remote import tasks
+    exact failure ADR 0032 D-b exists to prevent. Stopping before the spawn is the only safe answer.
+
+    That half is unchanged and is still the important one. What ADR 0033 issue 16a changed is what
+    happens NEXT: this used to return a terminal `failed` outcome, and terminal is the one state
+    nothing retries — so a relay that could not serve the fetch failed every task in the project
+    permanently. It now raises `InputFetchError`, which `_supervise_one_task` turns into silence and
+    the relay's reclaim turns into another provider's attempt.
+
+    Both assertions are kept in one test on purpose: "did not spawn" and "did not report terminal"
+    are the two halves of one answer, and a version of this that checked only the first would go
+    green on a change that reintroduced the permanent failure.
+    """
+    from remote import task_repo, tasks
 
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n"
           "touch \"$GRID_TEST_RAN\"\n")
@@ -1639,16 +1693,15 @@ def test_input_that_cannot_be_checked_out_fails_the_task_without_spawning_the_ag
     import os
     os.environ["GRID_TEST_RAN"] = str(ran)
     try:
-        from remote.task_repo import GitRemote
-        outcome = tasks.run_task(
-            _job(input_commit="0" * 40, branch="task/T1"),
-            remote=GitRemote(url=str(tmp_path / "nothing-here.git"), token="tok"))
+        with pytest.raises(task_repo.InputFetchError):
+            tasks.run_task(
+                _job(input_commit="0" * 40, branch="task/T1"),
+                remote=task_repo.GitRemote(
+                    url=str(tmp_path / "nothing-here.git"), token="tok"))
     finally:
         os.environ.pop("GRID_TEST_RAN", None)
 
-    assert outcome.state == "failed"
     assert not ran.exists(), "the agent was spawned against input that never arrived"
-    assert "workspace" in (outcome.error or "").lower() or "input" in (outcome.error or "").lower()
 
 
 def test_a_relay_with_no_git_plane_runs_the_task_as_before(agent, tmp_path):
@@ -2321,6 +2374,88 @@ def test_a_workspace_that_could_not_be_prepared_pushes_nothing(agent, tmp_path, 
     assert reported["state"] == "failed"
     assert reported["result_commit"] is None, "a result was published for an agent that never ran"
     assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == commit
+
+
+def test_a_fetch_that_fails_is_a_different_error_from_a_task_that_cannot_be_checked_out(
+        tmp_path):
+    """The input FETCH is retryable; a claim that never named an input is not (ADR 0033 issue 16a).
+
+    Both are `CheckoutError` — the subclass is what lets the supervisor tell them apart without
+    every existing `except CheckoutError` in this module having to be found and widened.
+
+    The split is at the network, and it falls exactly where `materialize` already validates: a
+    timeout, a 503 from a relay at its concurrency limit, or a connection dropped mid-pack is a fact
+    about THIS attempt, and another provider may well succeed. A claim with no branch on it is a
+    fact about the task, and retrying it burns three attempts to arrive at `retries_exhausted` —
+    which does not even carry the real reason.
+    """
+    from remote import task_repo
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    with pytest.raises(task_repo.InputFetchError):
+        task_repo.materialize(workspace, url=f"file://{tmp_path / 'no-such-repo.git'}",
+                              token="tok", branch="task/T1", input_commit="0" * 40)
+
+    for missing in ({"branch": ""}, {"input_commit": ""}, {"url": ""}):
+        kwargs = {"url": "file:///somewhere", "token": "t",
+                  "branch": "task/T1", "input_commit": "0" * 40, **missing}
+        with pytest.raises(task_repo.CheckoutError) as raised:
+            task_repo.materialize(workspace, **kwargs)
+        assert not isinstance(raised.value, task_repo.InputFetchError), (
+            f"{missing} was treated as a retryable fetch failure; it is a permanent bad claim and "
+            f"retrying it spends every attempt to reach `retries_exhausted`")
+
+
+def test_a_fetch_failure_leaves_the_task_retryable_instead_of_terminally_failed(
+        agent, tmp_path, monkeypatch, capsys):
+    """Acceptance criterion 4. A fetch that fails must NOT report a terminal state.
+
+    Before this, a `materialize` failure became `failed` — and terminal is precisely the state
+    nothing retries. So an imported history the relay could not pack in time made **every task in
+    that project fail immediately and never retry**. It did not degrade; it stopped.
+
+    The mechanism is the one the push path already uses and argues for: report nothing, let the
+    lease lapse, and let the relay's reclaim hand the task to another provider up to its retry cap.
+    Reporting `failed` here would be a lie of the worst kind — confident, terminal, and about
+    somebody else's repository.
+
+    The reason still has to reach the user, which is why the event is asserted as well as the
+    silence: a retry with no explanation is a task that appears to sit still.
+    """
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    def timed_out(*_args, **_kwargs):
+        raise task_repo.InputFetchError(
+            "git fetch timed out after 900s")
+
+    monkeypatch.setattr(task_repo, "materialize", timed_out)
+    reported = []
+    monkeypatch.setattr(tasks, "report_once",
+                        lambda _s, tid, **kw: reported.append((tid, kw)))
+    publisher = _RecordingPublisher()
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: publisher)
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert not reported, (
+        f"a fetch failure was reported as terminal, so nothing will ever retry it: {reported}")
+
+    # BOTH channels, not either. `TaskEventPublisher` latches off permanently on a 403/404 and then
+    # drops everything in silence — and a lost lease is both a common cause of a failed fetch and
+    # exactly what silences it, so the run where the reason matters most is the run most likely to
+    # lose it. An `or` here would go green with the unconditional half deleted.
+    published = " ".join(str(fields) for _kind, fields in publisher.published)
+    assert "900s" in published, (
+        f"the user gets no event saying why their task stalled: {publisher.published}")
+    assert "900s" in capsys.readouterr().err, (
+        "nothing reached the provider's own log — if the event publisher had latched off, this "
+        "failure would be completely invisible")
 
 
 def test_a_push_failure_is_reported_locally_even_when_the_event_channel_is_dead(
