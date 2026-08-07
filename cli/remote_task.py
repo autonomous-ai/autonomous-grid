@@ -514,17 +514,27 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         where = f" on {provider}" if provider else ""
         print(f"[{seq}] attempt {event.get('attempt')} started{where}")
     elif kind == "task.retry":
-        # On stderr with the other disclosures, and worded so the asymmetry is unmissable: the
-        # relay resets the task's branch to its input commit before the next attempt, so anything
-        # the lost attempt did INSIDE git is undone — and anything it did outside git is not
-        # (ADR 0032 D-d). A user who is not told this reads a repeated run as the agent looping.
+        # On stderr with the other disclosures, and worded so the asymmetry is unmissable: the relay
+        # resets the TASK's branch to its input commit before the next attempt, and a user who is
+        # not told that reads a repeated run as the agent looping (ADR 0032 D-d).
+        #
+        # It used to say "Changes the lost attempt made in git are undone", and ADR 0033 D-c made
+        # that FALSE. The reset covers `task/<id>` and nothing else — the reaper never touches a WIP
+        # branch, promote writes only `main`, and there is no revert. So an interrupted settle (the
+        # git write landed, the terminal transaction did not) leaves the lost attempt's work on
+        # `wip/<member_key>`, which is exactly where this member's NEXT task is cut from.
+        #
+        # Naming the recovery is the other half. "Something may be left behind" with no way to act
+        # on it is a worse message than the wrong one it replaces.
         attempt = event.get("attempt")
         of = event.get("max_attempts")
         reason = event.get("reason") or "its lease lapsed"
         print(f"[{seq}] attempt {attempt}"
               + (f" of {of}" if of else "")
-              + f" was lost ({reason}); retrying from the task's input. Changes the lost attempt "
-                f"made in git are undone; anything it did outside git is not.", file=sys.stderr)
+              + f" was lost ({reason}); retrying from the task's input. The task's own branch is "
+                f"reset; anything it did outside git is not, and work an interrupted settle "
+                f"already merged into your wip/ branch stays there "
+                f"(`grid project wip reset` moves it back).", file=sys.stderr)
     elif kind == "task.result":
         # The agent's own account of the run, one event at the end. `is_error` here is the AGENT's
         # claim about itself; the task's real outcome is `task.terminal`'s, which prints after it.

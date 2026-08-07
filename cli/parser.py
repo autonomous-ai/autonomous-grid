@@ -493,6 +493,26 @@ def _add_project(sub) -> None:
     member_remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     member_remove.set_defaults(handler=cmd_remote_project)
 
+    # `wip reset` — the one way out of a WIP branch left ahead of the task branch it settled from
+    # (ADR 0033 D-c). Nothing else moves one backwards: members never push it, promote writes only
+    # `main`, and there is no revert — so without this the member's NEXT task is silently cut from
+    # a lost attempt's work.
+    wip = project_sub.add_parser(
+        "wip", help="Work on a member's WIP branch — the ref their tasks are cut from")
+    wip_sub = wip.add_subparsers(dest="wip_action", required=True)
+
+    wip_reset = wip_sub.add_parser(
+        "reset", help="Move a member's WIP branch back to a commit (recovers a lost attempt)")
+    wip_reset.add_argument("project_id", help="Project id from `grid project list`.")
+    wip_reset.add_argument("member_key", help="Member key from `grid project member list`.")
+    wip_reset.add_argument(
+        "--commit", required=True,
+        help="Where to put the branch. `grid task get <id>` prints the `base_commit` a task was "
+             "cut from, which is usually the commit you want.")
+    wip_reset.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    wip_reset.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    wip_reset.set_defaults(handler=cmd_remote_project)
+
 
 def _add_task(sub) -> None:
     """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).

@@ -637,7 +637,18 @@ def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str,
 
 
 def _task_error_message(resp: httpx.Response) -> str:
-    """The relay's `detail` if it sent one, else the raw body — never an empty or bare-status line."""
+    """The relay's `detail` if it sent one, else the raw body — never an empty or bare-status line.
+
+    `detail` is a **string or an object**. Since ADR 0033 D-l the task plane's refusals carry a
+    machine-readable `code` alongside their sentence — `{"code": …, "message": …}` — because the
+    client is an application and one that regex-matches English is a release away from mis-handling
+    a reworded message. The sentence is what a PERSON reads, so it is pulled out here; a caller that
+    wants the code reads the response itself.
+
+    Both shapes stay supported, and that is not transitional politeness: only the routes ADR 0033
+    touched send objects, every other endpoint on this relay still sends a plain string, and issue
+    19 is where the rest follow.
+    """
     try:
         detail = resp.json().get("detail")
     except Exception:
@@ -646,6 +657,11 @@ def _task_error_message(resp: httpx.Response) -> str:
         # an error STRING — there is nothing it could usefully re-raise, and letting anything escape
         # would turn a clean CLI exit into a traceback.
         detail = None
+    if isinstance(detail, dict):
+        # `.get`, never `["message"]`: the shape is the relay's, and an object without one is a
+        # refusal we still owe the user words for rather than a `KeyError` in an error path.
+        message = detail.get("message")
+        detail = message if isinstance(message, str) else None
     if isinstance(detail, str) and detail.strip():
         return detail
     return f"Task request failed ({resp.status_code}): {resp.text[:400]}"
@@ -765,6 +781,28 @@ def remove_project_member(signaling_url: str, access_token: str, project_id: str
         signaling_url, access_token, "DELETE",
         f"/relay/v1/projects/{quote(project_id, safe='')}"
         f"/members/{quote(member_key, safe='')}", missing_route_hint=_OLD_RELAY)
+
+
+def reset_project_wip(signaling_url: str, access_token: str, project_id: str,
+                      *, member_key: str, commit: str) -> dict[str, Any]:
+    """Put a member's WIP branch back to a named commit (``POST …/wip/{key}/reset``).
+
+    The one way out of a WIP branch left ahead of the task branch it settled from (ADR 0033 D-c).
+    Nothing else moves one backwards: members do not push, promote writes only `main`, and there is
+    no revert — so without this a member's next task is silently cut from a lost attempt's work.
+
+    Addressed by the **member key**, like `remove_project_member` and for the same reason: the key
+    is a path segment by construction and `grid:<network>:<sub>` is not.
+
+    Refused by the relay while that member has an active task, which is the serialization that
+    makes two writers of one branch impossible. That refusal arrives as a real 409 with its own
+    words, not as the bare-404 hint below.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}"
+        f"/wip/{quote(member_key, safe='')}/reset",
+        json={"commit": commit}, missing_route_hint=_OLD_RELAY)
 
 
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:

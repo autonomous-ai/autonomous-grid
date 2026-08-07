@@ -21916,11 +21916,11 @@ def test_task_follow_renders_events_as_they_arrive(monkeypatch, tmp_path, capsys
 def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch, tmp_path, capsys):
     """A client attached across a reclaim sees the retry, and its cursor never means something else.
 
-    The disclosure is the point (ADR 0032 D-d). Effects inside git are undone — the relay resets the
-    branch to the input commit — but effects OUTSIDE it are not, so a user watching an agent start
-    over needs to be told that is what is happening rather than left to infer it from the output
-    repeating. On stderr, beside the other diagnostics, so `grid task follow > out.txt` keeps the
-    task's own output clean.
+    The disclosure is the point (ADR 0032 D-d). The relay resets the TASK's branch to the input
+    commit, but effects outside it are not undone, so a user watching an agent start over needs to
+    be told that is what is happening rather than left to infer it from the output repeating. On
+    stderr, beside the other diagnostics, so `grid task follow > out.txt` keeps the task's own
+    output clean.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -21945,6 +21945,40 @@ def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch
     # The sequence continues across the retry rather than restarting, so a reattaching client's
     # cursor still means what it meant.
     assert "attempt 2 started" in captured.out
+
+
+def test_task_follow_no_longer_claims_a_lost_attempts_git_changes_are_undone(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-c makes the old sentence FALSE, and it was printed verbatim.
+
+    Under ADR 0032 the reaper's reset covered the only ref that mattered, so "Changes the lost
+    attempt made in git are undone" was true. Since D-c a task also fast-forwards
+    `wip/<member_key>` — and the reaper resets `task/<id>` and never that — so an interrupted
+    settle leaves the lost attempt's work on the member's base, where their NEXT task is cut from.
+    Telling a user it was undone is worse than saying nothing: it is the one line they would rely on
+    when deciding whether to re-run the task by hand.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.retry", "reason": "lease_expired", "attempt": 1,
+                   "max_attempts": 3}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "in git are undone" not in captured.err, (
+        "the CLI still claims the lost attempt's git changes are undone; D-c made that false")
+    # What replaced it has to be MORE specific, not merely vaguer — a user who is told nothing
+    # about git is left with the same wrong assumption they started with.
+    assert "task's own branch" in captured.err, captured.err
+    assert "wip" in captured.err.lower(), captured.err
 
 
 def test_task_follow_says_when_the_provider_hit_its_subscriptions_wall(monkeypatch, tmp_path, capsys):
@@ -22900,6 +22934,94 @@ def test_project_member_remove_addresses_the_member_key(monkeypatch, tmp_path, c
     assert rc == 0
     assert (seen["method"], seen["path"]) == (
         "DELETE", "/relay/v1/projects/P1/members/def456")
+
+
+def test_project_wip_reset_posts_the_commit_to_the_member_keys_route(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-c's recovery path, end to end through `cli.main`.
+
+    Addressed by the **member key**, like `member remove` and for the same reason: the key is a
+    path segment by construction and `grid:<network>:<sub>` is not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "branch": "wip/def456", "member_key": "def456",
+            "commit": "a" * 40, "previous_commit": "b" * 40})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "wip", "reset", "P1", "def456", "--commit", "a" * 40])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == (
+        "POST", "/relay/v1/projects/P1/wip/def456/reset")
+    assert seen["body"] == {"commit": "a" * 40}
+    out = capsys.readouterr().out
+    assert "wip/def456" in out and "a" * 40 in out
+    # Where it came FROM is printed too: without it a user who reset to the wrong commit has no
+    # record of what to put back, and nothing else anywhere holds that value.
+    assert "b" * 40 in out
+
+
+def test_project_wip_reset_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path, capsys):
+    """A bare framework 404 from a relay that has never heard of this route reads as "the thing you
+    asked for is gone". The hint is keyed on FastAPI's own body, so a REAL 404 from a relay that
+    has the route still shows its own words — the distinction `remote/task_lease.py` also has to
+    make."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "wip", "reset", "P1", "def456", "--commit", "a" * 40])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_wip_reset_shows_the_relays_own_words_for_a_real_refusal(
+        monkeypatch, tmp_path, capsys):
+    """The refusal that actually happens: the member has a task running, so the reset would move
+    the base out from under it. It arrives as a D-l object — `{"code", "message"}` — and the person
+    at the terminal must be shown the MESSAGE, not the raw JSON."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "member_has_active_task",
+        "message": "def456 has an active task in this project (T7); resetting now would move the "
+                   "base out from under it.",
+        "task_id": "T7"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "wip", "reset", "P1", "def456", "--commit", "a" * 40])
+
+    assert "active task" in str(caught.value), caught.value
+    assert "code" not in str(caught.value), (
+        "the raw refusal object reached the user instead of its sentence")
+
+
+def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):
+    """`_task_error_message` reads a `detail` that is an OBJECT (ADR 0033 D-l), and still reads one
+    that is a plain string — every endpoint this ADR did not touch still sends one, and issue 19 is
+    where the rest follow."""
+    from remote import relay as relay_mod
+
+    as_object = httpx.Response(422, json={"detail": {"code": "project_has_no_trunk",
+                                                     "message": "Import a repository first."}})
+    as_string = httpx.Response(422, json={"detail": "prompt is required"})
+    shapeless = httpx.Response(422, json={"detail": {"code": "no_message_key"}})
+
+    assert relay_mod._task_error_message(as_object) == "Import a repository first."
+    assert relay_mod._task_error_message(as_string) == "prompt is required"
+    # An object with no `message` is still a refusal we owe the user words for — the raw body,
+    # never a `KeyError` raised from inside an error path.
+    assert "no_message_key" in relay_mod._task_error_message(shapeless)
 
 
 def test_task_get_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):

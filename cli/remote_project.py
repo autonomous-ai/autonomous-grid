@@ -23,6 +23,10 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_create(args)
     if args.subcommand == "list":
         return _project_list(args)
+    if args.subcommand == "wip":
+        if args.wip_action != "reset":
+            raise SystemExit(f"Unknown project wip action: {args.wip_action!r}")
+        return _wip_reset(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
     # so direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "member":
@@ -130,6 +134,37 @@ def _member_add(args: argparse.Namespace) -> int:
         return 0
     print(f"{member.get('email') or args.email} is in project {args.project_id}")
     print(f"member_key={member.get('member_key') or 'unknown'}")
+    return 0
+
+
+def _wip_reset(args: argparse.Namespace) -> int:
+    """Move a member's WIP branch back to a named commit (ADR 0033 D-c).
+
+    The recovery path for a settle that was interrupted between its git write and its terminal
+    transaction: the WIP branch is then ahead of a task branch the relay has reset, every later
+    attempt is a non-fast-forward, and — worse — that member's next task is cut from the lost
+    attempt's work.
+
+    Any project member may reset any member's branch, matching promote: the moment somebody leaves
+    the team nobody else could move `wip/<departed>`, and there is no adopt or transfer operation.
+
+    Refused by the relay while that member has an active task, because a reset landing mid-task
+    would move the base out from under an attempt in flight.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.reset_project_wip(base, token, args.project_id,
+                                     member_key=args.member_key, commit=args.commit)
+
+    if _emit(args, answer):
+        return 0
+    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    print(f"{answer.get('branch') or 'the WIP branch'} is now at "
+          f"{answer.get('commit') or args.commit}")
+    previous = answer.get("previous_commit")
+    if previous:
+        print(f"was={previous}")
     return 0
 
 

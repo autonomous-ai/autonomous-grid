@@ -883,6 +883,7 @@ grid project list [--grid <grid>] [--json]
 grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
+grid project wip reset     <project-id> <member-key> --commit <oid> [--grid <grid>] [--json]
 ```
 
 **Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
@@ -904,6 +905,27 @@ next request — they stop being able to clone the repository or create tasks in
 Someone who is not a member of a project gets **404** from every one of its endpoints, including its
 git plane — not 403, because the id is the only thing standing between one team's source and
 another's, and a 403 would confirm the project exists.
+
+### Each member has a WIP branch, and `main` is the release branch
+
+A task is cut from — and, on success, fast-forwards — **`wip/<member-key>`**, the asking member's own
+branch. `main` is not touched by a task at all. That is what lets several people work in one project
+without their results racing for one ref.
+
+A project's `main` therefore has to **exist before its first task**: a project that has just been
+created has no commits, and creating a task in one is refused with a message saying so. Give it a
+first commit (push `main` while the project is idle) and tasks work from then on.
+
+`wip reset` moves a member's WIP branch back to a commit you name — the way out of the one state
+nothing else can undo. If a task's result is written into git but its completion is then interrupted,
+that member's branch is left ahead of the task branch, every retry is refused as a non-fast-forward,
+and their *next* task would be cut from the lost attempt's work. `grid task get <id>` prints the
+`base_commit` a task was cut from, which is usually the commit to reset to.
+
+Any member may reset any member's branch — someone who leaves the team otherwise strands everything
+they never merged, since nothing can adopt or transfer their branch. It is refused while that member
+has a task running, because moving the base out from under an attempt in flight would fail its
+result for a reason nobody caused.
 
 ## Task
 
@@ -936,10 +958,10 @@ never finds that its cursor has come to mean something else.
 your own project called `default`, created on first use — the name is resolved here, by the CLI,
 against projects you own, and only an id ever reaches the relay.
 
-**One task runs per project at a time** — creating a second one while the first is still `preparing`,
-`queued` or `running` is refused, so a project's tasks are strictly sequential and each starts from
-the last one's result. Use different projects to run tasks in parallel. Note this is per *project*,
-not per person: a second member of a busy project is refused too.
+**One task runs per person per project at a time** — creating a second one while your first is still
+`preparing`, `queued` or `running` is refused, so *your* tasks in a project are strictly sequential
+and each starts from the last one's result. Other members are unaffected: a project with five people
+in it runs five tasks at once, one each. Use different projects to run your own tasks in parallel.
 
 ### Sending files with a task
 
@@ -948,10 +970,10 @@ not per person: a second member of a busy project is refused too.
 
 The files travel in the **same request** as the prompt, and that ordering is the guarantee, not a
 convenience: each project is a git repository the relay owns, and creating a task cuts `task/<id>`
-from the project's `main`, commits the input, and only *then* makes the task claimable. "The task
-exists" and "its input is in git" are one event, so a provider can never claim a task and check out
-before the files arrive — which would run the agent against missing input with nothing to say why
-the answer is wrong. `get --json` reports the `input_commit` the files landed on.
+from your `wip/<member-key>` branch, commits the input, and only *then* makes the task claimable.
+"The task exists" and "its input is in git" are one event, so a provider can never claim a task and
+check out before the files arrive — which would run the agent against missing input with nothing to
+say why the answer is wrong. `get --json` reports the `input_commit` the files landed on.
 
 **Filenames are validated at the relay and never repaired.** A path that is absolute, contains
 `..`, or names anything inside `.git/` or `.grid/` is refused and *nothing* is committed — a file
