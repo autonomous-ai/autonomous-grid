@@ -29,6 +29,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _wip_reset(args)
     if args.subcommand == "promote":
         return _project_promote(args)
+    if args.subcommand == "integrate":
+        return _project_integrate(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
     # so direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "member":
@@ -223,6 +225,62 @@ def _project_promote(args: argparse.Namespace) -> int:
         # that records nothing either.
         print("warning: the relay could not record who promoted this; "
               "it will be missing from the project's release history")
+    return 0
+
+
+# What the relay can say happened, and how to say it to a person. A dict rather than a chain of
+# `if`s so the one thing this command must never do — print a line for a `status` it does not know —
+# is a lookup that misses rather than an `else` that guesses.
+_INTEGRATED = {
+    "up_to_date": "{branch} already has everything on main; nothing to integrate",
+    "fast_forward": "{branch} moved onto main at {commit}",
+    "merged": "main was merged into {branch}; the merge commit is {commit}",
+}
+
+
+def _project_integrate(args: argparse.Namespace) -> int:
+    """Bring the project's `main` into the caller's own WIP branch (ADR 0033 D-d/D-e).
+
+    The counterpart to promote. Because `main` moves only on a promote, the first one leaves every
+    other member unable to promote at all — their branch was cut from a trunk that is now history —
+    and this is the only way back.
+
+    **Your own branch, so there is no member key to name.** The relay holds your one task slot while
+    it works, by inserting a task row: that INSERT is what stops an integration moving the branch a
+    task of yours is running on. So integrating is refused while you have a task in flight, and the
+    refusal names it.
+
+    Three outcomes, and they are deliberately different sentences: already up to date, a
+    fast-forward, and a real merge commit. A conflict is refused — resolving one needs an agent,
+    which this release does not run for an integration.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.integrate_project(base, token, args.project_id)
+
+    if _emit(args, answer):
+        return 0
+    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    branch = answer.get("branch") or "your WIP branch"
+    commit = answer.get("commit") or ""
+    line = _INTEGRATED.get(answer.get("status"))
+    if line is None or (not commit and answer.get("status") != "up_to_date"):
+        # A reply this command cannot read is NOT an integration that succeeded. Printing the
+        # success line by default is how promote once reported work as landed for a body a proxy
+        # had stripped — and the next thing somebody does on that belief is promote. There is no
+        # relay old enough to be a reason for leniency: integrate is a new route, so every relay
+        # that has it sends `status`.
+        raise SystemExit(
+            f"The relay's answer to integrating project {args.project_id} did not say what it did, "
+            f"so this cannot be reported as an integration. "
+            f"`grid project integrate {args.project_id} --json` shows what it sent.")
+    print(line.format(branch=branch, commit=commit))
+    previous = answer.get("previous_commit")
+    if answer.get("advanced") and previous:
+        # Where the branch was before. There is no revert, so somebody putting it back needs it —
+        # and `grid project wip reset` is the command that takes it.
+        print(f"was={previous}")
     return 0
 
 

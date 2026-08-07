@@ -23158,6 +23158,144 @@ def test_project_promote_help_discloses_what_reaching_main_means():
         "the help does not say a promote cannot be undone")
 
 
+def test_project_integrate_posts_to_the_integrate_route_and_names_no_member(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-d end to end through `cli.main`.
+
+    **No member key**, unlike promote and `wip reset`, and that is forced by the mechanism rather
+    than chosen: the relay holds the caller's task slot by INSERTING a row keyed on their own
+    `owner_id`, so a request that moved somebody else's branch would be serialized against the wrong
+    person's running task — the exact failure the row exists to prevent.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "status": "fast_forward", "advanced": True,
+            "commit": "a" * 40, "previous_commit": "b" * 40, "main_commit": "a" * 40})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "integrate", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/integrate")
+    # No body at all. The relay reads none, so sending one would be a wire detail with nothing
+    # behind it — and an empty JSON body is what a stricter handler would refuse with a 400.
+    assert seen["body"] == b"", seen["body"]
+    out = capsys.readouterr().out
+    assert "wip/def456" in out and "a" * 40 in out
+
+
+def test_project_integrate_distinguishes_up_to_date_from_a_real_integration(
+        monkeypatch, tmp_path, capsys):
+    """`status` is the relay saying which tier answered. Rendering `up_to_date` as an integration
+    would tell somebody `main` had just come into their branch when nothing moved — and the next
+    thing they do on that belief is promote."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+        "status": "up_to_date", "advanced": False,
+        "commit": "a" * 40, "previous_commit": "a" * 40, "main_commit": "a" * 40}))
+
+    rc = cli.main(["project", "integrate", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "up to date" in out or "already" in out, out
+    assert "merge" not in out, "a no-op was reported as a merge"
+
+
+def test_project_integrate_says_a_merge_commit_was_made(monkeypatch, tmp_path, capsys):
+    """Tier 2 leaves a merge commit on the member's branch and tier 1 does not. Somebody deciding
+    whether to review before promoting needs to know which happened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+        "status": "merged", "advanced": True,
+        "commit": "c" * 40, "previous_commit": "b" * 40, "main_commit": "a" * 40}))
+
+    rc = cli.main(["project", "integrate", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "merge" in out, out
+
+
+def test_project_integrate_does_not_call_a_reply_it_cannot_read_an_integration(
+        monkeypatch, tmp_path):
+    """`status` is what says which tier answered. A reply without it is not an integration that
+    succeeded — it is a reply this command cannot read, and the two must not print the same.
+
+    The same guard promote has, for the same measured reason: defaulting to the success line
+    reported work as landed for a body a proxy had stripped. Integrate is a brand-new route, so
+    every relay that has it sends the key; there is no old server to be lenient for.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"branch": "wip/def456"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "integrate", "P1"])
+
+    assert "P1" in str(caught.value), caught.value
+
+
+def test_project_integrate_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A bare framework 404 from a relay that predates the route. Without the hint the user's whole
+    reward for upgrading this CLI ahead of their relay is the words "Not Found"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "integrate", "P1"])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_integrate_shows_the_relays_own_words_for_a_conflict(monkeypatch, tmp_path):
+    """The refusal that actually happens once two people edit the same lines: tier 3 is issue 15, so
+    until then this is a real 409 the person has to be able to act on. Its sentence is shown, not
+    the raw D-l object."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "integrate_conflict",
+        "message": "main and wip/def456 both changed shared.txt, so they cannot be merged "
+                   "automatically.",
+        "files": ["shared.txt"]}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "integrate", "P1"])
+
+    assert "shared.txt" in str(caught.value), caught.value
+    assert "code" not in str(caught.value), (
+        "the raw refusal object reached the user instead of its sentence")
+
+
+def test_project_integrate_help_discloses_that_a_conflict_is_refused():
+    """The PRD is explicit that the tier-3 gap is "survivable for a small team working in separate
+    areas; not survivable silently". The help is where somebody meets it before they need it."""
+    parser = cli.build_parser()
+    integrate = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["integrate"]
+    help_text = integrate.format_help().lower()
+
+    assert "conflict" in help_text, "the help does not mention conflicts at all"
+
+
 def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):
     """`_task_error_message` reads a `detail` that is an OBJECT (ADR 0033 D-l), and still reads one
     that is a plain string — every endpoint this ADR did not touch still sends one, and issue 19 is

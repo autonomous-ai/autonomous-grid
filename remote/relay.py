@@ -828,6 +828,38 @@ def promote_project(signaling_url: str, access_token: str, project_id: str,
         json={"member_key": member_key}, missing_route_hint=_OLD_RELAY)
 
 
+def integrate_project(signaling_url: str, access_token: str,
+                      project_id: str) -> dict[str, Any]:
+    """Bring a project's `main` into the CALLER's WIP branch (``POST …/{id}/integrate``).
+
+    The counterpart to promote, and the thing that makes promote survivable at all: since `main`
+    moves only on a promote, the first one locks every other member out — their branch was cut from
+    a trunk that is now history, so `merge-base --is-ancestor main wip/<theirs>` can never succeed
+    again. This is the only way back.
+
+    **It takes no member key**, which is the one place it differs from `promote_project` and
+    `reset_project_wip`, and it is forced rather than chosen. The relay holds the caller's one task
+    slot by inserting a task row keyed on their own `owner_id` — that INSERT is what serializes an
+    integration against a task already running on the branch it is about to move — so a request that
+    named somebody else's branch would take the wrong person's slot and move a ref their running
+    task was cut from. A departed member's branch is reached through promote and `wip reset`, both
+    of which are safe to address by key.
+
+    **No request body**, because the relay reads none: the branch is the caller's own and the trunk
+    is the project's, so there is nothing to send. Sending `{}` would be a wire detail with nothing
+    behind it.
+
+    Three answers, and the client has to tell them apart without diffing oids: `status` is
+    `up_to_date`, `fast_forward` or `merged`. A conflict is a real **409** with `code`
+    `integrate_conflict` and the conflicted paths as a `files` field — not the bare-404 hint below,
+    which is only for a relay that predates the route.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/integrate",
+        missing_route_hint=_OLD_RELAY)
+
+
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
     """Read one task back (``GET /relay/v1/tasks/{id}``)."""
     return _task_oneshot(

@@ -539,6 +539,33 @@ def _add_project(sub) -> None:
     promote.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     promote.set_defaults(handler=cmd_remote_project)
 
+    # `integrate` — the counterpart to promote, and what makes promote survivable at all (ADR 0033
+    # D-d/D-e). It takes NO member key: the relay holds the caller's own task slot while it works,
+    # so the branch it moves has to be the caller's own.
+    integrate = project_sub.add_parser(
+        "integrate",
+        help="Bring the project's main into your own WIP branch",
+        description=(
+            "Bring the project's `main` into your own WIP branch.\n\n"
+            "`main` moves only when somebody promotes, so the first promote leaves everyone else "
+            "unable to promote at all — their branch was cut from a trunk that is now history. "
+            "Integrating is the way back, and it is what you run before promoting again.\n\n"
+            "It is always YOUR branch, so there is no member key to give. The relay holds your one "
+            "task slot while it works, which is what stops an integration moving the branch a task "
+            "of yours is running on — so it is refused while you have a task in flight, and the "
+            "refusal names that task.\n\n"
+            "Three things can happen: your branch already has everything on `main`; it moves "
+            "straight onto `main`; or the two are merged and a merge commit is made on your "
+            "branch.\n\n"
+            "**A conflict is refused.** If you and somebody else changed the same lines, resolving "
+            "it needs an agent, and this release cannot run one for an integration — the refusal "
+            "names the files."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    integrate.add_argument("project_id", help="Project id from `grid project list`.")
+    integrate.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    integrate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    integrate.set_defaults(handler=cmd_remote_project)
+
 
 def _add_task(sub) -> None:
     """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).
