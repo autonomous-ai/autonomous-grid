@@ -40,6 +40,7 @@ from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
+from .remote_project import cmd_remote_project
 from .remote_task import cmd_remote_task
 from .remote_router import (
     MAX_ADVISORS,
@@ -84,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth(sub)
     _add_members(sub)
     _add_price(sub)
+    _add_project(sub)
     _add_task(sub)
     _add_router(sub)
     _add_engine_setup(sub)
@@ -443,6 +445,55 @@ def _add_members(sub) -> None:
     listing.set_defaults(handler=cmd_remote_members)
 
 
+def _add_project(sub) -> None:
+    """Remote-only `grid project create|list` and `grid project member …` (ADR 0033 D-a).
+
+    Gated in local mode by dispatch (`project` is in `REMOTE_ONLY`). A project is addressed by
+    **id** everywhere downstream, so `create` printing one and `list` showing them is not a
+    convenience — without it, `grid task create --project <id>` has no id to be given."""
+    project = sub.add_parser("project", help="Create projects and manage who is in them (remote)")
+    project_sub = project.add_subparsers(dest="subcommand", required=True)
+
+    create = project_sub.add_parser("create", help="Create (or get) one of your projects by name")
+    create.add_argument("--name", required=True, help="What to call it. Unique among your own.")
+    create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    create.set_defaults(handler=cmd_remote_project)
+
+    listing = project_sub.add_parser("list", help="List the projects you are a member of")
+    listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    listing.set_defaults(handler=cmd_remote_project)
+
+    member = project_sub.add_parser("member", help="List, add and remove project members")
+    member_sub = member.add_subparsers(dest="member_action", required=True)
+
+    member_list = member_sub.add_parser("list", help="Show a project's members and their keys")
+    member_list.add_argument("project_id", help="Project id from `grid project list`.")
+    member_list.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    member_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    member_list.set_defaults(handler=cmd_remote_project)
+
+    member_add = member_sub.add_parser("add", help="Admit a grid member to this project")
+    member_add.add_argument("project_id", help="Project id from `grid project list`.")
+    member_add.add_argument(
+        "--email", required=True,
+        help="Their address on this grid. They must have signed in to it at least once.")
+    member_add.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    member_add.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    member_add.set_defaults(handler=cmd_remote_project)
+
+    # By member key and not by email: the key is a path segment by construction, and a member's
+    # `user_id` (`grid:<network>:<sub>`) is not. `grid project member list` prints it.
+    member_remove = member_sub.add_parser("remove", help="Remove someone from this project")
+    member_remove.add_argument("project_id", help="Project id from `grid project list`.")
+    member_remove.add_argument("member_key", help="Member key from `grid project member list`.")
+    member_remove.add_argument("--grid", default=None,
+                               help="Grid to act on (default: active grid).")
+    member_remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    member_remove.set_defaults(handler=cmd_remote_project)
+
+
 def _add_task(sub) -> None:
     """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).
 
@@ -455,8 +506,9 @@ def _add_task(sub) -> None:
     create = task_sub.add_parser("create", help="Hand the grid a task and queue it for a provider")
     create.add_argument("--prompt", required=True, help="What the agent should do.")
     create.add_argument(
-        "--project", default=None,
-        help="Project to run in (default: 'default'). One task runs per project at a time.")
+        "--project", default=None, metavar="ID",
+        help="Project ID to run in, from `grid project list` (default: your own project named "
+             "'default', created on first use). One task runs per project at a time.")
     create.add_argument(
         "--file", action="append", default=None, metavar="LOCAL[:DEST]",
         help="File to upload with the task; repeatable. Committed with the task before any "

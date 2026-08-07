@@ -24,6 +24,34 @@ def test_workspace_is_the_shared_path_every_provider_must_agree_on(monkeypatch, 
     assert task_agent.workspace_for("proj-1") == tmp_path / "projects" / "proj-1" / "workspace"
 
 
+def test_a_member_key_is_accepted_as_a_path_segment(monkeypatch, tmp_path):
+    """The relay's `member_key` must survive this repo's allowlist (ADR 0033 D-a, issue 10).
+
+    `auth.user_id` is `grid:<network>:<sub>` — it contains **colons**, which `_SAFE_PROJECT_ID`
+    rejects and git forbids in a ref name. So the relay derives `member_key = sha256(user_id)`
+    truncated and sends THAT; issues 11 and 12 build `<project>/<member_key>/workspace` and
+    `wip/<member_key>` from it.
+
+    This asserts the two halves agree BEFORE anything depends on it. The key is spelled out rather
+    than imported, because the relay is a different repository — a test that computed it here with
+    this repo's own rule would agree with itself no matter what the relay actually sends.
+    """
+    import hashlib
+
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
+    member_key = hashlib.sha256(
+        b"grid:2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f:106174299838271639492").hexdigest()[:32]
+
+    assert task_agent._SAFE_PROJECT_ID.match(member_key), (
+        f"the relay's member_key {member_key!r} is not a legal path segment here — every task "
+        "would fail on the workspace path from issue 11 onward")
+    assert len(member_key) <= task_agent._MAX_PROJECT_ID_CHARS
+    # And it survives the function that actually builds a path, not only the regex.
+    assert task_agent.workspace_for(member_key).name == "workspace"
+
+
 @pytest.mark.parametrize("project_id", [
     "../../etc",           # climbs out of the root entirely
     "a/b",                 # a separator invents a level nobody agreed on

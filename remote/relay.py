@@ -596,7 +596,22 @@ def _price_oneshot(signaling_url: str, access_token: str, method: str, path: str
 # ---------------------------------------------------------------------------
 
 
-def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, **kwargs: Any) -> Any:
+# What FastAPI answers for a route it has never heard of. A relay too old for an endpoint sends
+# exactly this, and it is byte-identical to nothing else this feature produces — every real 404 from
+# these routes carries its own sentence. Compared rather than trusted, which is why the hint below
+# is keyed on it and not on the status alone: a 404 ABOUT the thing you asked for must show the
+# relay's own words. The same distinction `remote/task_lease.py` already has to make.
+_BARE_FRAMEWORK_404 = "not found"
+
+
+def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, *,
+                  missing_route_hint: str | None = None, **kwargs: Any) -> Any:
+    """One relay call. Any failure is a clean `SystemExit` carrying the relay's own words.
+
+    `missing_route_hint` replaces the useless bare-404 body for an endpoint that a relay predating
+    its feature simply does not have. Without it the user's entire reward for upgrading this CLI
+    ahead of their relay is the words "Not Found", which reads as "the thing I asked for is gone".
+    """
     try:
         with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
             resp = client.request(method, path, **kwargs)
@@ -607,7 +622,12 @@ def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str,
         # clean SystemExit"), which is exactly the condition that makes the mapping load-bearing.
         raise SystemExit(f"Cannot reach the relay ({method} {path}): {exc}") from None
     if resp.status_code >= 400:
-        raise SystemExit(_task_error_message(resp))
+        message = _task_error_message(resp)
+        if (missing_route_hint
+                and resp.status_code == 404
+                and message.strip().lower() == _BARE_FRAMEWORK_404):
+            raise SystemExit(missing_route_hint)
+        raise SystemExit(message)
     return resp.json() if resp.content else {}
 
 
@@ -631,10 +651,16 @@ def create_task(
     access_token: str,
     *,
     prompt: str,
-    project: str | None,
+    project_id: str,
     files: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create a task (``POST /relay/v1/tasks``).
+
+    The project is an **id** and is required (ADR 0033 D-a). It used to be a name, resolved by the
+    relay against `(owner_id, name)` — an index that is unique per owner, so a name was never an
+    address a second project member could use: posting one into someone else's project silently
+    created a new, empty project of one's own. Names are resolved here instead, by
+    :func:`create_project`, where they can only ever name something of the caller's.
 
     The files ride in the SAME request as the prompt, and that is the point of the slice rather than
     a convenience: "the task exists" and "its input is in git" must be one event (ADR 0032 D-b).
@@ -644,12 +670,96 @@ def create_task(
     Omitted entirely when there are none, so a relay predating the git plane never sees a key it
     does not understand.
     """
-    body: dict[str, Any] = {"prompt": prompt}
-    if project:
-        body["project"] = project
+    body: dict[str, Any] = {"prompt": prompt, "project_id": project_id}
     if files:
         body["files"] = files
-    return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/tasks", json=body)
+    task = _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/tasks", json=body)
+
+    # The ONE way this feature can fail silently, and it is the exact bug it exists to kill.
+    # `/relay/v1/tasks` exists on a relay that predates project membership too, so it answers 201
+    # rather than the bare 404 every other new route gives: its `_project_name` reads
+    # `body.get("project")`, finds nothing because we now send `project_id`, and falls back to the
+    # caller's OWN project called `default`. The task runs, reports success, and is simply in the
+    # wrong project — which for a shared project means one person's work landing in their personal
+    # one with nothing said. **Roll the relay out BEFORE the client.**
+    #
+    # It is already created by the time we see this, so this cannot prevent it. What it can do is
+    # refuse to call it a success and name both projects, which is the whole difference between a
+    # silent wrong answer and a loud one. A relay that sends no `project_id` at all cannot be
+    # checked and is not second-guessed — every relay that has ever had this endpoint sends it, so
+    # the absent case is a proxy mangling the body, not an old server.
+    landed = task.get("project_id")
+    if landed and landed != project_id:
+        raise SystemExit(
+            f"Task {task.get('id') or '(no id)'} was created in project {landed}, not the "
+            f"{project_id} you asked for. This grid's relay predates project membership and "
+            "ignored the project — ask its operator to update it before using shared projects."
+        )
+    return task
+
+
+# Every project endpoint arrived together (ADR 0033 issue 10), so a relay missing one is missing
+# all of them, and one sentence covers the lot.
+_OLD_RELAY = (
+    "This grid's relay does not have projects yet — it predates project membership. "
+    "Ask its operator to update it, or use a grid that has."
+)
+
+
+def create_project(signaling_url: str, access_token: str, *, name: str) -> dict[str, Any]:
+    """Create-or-get the caller's project called ``name`` (``POST /relay/v1/projects``).
+
+    Idempotent by design, so `grid task create` with no `--project` can call it every time to turn
+    the default name into an id without accumulating empty projects.
+    """
+    return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/projects",
+                         json={"name": name}, missing_route_hint=_OLD_RELAY)
+
+
+def list_projects(signaling_url: str, access_token: str) -> dict[str, Any]:
+    """Every project the caller is a MEMBER of (``GET /relay/v1/projects``).
+
+    Membership, not ownership: since a project has members, being told an id out of band is no
+    longer the only way someone admitted to one could find it.
+    """
+    return _task_oneshot(signaling_url, access_token, "GET", "/relay/v1/projects",
+                         missing_route_hint=_OLD_RELAY)
+
+
+def list_project_members(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
+    """Who is in a project (``GET /relay/v1/projects/{id}/members``)."""
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        # The id is user input going into a path.
+        f"/relay/v1/projects/{quote(project_id, safe='')}/members",
+        missing_route_hint=_OLD_RELAY)
+
+
+def add_project_member(signaling_url: str, access_token: str, project_id: str,
+                       *, email: str) -> dict[str, Any]:
+    """Admit someone to a project by email (``POST /relay/v1/projects/{id}/members``).
+
+    By email because `user_id` is `grid:<network>:<sub>` — a string nobody types and nobody can look
+    up. The relay resolves it against the grid's own members, so someone who has never signed in is
+    refused rather than invented.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/members", json={"email": email},
+        missing_route_hint=_OLD_RELAY)
+
+
+def remove_project_member(signaling_url: str, access_token: str, project_id: str,
+                          *, member_key: str) -> dict[str, Any]:
+    """Remove someone from a project (``DELETE …/members/{member_key}``).
+
+    Addressed by the **member key** rather than the email or the user id: the key is a path segment
+    by construction, and `grid:<network>:<sub>` is not. `grid project member list` prints it.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "DELETE",
+        f"/relay/v1/projects/{quote(project_id, safe='')}"
+        f"/members/{quote(member_key, safe='')}", missing_route_hint=_OLD_RELAY)
 
 
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:

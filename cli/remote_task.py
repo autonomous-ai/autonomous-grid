@@ -155,6 +155,50 @@ def _split_spec(spec: str) -> tuple[str, str]:
     return spec, Path(spec).name
 
 
+# The project a task lands in when `--project` is not given. A NAME, resolved here against the
+# caller's own projects and never sent to the relay as one — `POST /tasks` takes an id (ADR 0033
+# D-a). LOCKSTEP in spirit with grid-src's `DEFAULT_PROJECT_NAME`, but not in effect: the relay no
+# longer resolves it for anybody, so the two drifting apart would give this CLI a differently-named
+# personal project, not a broken one.
+DEFAULT_PROJECT_NAME = "default"
+
+
+def _resolve_project(base: str, token: str, project: str | None) -> str:
+    """The project id to post a task to.
+
+    `--project` is an **id**, used verbatim: a name is unique per owner (`idx_projects_owner_name`),
+    so it was never an address a second project member could use, and resolving one here would put
+    back the bug ADR 0033 D-a closes — posting a name someone else owns used to hand you a new,
+    empty project of your own, silently.
+
+    With no `--project`, the caller's own project called `default` is created-or-got and its id is
+    what travels. The name is resolved on THIS side on purpose: `POST /relay/v1/projects` creates
+    under the caller's own ownership, so a name here can only ever name something of theirs.
+    """
+    from remote import relay
+
+    if project is not None:
+        # `is not None`, then reject blank — NOT a bare truthiness test. `--project ""` naming the
+        # default project is the same substitution this whole slice removes: the caller named
+        # something and something else was used. The relay would refuse an empty `project_id`, but
+        # it never sees one, because an empty string never reaches the wire.
+        if not project.strip():
+            raise SystemExit(
+                "--project needs a project id. Find yours with `grid project list`, "
+                "or leave --project off to use your own 'default' project.")
+        return project
+    created = relay.create_project(base, token, name=DEFAULT_PROJECT_NAME)
+    project_id = created.get("id")
+    if not project_id:
+        # A relay that answered 2xx with no id. Nothing downstream can recover — `create_task`
+        # would post `project_id: None` and be refused with a message about a key the user never
+        # typed — so say what actually happened.
+        raise SystemExit(
+            f"The relay accepted the project {DEFAULT_PROJECT_NAME!r} but returned no id. "
+            "Pass --project <id> explicitly, or list your projects with `grid project list`.")
+    return project_id
+
+
 def _task_create(args: argparse.Namespace) -> int:
     from remote import relay
 
@@ -163,10 +207,11 @@ def _task_create(args: argparse.Namespace) -> int:
     files = _collect_files(getattr(args, "file", None))
 
     base, token, label = _resolve(args)
+    project_id = _resolve_project(base, token, getattr(args, "project", None))
     # `files` and not `files or None`: `create_task` already decides whether the key goes on the
     # wire, and a second guard here reads as though it mattered while doing nothing.
     task = relay.create_task(
-        base, token, prompt=args.prompt, project=getattr(args, "project", None), files=files)
+        base, token, prompt=args.prompt, project_id=project_id, files=files)
 
     if getattr(args, "json", False):
         print(json.dumps(task, indent=2))

@@ -875,10 +875,40 @@ model you aren't currently serving (`grid join` first). `rm` does not (you can c
 `grid leave`). `show` lists the grid's models and prices. In `local` mode the command exits with
 guidance to switch.
 
+## Project
+
+```
+grid project create --name <name> [--grid <grid>] [--json]
+grid project list [--grid <grid>] [--json]
+grid project member list   <project-id> [--grid <grid>] [--json]
+grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
+grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
+```
+
+**Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
+holds it. It has **members**, and it is addressed by **id** — `create` prints the id, `list` shows
+every project you are a member of, and that id is what `grid task create --project` takes.
+
+A name is unique **per owner**, so it is not an address someone else can use: two people can both
+have a project called `acme` and they are different projects. That is why the wire carries an id and
+`--project` takes one.
+
+`member add` takes an **email**, and the person must already be a member of the grid — someone who
+has never signed in to it cannot be admitted to a project on it. `member remove` takes a **member
+key**, which `member list` prints: a member's underlying id contains colons, which are illegal in
+both a git ref name and a path segment, so the key is the form that can be said everywhere.
+
+Only the project's **owner** can add or remove members. Removal takes effect on that person's very
+next request — they stop being able to clone the repository or create tasks in it immediately.
+
+Someone who is not a member of a project gets **404** from every one of its endpoints, including its
+git plane — not 403, because the id is the only thing standing between one team's source and
+another's, and a 403 would confirm the project exists.
+
 ## Task
 
 ```
-grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <name>] [--grid <grid>] [--json]
+grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <id>] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
@@ -902,10 +932,14 @@ per line for a script to consume.
 The log is **one sequence for the task's whole life**, including across a retry: a reattached client
 never finds that its cursor has come to mean something else.
 
-`--project` groups tasks that share a workspace (default: `default`). **One task runs per project at
-a time** — creating a second one while the first is still `preparing`, `queued` or `running` is
-refused, so a project's tasks are strictly sequential and each starts from the last one's result.
-Use different `--project` names to run tasks in parallel.
+`--project` takes a project **id** from `grid project list`. With no `--project`, the task runs in
+your own project called `default`, created on first use — the name is resolved here, by the CLI,
+against projects you own, and only an id ever reaches the relay.
+
+**One task runs per project at a time** — creating a second one while the first is still `preparing`,
+`queued` or `running` is refused, so a project's tasks are strictly sequential and each starts from
+the last one's result. Use different projects to run tasks in parallel. Note this is per *project*,
+not per person: a second member of a busy project is refused too.
 
 ### Sending files with a task
 

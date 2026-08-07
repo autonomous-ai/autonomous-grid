@@ -117,6 +117,10 @@ REMOTE_ONLY: dict[str, str | None] = {
     # Tasks live in the relay's durable queue and are claimed by whichever provider is free
     # (ADR 0032). A local grid has neither, so this is sign-in-gated like the rest.
     "task": None,
+    # A project and its members are rows in the RELAY's own database (ADR 0033 D-a) — deliberately
+    # not the control plane's — and the repository they name is served by the relay's git plane. A
+    # local grid has none of it.
+    "project": None,
     # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
     # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
     # speaks. Naming the dialect is what stops this being filed as a bug.

@@ -10772,6 +10772,7 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
         "price": ["price", "show"],
         "router": ["router", "status"],
         "task": ["task", "get", "T1"],
+        "project": ["project", "list"],
     }
     # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
     # *and* skipped by the `is None` filter below — the one state that is invisible in both
@@ -22623,12 +22624,282 @@ def test_task_create_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
         return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
 
     _mock_relay(monkeypatch, handler)
-    rc = cli.main(["task", "create", "--prompt", "say hello", "--project", "alpha"])
+    rc = cli.main(["task", "create", "--prompt", "say hello", "--project", "P1"])
 
     assert rc == 0
     assert (seen["method"], seen["path"], seen["auth"]) == ("POST", "/relay/v1/tasks", "Bearer AT")
-    assert seen["body"] == {"prompt": "say hello", "project": "alpha"}
+    assert seen["body"] == {"prompt": "say hello", "project_id": "P1"}
     assert "T1" in capsys.readouterr().out
+
+
+def test_task_create_with_an_explicit_project_asks_the_relay_nothing_else(monkeypatch, tmp_path):
+    """`--project` takes an **id** and is used verbatim (ADR 0033 D-a, issue 10).
+
+    No name lookup, no id-vs-name heuristic: a name is unique per owner, so it was never an address
+    a second project member could use, and resolving one here is the shadow-project bug wearing a
+    convenience label.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--prompt", "x", "--project", "P1"])
+
+    assert paths == ["/relay/v1/tasks"], "an explicit id must not be looked up"
+
+
+def test_task_create_with_no_project_resolves_the_callers_own_default(monkeypatch, tmp_path):
+    """The default is resolved on the CLIENT, by name, against the caller's own projects.
+
+    The relay never resolves a name into a project for a task any more — that is what let member B
+    post `{"project": "acme"}` and silently get an empty project of their own. Here the name can
+    only ever name something of the caller's, because `POST /relay/v1/projects` creates it under
+    their own ownership.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append((request.url.path, body))
+        if request.url.path == "/relay/v1/projects":
+            return httpx.Response(201, json={"id": "P-default", "name": "default"})
+        return httpx.Response(201, json={"id": "T1", "state": "queued",
+                                         "project_id": "P-default"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--prompt", "x"])
+
+    assert calls == [
+        ("/relay/v1/projects", {"name": "default"}),
+        ("/relay/v1/tasks", {"prompt": "x", "project_id": "P-default"}),
+    ]
+
+
+def test_project_is_classified_and_remote_only(monkeypatch, tmp_path):
+    """`project` reaches the relay's own tables, which a local grid has neither of."""
+    assert "project" in dispatch.REMOTE_ONLY
+    assert not (set(dispatch.AGNOSTIC) & set(dispatch.REMOTE_ONLY))
+    assert not (set(dispatch.REMOTE_HANDLERS) & set(dispatch.REMOTE_ONLY))
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["project", "list"])
+    assert "remote" in str(exc.value).lower()
+
+
+def test_project_create_on_a_relay_too_old_to_know_the_route_says_so(monkeypatch, tmp_path):
+    """A relay predating ADR 0033 issue 10 has no `/relay/v1/projects` at all, and answers a **bare
+    framework 404** — `{"detail": "Not Found"}`, with no idea which route was missing.
+
+    Left alone the user's whole reward for upgrading the CLI first is the words "Not Found", which
+    reads as "my project is gone". This is the same trap the lease renewer already has to handle:
+    a bare 404 from an unmatched route is not the same thing as a 404 about the thing you asked
+    for, and the two are byte-identical.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme"])
+
+    message = str(caught.value)
+    assert "Not Found" != message, "the bare framework 404 reached the user unexplained"
+    assert "relay" in message.lower() and "project" in message.lower()
+
+
+def test_task_create_without_a_project_explains_an_old_relay_too(monkeypatch, tmp_path):
+    """The same 404, reached through the path every ordinary `grid task create` takes."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    assert "relay" in str(caught.value).lower()
+
+
+def test_a_real_404_from_the_projects_route_is_not_masked(monkeypatch, tmp_path):
+    """The other half, and the reason the hint is keyed on the BARE detail: a relay that does know
+    the route and answers 404 about the project itself must have its own words shown, not be
+    reported as too old."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        404, json={"detail": "No such project"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "member", "list", "P1"])
+
+    assert str(caught.value) == "No such project"
+
+
+def test_task_create_refuses_to_report_success_for_the_wrong_project(monkeypatch, tmp_path):
+    """The one way this feature can fail SILENTLY, and it is the exact bug the feature exists to
+    kill (ADR 0033 D-a).
+
+    `POST /relay/v1/tasks` exists on an old relay too, so it answers 200 rather than 404 — and its
+    `_project_name` reads `body.get("project")`, gets `None` because this CLI now sends
+    `project_id`, and falls back to the caller's OWN project named `default`. So passing
+    `--project <id-of-a-shared-project>` at a relay that has not been updated lands the task in a
+    personal project with nothing said.
+
+    The task is already created by the time the answer comes back, so this cannot prevent it. What
+    it can do is refuse to call it a success, and name both projects — turning silently-wrong into
+    loudly-wrong, which is the whole difference.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    # An old relay's answer: 201, but the task landed somewhere else.
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "T1", "state": "queued", "project_id": "P-my-own-default"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x", "--project", "P-the-shared-one"])
+
+    message = str(caught.value)
+    assert "P-the-shared-one" in message and "P-my-own-default" in message
+    assert "T1" in message, "the task exists — the user needs its id to look at what happened"
+
+
+def test_task_create_is_happy_when_the_relay_echoes_the_project_it_was_given(monkeypatch, tmp_path):
+    """The positive control. Without it the check above passes for a `create_task` that refuses
+    every task ever created."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "T1", "state": "queued", "project_id": "P-the-shared-one"}))
+
+    assert cli.main(["task", "create", "--prompt", "x", "--project", "P-the-shared-one"]) == 0
+
+
+def test_task_create_refuses_an_empty_project(monkeypatch, tmp_path):
+    """`--project ""` used to fall through to the default project, which is the same class of
+    substitution as the bug above: the caller named something, and something else was used."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(500, json={"detail": "should never be called"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x", "--project", "   "])
+
+    assert "--project" in str(caught.value)
+
+
+def test_project_create_prints_the_id_a_task_needs(monkeypatch, tmp_path, capsys):
+    """Creating a project is an explicit act now, and the id is its whole point — everything
+    downstream addresses a project by id (ADR 0033 D-a)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "P1", "name": "acme", "owner_id": "u1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "create", "--name", "acme"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects")
+    assert seen["body"] == {"name": "acme"}
+    assert "P1" in capsys.readouterr().out
+
+
+def test_project_list_shows_every_project_you_are_a_member_of(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={"projects": [
+            {"id": "P1", "name": "acme", "role": "owner"},
+            {"id": "P2", "name": "shared", "role": "member"},
+        ]})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "list"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects")
+    out = capsys.readouterr().out
+    assert "P1" in out and "acme" in out and "P2" in out and "shared" in out
+
+
+def test_project_member_list_prints_the_key_a_removal_needs(monkeypatch, tmp_path, capsys):
+    """The member key is what `member remove` addresses, because `grid:<network>:<sub>` is not a
+    path segment. Printing it is what makes removal usable at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"members": [
+            {"user_id": "grid:n:1", "member_key": "abc123", "role": "owner",
+             "email": "alice@example.com", "name": "Alice"},
+        ]})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "member", "list", "P1"])
+
+    assert rc == 0
+    assert seen["path"] == "/relay/v1/projects/P1/members"
+    out = capsys.readouterr().out
+    assert "abc123" in out and "alice@example.com" in out
+
+
+def test_project_member_add_sends_the_email(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"user_id": "grid:n:2", "member_key": "def456",
+                                         "role": "member", "email": "bob@example.com"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "member", "add", "P1", "--email", "bob@example.com"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/members")
+    assert seen["body"] == {"email": "bob@example.com"}
+
+
+def test_project_member_remove_addresses_the_member_key(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={"removed": "def456"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "member", "remove", "P1", "def456"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == (
+        "DELETE", "/relay/v1/projects/P1/members/def456")
 
 
 def test_task_get_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
@@ -27596,9 +27867,17 @@ def test_task_create_uploads_a_file_at_its_basename(monkeypatch, tmp_path, capsy
     source.write_bytes(b"ZEBRA-4417\n")
     seen = {}
 
-    _mock_relay(monkeypatch, lambda r: (
-        seen.update(body=json.loads(r.content)),
-        httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"}))[1])
+    # Path-aware, because `grid task create` with no `--project` is TWO requests since ADR 0033
+    # issue 10: resolve the caller's own `default` project to an id, then post the task to it. One
+    # canned answer for both would hand the task-create the project id `T1`, which `create_task`
+    # then correctly reports as a project mismatch.
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return httpx.Response(201, json={"id": "P1", "name": "default"})
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
     rc = cli.main(["task", "create", "--prompt", "read it", "--file", str(source)])
 
     assert rc == 0

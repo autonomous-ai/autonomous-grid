@@ -130,9 +130,18 @@ class Provider:
 # ------------------------------------------------------------------------- the client, for real
 
 def create(relay_base, bearer, prompt, *, project, files=None):
+    """One task in the project called `project`, creating that project if it is not there yet.
+
+    Two calls, and the first one is the point rather than setup noise: a task is posted to a project
+    **id** since ADR 0033 issue 10, and a name is resolved only by `POST /relay/v1/projects`, under
+    the caller's own ownership. This is exactly the sequence `grid task create` runs, so the E2E
+    exercises the real client path and every call site above stays as it was.
+    """
     from remote import relay as relay_client
 
-    return relay_client.create_task(relay_base, bearer, prompt=prompt, project=project, files=files)
+    project_id = relay_client.create_project(relay_base, bearer, name=project)["id"]
+    return relay_client.create_task(
+        relay_base, bearer, prompt=prompt, project_id=project_id, files=files)
 
 
 def get(relay_base, bearer, task_id):
