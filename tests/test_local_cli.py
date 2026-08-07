@@ -23006,6 +23006,158 @@ def test_project_wip_reset_shows_the_relays_own_words_for_a_real_refusal(
         "the raw refusal object reached the user instead of its sentence")
 
 
+def test_project_promote_posts_the_member_key_to_the_promote_route(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-b end to end through `cli.main`. `main` is a release branch, so it moves when a
+    person asks — and the ask names WHOSE branch, not "mine": the moment somebody leaves the team,
+    `wip/<departed>` holds everything they never promoted and nothing else can move it.
+
+    By **member key** for the same reason `member remove` and `wip reset` are: the key is a path
+    segment by construction and `grid:<network>:<sub>` is not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "branch": "main", "member_key": "def456", "source_branch": "wip/def456",
+            "commit": "a" * 40, "previous_commit": "b" * 40, "advanced": True,
+            "promotion_id": "p-1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "promote", "P1", "def456"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/promote")
+    assert seen["body"] == {"member_key": "def456"}
+    out = capsys.readouterr().out
+    assert "main" in out and "a" * 40 in out
+    # Where it came FROM is printed too: a fast-forward leaves no merge commit, so this line is the
+    # only place the previous release is named — and `receive.denyNonFastForwards` means undoing a
+    # promote is a relay-side operation somebody has to be able to state a commit for.
+    assert "b" * 40 in out
+
+
+def test_project_promote_says_when_nothing_moved_rather_than_claiming_a_release(
+        monkeypatch, tmp_path, capsys):
+    """`advanced: false` is the relay saying the branch was already on `main`. Rendering that as a
+    promotion would tell a team something shipped when nothing did."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "branch": "main", "member_key": "def456", "source_branch": "wip/def456",
+        "commit": "a" * 40, "previous_commit": "a" * 40, "advanced": False,
+        "promotion_id": None}))
+
+    rc = cli.main(["project", "promote", "P1", "def456"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "already" in out, out
+
+
+def test_project_promote_does_not_call_a_reply_it_cannot_read_a_release(monkeypatch, tmp_path):
+    """`advanced` is what says the trunk moved. A reply without it is not a promote that succeeded
+    — it is a reply this CLI cannot read, and the two must not print the same line.
+
+    `_task_oneshot` returns `{}` for any 200 with an empty body, so "not explicitly False" reaches
+    the success branch on a body a proxy stripped, and prints `main is now at ` with no commit at
+    all. Exit code 0, to a human and to a script. There is no relay old enough to be a reason to
+    tolerate it: promote is a brand-new route, so every relay that has it sends the key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, content=b""))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "promote", "P1", "def456"])
+
+    assert "def456" in str(caught.value) or "promote" in str(caught.value).lower(), caught.value
+
+
+def test_project_promote_says_when_the_release_was_not_recorded(monkeypatch, tmp_path, capsys):
+    """`promotion_id: null` beside `advanced: true` is the relay saying the trunk moved but the row
+    naming who released it could not be written.
+
+    That signal exists precisely so it can be noticed, and the CLI is its only first-party reader.
+    Printing the ordinary success line would leave it discoverable only by an operator grepping the
+    relay's log, or by somebody later finding a hole in the project's release history.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "branch": "main", "member_key": "def456", "source_branch": "wip/def456",
+        "commit": "a" * 40, "previous_commit": "b" * 40, "advanced": True,
+        "promotion_id": None}))
+
+    rc = cli.main(["project", "promote", "P1", "def456"])
+
+    assert rc == 0, "the release landed, so this is not a failure"
+    out = capsys.readouterr().out.lower()
+    assert "a" * 40 in out, "the release itself must still be reported"
+    assert "record" in out, f"the missing record was never mentioned: {out!r}"
+
+
+def test_project_promote_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """Promote is a brand-new route, so a relay that predates it answers the bare framework 404 —
+    which reads as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "promote", "P1", "def456"])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_promote_shows_the_relays_own_words_when_the_branch_is_behind(
+        monkeypatch, tmp_path, capsys):
+    """The refusal that actually happens once two people share a project: somebody else promoted
+    first. It arrives as a D-l object carrying `main_commit` and `behind` as FIELDS — an application
+    branches on those, and the person at the terminal is shown the sentence, never the raw JSON."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "promote_not_fast_forward",
+        "message": "wip/def456 is 2 commit(s) behind main, so it cannot be promoted. Integrate "
+                   "main into it and promote again.",
+        "main_commit": "c" * 40, "source_commit": "d" * 40, "behind": 2}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "promote", "P1", "def456"])
+
+    assert "behind" in str(caught.value), caught.value
+    assert "code" not in str(caught.value), (
+        "the raw refusal object reached the user instead of its sentence")
+
+
+def test_project_promote_help_discloses_what_reaching_main_means():
+    """Two consequences the issue requires in the CLI's own help text, not only in the ADR.
+
+    Anyone can promote, so code an agent wrote and nobody read can reach the release branch; and
+    `receive.denyNonFastForwards` means a promote cannot be undone by pushing, so there is no revert
+    in this slice at all. Somebody typing this command is the last person who can decide that is
+    acceptable, and they can only decide it if they are told.
+    """
+    parser = cli.build_parser()
+    promote = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["promote"]
+    help_text = promote.format_help().lower()
+
+    assert "review" in help_text, "the help does not say unreviewed code can reach main"
+    assert "revert" in help_text or "undo" in help_text, (
+        "the help does not say a promote cannot be undone")
+
+
 def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):
     """`_task_error_message` reads a `detail` that is an OBJECT (ADR 0033 D-l), and still reads one
     that is a plain string — every endpoint this ADR did not touch still sends one, and issue 19 is

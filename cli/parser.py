@@ -513,6 +513,32 @@ def _add_project(sub) -> None:
     wip_reset.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     wip_reset.set_defaults(handler=cmd_remote_project)
 
+    # `promote` — the only thing that moves `main` (ADR 0033 D-b). Its two consequences are in the
+    # help text and not only in the ADR, because the person typing this is the last one who can
+    # decide they are acceptable, and they can only decide it if they are told.
+    promote = project_sub.add_parser(
+        "promote",
+        help="Advance the project's main to a member's WIP branch (fast-forward only)",
+        description=(
+            "Advance the project's `main` to a member's WIP branch, fast-forward only.\n\n"
+            "`main` is the release branch: no task ever moves it, and this is the one thing that "
+            "does. Any member may promote any member's branch, including someone who has left the "
+            "team — nothing else can move their branch once they are gone.\n\n"
+            "Two things to know before you run it. Code an agent wrote reaches `main` if you "
+            "promote without reviewing it. And a promote cannot be undone by pushing, so there is "
+            "no revert for it in this release — the commit it replaced is printed, and putting it "
+            "back is an operation on the relay itself.\n\n"
+            "A branch that is behind `main` is refused, saying how far behind: integrate `main` "
+            "into it first, then promote."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    promote.add_argument("project_id", help="Project id from `grid project list`.")
+    promote.add_argument(
+        "member_key",
+        help="Whose WIP branch to promote. Member key from `grid project member list`.")
+    promote.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    promote.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    promote.set_defaults(handler=cmd_remote_project)
+
 
 def _add_task(sub) -> None:
     """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).

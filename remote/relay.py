@@ -805,6 +805,29 @@ def reset_project_wip(signaling_url: str, access_token: str, project_id: str,
         json={"commit": commit}, missing_route_hint=_OLD_RELAY)
 
 
+def promote_project(signaling_url: str, access_token: str, project_id: str,
+                    *, member_key: str) -> dict[str, Any]:
+    """Fast-forward a project's `main` from a member's WIP branch (``POST …/{id}/promote``).
+
+    `main` is a release branch since ADR 0033 D-b, so nothing a task does reaches it — this is the
+    one thing that moves it, and it is an ENDPOINT rather than a push because keeping the relay
+    `main`'s only writer is what lets a provider be unable to announce its own success.
+
+    The source is named, not assumed to be the caller's own: the moment somebody leaves the team
+    `wip/<departed>` holds everything they never promoted, and there is no adopt, transfer or rename
+    anywhere in this feature. By **member key** for `reset_project_wip`'s reason.
+
+    **Fast-forward only.** A source branch that is behind is refused with a real 409 — a D-l object
+    carrying `main_commit` and `behind` as fields, so a client can serialize its own promotes rather
+    than discover the collision rate empirically. That is not the bare-404 hint below; it is the
+    relay's own answer, and the words belong to it.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/promote",
+        json={"member_key": member_key}, missing_route_hint=_OLD_RELAY)
+
+
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
     """Read one task back (``GET /relay/v1/tasks/{id}``)."""
     return _task_oneshot(

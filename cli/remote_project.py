@@ -27,6 +27,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         if args.wip_action != "reset":
             raise SystemExit(f"Unknown project wip action: {args.wip_action!r}")
         return _wip_reset(args)
+    if args.subcommand == "promote":
+        return _project_promote(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
     # so direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "member":
@@ -165,6 +167,62 @@ def _wip_reset(args: argparse.Namespace) -> int:
     previous = answer.get("previous_commit")
     if previous:
         print(f"was={previous}")
+    return 0
+
+
+def _project_promote(args: argparse.Namespace) -> int:
+    """Fast-forward the project's `main` from a member's WIP branch (ADR 0033 D-b).
+
+    `main` is the release branch: no task touches it, and this is the one thing that moves it. It
+    goes through the relay rather than a push because the relay being `main`'s only writer is what
+    makes a provider unable to announce its own success.
+
+    The source is NAMED. Any member may promote any member's branch — including a departed one's,
+    which is the whole reason it is not "your own": nothing else can ever move `wip/<departed>`.
+
+    Fast-forward only, so a branch that is behind is refused and integration is the fix. The
+    refusal carries how far behind, and the relay's own sentence is what is shown.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.promote_project(base, token, args.project_id, member_key=args.member_key)
+
+    if _emit(args, answer):
+        return 0
+    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    branch = answer.get("branch") or "main"
+    commit = answer.get("commit") or ""
+    advanced = answer.get("advanced")
+    if advanced is False:
+        # Said plainly rather than printed as a move. A team reading "main is now at <oid>" after a
+        # no-op has been told something shipped when nothing did.
+        print(f"{branch} is already at {commit}; nothing to promote")
+        return 0
+    if advanced is not True or not commit:
+        # Anything that is not one of the two answers this command knows how to report is a reply it
+        # cannot read, NOT a release. Defaulting to the success line here printed `main is now at `
+        # — with no commit — and exited 0 for a body a proxy had stripped, telling a human and a
+        # script alike that work had shipped. There is no relay old enough to be a reason to be
+        # lenient: promote is a new route, so every relay that has it sends both keys.
+        raise SystemExit(
+            f"The relay's answer to promoting {args.member_key} in project {args.project_id} did "
+            f"not say whether {branch} moved, so this cannot be reported as a release. "
+            f"`grid project promote {args.project_id} {args.member_key} --json` shows what it sent.")
+    print(f"{branch} is now at {commit}")
+    previous = answer.get("previous_commit")
+    if previous:
+        # A fast-forward leaves no merge commit, so this line is the only place the release it
+        # replaced is named — and there is no revert command, so somebody undoing this needs it.
+        print(f"was={previous}")
+    if answer.get("promotion_id") is None:
+        # The trunk moved and the row naming who released it did not get written — the relay says so
+        # here and nowhere else a person will look. Left unsaid, it is discoverable only by grepping
+        # the relay's log, or by somebody later finding a hole in the project's release history.
+        # Not an error: the release happened, and calling it a failure would invite a second promote
+        # that records nothing either.
+        print("warning: the relay could not record who promoted this; "
+              "it will be missing from the project's release history")
     return 0
 
 

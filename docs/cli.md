@@ -884,6 +884,7 @@ grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
 grid project wip reset     <project-id> <member-key> --commit <oid> [--grid <grid>] [--json]
+grid project promote       <project-id> <member-key> [--grid <grid>] [--json]
 ```
 
 **Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
@@ -914,7 +915,29 @@ without their results racing for one ref.
 
 A project's `main` therefore has to **exist before its first task**: a project that has just been
 created has no commits, and creating a task in one is refused with a message saying so. Give it a
-first commit (push `main` while the project is idle) and tasks work from then on.
+first commit — push `main` while the project is idle — and tasks work from then on. That push is the
+**only** one this grid accepts to `main`, and only while the project has none: once a trunk exists,
+`promote` is the one thing that moves it.
+
+### Promoting
+
+`grid project promote` advances the project's `main` to a member's WIP branch. It is what releases
+work, and it is deliberately a decision somebody makes rather than something a task does.
+
+You name **whose** branch, not "mine". Any member may promote any member's branch, including the
+branch of somebody who has left the team — once they are gone nothing else can move `wip/<theirs>`,
+and there is no way to adopt, transfer or rename it.
+
+**It is fast-forward only.** A branch that is behind `main` — because somebody else promoted first —
+is refused, and the refusal says how far behind it is. Integrating `main` into it is the fix;
+retrying is not, and never becomes one. Two people promoting at the same moment is safe: one wins and
+the other is refused, and neither one's commits are lost.
+
+Two things worth knowing before you run it:
+
+- code an agent wrote reaches `main` if you promote without reading it. Nothing reviews it for you;
+- **a promote cannot be undone by pushing**, and there is no revert command in this release. The
+  command prints the commit `main` was at before it moved, which is the value putting it back needs.
 
 `wip reset` moves a member's WIP branch back to a commit you name — the way out of the one state
 nothing else can undo. If a task's result is written into git but its completion is then interrupted,
@@ -1006,11 +1029,12 @@ confidently. It also refuses `--into` a directory that already has files in it a
 a marker the command writes itself, not the presence of a `.git`, because your own repositories have
 one of those too.
 
-**On success the project's `main` moves to the result; on failure it does not.** That is what makes
-`main` a known-good state and the base the project's next task is cut from. A failed attempt still
-commits and still pushes its own `task/<id>` branch, so you can fetch it, read what the agent did
-before it broke, and cherry-pick what was right — `get --json` reports the `result_commit` for both
-outcomes.
+**On success the result lands on your own `wip/<member-key>` branch; on failure it does not.** That
+is what makes your WIP branch a known-good state and the base your next task is cut from. `main` is
+not touched either way — it moves only when somebody runs `grid project promote`. A failed attempt
+still commits and still pushes its own `task/<id>` branch, so you can fetch it, read what the agent
+did before it broke, and cherry-pick what was right — `get --json` reports the `result_commit` for
+both outcomes.
 
 **What a provider may see and write is decided by the lease, not by trust.** A provider running one
 of your tasks is shown that task's branch and the project's `main` — not the branches of your other
