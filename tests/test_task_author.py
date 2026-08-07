@@ -27,6 +27,12 @@ import pytest
 # constant from the module under test would keep passing if the constant changed.
 GRID = "grid|grid@invalid"
 
+# A `member_key` shaped like the relay's — 32 hex characters. Since ADR 0033 D-g a workspace, and
+# the transcript pathspec the result commit stages, belong to a (project, member) pair. Unrelated to
+# the AUTHOR this module is about: the key names the workspace, the author names the person, and
+# nothing derives one from the other.
+_MEMBER = "9f2b" * 8
+
 
 def _git(cwd, *args, check=True):
     """Real git, run by the TEST — never the module under test.
@@ -60,6 +66,18 @@ def _remote_for(tmp_path, branch, files, name="origin.git"):
     return GitRemote(url=str(bare), token="tok"), _git(bare, "rev-parse", branch).stdout.strip()
 
 
+def _transcript_dir(path):
+    """This member's conversation directory inside `path`, which `commit_and_push` now requires.
+
+    Required rather than defaulted there, so a caller cannot silently stop committing the
+    conversation — see that function. Here it is setup noise: nothing in this module writes a
+    transcript, and every test below is about the author.
+    """
+    from remote import task_agent
+
+    return task_agent.transcript_dir(path, _MEMBER)
+
+
 def _idents(repo, rev):
     """`author-name|author-email|committer-name|committer-email`, the four fields this slice moves.
 
@@ -77,7 +95,7 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
 
     def _materialize(remote, commit, branch="task/T1"):
-        path = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+        path = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
         task_repo.materialize(path, url=remote.url, token=remote.token,
                               branch=branch, input_commit=commit)
         return path
@@ -102,6 +120,7 @@ class TestTheResultCommitCarriesTheMember:
 
         pushed = task_repo.commit_and_push(
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+            transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice Nguyen", "alice@example.com"))
 
         assert _idents(remote.url, pushed) == f"Alice Nguyen|alice@example.com|{GRID}"
@@ -115,7 +134,8 @@ class TestTheResultCommitCarriesTheMember:
         (path / "fix.py").write_text("done\n")
 
         pushed = task_repo.commit_and_push(
-            path, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
+            path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+            transcript=_transcript_dir(path))
 
         assert _idents(remote.url, pushed) == f"{GRID}|{GRID}"
 
@@ -134,6 +154,7 @@ class TestTheResultCommitCarriesTheMember:
 
         task_repo.commit_and_push(
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+            transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice Nguyen", "alice@example.com"))
 
         blamed = _git(path, "blame", "--line-porcelain", "-L", "2,2", "a.txt").stdout
@@ -169,7 +190,8 @@ class TestTheClaimPayloadIsWhereTheAuthorComesFrom:
         remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
         path = workspace(remote, commit)
         (path / "fix.py").write_text("done\n")
-        job = {"task_id": "T1", "project_id": "proj-1", "branch": "task/T1", **job_extra}
+        job = {"task_id": "T1", "project_id": "proj-1", "member_key": _MEMBER,
+               "branch": "task/T1", **job_extra}
         outcome, landed = tasks._push_result(
             job, tasks.TaskOutcome("completed", "ok", None), True, remote, _Publisher())
         assert landed, outcome.error
@@ -287,6 +309,7 @@ class TestTheIsolationIsUnchanged:
 
         pushed = task_repo.commit_and_push(
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+            transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice", "alice@example.com"))
 
         assert _idents(remote.url, pushed) == f"Alice|alice@example.com|{GRID}"

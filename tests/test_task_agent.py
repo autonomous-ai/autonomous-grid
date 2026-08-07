@@ -9,19 +9,30 @@ from pathlib import Path
 
 import pytest
 
+# A `member_key` shaped like the relay's — 32 hex characters, `sha256(user_id)` truncated (grid-src
+# `project_members.MEMBER_KEY_CHARS`). Since ADR 0033 D-g a workspace, and therefore a conversation,
+# belongs to a (project, member) pair, so almost every test here needs one. Two of them, because
+# several of the interesting properties are about one member NOT reaching another's.
+_MEMBER = "9f2b" * 8
+_OTHER_MEMBER = "4c7e" * 8
+
 
 def test_workspace_is_the_shared_path_every_provider_must_agree_on(monkeypatch, tmp_path):
-    """`<root>/projects/<project_id>/workspace` — a LOCKSTEP value, not a local preference.
+    """`<root>/projects/<project_id>/<member_key>/workspace` — a LOCKSTEP value, not a preference.
 
     Claude Code derives a session's transcript directory from the working directory, so a provider
     using a different prefix cannot `--resume` a session another one started (ADR 0032). The root is
     overridable only so tests and dev boxes need not write to `/var`.
+
+    The member level arrived with ADR 0033 D-g: two members' tasks landing on one provider would
+    otherwise share a directory that `materialize` opens with `reset --hard` and `clean -ffdx`.
     """
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
 
-    assert task_agent.workspace_for("proj-1") == tmp_path / "projects" / "proj-1" / "workspace"
+    assert (task_agent.workspace_for("proj-1", "9f2b" * 8)
+            == tmp_path / "projects" / "proj-1" / ("9f2b" * 8) / "workspace")
 
 
 def test_a_member_key_is_accepted_as_a_path_segment(monkeypatch, tmp_path):
@@ -41,42 +52,63 @@ def test_a_member_key_is_accepted_as_a_path_segment(monkeypatch, tmp_path):
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
-    member_key = hashlib.sha256(
-        b"grid:2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f:106174299838271639492").hexdigest()[:32]
+    user_id = "grid:2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f:106174299838271639492"
+    member_key = hashlib.sha256(user_id.encode()).hexdigest()[:32]
 
     assert task_agent._SAFE_PROJECT_ID.match(member_key), (
         f"the relay's member_key {member_key!r} is not a legal path segment here — every task "
         "would fail on the workspace path from issue 11 onward")
     assert len(member_key) <= task_agent._MAX_PROJECT_ID_CHARS
     # And it survives the function that actually builds a path, not only the regex.
-    assert task_agent.workspace_for(member_key).name == "workspace"
+    assert task_agent.workspace_for("proj-1", member_key).parent.name == member_key
+
+    # The other half, and the reason the key exists at all: the RAW id must stay refused. Asserted
+    # rather than left implied so that nobody later "fixes" the validator to accept colons — which
+    # would compile, pass every other test, and produce a directory name git cannot carry as a ref
+    # (issue 12's `wip/<member_key>`) on the very first task of every real user.
+    assert not task_agent._SAFE_PROJECT_ID.match(user_id), (
+        "the validator accepts a raw grid:<network>:<sub> id — a colon is illegal in a git ref "
+        "name, so `member_key` would have no reason to exist and issue 12 would break")
+    with pytest.raises(ValueError, match="member key"):
+        task_agent.workspace_for("proj-1", user_id)
 
 
-@pytest.mark.parametrize("project_id", [
+_HOSTILE_SEGMENTS = [
     "../../etc",           # climbs out of the root entirely
     "a/b",                 # a separator invents a level nobody agreed on
     "a\\b",                # the same on Windows, where `\` is the separator
     "/etc",                # absolute: `Path(root) / "/etc"` IS `/etc`, silently
-    "",                    # empty: the path collapses to the projects directory itself
+    "",                    # empty: the path collapses to the level above
     ".",
     "..",
     "x" * 4096,            # longer than any filesystem accepts, so `mkdir` fails obscurely
-])
-def test_a_hostile_project_id_is_refused_before_anything_is_created(
-        monkeypatch, tmp_path, project_id):
-    """The project id arrives off the wire, so it is attacker-controlled (ADR 0032 D-b).
+]
+
+
+@pytest.mark.parametrize("hostile", _HOSTILE_SEGMENTS)
+@pytest.mark.parametrize("position", ["project id", "member key"])
+def test_a_hostile_path_segment_is_refused_before_anything_is_created(
+        monkeypatch, tmp_path, hostile, position):
+    """Both segments arrive off the wire, so both are attacker-controlled (ADR 0032 D-b).
 
     `Path(root) / "../../etc"` is not a theoretical escape — it resolves, and the provider would then
     create a directory and run an agent with write access outside the tree entirely. Refused where the
     path is BUILT, so no caller can forget to check.
+
+    Parametrized over the POSITION as well as the value, and that is the point of the rewrite: issue
+    11 added a second segment, and validating only the first would leave a hole that every existing
+    case in this table walks straight through.
     """
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
+    args = (hostile, "9f2b" * 8) if position == "project id" else ("proj-1", hostile)
 
-    with pytest.raises(ValueError):
-        task_agent.workspace_for(project_id)
+    with pytest.raises(ValueError) as excinfo:
+        task_agent.workspace_for(*args)
 
+    assert position in str(excinfo.value), (
+        f"the refusal does not say which segment was wrong: {excinfo.value}")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -91,7 +123,7 @@ def test_the_workspace_and_every_level_above_it_are_never_shared_writable(monkey
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    path = task_agent.workspace_for("proj-1")
+    path = task_agent.workspace_for("proj-1", _MEMBER)
 
     task_agent.ensure_workspace(path)
 
@@ -107,7 +139,7 @@ def test_ensure_workspace_is_idempotent(monkeypatch, tmp_path):
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
-    path = task_agent.workspace_for("proj-1")
+    path = task_agent.workspace_for("proj-1", _MEMBER)
     task_agent.ensure_workspace(path)
     (path / "kept.txt").write_text("from the first task", encoding="utf-8")
 
@@ -126,7 +158,7 @@ def test_a_workspace_that_cannot_be_created_says_where_and_why(monkeypatch, tmp_
     monkeypatch.setenv("GRID_TASK_ROOT", str(blocked / "root"))
 
     with pytest.raises(OSError) as excinfo:
-        task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+        task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
     assert str(blocked) in str(excinfo.value)
 
@@ -988,7 +1020,8 @@ def agent(monkeypatch, tmp_path):
 
 
 def _job(**overrides):
-    job = {"task_id": "T1", "project_id": "proj-1", "prompt": "fix the flaky test", "attempt": 1}
+    job = {"task_id": "T1", "project_id": "proj-1", "member_key": _MEMBER,
+           "prompt": "fix the flaky test", "attempt": 1}
     job.update(overrides)
     return job
 
@@ -1011,7 +1044,7 @@ def test_a_task_runs_the_agent_in_its_projects_workspace(agent, tmp_path):
 
     assert outcome.state == "completed"
     assert outcome.error is None
-    assert outcome.output == str(task_agent.workspace_for("proj-1"))
+    assert outcome.output == str(task_agent.workspace_for("proj-1", _MEMBER))
     assert outcome.session_id == "sess-1"
 
 
@@ -1605,7 +1638,7 @@ def test_a_second_task_on_a_project_fetches_only_the_delta(agent, tmp_path):
 
     remote, first_commit = _remote_for(tmp_path, "task/T1", {"a.txt": "one\n"})
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
-    workspace = task_agent.workspace_for("proj-1")
+    workspace = task_agent.workspace_for("proj-1", _MEMBER)
 
     assert tasks.run_task(
         _job(input_commit=first_commit, branch="task/T1"), remote=remote).state == "completed"
@@ -1627,7 +1660,7 @@ def test_a_second_task_on_a_project_fetches_only_the_delta(agent, tmp_path):
         "re-cloned per task")
     # And it really is the same directory, which is what makes the comparison above meaningful at
     # all: two clones into two paths would each look like a clean superset of nothing.
-    assert task_agent.workspace_for("proj-1") == workspace
+    assert task_agent.workspace_for("proj-1", _MEMBER) == workspace
     assert task_repo.fetched_project(workspace) is None, (
         "the provider's workspace was turned into a `grid task fetch` destination")
 
@@ -1663,9 +1696,9 @@ def test_a_previous_tasks_leftovers_are_gone_but_the_reserved_directory_survives
     """
     from remote import task_agent, tasks
 
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     (workspace / "stale.txt").write_text("from the last task\n")
-    transcript = task_agent.transcript_dir(workspace)
+    transcript = task_agent.transcript_dir(workspace, _MEMBER)
     transcript.mkdir(parents=True)
     (transcript / "sess-1.jsonl").write_text("the project's conversation\n")
     (workspace / ".grid" / "scratch.txt").write_text("the provider's own\n")
@@ -1693,7 +1726,7 @@ def test_the_workspace_is_left_on_the_task_branch_for_the_push(agent, tmp_path):
 
     tasks.run_task(_job(input_commit=commit, branch="task/T1"), remote=remote)
 
-    workspace = task_agent.workspace_for("proj-1")
+    workspace = task_agent.workspace_for("proj-1", _MEMBER)
     assert _git(workspace, "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/task/T1"
     assert _git(workspace, "rev-parse", "HEAD").stdout.strip() == commit
 
@@ -1809,7 +1842,8 @@ def test_the_git_remote_is_built_for_this_tasks_own_project(monkeypatch):
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
 
     tasks._run_and_report(_FakeState(), {"task_id": "T-42", "prompt": "p",
-                                         "project_id": "proj-1", "input_commit": "c" * 40})
+                                         "project_id": "proj-1", "member_key": _MEMBER,
+                                          "input_commit": "c" * 40})
 
     assert captured["remote"].url == "http://relay/relay/v1/git/proj-1"
     assert captured["remote"].token == "tok"
@@ -1859,7 +1893,8 @@ def test_a_runner_that_raises_does_not_publish_the_exceptions_words_verbatim(mon
         tasks, "report_once",
         lambda _s, _t, *, error, **_rest: reported.update(error=error))
 
-    tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1"})
+    tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1",
+                                         "member_key": _MEMBER})
 
     assert "DEADBEEFCAFE" not in reported["error"]
     # The MARKER is expected to survive — it is deliberately recognizable, so a reader can tell
@@ -1980,8 +2015,8 @@ class _RecordingPublisher:
         pass
 
 
-def _job_with_input(commit, branch="task/T1"):
-    return {"task_id": "T1", "prompt": "p", "project_id": "proj-1",
+def _job_with_input(commit, branch="task/T1", member_key=_MEMBER):
+    return {"task_id": "T1", "prompt": "p", "project_id": "proj-1", "member_key": member_key,
             "branch": branch, "input_commit": commit}
 
 
@@ -1990,9 +2025,9 @@ def test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the
     """The issue's demo from the provider's end: the agent writes a file, and that file is in the
     commit the relay is told about — and so is the conversation it had.
 
-    `.grid/agent/` rides along; the rest of `.grid/` does not. The transcript and the agent's
-    `memory/` ARE the project's conversation, and the ordinary result commit is how they reach the
-    project's next task and its next provider (issue 06). Anything else under `.grid/` is the
+    `.grid/agent/<member_key>/` rides along; the rest of `.grid/` does not. The transcript and the
+    agent's `memory/` ARE this member's conversation, and the ordinary result commit is how they
+    reach their next task and its next provider (issue 06). Anything else under `.grid/` is the
     provider's own state and belongs in nobody else's repository.
 
     **This reverses issue 05**, which excluded all of `.grid/` on the reasoning that the transcript
@@ -2000,14 +2035,27 @@ def test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the
     issue 06 — and contradicts ADR 0032 D-b, which describes the transcript as "then committed back
     to the user's repo". The relay's refusal to accept an UPLOAD anywhere under `.grid/` is
     unchanged, so the conversation is still written only by the provider.
+
+    The forced add is scoped to this member's own subtree (ADR 0033 D-g). A second member's
+    directory is present in the checkout below, because that is what every workspace looks like
+    after one integration — and the assertion on it records a REAL LIMIT rather than a protection:
+    the narrow pathspec stops the forced add reaching another member's transcript, but `git add -A`
+    still stages a modification to one, because `$GIT_DIR/info/exclude` does not apply to files git
+    already tracks. So an agent that writes into `.grid/agent/<someone else>/` has that change
+    committed. Reachable only after a promote, harmless to the other member's own branch until they
+    integrate, and closing it belongs with the merge semantics for `.grid/agent/` that issues 13–15
+    decide. Pinned here so it is a known property with a place for the fix to land, not a surprise.
     """
     from remote import tasks
 
-    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    remote, commit = _remote_for(
+        tmp_path, "task/T1",
+        {"a.txt": "x\n", f".grid/agent/{_OTHER_MEMBER}/sess-9.jsonl": "someone else's\n"})
     _relay_git_url(monkeypatch, remote.url)
-    agent("mkdir -p .grid/agent/memory\n"
-          "echo transcript > .grid/agent/sess-1.jsonl\n"
-          "echo remembered > .grid/agent/memory/note.md\n"
+    agent(f"mkdir -p .grid/agent/{_MEMBER}/memory\n"
+          f"echo transcript > .grid/agent/{_MEMBER}/sess-1.jsonl\n"
+          f"echo remembered > .grid/agent/{_MEMBER}/memory/note.md\n"
+          f"echo tampered > .grid/agent/{_OTHER_MEMBER}/sess-9.jsonl\n"
           "echo provider-only > .grid/scratch.txt\n"
           "echo fixed > fix.py\n"
           "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
@@ -2022,9 +2070,17 @@ def test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the
     assert pushed and pushed != commit, "nothing new was pushed"
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
     assert "fix.py" in listing
-    assert ".grid/agent/sess-1.jsonl" in listing, listing
-    assert ".grid/agent/memory/note.md" in listing, listing
+    assert f".grid/agent/{_MEMBER}/sess-1.jsonl" in listing, listing
+    assert f".grid/agent/{_MEMBER}/memory/note.md" in listing, listing
     assert ".grid/scratch.txt" not in listing, listing
+    # The limit named in the docstring, asserted rather than described. `git add -A` stages the
+    # modification because the file is TRACKED and `info/exclude` has no say over tracked files —
+    # the narrow pathspec never gets a chance to not-add it. If a later slice closes this, this
+    # assertion is the one that flips, and it should flip deliberately.
+    other = _git(remote.url, "show", f"{pushed}:.grid/agent/{_OTHER_MEMBER}/sess-9.jsonl").stdout
+    assert other == "tampered\n", (
+        f"another member's transcript is no longer writable by this task ({other!r}) — if that is "
+        f"deliberate, this test and issue 11's 'what this does NOT fix' both need updating")
 
 
 def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
@@ -2048,9 +2104,9 @@ def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
         tmp_path, "task/T1",
         {"a.txt": "x\n", ".gitignore": ".grid/agent/\n*.jsonl\nmemory/\n"})
     _relay_git_url(monkeypatch, remote.url)
-    agent("mkdir -p .grid/agent/memory\n"
-          "echo transcript > .grid/agent/sess-1.jsonl\n"
-          "echo remembered > .grid/agent/memory/note.md\n"
+    agent(f"mkdir -p .grid/agent/{_MEMBER}/memory\n"
+          f"echo transcript > .grid/agent/{_MEMBER}/sess-1.jsonl\n"
+          f"echo remembered > .grid/agent/{_MEMBER}/memory/note.md\n"
           "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
     reported = {}
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
@@ -2060,8 +2116,87 @@ def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
 
     assert reported["state"] == "completed"
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", reported["result_commit"]).stdout.split()
-    assert ".grid/agent/sess-1.jsonl" in listing, listing
-    assert ".grid/agent/memory/note.md" in listing, listing
+    assert f".grid/agent/{_MEMBER}/sess-1.jsonl" in listing, listing
+    assert f".grid/agent/{_MEMBER}/memory/note.md" in listing, listing
+
+
+def test_two_members_tasks_on_one_provider_do_not_reset_each_others_workspace(
+        agent, tmp_path, monkeypatch):
+    """Issue 11's first acceptance criterion, run through the real checkout rather than the lock.
+
+    `_reserve_workspace` keeps two supervisors out of ONE directory; this is the other half — that
+    the two members do not share a directory in the first place. It matters because `materialize`
+    opens with `reset --hard` and `clean -ffdx`, so a shared workspace does not merely confuse the
+    second task, it deletes the first member's work and their conversation on the way in.
+
+    Sequential rather than concurrent on purpose: `clean -ffdx` is what has to be shown to miss, and
+    a race would prove the lock instead of the path.
+    """
+    from remote import task_agent, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    agent(f"mkdir -p .grid/agent/{_MEMBER}\n"
+          f"echo alices-conversation > .grid/agent/{_MEMBER}/sess-a.jsonl\n"
+          "echo alices-work > mine.txt\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    first = tasks.run_task(_job_with_input(commit, member_key=_MEMBER), remote=remote)
+    assert first.state == "completed", first.error
+
+    # The second member's task, in the SAME project, on this same provider — an untracked file and
+    # a full `reset --hard` + `clean -ffdx` of its own.
+    agent("echo bobs-work > mine.txt\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    second = tasks.run_task(
+        _job_with_input(commit, member_key=_OTHER_MEMBER), remote=remote)
+    assert second.state == "completed", second.error
+
+    mine = task_agent.workspace_for("proj-1", _MEMBER)
+    theirs = task_agent.workspace_for("proj-1", _OTHER_MEMBER)
+    assert mine != theirs
+    assert (mine / "mine.txt").read_text(encoding="utf-8") == "alices-work\n", (
+        "the second member's checkout reset the first member's workspace")
+    assert (theirs / "mine.txt").read_text(encoding="utf-8") == "bobs-work\n"
+    # And the conversation with it — `clean -ffdx -e .grid` spares `.grid`, but a SHARED workspace
+    # would have had the second task's `link_transcript` and commit acting on the same directory.
+    assert (task_agent.transcript_dir(mine, _MEMBER) / "sess-a.jsonl").is_file()
+    assert not (task_agent.transcript_dir(theirs, _OTHER_MEMBER) / "sess-a.jsonl").exists()
+
+
+def test_a_claim_with_no_member_key_is_refused_instead_of_falling_back_to_the_project(
+        agent, tmp_path, monkeypatch):
+    """Issue 11's fourth acceptance criterion. The one wire field on this path that is not optional.
+
+    A fallback to `<root>/projects/<project_id>/workspace` would look like it worked: the agent
+    runs, the result pushes, the task reports `completed`. What it actually does is change
+    `transcript_dir_name(cwd)`, so Claude Code writes the conversation somewhere the next task never
+    looks — that member's history is then permanently unresumable, with every other signal healthy.
+
+    So it is a refusal, and a TERMINAL one: no provider can fix it and every retry finds the same
+    answer, so the user gets the reason now rather than `retries_exhausted` in three lease TTLs.
+    """
+    from remote import task_agent, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    agent("echo should-never-run > ran.txt\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    keyless = _job_with_input(commit)
+    del keyless["member_key"]
+
+    outcome = tasks.run_task(keyless, remote=remote)
+
+    assert outcome.state == "failed"
+    assert "member_key" in (outcome.error or ""), outcome.error
+    # No fallback path was created, let alone run in. Asserted on the filesystem rather than on the
+    # message, because the message is what a future edit would keep while quietly restoring the
+    # fallback underneath it.
+    root = task_agent.workspace_root()
+    assert not (root / "projects" / "proj-1" / "workspace").exists(), (
+        "a project-level workspace was created — the fallback this refusal exists to prevent")
+    assert not list((root / "projects").glob("proj-1/*/workspace/ran.txt")), "the agent ran"
 
 
 def test_a_task_whose_agent_left_no_transcript_still_commits_and_pushes(
@@ -2080,13 +2215,14 @@ def test_a_task_whose_agent_left_no_transcript_still_commits_and_pushes(
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
     outcome = tasks.run_task(_job(input_commit=commit, branch="task/T1"), remote=remote)
     assert outcome.state == "completed", outcome.error
-    workspace = task_agent.workspace_for("proj-1")
+    workspace = task_agent.workspace_for("proj-1", _MEMBER)
     import shutil
-    shutil.rmtree(task_agent.transcript_dir(workspace))
+    shutil.rmtree(task_agent.transcript_dir(workspace, _MEMBER))
 
     from remote import task_repo
     pushed = task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
 
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
     assert "fix.py" in listing, listing
@@ -2182,7 +2318,8 @@ def test_a_task_with_no_git_plane_reports_normally_and_pushes_nothing(agent, mon
     monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
 
-    tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1"})
+    tasks._run_and_report(_FakeState(), {"task_id": "T1", "prompt": "p", "project_id": "proj-1",
+                                         "member_key": _MEMBER})
 
     assert reported["state"] == "completed"
     assert reported["result_commit"] is None
@@ -2326,7 +2463,7 @@ def test_a_refused_push_raises_push_error_and_not_checkout_error(tmp_path):
     failure it sees — so without the translation the push path would inherit the checkout path's
     meaning, and a lost result would be recorded as a finished, failed task nothing ever retries.
     """
-    from remote import task_repo
+    from remote import task_agent, task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     workspace = tmp_path / "ws"
@@ -2338,7 +2475,8 @@ def test_a_refused_push_raises_push_error_and_not_checkout_error(tmp_path):
     with pytest.raises(task_repo.PushError) as caught:
         task_repo.commit_and_push(
             workspace, url=str(tmp_path / "no-such-repo.git"), token="tok",
-            branch="task/T1", message="task T1 (completed)")
+            branch="task/T1", message="task T1 (completed)",
+            transcript=task_agent.transcript_dir(workspace, _MEMBER))
 
     assert not isinstance(caught.value, task_repo.CheckoutError)
     # Still carries git's own words, which are the only thing that says WHY.
@@ -2352,7 +2490,7 @@ def test_a_push_that_is_refused_leaves_the_result_committed_locally(tmp_path):
     at the workspace, still finds what the agent produced rather than an uncommitted tree that the
     next attempt's `reset --hard` would erase.
     """
-    from remote import task_repo
+    from remote import task_agent, task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     workspace = tmp_path / "ws"
@@ -2363,7 +2501,8 @@ def test_a_push_that_is_refused_leaves_the_result_committed_locally(tmp_path):
 
     with pytest.raises(task_repo.PushError):
         task_repo.commit_and_push(workspace, url=str(tmp_path / "gone.git"), token="tok",
-                                  branch="task/T1", message="task T1 (completed)")
+                                  branch="task/T1", message="task T1 (completed)",
+                                  transcript=task_agent.transcript_dir(workspace, _MEMBER))
 
     assert _git(workspace, "rev-parse", "HEAD").stdout.strip() != commit
     assert "fix.py" in _git(workspace, "show", "--name-only", "--format=", "HEAD").stdout
@@ -2543,6 +2682,15 @@ _MEASURED_TRANSCRIPT_DIR_NAMES = [
     ("/private/tmp/grid_enc/a_b.c-d", "-private-tmp-grid-enc-a-b-c-d"),
     ("/Users/macbookpro/.grid", "-Users-macbookpro--grid"),
     ("/private/tmp/one/workspaces/abc.com", "-private-tmp-one-workspaces-abc-com"),
+    # The shape this provider actually produces since ADR 0033 D-g: a real project uuid and a real
+    # 32-hex `member_key`, one level deeper than issue 06's. The characters are all in the classes
+    # already covered above, which is exactly why the E2E in `tests/e2e_cross_repo/e2e_live_agent.py`
+    # is what settles this rather than the table — "every character is already covered" is the
+    # reasoning that agreed with issue 06's bug.
+    ("/private/var/grid/projects/2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f/"
+     "9f2b9f2b9f2b9f2b9f2b9f2b9f2b9f2b/workspace",
+     "-private-var-grid-projects-2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f-"
+     "9f2b9f2b9f2b9f2b9f2b9f2b9f2b9f2b-workspace"),
 ]
 
 
@@ -2602,9 +2750,9 @@ def test_what_the_agent_writes_to_its_transcript_directory_lands_in_the_workspac
     config = tmp_path / "provider-config"
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(config))
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
-    target = task_agent.link_transcript(workspace)
+    target = task_agent.link_transcript(workspace, _MEMBER)
 
     link = config / "projects" / task_agent.transcript_dir_name(workspace)
     assert link.is_symlink(), f"{link} is not a symlink"
@@ -2614,7 +2762,7 @@ def test_what_the_agent_writes_to_its_transcript_directory_lands_in_the_workspac
     (link / "memory").mkdir()
     (link / "memory" / "note.md").write_text("remembered", encoding="utf-8")
 
-    assert target == workspace / ".grid" / "agent"
+    assert target == workspace / ".grid" / "agent" / _MEMBER
     assert (target / "sess-1.jsonl").read_text(encoding="utf-8") == '{"type":"system"}\n'
     assert (target / "memory" / "note.md").read_text(encoding="utf-8") == "remembered"
 
@@ -2633,13 +2781,13 @@ def test_a_real_directory_where_the_symlink_belongs_is_refused_and_nothing_is_de
     config = tmp_path / "provider-config"
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(config))
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     squatter = config / "projects" / task_agent.transcript_dir_name(workspace)
     squatter.mkdir(parents=True)
     (squatter / "older-session.jsonl").write_text("a conversation from before 06\n", encoding="utf-8")
 
     with pytest.raises(OSError) as excinfo:
-        task_agent.link_transcript(workspace)
+        task_agent.link_transcript(workspace, _MEMBER)
 
     # A bare `FileExistsError` from `symlink_to` would also carry the path and would also be an
     # OSError — and it would tell an operator nothing about what to do. The refusal has to be the
@@ -2661,11 +2809,11 @@ def test_a_config_directory_inside_the_workspace_is_refused(monkeypatch, tmp_pat
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(workspace / "provider-config"))
 
     with pytest.raises(OSError) as excinfo:
-        task_agent.link_transcript(workspace)
+        task_agent.link_transcript(workspace, _MEMBER)
 
     assert "credential" in str(excinfo.value).lower(), excinfo.value
 
@@ -2690,8 +2838,8 @@ def test_an_operator_who_configures_nothing_gets_claude_codes_own_default(monkey
     assert task_agent.configured_claude_config_dir() is None
     assert task_agent.claude_config_dir() == fake_home / ".claude"
 
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
-    task_agent.link_transcript(workspace)
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
+    task_agent.link_transcript(workspace, _MEMBER)
 
     link = fake_home / ".claude" / "projects" / task_agent.transcript_dir_name(workspace)
     assert link.is_symlink(), f"{link} was not created under the default config directory"
@@ -2740,11 +2888,37 @@ def test_a_follow_up_task_asks_the_agent_to_continue_the_projects_conversation(m
     ]
 
 
+def test_a_members_transcript_lives_under_their_own_key_inside_the_worktree(
+        monkeypatch, tmp_path):
+    """`.grid/agent/<member_key>/`, not `.grid/agent/` (ADR 0033 D-g).
+
+    One directory per project would have two members appending to the same JSONL transcript, which
+    conflicts on every single integration — and a merge conflict inside a conversation is the last
+    thing anyone wants an agent resolving. It is also the same fact as the workspace path: Claude
+    Code derives the transcript directory from the cwd, so these cannot be keyed differently
+    without one of them being wrong.
+    """
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    workspace = task_agent.workspace_for("proj-1", _MEMBER)
+
+    assert (task_agent.transcript_dir(workspace, _MEMBER)
+            == workspace / ".grid" / "agent" / _MEMBER)
+    # Both members' transcripts can coexist in one checkout, which is exactly what makes the
+    # committed conversation travel without conflicting.
+    assert (task_agent.transcript_dir(workspace, _OTHER_MEMBER)
+            != task_agent.transcript_dir(workspace, _MEMBER))
+    # And the key still arrives off the wire here, so it is still validated here.
+    with pytest.raises(ValueError, match="member key"):
+        task_agent.transcript_dir(workspace, "../../../etc")
+
+
 def _transcript(workspace, session_id, body='{"type":"summary"}\n'):
     """Put a transcript for `session_id` where a checkout would have left one."""
     from remote import task_agent
 
-    directory = task_agent.transcript_dir(workspace)
+    directory = task_agent.transcript_dir(workspace, _MEMBER)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{session_id}.jsonl"
     path.write_text(body, encoding="utf-8")
@@ -2760,10 +2934,10 @@ def test_a_session_whose_transcript_arrived_with_the_checkout_is_resumable(monke
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     _transcript(workspace, "012c9e09-abcd")
 
-    decision = task_agent.resumable_session(workspace, "012c9e09-abcd")
+    decision = task_agent.resumable_session(workspace, "012c9e09-abcd", _MEMBER)
 
     assert decision.session_id == "012c9e09-abcd"
     assert decision.reason is None
@@ -2774,9 +2948,9 @@ def test_a_project_with_no_conversation_yet_starts_fresh_and_says_nothing(monkey
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
-    decision = task_agent.resumable_session(workspace, None)
+    decision = task_agent.resumable_session(workspace, None, _MEMBER)
 
     assert decision.session_id is None
     assert decision.reason is None
@@ -2802,9 +2976,9 @@ def test_a_session_id_that_is_not_a_safe_filename_never_reaches_the_filesystem(
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
-    decision = task_agent.resumable_session(workspace, hostile)
+    decision = task_agent.resumable_session(workspace, hostile, _MEMBER)
 
     assert decision.session_id is None
     # The REASON matters as much as the verdict: without the allowlist these ids also return None,
@@ -2828,9 +3002,9 @@ def test_a_session_id_of_the_wrong_type_degrades_instead_of_killing_the_task(
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
-    decision = task_agent.resumable_session(workspace, wrong_type)
+    decision = task_agent.resumable_session(workspace, wrong_type, _MEMBER)
 
     assert decision.session_id is None
     assert "not a safe id" in (decision.reason or ""), decision.reason
@@ -2847,12 +3021,12 @@ def test_a_session_id_cannot_reach_a_file_outside_the_transcript_directory(monke
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
-    task_agent.transcript_dir(workspace).mkdir(parents=True, exist_ok=True)
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
+    task_agent.transcript_dir(workspace, _MEMBER).mkdir(parents=True, exist_ok=True)
     outside = workspace / task_agent.task_repo.RESERVED_DIR / "sneaky.jsonl"
     outside.write_text('{"type": "summary"}\n', encoding="utf-8")
 
-    decision = task_agent.resumable_session(workspace, "../sneaky")
+    decision = task_agent.resumable_session(workspace, "../sneaky", _MEMBER)
 
     assert decision.session_id is None, "a session id climbed out of the transcript directory"
     assert "not a safe id" in (decision.reason or ""), decision.reason
@@ -2869,7 +3043,7 @@ def test_a_follow_up_task_spawns_the_agent_with_the_projects_session(agent, tmp_
     from remote import task_agent, tasks
 
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-config"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     _transcript(workspace, "012c9e09-abcd")
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
@@ -2903,7 +3077,7 @@ def test_a_session_the_workspace_cannot_supply_starts_fresh_and_says_so_in_the_l
     from remote import task_agent, tasks
 
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-config"))
-    task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     seen = tmp_path / "argv.txt"
@@ -2936,7 +3110,7 @@ def test_a_publisher_that_raises_on_the_session_event_does_not_fail_the_task(
     """
     from remote import task_agent, tasks
 
-    task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     agent("echo done > out.txt\n"
           "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
@@ -2949,7 +3123,7 @@ def test_a_publisher_that_raises_on_the_session_event_does_not_fail_the_task(
         publish=exploding, remote=remote)
 
     assert outcome.state == "completed", outcome.error
-    assert (task_agent.workspace_for("proj-1") / "out.txt").exists(), "the agent never ran"
+    assert (task_agent.workspace_for("proj-1", _MEMBER) / "out.txt").exists(), "the agent never ran"
 
 
 def test_a_relay_that_names_no_session_runs_fresh_without_reporting_anything(
@@ -2960,7 +3134,7 @@ def test_a_relay_that_names_no_session_runs_fresh_without_reporting_anything(
     from remote import task_agent, tasks
 
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-config"))
-    task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     seen = tmp_path / "argv.txt"
@@ -2996,7 +3170,7 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
 
     # --- provider A -------------------------------------------------------------------------
     monkeypatch.setenv("GRID_TASK_CLAUDE_CONFIG_DIR", str(tmp_path / "provider-a-config"))
-    workspace = task_agent.workspace_for("proj-1")
+    workspace = task_agent.workspace_for("proj-1", _MEMBER)
     link = (task_agent.claude_config_dir() / "projects"
             / task_agent.transcript_dir_name(workspace))
     remote, first_input = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
@@ -3036,17 +3210,18 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
     assert "--resume sess-1" in seen.read_text(encoding="utf-8"), \
         "provider B started a fresh session instead of continuing the project's"
     # The conversation itself arrived, not merely the id — including the agent's own memory.
-    rebuilt = task_agent.transcript_dir(task_agent.workspace_for("proj-1"))
+    rebuilt = task_agent.transcript_dir(task_agent.workspace_for("proj-1", _MEMBER), _MEMBER)
     assert (rebuilt / "sess-1.jsonl").exists()
     assert (rebuilt / "memory" / "note.md").read_text(encoding="utf-8") == "remembered\n"
 
 
-def task_repo_commit_and_push(workspace, remote, branch):
+def task_repo_commit_and_push(workspace, remote, branch, member_key=_MEMBER):
     """Commit and push what the agent left, the way `_push_result` does."""
-    from remote import task_repo
+    from remote import task_agent, task_repo
 
     return task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch=branch, message="task T1 (completed)")
+        workspace, url=remote.url, token=remote.token, branch=branch, message="task T1 (completed)",
+        transcript=task_agent.transcript_dir(workspace, member_key))
 
 
 @pytest.mark.parametrize("body,expected_in_reason", [
@@ -3067,10 +3242,10 @@ def test_a_transcript_that_cannot_be_read_starts_a_fresh_session_with_a_reason(
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     _transcript(workspace, "sess-1", body=body)
 
-    decision = task_agent.resumable_session(workspace, "sess-1")
+    decision = task_agent.resumable_session(workspace, "sess-1", _MEMBER)
 
     assert decision.session_id is None
     assert expected_in_reason in decision.reason, decision.reason
@@ -3084,9 +3259,9 @@ def test_a_transcript_that_never_arrived_starts_a_fresh_session_with_a_reason(
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
 
-    decision = task_agent.resumable_session(workspace, "012c9e09-abcd")
+    decision = task_agent.resumable_session(workspace, "012c9e09-abcd", _MEMBER)
 
     assert decision.session_id is None
     assert "no transcript" in decision.reason, decision.reason
@@ -3098,14 +3273,14 @@ def test_a_transcript_that_is_a_symlink_is_never_followed(monkeypatch, tmp_path)
     from remote import task_agent
 
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
-    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1"))
+    workspace = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
     secret = tmp_path / "credentials.json"
     secret.write_text('{"access_token": "the provider\'s own"}\n', encoding="utf-8")
-    directory = task_agent.transcript_dir(workspace)
+    directory = task_agent.transcript_dir(workspace, _MEMBER)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "sess-1.jsonl").symlink_to(secret)
 
-    decision = task_agent.resumable_session(workspace, "sess-1")
+    decision = task_agent.resumable_session(workspace, "sess-1", _MEMBER)
 
     assert decision.session_id is None
     assert "symlink" in decision.reason, decision.reason
@@ -3301,14 +3476,11 @@ def test_a_run_with_no_gate_wired_behaves_exactly_as_it_did_before(agent):
     assert tasks.run_task(_job()).state == "completed"
 
 
-def test_two_workers_never_run_two_tasks_in_one_projects_workspace(monkeypatch, capsys):
-    """A workspace is per PROJECT and persists between tasks, and preparing one runs `reset --hard`
-    and `clean` over it. Two supervisors inside one workspace is therefore not a race that produces a
-    confusing log — it is one agent's work being deleted underneath it while it runs.
+def _concurrent_supervisors(monkeypatch):
+    """Two `_run_and_report` calls that overlap: the first parks inside `run_task` until released.
 
-    The relay's `tasks_one_active_per_project` unique index means this cannot happen. This is here
-    because a provider may now run several tasks at once, and the cost of the invariant being wrong
-    ONCE is destroyed work rather than a retry.
+    Returns `(start_first, reported)` — call `start_first(job)` to launch the parked supervisor and
+    get back a `join()` for it, then call `_run_and_report` on the second job directly.
     """
     import threading
 
@@ -3328,19 +3500,66 @@ def test_two_workers_never_run_two_tasks_in_one_projects_workspace(monkeypatch, 
     monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
     monkeypatch.setattr(tasks, "_lease_renewer", lambda *a, **k: tasks._NoRenewal())
 
-    first = threading.Thread(
-        target=tasks._run_and_report, args=(_FakeState(), _job(task_id="T1")), daemon=True)
-    first.start()
-    assert inside.wait(5), "the first task never started"
+    def start_first(job):
+        thread = threading.Thread(
+            target=tasks._run_and_report, args=(_FakeState(), job), daemon=True)
+        thread.start()
+        assert inside.wait(5), "the first task never started"
 
-    tasks._run_and_report(_FakeState(), _job(task_id="T2"))   # same project, while T1 is running
+        def release():
+            finish.set()
+            thread.join(5)
+            # Checked, not assumed. The reservation is process-global and is released in the
+            # background thread's `finally`; a join that timed out would leave the pair held for
+            # the rest of the session, and every later test using it would fail instead of this one.
+            assert not thread.is_alive(), "the first task's supervisor never finished"
 
-    finish.set()
-    first.join(5)
-    # Checked, not assumed. The reservation this test creates is process-global and is released in
-    # the background thread's `finally`; a join that timed out would leave the default project held
-    # for the rest of the session, and every later test using it would fail instead of this one.
-    assert not first.is_alive(), "the first task's supervisor never finished"
+        return release
+
+    return start_first, reported
+
+
+def test_two_members_of_one_project_run_side_by_side_on_one_provider(monkeypatch, capsys):
+    """The point of the re-key (ADR 0033 D-g), and the failure it removes.
+
+    A workspace belongs to a (project, member) pair, so two members' tasks in ONE project are two
+    directories and must both run. Keyed on the project alone — as this was — the second is refused,
+    and refused with NO terminal report by design: it sits `running` for a lease TTL, is reclaimed,
+    and can be refused again, reaching `retries_exhausted` on a provider that had capacity the whole
+    time. `GRID_MAX_TASKS` makes one provider claiming two tasks in one project ordinary.
+    """
+    from remote import tasks
+
+    start_first, reported = _concurrent_supervisors(monkeypatch)
+    release = start_first(_job(task_id="T1", member_key=_MEMBER))
+
+    # Same project, a DIFFERENT member, while T1 is still running.
+    tasks._run_and_report(_FakeState(), _job(task_id="T2", member_key=_OTHER_MEMBER))
+
+    release()
+
+    assert sorted(reported) == ["T1", "T2"], (
+        "the second member's task was refused — the reservation is still keyed on the project")
+    assert "refusing task" not in capsys.readouterr().err
+
+
+def test_two_workers_never_run_two_tasks_in_one_members_workspace(monkeypatch, capsys):
+    """A workspace persists between that member's tasks, and preparing one runs `reset --hard` and
+    `clean` over it. Two supervisors inside one workspace is therefore not a race that produces a
+    confusing log — it is one agent's work being deleted underneath it while it runs.
+
+    The relay's active-task index means this cannot happen. This is here because a provider may now
+    run several tasks at once, and the cost of the invariant being wrong ONCE is destroyed work
+    rather than a retry.
+    """
+    from remote import tasks
+
+    start_first, reported = _concurrent_supervisors(monkeypatch)
+    release = start_first(_job(task_id="T1"))
+
+    tasks._run_and_report(_FakeState(), _job(task_id="T2"))   # same project AND same member
+
+    release()
 
     # No terminal report for T2 — reporting one would mark it finished with nothing done. Left
     # `running`, its lease lapses and the relay hands it to a provider that can actually run it.

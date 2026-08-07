@@ -169,24 +169,47 @@ def workspace_root() -> Path:
     return Path(os.getenv(WORKSPACE_ROOT_ENV) or DEFAULT_WORKSPACE_ROOT)
 
 
-def workspace_for(project_id: str) -> Path:
-    """The working directory a task for `project_id` runs in.
+def _safe_segment(kind: str, value: str) -> str:
+    """`value` if it is one safe path component, else a `ValueError` naming WHICH one it was.
 
-    The id arrives off the wire, so it is attacker-controlled and is validated HERE — where the path
-    is built — rather than at each caller. `Path(root) / "../../etc"` is not a theoretical escape: it
-    resolves, and the provider would then create that directory and run an agent with write access
-    inside it. `Path(root) / "/etc"` is worse still: pathlib *discards* the left operand when the
-    right one is absolute, so the root is silently gone (ADR 0032 D-b applies the same rule to the
-    filenames a client uploads).
+    The values reaching this all arrive off the wire, so they are attacker-controlled and are
+    validated HERE — where the path is built — rather than at each caller.
+    `Path(root) / "../../etc"` is not a theoretical escape: it resolves, and the provider would then
+    create that directory and run an agent with write access inside it. `Path(root) / "/etc"` is
+    worse still: pathlib *discards* the left operand when the right one is absolute, so the root is
+    silently gone (ADR 0032 D-b applies the same rule to the filenames a client uploads).
+
+    `kind` is in the message because there are now two segments and they come from different places
+    — a project id the relay minted and a `member_key` it derived — so "not a safe path segment" on
+    its own would leave an operator with two things to check and no way to tell which.
     """
-    if not isinstance(project_id, str):
-        raise ValueError(f"project id must be a string, got {type(project_id).__name__}")
-    if not project_id or len(project_id) > _MAX_PROJECT_ID_CHARS:
-        raise ValueError(
-            f"project id must be 1-{_MAX_PROJECT_ID_CHARS} characters, got {len(project_id)}")
-    if project_id in (".", "..") or not _SAFE_PROJECT_ID.match(project_id):
-        raise ValueError(f"project id {project_id!r} is not a single safe path segment")
-    return workspace_root() / "projects" / project_id / "workspace"
+    if not isinstance(value, str):
+        raise ValueError(f"{kind} must be a string, got {type(value).__name__}")
+    if not value or len(value) > _MAX_PROJECT_ID_CHARS:
+        raise ValueError(f"{kind} must be 1-{_MAX_PROJECT_ID_CHARS} characters, got {len(value)}")
+    if value in (".", "..") or not _SAFE_PROJECT_ID.match(value):
+        raise ValueError(f"{kind} {value!r} is not a single safe path segment")
+    return value
+
+
+def workspace_for(project_id: str, member_key: str) -> Path:
+    """The working directory a task for `member_key` on `project_id` runs in (ADR 0033 D-g).
+
+    Keyed on the PAIR, not the project. Claude Code derives a session's transcript directory from
+    the working directory, so the cwd *is* the conversation's identity — and two members' tasks
+    landing on one provider would otherwise share a directory that `materialize` opens with
+    `reset --hard` and `clean -ffdx`, deleting one agent's work while it runs.
+
+    **Both** segments are validated, because the second is just as much off the wire as the first:
+    `member_key` is the relay's own `sha256(user_id)` truncated, but this provider is handed it by
+    an authenticated party, and authenticated is not trusted. It is also why the key exists at all —
+    the raw `user_id` is `grid:<network>:<sub>`, and a colon fails `_SAFE_PROJECT_ID` here for the
+    same reason git refuses it in a ref name.
+    """
+    return (workspace_root() / "projects"
+            / _safe_segment("project id", project_id)
+            / _safe_segment("member key", member_key)
+            / "workspace")
 
 
 def ensure_workspace(path: Path) -> Path:
@@ -301,12 +324,27 @@ def _resolve_for_containment(path: Path) -> Path:
     return path.resolve(strict=False)
 
 
-def transcript_dir(workspace: Path) -> Path:
-    """Where this project's transcript and `memory/` live inside the git worktree."""
-    return workspace / task_repo.RESERVED_DIR / task_repo.TRANSCRIPT_DIR
+def transcript_dir(workspace: Path, member_key: str) -> Path:
+    """Where THIS MEMBER's transcript and `memory/` live inside the git worktree (ADR 0033 D-g).
+
+    Per member, not per project, and it is the same fact as `workspace_for`'s second level rather
+    than a matching decision: Claude Code derives the transcript directory from the cwd, so keying
+    these two differently would mean one of them is wrong. Sharing one directory would also have
+    every member appending to the same JSONL, which conflicts on every integration — and a conflict
+    inside a conversation is the last thing anyone wants an agent resolving.
+
+    Validated here as well as in `workspace_for` for that function's own reason: this builds a path
+    out of a wire value, and the rule belongs where the path is built rather than at each caller.
+
+    Committed, and therefore **readable by every other member** once the branch has been promoted
+    and integrated. That is a property of the design — travelling in the ordinary result commit is
+    what makes cross-provider resume work at all — and per-member directories do not change it.
+    """
+    return (workspace / task_repo.RESERVED_DIR / task_repo.TRANSCRIPT_DIR
+            / _safe_segment("member key", member_key))
 
 
-def link_transcript(workspace: Path) -> Path:
+def link_transcript(workspace: Path, member_key: str) -> Path:
     """Point Claude Code's per-cwd transcript folder at the workspace, and return the target.
 
     The agent writes THROUGH this symlink (measured by the issue-01 spike), so the transcript and
@@ -327,7 +365,7 @@ def link_transcript(workspace: Path) -> Path:
             "refusing to run, because the provider's credential would be committed to the "
             "requesting user's repository")
 
-    target = transcript_dir(workspace)
+    target = transcript_dir(workspace, member_key)
     target.mkdir(parents=True, exist_ok=True)
 
     link = config_dir / "projects" / transcript_dir_name(workspace)
@@ -364,7 +402,7 @@ class ResumeDecision:
     reason: str | None = None
 
 
-def resumable_session(workspace: Path, requested: str | None) -> ResumeDecision:
+def resumable_session(workspace: Path, requested: str | None, member_key: str) -> ResumeDecision:
     """The session this task should resume, given what the relay asked for and what is on disk.
 
     Missing or unreadable is an ORDINARY outcome, not a failure: the project's first task has no
@@ -387,7 +425,7 @@ def resumable_session(workspace: Path, requested: str | None) -> ResumeDecision:
         # `workspace_for` applies to a project id, for the same reason: `..` and separators resolve.
         return ResumeDecision(reason=f"the relay named session {requested!r}, which is not a safe id")
 
-    path = transcript_dir(workspace) / f"{requested}.jsonl"
+    path = transcript_dir(workspace, member_key) / f"{requested}.jsonl"
     if path.is_symlink():
         # Nothing legitimate plants one: the transcript is written by the agent through our own
         # symlink, and a checkout cannot create one (`core.symlinks=false`). Following it would read

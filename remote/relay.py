@@ -292,10 +292,15 @@ def claim_task(
     Mixing them would put a durable mechanism inside a route built for an ephemeral one — and put
     the money path at risk for a feature that does not touch money.
 
-    Returns the claimed task on 200 (``{task_id, project_id, prompt, branch, attempt,
+    Returns the claimed task on 200 (``{task_id, project_id, member_key, prompt, branch, attempt,
     lease_expires_at}``), ``None`` on 204 (nothing queued). 401 → ``RelayUnauthorized``; anything
     else → ``RelayError`` carrying ``.status``, so the caller can tell a relay with no tasks plane
     (404) from a transient fault.
+
+    ``member_key`` is the one key here that is **not** safe to omit (ADR 0033 D-g): it names whose
+    workspace and whose conversation the task belongs to, and `run_task` refuses a claim without one
+    rather than falling back to a project-level path. Every other key on this payload degrades to
+    the behaviour that preceded it.
     """
     try:
         with _client(signaling_url, access_token, timeout=timeout) as client:

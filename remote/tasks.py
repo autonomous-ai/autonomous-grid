@@ -508,11 +508,29 @@ def run_task(job: dict[str, Any],
         # The job dict came off the wire; a missing or mistyped prompt is bad input, not a crash.
         return failed(f"task has no usable prompt (got {type(prompt).__name__})")
 
+    # WHOSE workspace this task runs in (ADR 0033 D-g). Refused rather than defaulted, and this is
+    # the one wire field on this path that gets that treatment: a missing key would put the agent in
+    # a project-level directory, which changes `transcript_dir_name(cwd)`, which makes that member's
+    # conversation permanently unresumable — while the task completes, the push lands, and every
+    # other signal reads healthy. A fallback here would be a second path to a conversation, which is
+    # exactly what D-g exists to remove.
+    #
+    # Terminal rather than silent, unlike a failed push: no provider can fix this and retrying finds
+    # the same answer, so the user gets the reason now instead of `retries_exhausted` in three lease
+    # TTLs with nothing to read. It is also what makes the relay's half fail loudly on a version
+    # skew — hence: roll the relay out BEFORE the provider fleet.
+    member_key = str(job.get("member_key") or "")
+    if not member_key:
+        return failed(
+            "the relay's claim named no member_key, so this provider cannot tell whose workspace "
+            "and whose conversation this task belongs to. It refuses to run rather than share one "
+            "project-level workspace between members. Upgrade the relay (ADR 0033 issue 11).")
+
     sink = publish if publish is not None else _no_publish
     timeout = task_timeout()
     try:
         workspace = task_agent.ensure_workspace(
-            task_agent.workspace_for(str(job.get("project_id") or "")))
+            task_agent.workspace_for(str(job.get("project_id") or ""), member_key))
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
         binary = task_agent.resolve_binary()
@@ -579,11 +597,11 @@ def run_task(job: dict[str, Any],
     # commit has been materialized. Fatal if it fails — an agent spawned without the link writes its
     # transcript outside the repository, so the conversation is silently lost from that task on.
     try:
-        task_agent.link_transcript(workspace)
+        task_agent.link_transcript(workspace, member_key)
     except (Exception, SystemExit) as exc:
         return failed(f"could not prepare the agent's transcript directory: {exc}")
 
-    resume = task_agent.resumable_session(workspace, job.get("resume_session_id"))
+    resume = task_agent.resumable_session(workspace, job.get("resume_session_id"), member_key)
     if resume.session_id:
         _publish_safely(sink, "task.session_resumed", session_id=resume.session_id)
     elif resume.reason:
@@ -767,13 +785,21 @@ def _run_and_report(state: Any, job: dict[str, Any], capacity: Any = None) -> No
     """One claimed task, start to terminal report. Guarded so no single task can end the loop.
 
     The workspace reservation around it exists because a provider may now run several tasks at once
-    (`GRID_MAX_TASKS`). A workspace belongs to a PROJECT and persists between that project's tasks,
-    and preparing one runs `reset --hard` and `clean` across it — so two supervisors inside one
-    workspace is not a confusing log, it is one agent's work being deleted underneath it mid-run.
+    (`GRID_MAX_TASKS`). A workspace belongs to a **(project, member) pair** and persists between
+    that pair's tasks, and preparing one runs `reset --hard` and `clean` across it — so two
+    supervisors inside one workspace is not a confusing log, it is one agent's work being deleted
+    underneath it mid-run.
 
-    The relay's `tasks_one_active_per_project` unique index means this cannot happen. It is checked
-    anyway because the two failures are not comparable: refusing a task the relay will hand to
-    someone else costs a lease TTL, and being wrong once about the invariant costs the work.
+    Keyed on the pair since ADR 0033 D-g, and that is the correction rather than a tidy-up. It used
+    to key on the project alone, justified by the relay's `tasks_one_active_per_project` index —
+    which ADR 0033 replaces with a per-member one. Left alone, this would refuse the second member's
+    task in a project the moment concurrency is switched on, and refuse it with NO terminal report
+    by design: the task sits `running` for a lease TTL, is reclaimed, and can be refused again,
+    reaching `retries_exhausted` on a provider that had capacity the whole time.
+
+    The relay's index still makes a repeat of the SAME pair unexpected. It is checked anyway because
+    the two failures are not comparable: refusing a task the relay will hand to someone else costs a
+    lease TTL, and being wrong once about the invariant costs the work.
     """
     task_id = str(job.get("task_id") or "")
     if not task_id:
@@ -784,57 +810,68 @@ def _run_and_report(state: Any, job: dict[str, Any], capacity: Any = None) -> No
         return
 
     project_id = str(job.get("project_id") or "")
-    if not _reserve_workspace(project_id):
+    member_key = str(job.get("member_key") or "")
+    if not _reserve_workspace(project_id, member_key):
         # DELIBERATELY no terminal report, the same policy as a result that could not be pushed:
         # terminal is the one state nothing retries, and nothing has been done. Left `running`, its
         # lease lapses and the relay hands it to a provider that can actually run it.
         _warn(f"refusing task {task_id}: this provider is already running a task in project "
-              f"{project_id}'s workspace, and two agents in one workspace would destroy each "
-              f"other's work. No terminal state is reported, so the task's lease lapses and the "
-              f"relay reclaims it. The relay is supposed to make this impossible — if it recurs, "
-              f"its one-active-task-per-project index is not holding.")
+              f"{project_id}'s workspace for member {member_key}, and two agents in one workspace "
+              f"would destroy each other's work. No terminal state is reported, so the task's "
+              f"lease lapses and the relay reclaims it. The relay is supposed to make this "
+              f"impossible — if it recurs, its one-active-task-per-member index is not holding. "
+              f"Two DIFFERENT members in this project are fine and are not refused here.")
         return
     try:
         _supervise_one_task(state, job, task_id, capacity)
     finally:
         # In a `finally`, and unconditional: a supervisor that raised on its way out must not take
-        # the project's workspace with it, or one bad task locks that project out of this provider
-        # for the life of the process.
-        _release_workspace(project_id)
+        # the workspace with it, or one bad task locks that member out of that project on this
+        # provider for the life of the process.
+        _release_workspace(project_id, member_key)
 
 
-# The projects this process is running a task in, so two workers can never share a workspace. A set
-# rather than a lock per project: the collection is tiny, it is only ever touched at the two ends of
-# a task, and a dict of locks would need its own lock to grow safely anyway.
-_WORKSPACES_IN_USE: set[str] = set()
+# The (project, member) pairs this process is running a task in, so two workers can never share a
+# workspace. A set rather than a lock per pair: the collection is tiny, it is only ever touched at
+# the two ends of a task, and a dict of locks would need its own lock to grow safely anyway.
+#
+# The PAIR since ADR 0033 D-g, because that is what a workspace is. Keyed on the project alone, this
+# refused the second member's task in a project the moment concurrency was switched on.
+_WORKSPACES_IN_USE: set[tuple[str, str]] = set()
 _WORKSPACES_LOCK = threading.Lock()
 
 
-def _reserve_workspace(project_id: str) -> bool:
-    """Take this project's workspace for the caller. False means another worker already has it.
+def _reserve_workspace(project_id: str, member_key: str) -> bool:
+    """Take this (project, member) workspace for the caller. False means a worker already has it.
 
-    An empty project id reserves nothing and always succeeds: `run_task` refuses such a job with a
-    readable message of its own, and there is no workspace to protect.
+    Two different members of one project reserve two different workspaces and never collide — which
+    is the whole of the re-key, and is what stops a provider running two members' tasks from
+    refusing the second one into `retries_exhausted`.
+
+    An empty project id or member key reserves nothing and always succeeds: `run_task` refuses such
+    a job with a readable message of its own, and there is no workspace to protect. Reserving
+    `(project_id, "")` instead would make a SECOND keyless task collide with the first and take the
+    silent no-report path above, replacing a refusal the user can read with one they cannot.
     """
-    if not project_id:
+    if not project_id or not member_key:
         return True
     with _WORKSPACES_LOCK:
-        if project_id in _WORKSPACES_IN_USE:
+        if (project_id, member_key) in _WORKSPACES_IN_USE:
             return False
-        _WORKSPACES_IN_USE.add(project_id)
+        _WORKSPACES_IN_USE.add((project_id, member_key))
         return True
 
 
-def _release_workspace(project_id: str) -> None:
-    """Give the project's workspace back. `discard`, so releasing twice is not an error."""
-    if not project_id:
+def _release_workspace(project_id: str, member_key: str) -> None:
+    """Give the workspace back. `discard`, so releasing twice is not an error."""
+    if not project_id or not member_key:
         return
     with _WORKSPACES_LOCK:
-        _WORKSPACES_IN_USE.discard(project_id)
+        _WORKSPACES_IN_USE.discard((project_id, member_key))
 
 
 def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity: Any) -> None:
-    """`_run_and_report`'s body, with this project's workspace already reserved for it."""
+    """`_run_and_report`'s body, with this member's workspace on this project already reserved."""
     publisher = _publisher_for(state, task_id, job)
     remote = _git_remote(state, job)
     landed = True
@@ -1002,7 +1039,8 @@ def _tree_beat(job: dict[str, Any], publisher: Any) -> Callable[[], None] | None
     try:
         from . import task_tree
 
-        workspace = task_agent.workspace_for(str(job.get("project_id") or ""))
+        workspace = task_agent.workspace_for(
+            str(job.get("project_id") or ""), str(job.get("member_key") or ""))
         return task_tree.WorkspaceTree(workspace, publisher).beat
     except (Exception, SystemExit) as exc:
         _warn(f"could not set up workspace tree snapshots for task {job.get('task_id')} ({exc!r}); "
@@ -1083,11 +1121,19 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         return outcome, True
 
     try:
-        workspace = task_agent.workspace_for(str(job.get("project_id") or ""))
+        # The same pair `run_task` built its workspace from, and reached only when the agent was
+        # SPAWNED — so `workspace_for` has already accepted both segments once on this path, and a
+        # hostile one would have failed the task before any of this ran.
+        member_key = str(job.get("member_key") or "")
+        workspace = task_agent.workspace_for(str(job.get("project_id") or ""), member_key)
         commit = task_repo.commit_and_push(
             workspace, url=remote.url, token=remote.token,
             branch=str(job.get("branch") or ""),
             message=f"task {job.get('task_id')} ({outcome.state})",
+            # Only THIS member's conversation is staged (ADR 0033 D-g). Passed as a built path
+            # rather than as a key, so `task_repo` needs no copy of the path-segment rule and the
+            # containment check is `relative_to` refusing.
+            transcript=task_agent.transcript_dir(workspace, member_key),
             # Who asked for this task (ADR 0033 D-m). Straight off the claim payload and NOT
             # coerced here: `identity_or_default` is the boundary, and it is the one place that
             # knows git's rules — an empty name is a refusal, a NUL never reaches git at all.

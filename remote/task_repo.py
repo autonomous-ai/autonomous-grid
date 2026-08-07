@@ -379,8 +379,14 @@ def _split(output: str) -> list[str]:
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
-                    message: str, author: GitIdentity | None = None) -> str:
+                    message: str, transcript: Path, author: GitIdentity | None = None) -> str:
     """Commit whatever the agent left and push `branch`. Returns the result commit.
+
+    `transcript` is this member's conversation directory inside the worktree — what
+    `task_agent.transcript_dir(workspace, member_key)` returns, already built and already validated.
+    **Required, deliberately.** A defaulted one that a caller forgot would be issue 06's failure
+    exactly: the task reports `completed`, the push lands, and the conversation is simply never
+    committed — visible only when a different provider finds nothing to resume, tasks later.
 
     `author` is the project member the claim named (ADR 0033 D-m); the committer is `grid` whatever
     it says. `None` gives the pre-0033 identity on both — what an older relay's payload produces,
@@ -402,19 +408,46 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
     if not url:
         raise PushError("no git remote to push the result to")
 
+    # Computed BEFORE the block below, so a directory outside the worktree is refused in its own
+    # words rather than escaping the `except CheckoutError` as a bare `ValueError` from somewhere
+    # inside a commit. `relative_to` raising IS the containment check — deliberately, rather than a
+    # second copy of `task_agent`'s path-segment allowlist, which would be one more rule to keep in
+    # step and one more place to get it wrong.
+    try:
+        transcript_pathspec = transcript.relative_to(workspace).as_posix()
+    except ValueError:
+        raise PushError(
+            f"the transcript directory {transcript} is not inside the workspace {workspace}; "
+            f"refusing to commit, because the pathspec would reach outside the task's worktree"
+        ) from None
+
     try:
         _run(workspace, "add", "-A")
-        # The project's conversation, added explicitly and by force (ADR 0032, issue 06). `-f`
-        # because EVERY ignore source has to be overridden, not just the one we wrote: `.grid/` is
-        # excluded wholesale by `_ensure_repo`, and a tracked `.gitignore` in the user's own
-        # repository outranks that file anyway. `-A` within the pathspec so a memory file the agent
-        # deleted is staged as a deletion rather than lingering forever.
+        # THIS MEMBER's conversation, added explicitly and by force (ADR 0032 issue 06; per member
+        # since ADR 0033 D-g). `-f` because EVERY ignore source has to be overridden, not just the
+        # one we wrote: `.grid/` is excluded wholesale by `_ensure_repo`, and a tracked `.gitignore`
+        # in the user's own repository outranks that file anyway. `-A` within the pathspec so a
+        # memory file the agent deleted is staged as a deletion rather than lingering forever.
+        #
+        # Scoped to `.grid/agent/<member_key>` rather than all of `.grid/agent`, because after a
+        # promote every member's transcript is a tracked file in every other member's checkout and
+        # a wider pathspec would force-add all of them back on every task.
+        #
+        # ⚠️ It is NOT full containment, and must not be read as any. `add -A` above has ALREADY
+        # staged whatever the agent did to another member's transcript, because the exclude
+        # `_ensure_repo` writes has no say over files git already TRACKS — so the narrow pathspec
+        # here only ever gets to decide about UNTRACKED cross-member writes. The tracked-file leak
+        # is real, known, and deferred: closing it depends on merge semantics for `.grid/agent/`
+        # that arrive with integration (ADR 0033, issues 13-15). Pinned meanwhile by
+        # `test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the_reserved_directory`,
+        # which seeds a second member's transcript and asserts the leak, so closing it later is a
+        # deliberate flip of that assertion rather than a surprise.
         #
         # Guarded on existence because `git add` treats a pathspec matching nothing as an error, and
         # a task whose agent never started has no transcript directory to add — that outcome must
         # still commit and push, since a failed attempt is pushed too.
-        if (workspace / RESERVED_DIR / TRANSCRIPT_DIR).is_dir():
-            _run(workspace, "add", "-f", "-A", "--", f"{RESERVED_DIR}/{TRANSCRIPT_DIR}")
+        if transcript.is_dir():
+            _run(workspace, "add", "-f", "-A", "--", transcript_pathspec)
         # The ONE invocation here that writes an identity, so the author travels no further than it.
         _run(workspace, "commit", "--quiet", "--allow-empty", "-m", message, author=author)
         commit = _run(workspace, "rev-parse", "HEAD").strip()

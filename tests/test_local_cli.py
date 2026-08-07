@@ -24357,6 +24357,12 @@ def test_task_error_message_survives_a_body_that_blows_the_recursion_limit(monke
     assert "400" in relay._task_error_message(_Hostile())
 
 
+# A `member_key` shaped like the relay's — 32 hex characters, `sha256(user_id)` truncated. Since
+# ADR 0033 D-g a task's workspace belongs to a (project, member) pair and `run_task` REFUSES a claim
+# without one, so every job dict below needs it even when the test is about something else.
+_TASK_MEMBER_KEY = "9f2b" * 8
+
+
 def _child(argv, *, timeout=5.0, publish=None, translator=None):
     """`_run_child` with the arguments that do not vary, so the pump's own tests stay about the pump.
 
@@ -24391,7 +24397,8 @@ def test_run_task_reports_failure_rather_than_raising(monkeypatch, tmp_path):
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
     monkeypatch.setattr(tasks.subprocess, "Popen", _raise(OSError("no such binary")))
 
-    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "prompt": "x"})
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "member_key": _TASK_MEMBER_KEY,
+                              "prompt": "x"})
 
     assert outcome.state == "failed"
     assert "no such binary" in outcome.error
@@ -24409,7 +24416,8 @@ def test_run_task_times_out_into_a_failed_state(monkeypatch, tmp_path):
     monkeypatch.setattr(
         tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="claude", timeout=1)))
 
-    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "prompt": "x"})
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "member_key": _TASK_MEMBER_KEY,
+                              "prompt": "x"})
 
     assert outcome.state == "failed"
     assert "timed out" in outcome.error.lower()
@@ -24446,7 +24454,7 @@ def test_run_task_refuses_a_job_with_no_project(monkeypatch):
     """
     from remote import tasks
 
-    outcome = tasks.run_task({"task_id": "T1", "prompt": "x"})
+    outcome = tasks.run_task({"task_id": "T1", "member_key": _TASK_MEMBER_KEY, "prompt": "x"})
 
     assert outcome.state == "failed"
     assert "could not start the agent" in outcome.error
@@ -24566,7 +24574,8 @@ def test_run_task_without_a_publisher_still_works(monkeypatch, tmp_path):
     script.chmod(0o755)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: str(script))
 
-    outcome = tasks.run_task({"task_id": "T1", "project_id": "p1", "prompt": "solo"})
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p1", "member_key": _TASK_MEMBER_KEY,
+                              "prompt": "solo"})
 
     assert (outcome.state, outcome.error) == ("completed", None)
     assert outcome.output == "solo"

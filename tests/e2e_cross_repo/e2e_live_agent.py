@@ -165,10 +165,19 @@ def test_a_second_task_recalls_what_the_first_one_was_told(
 
     first_provider.stop()
 
-    workspace = live_workspace_root / "projects" / first["project_id"] / "workspace"
-    assert sorted((workspace / ".grid" / "agent").glob("*.jsonl")), (
-        f"the agent's transcript never landed in {workspace / '.grid' / 'agent'} — this is issue "
-        f"06's failure mode, and it is silent through every other signal")
+    # DISCOVERED, not derived. Since ADR 0033 D-g the workspace is
+    # `projects/<project_id>/<member_key>/workspace`, and `member_key` is `sha256(user_id)`
+    # truncated by the RELAY. Recomputing it here would make this test agree with a rule this
+    # repository does not own — the same reason `_harness.sweep_transcript_links` reads symlink
+    # targets instead of predicting their names. One member has run tasks in this project, so there
+    # is exactly one directory, and asserting that is itself worth doing.
+    members = sorted((live_workspace_root / "projects" / first["project_id"]).iterdir())
+    assert len(members) == 1, f"expected one member's workspace, found {members!r}"
+    workspace = members[0] / "workspace"
+    transcripts = sorted((workspace / ".grid" / "agent" / members[0].name).glob("*.jsonl"))
+    assert transcripts, (
+        f"the agent's transcript never landed in {workspace / '.grid' / 'agent' / members[0].name}"
+        f" — this is issue 06's failure mode, and it is silent through every other signal")
     shutil.rmtree(workspace)
 
     spawn_live_provider("B")

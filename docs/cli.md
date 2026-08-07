@@ -1011,15 +1011,24 @@ serves inference exactly as before, and the two loops are independent — neithe
 
 ### What a provider actually runs
 
-A claimed task first brings the project's workspace to the task's input commit: it fetches the task
+A claimed task first brings the workspace to the task's input commit: it fetches the task
 branch from the relay over the same git-over-HTTP front the client uses, and resets the workspace to
 it exactly, so a previous task's leftovers can never be mistaken for this task's input. **`git` must
 be installed on the provider.** The one directory spared is `.grid/`, which is the provider's own
 state — it is why nothing may be uploaded there, and it is excluded from the result commit too, with
-one exception: `.grid/agent/` holds the project's conversation and *is* committed (see
+one exception: `.grid/agent/<member>/` holds that member's conversation and *is* committed (see
 [Continuing a conversation](#continuing-a-conversation) below). If the input cannot be checked out
 the task fails **without spawning the agent** — an agent run against input that never arrived
 produces a confidently wrong answer.
+
+**A workspace belongs to a project *and a member*, not to a project alone** —
+`<root>/projects/<project_id>/<member>/workspace`. A project can have several people in it, and
+bringing a workspace to a task's input starts with `reset --hard` and `clean -ffdx`: sharing one
+directory between two members would mean each one's task wiped the other's, and it is what keeps
+their conversations apart, since Claude Code derives a session's transcript directory from the
+working directory. The relay tells the provider which member a task belongs to on the claim; a
+provider that is not told **refuses to run the task** rather than guessing, because a guess would
+put the conversation somewhere the next task never looks.
 
 When the agent exits, the provider commits the workspace and pushes `task/<id>` — for a failed run
 as well as a successful one — and reports the commit it pushed. The relay checks that against the
@@ -1080,10 +1089,10 @@ keeps the workers it did start.
 > ⚠️ **Anything above 1 is unverified.** No value greater than 1 has been run against a real relay,
 > and the specific unknown is **two Claude Code children sharing one `CLAUDE_CONFIG_DIR`** — the
 > issue-01 spike listed it as an open question and never measured it. The parts that can be reasoned
-> about hold: workspaces are per project and the relay allows only one active task per project, so
-> two concurrent tasks are always in different directories. What has not been observed is the agent
-> itself under concurrency. Raise this only on a provider you can watch, and expect to be the first
-> to find out.
+> about hold: a workspace belongs to a (project, member) pair, and the relay allows only one active
+> task per project, so two concurrent tasks are always in different directories. What has not been
+> observed is the agent itself under concurrency. Raise this only on a provider you can watch, and
+> expect to be the first to find out.
 
 The other bound is the subscription itself, and nobody configures it. Every agent child a provider
 spawns draws on the same Claude subscription, so that subscription's rate limit — not memory, not
@@ -1136,11 +1145,15 @@ starting cold, and they do so even when a different provider serves them.
 
 The mechanism is the repository. Claude Code keeps a session's transcript — and the agent's own
 `memory/` — in a folder named after its working directory, and it writes through a symlink, so the
-provider points that folder at `.grid/agent/` inside the project's workspace. The transcript is then
-carried by the ordinary result commit, with no separate synchronization step: a provider that has
-done nothing but clone the repository has the conversation the moment it checks the task out. This
-is why every provider must agree on `GRID_TASK_ROOT` — the folder's name is derived from the
-*absolute* path, so a different root is a different conversation.
+provider points that folder at `.grid/agent/<member>/` inside that member's workspace. The
+transcript is then carried by the ordinary result commit, with no separate synchronization step: a
+provider that has done nothing but clone the repository has the conversation the moment it checks
+the task out. This is why every provider must agree on `GRID_TASK_ROOT` — the folder's name is
+derived from the *absolute* path, so a different root is a different conversation.
+
+A conversation belongs to one member, so a follow-up task continues **your own** and never a
+colleague's. It is not private, though: the transcript travels in the ordinary commit, so once a
+branch has been promoted and merged, everyone working in the project has a copy of everyone's.
 
 Two consequences worth knowing:
 
@@ -1265,7 +1278,7 @@ The environment variables that tune a provider, all optional:
 |---|---|---|
 | `GRID_TASKS` | off | `1` to claim tasks at all |
 | `GRID_MAX_TASKS` | `1` | how many tasks this provider runs at once. **Anything above 1 is unverified** — two Claude Code children sharing one config directory has never been measured (see [How much a provider takes on](#how-much-a-provider-takes-on)). No upper limit is imposed: the ceiling that actually binds is the provider's own Claude subscription, which is read at runtime rather than guessed at. A value that is not a positive whole number falls back to `1` and says so |
-| `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
+| `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree (`<root>/projects/<project_id>/<member>/workspace`). **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
 | `GRID_TASK_PERMISSION_MODE` | `acceptEdits` | any mode `claude --permission-mode` accepts, **except `bypassPermissions` while the sandbox is on** — the provider refuses that combination. Measured: with that mode the agent reads files outside its workspace even with the whole policy in force, because the `Read` tool runs inside Claude Code, which the sandbox does not confine |
 | `GRID_TASK_SANDBOX` | on | `0` runs agents **unconfined** — no filesystem or network confinement, and the Claude Code version check is skipped with it |

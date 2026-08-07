@@ -103,10 +103,14 @@ _DENIED_ENV_NAMES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # built on a proxy this shaky would refuse working providers on a rule that cannot be defended.
 # What an operator needs here is the clue, printed where they are already looking when tasks fail.
 #
-# `/var/grid/projects/<uuid>/workspace` is about 65 characters and multi-membership (issue 11) adds
-# roughly 16 more, so nothing this design produces is near it; this is for the operator who moved the
-# root. Not applied off macOS: bubblewrap does not pass a profile this way, and D-n already requires
-# the Linux backend to be re-measured on the fleet rather than assumed to behave like seatbelt.
+# `/var/grid/projects/<uuid>/<member_key>/workspace` is **98** characters — 65 for the pre-issue-11
+# path plus 33 for the separator and the 32-hex key (ADR 0033 D-g). Counted rather than estimated,
+# because an earlier version of this comment said "roughly 16 more" and the difference is the whole
+# margin: 98 leaves 22 characters before the warning, so an operator who moves the root more than
+# that much deeper starts seeing it. Still inside the threshold by design, and the threshold stays a
+# warning rather than becoming a refusal. Not applied off macOS: bubblewrap does not pass a profile
+# this way, and D-n already requires the Linux backend to be re-measured on the fleet rather than
+# assumed to behave like seatbelt.
 WORKSPACE_PATH_WARNING_CHARS = 120
 
 
