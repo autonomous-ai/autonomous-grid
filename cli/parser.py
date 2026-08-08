@@ -582,7 +582,8 @@ def _add_project(sub) -> None:
             "anything.\n\n"
             "It is also how an application notices the project changed without running `git fetch`: "
             "`main` moves on a promote or an import, and each member's branch moves when their work "
-            "settles, integrates, or is committed."),
+            "settles, when an integration lands, or when they commit. An integration that "
+            "conflicts moves nothing — it shows up as a held task slot instead."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     status.add_argument("project_id", help="Project id from `grid project list`.")
     status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")

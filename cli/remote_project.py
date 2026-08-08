@@ -415,8 +415,9 @@ def _project_status(args: argparse.Namespace) -> int:
     used as a query. "What holds my slot" meant attempting a create and reading the 409.
 
     It is also the change signal: `main_commit` moves on a promote or an import, and every member's
-    tip moves when their work settles, integrates or is committed — so an application watches this
-    instead of polling `git fetch`.
+    tip moves when their work settles, when a tier-1/2 integration lands, or when they commit — so
+    an application watches this instead of polling `git fetch`. A CONFLICTING integration moves no
+    ref at all and shows up as a held slot instead, which is why both are printed.
     """
     from remote import relay
 

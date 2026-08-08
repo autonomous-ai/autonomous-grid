@@ -992,9 +992,13 @@ def project_status(signaling_url: str, access_token: str,
     (attempt a create and read the 409). Both are reads now.
 
     It is also the project's **change signal**. `main_commit` moves on a promote or an import, and
-    each member's tip moves when a task of theirs settles, integrates or commits — so an application
-    notices either by diffing an oid it already holds, instead of polling `git fetch` against the
-    transport issue 16a exists to rescue.
+    each member's tip moves when a task of theirs settles, when a tier-1/2 integration lands, or
+    when they commit — so an application notices either by diffing an oid it already holds, instead
+    of polling `git fetch` against the transport issue 16a exists to rescue.
+
+    ⚠️ **A CONFLICTING integration moves no ref at all** — it queues a merge task — so the tips are
+    not the whole signal. `active_task` and each member's `active_task_id` are what change there,
+    and they are the ones that matter: that is the integration which can run for an hour.
     """
     return _task_oneshot(
         signaling_url, access_token, "GET",

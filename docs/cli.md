@@ -1039,7 +1039,12 @@ exactly when `integrate` refuses you.
 
 `grid project status` is also how an application notices the project changed without running
 `git fetch`: `main` moves on a promote or an import, and each member's branch moves when their work
-settles, integrates or is committed, so a changed commit id is the signal.
+settles, when an integration lands, or when they commit — so a changed commit id is the signal.
+
+One case is not a moved commit, and it is the one that runs longest: an integration that
+**conflicts** moves no ref at all, because it queues a merge task instead. That shows up as a held
+task slot — `active_task`, and the member's `active_task_id` — so an application watching only the
+commit ids would see nothing for the whole hour somebody is waiting on it.
 
 ### Committing without an agent
 
