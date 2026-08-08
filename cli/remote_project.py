@@ -31,6 +31,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_promote(args)
     if args.subcommand == "integrate":
         return _project_integrate(args)
+    if args.subcommand == "commit":
+        return _project_commit(args)
     if args.subcommand == "import":
         return _project_import(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
@@ -398,6 +400,72 @@ def _project_integrate(args: argparse.Namespace) -> int:
         # Where the branch was before. There is no revert, so somebody putting it back needs it —
         # and `grid project wip reset` is the command that takes it.
         print(f"was={previous}")
+    return 0
+
+
+def _project_commit(args: argparse.Namespace) -> int:
+    """Put a change into the project without running an agent (ADR 0033 D-j).
+
+    The answer to "the agent got it 90% right, let me fix the last line" — which at team scale is the
+    most frequent action of a working day, and which the rest of this design otherwise answers with a
+    whole agent run that may change the very line being fixed.
+
+    **Your own branch, so there is no member key to name**, exactly like integrate. The relay holds
+    your one task slot while it commits, which is what stops a commit landing under a task of yours
+    that is already running — so this is refused while you have one in flight, and the refusal names
+    it.
+
+    An executable bit is **kept** without being asked for: a file already in the project as
+    executable stays executable when you edit it, and a local file that is executable makes the
+    committed one executable too.
+    """
+    from remote import relay
+
+    from . import remote_task
+
+    # Read the files BEFORE resolving the grid, for `_task_create`'s reason: a typo in a filename
+    # should not first cost a credential lookup and a control-plane round trip to discover.
+    files = remote_task._collect_files(getattr(args, "file", None), mark_executable=True)
+    deletes = list(getattr(args, "delete", None) or ())
+    if not files and not deletes:
+        # Refused HERE as well as by the relay, because this one is answerable without a round trip
+        # and the message can name the flags rather than the wire fields.
+        raise SystemExit(
+            "Nothing to commit. Pass --file to write a file, --delete to remove one, or both.")
+
+    base, token, _label = _resolve(args)
+    answer = relay.commit_project(base, token, args.project_id,
+                                  message=args.message, files=files, deletes=deletes)
+
+    if _emit(args, answer):
+        return 0
+    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    commit = answer.get("commit")
+    branch = answer.get("branch") or "your WIP branch"
+    if not commit:
+        # A reply this command cannot read is NOT a commit — the same rule promote, integrate and
+        # import follow. Printing the success line by default is how promote once reported work as
+        # landed for a body a proxy had stripped, and the next thing somebody does on that belief is
+        # promote. There is no relay old enough to be a reason for leniency: commit is a new route,
+        # so every relay that has it sends the commit.
+        raise SystemExit(
+            f"The relay's answer to committing in project {args.project_id} did not say what it "
+            f"wrote, so this cannot be reported as a commit. "
+            f"`grid project commit {args.project_id} … --json` shows what it sent.")
+    print(f"{branch} is now at {commit}")
+    previous = answer.get("previous_commit")
+    if previous:
+        # There is no revert, and `grid project wip reset` is the way back — which takes exactly
+        # this. Left unsaid, undoing a mistyped commit means finding the old oid by hand.
+        print(f"was={previous}")
+    wrote = answer.get("files") or []
+    removed = answer.get("deletes") or []
+    if wrote:
+        print(f"wrote: {', '.join(str(path) for path in wrote)}")
+    if removed:
+        print(f"deleted: {', '.join(str(path) for path in removed)}")
+    print(f"\nRelease it with: grid project promote {args.project_id} "
+          f"{answer.get('member_key') or '<member-key>'}")
     return 0
 
 

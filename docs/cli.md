@@ -886,6 +886,8 @@ grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
 grid project wip reset     <project-id> <member-key> --commit <oid> [--grid <grid>] [--json]
 grid project promote       <project-id> <member-key> [--grid <grid>] [--json]
 grid project integrate     <project-id> [--grid <grid>] [--json]
+grid project commit        <project-id> -m <message> [--file <local[:dest]>]… [--delete <path>]…
+                                        [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
 ```
 
@@ -1009,6 +1011,41 @@ integration** and your branch is left alone. What no check can catch is a merge 
 The `main` a merge task merges is **pinned when you run `integrate`**. If somebody else promotes
 while your agent is working, your merge still succeeds — you simply integrate again to pick up their
 release. That is a second round, not lost work.
+
+### Committing without an agent
+
+`grid project commit` puts files into the project with **no agent, no provider and no model**. It is
+the answer to "the agent got it 90% right, let me fix the last line" — which, on a team, is the most
+frequent thing anyone does. The alternative is `grid task create --file`, which spends your one task
+slot and then runs an agent that may change the very line you are fixing.
+
+```
+grid project commit <project-id> -m "fix the loop bound" --file ./worker.py:src/worker.py
+grid project commit <project-id> -m "drop the dead module" --delete src/legacy.py
+```
+
+**It is not a way to push.** The write still goes through the grid, still lands on exactly one ref —
+your own WIP branch — and the grid still holds your one task slot while it does. So it is refused
+while you have a task in flight, and the refusal names that task. `main` is untouched: `promote` is
+still what releases work.
+
+It is always **your own** branch, so there is no member key to give, exactly as with `integrate` and
+for the same reason.
+
+**Executable bits look after themselves.** Editing a file the project already holds as executable
+keeps it executable — before this, re-uploading a shell script silently turned it into a plain file —
+and a local file that is executable is committed that way. Removing an executable bit is not
+expressible from the CLI; nothing on the wire can name a file *mode*, which is what makes it
+impossible to create a symlink or a submodule through this route.
+
+**`--delete` is checked.** The path must already be in your branch; one that is not there is
+**refused**, and nothing is committed. That is deliberate: git's own answer to deleting a file that
+does not exist is to report success and do nothing, so a typed path would otherwise leave you
+believing a file was gone. Deletes go through the same validator as uploads, so `.git/`, `.grid/`,
+`.claude/` and `.mcp.json` are as unreachable to a delete as they are to an upload.
+
+A path named as both a `--file` and a `--delete` is refused rather than resolved one way or the
+other, and a request naming neither never leaves the machine.
 
 `wip reset` moves a member's WIP branch back to a commit you name — the way out of the one state
 nothing else can undo. If a task's result is written into git but its completion is then interrupted,

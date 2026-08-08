@@ -23356,6 +23356,211 @@ def test_project_integrate_help_discloses_what_a_conflict_costs():
     assert "merge task" in help_text, "the help does not say a conflict becomes a merge task"
 
 
+def test_project_commit_posts_files_and_a_message_to_the_commit_route(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-j end to end through `cli.main`.
+
+    `grid project commit` is the answer to "the agent got it 90% right, let me fix the last line" —
+    the most frequent action of a working day, which the design otherwise answers with a paid agent
+    run. Like integrate and for the same forced reason, it names **no member key**: it commits onto
+    the caller's own WIP branch.
+    """
+    import base64
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "fix.py"
+    source.write_text("x = 2\n")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": ["fix.py"], "deletes": []})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "commit", "P1", "-m", "fix the last line",
+                   "--file", f"{source}:src/fix.py"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/commit")
+    assert seen["body"]["message"] == "fix the last line"
+    assert seen["body"]["files"] == [
+        {"path": "src/fix.py", "content_b64": base64.b64encode(b"x = 2\n").decode()}]
+    out = capsys.readouterr().out
+    assert "wip/def456" in out and "a" * 40 in out
+
+
+def test_project_commit_sends_the_executable_bit_only_to_set_it_never_to_clear_it(
+        monkeypatch, tmp_path, capsys):
+    """The wire carries a boolean, and this CLI is **set-only** (ADR 0033 D-j).
+
+    Absent means "keep whatever the project already has"; `false` means "make this a regular file".
+    Sending `false` for a local file that merely lost its bit — a zip, a Windows share, a `curl -O` —
+    would strip it server-side, which is the exact defect the field exists to fix.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    script = tmp_path / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    plain = tmp_path / "notes.md"
+    plain.write_text("hi\n")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": ["build.sh", "notes.md"], "deletes": []})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "commit", "P1", "-m", "m",
+                   "--file", str(script), "--file", str(plain)])
+
+    assert rc == 0
+    by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
+    assert by_path["build.sh"]["executable"] is True
+    # The key is ABSENT, not `False`. `"executable" not in` rather than `.get(...) is not False`,
+    # because those two are the difference between inheriting and stripping.
+    assert "executable" not in by_path["notes.md"], by_path["notes.md"]
+
+
+def test_task_create_does_not_send_the_executable_key(monkeypatch, tmp_path):
+    """`grid task create`'s wire shape is byte-identical to before this slice, and that is a ROLLOUT
+    constraint rather than tidiness.
+
+    `task_files.parse_files` refuses unknown keys, so a relay predating this release answers 422
+    rather than dropping the field — sending it here would break a command that works today against
+    every un-upgraded relay. Task uploads still stop stripping executable bits, because that half is
+    the relay reading its own base tree and needs nothing from this side.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    script = tmp_path / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    seen = {}
+
+    def handler(request):
+        if request.url.path.endswith("/projects"):
+            return httpx.Response(201, json={"id": "P1", "name": "default"})
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "create", "--prompt", "p", "--file", str(script)])
+
+    assert rc == 0
+    assert seen["body"]["files"] == [
+        {"path": "build.sh", "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], (
+        "task create's file entries gained a key an older relay would refuse")
+
+
+def test_project_commit_posts_deletes_and_refuses_an_empty_request_locally(
+        monkeypatch, tmp_path, capsys):
+    """`--delete` rides the same request as `--file`, and a request naming neither never leaves.
+
+    Refused locally as well as by the relay because this one is answerable without a round trip, and
+    the message can name the flags rather than the wire fields.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": [], "deletes": ["dead.py"]})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "commit", "P1", "-m", "drop it", "--delete", "dead.py"]) == 0
+    assert seen["body"]["deletes"] == ["dead.py"]
+    assert "files" not in seen["body"], "an empty files list was sent where the key should be absent"
+    assert "dead.py" in capsys.readouterr().out
+
+    seen.clear()
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "P1", "-m", "nothing"])
+    assert "--file" in str(caught.value) and "--delete" in str(caught.value)
+    assert seen == {}, "an empty commit was sent to the relay anyway"
+
+
+def test_project_commit_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A bare framework 404 means the route is not there, and "Not Found" reads as "the thing I
+    asked for is gone". Keyed on the bare body, so a REAL 404 from a relay that has the route still
+    shows its own words."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_text("x\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "P1", "-m", "m", "--file", str(source)])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_commit_does_not_call_a_reply_it_cannot_read_a_commit(monkeypatch, tmp_path):
+    """The same rule promote, integrate and import follow. Printing the success line by default is
+    how promote once reported work as landed for a body a proxy had stripped."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_text("x\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "branch": "wip/def456", "files": ["a.txt"]}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "P1", "-m", "m", "--file", str(source)])
+
+    assert "P1" in str(caught.value), caught.value
+
+
+def test_project_commit_shows_the_relays_own_words_when_a_task_is_running(monkeypatch, tmp_path):
+    """The 409 that matters day to day, and it is not the bare-404 hint: the relay holds the
+    caller's one task slot to make this write safe, so a task in flight refuses it — naming the
+    task, because an application cannot wait on one it has not been told the id of."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_text("x\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "member_has_active_task",
+        "message": "You already have an active task in project P1 (T7).",
+        "project_id": "P1", "task_id": "T7"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "P1", "-m", "m", "--file", str(source)])
+
+    assert "T7" in str(caught.value), caught.value
+
+
+def test_project_commit_help_says_it_is_not_a_push_and_that_deletes_are_checked():
+    """Two things a user has to meet before they need them: this does not lift the push ban, and a
+    delete of a path that is not there is REFUSED — because git's own answer is to report success
+    and do nothing, which is what somebody would otherwise assume happened."""
+    parser = cli.build_parser()
+    committer = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["commit"]
+    help_text = committer.format_help().lower()
+
+    assert "task slot" in help_text, "the help does not say it holds your task slot"
+    assert "refused" in help_text and "not there" in help_text, (
+        "the help does not say a delete of a missing path is refused")
+    assert "main" in help_text, "the help does not say this stops short of main"
+
+
 def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):
     """`_task_error_message` reads a `detail` that is an OBJECT (ADR 0033 D-l), and still reads one
     that is a plain string — every endpoint this ADR did not touch still sends one, and issue 19 is

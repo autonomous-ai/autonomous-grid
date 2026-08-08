@@ -910,6 +910,38 @@ def integrate_project(signaling_url: str, access_token: str,
         missing_route_hint=_OLD_RELAY)
 
 
+def commit_project(signaling_url: str, access_token: str, project_id: str, *,
+                   message: str, files: list[dict[str, Any]] | None = None,
+                   deletes: list[str] | None = None) -> dict[str, Any]:
+    """Commit files onto the CALLER's WIP branch without running an agent (``POST …/{id}/commit``).
+
+    ADR 0033 D-j, and the thing that makes the rest of this design usable day to day: without it the
+    only route from "I edited a file on my machine" to "it is in the project" is `grid task create
+    --file`, which spends the member's one task slot and then runs an agent that may change the very
+    line being fixed.
+
+    **Not a relaxation of the push ban.** The write still goes through the relay, still lands on
+    exactly one ref, and the relay still holds the member's task slot while it does — so committing
+    is refused while they have a task in flight, exactly as integrating is, and the refusal names it.
+
+    **No member key**, for `integrate_project`'s reason: the slot the relay holds is keyed on the
+    caller's own identity, so there is no coherent way to commit onto somebody else's branch.
+
+    The keys are omitted when empty rather than sent as `[]`, matching `create_task`: a relay that
+    predates this route answers a bare 404 either way, but a relay that predates only `deletes` must
+    not see a key it would refuse.
+    """
+    body: dict[str, Any] = {"message": message}
+    if files:
+        body["files"] = files
+    if deletes:
+        body["deletes"] = deletes
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/commit",
+        json=body, missing_route_hint=_OLD_RELAY)
+
+
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
     """Read one task back (``GET /relay/v1/tasks/{id}``)."""
     return _task_oneshot(

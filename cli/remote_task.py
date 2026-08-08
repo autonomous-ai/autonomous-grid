@@ -73,7 +73,7 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
     return _task_get(args)
 
 
-def _collect_files(specs: list[str] | None) -> list[dict]:
+def _collect_files(specs: list[str] | None, *, mark_executable: bool = False) -> list[dict]:
     """Read each `--file LOCAL[:DEST]` into the wire shape, or exit with a sentence naming the file.
 
     Every refusal here is local and happens BEFORE the relay is contacted. Two of them cannot be
@@ -90,6 +90,20 @@ def _collect_files(specs: list[str] | None) -> list[dict]:
     Path RULES — `..`, `.git/`, absolute — are deliberately NOT re-implemented here. The relay is
     the sole authority on them, and a second copy in another repo drifts silently: each side keeps
     working, just not identically, and the gap is a path one accepts and the other does not.
+
+    `mark_executable` sends the `executable` boolean (ADR 0033 D-j), and it is **set-only**: `True`
+    for a local file with an exec bit, and the key OMITTED otherwise. Never `False`, because absent
+    means "inherit the mode already in the project" and `False` means "make this a regular file" —
+    so a local copy that lost its bit (a zip, a Windows share, a `curl -O`) would silently strip the
+    bit on the server, which is the exact defect this field exists to fix. Clearing one is therefore
+    not expressible from this CLI; the relay's API takes `false` if it is ever wanted.
+
+    **Off by default, and that is a rollout constraint rather than a taste.** `grid task create`
+    calls this with no flag, so its wire shape is byte-identical to before — and it has to be:
+    `task_files.parse_files` refuses unknown keys, so a relay predating this release answers 422
+    rather than dropping the field, and sending it from task create would break a command that works
+    today. Task uploads still stop stripping executable bits, because that half is the relay reading
+    the base tree and needs nothing from here.
     """
     if not specs:
         # No key at all rather than an empty list: a relay predating the git plane must not receive
@@ -132,8 +146,33 @@ def _collect_files(specs: list[str] | None) -> list[dict]:
             raise SystemExit(
                 f"The upload exceeds the {MAX_TOTAL_BYTES}-byte total limit.")
 
-        files.append({"path": dest, "content_b64": base64.b64encode(content).decode()})
+        entry = {"path": dest, "content_b64": base64.b64encode(content).decode()}
+        if mark_executable and _is_executable(source):
+            entry["executable"] = True
+        files.append(entry)
     return files
+
+
+def _is_executable(source: Path) -> bool:
+    """Whether this local file carries an execute bit.
+
+    `os.access(X_OK)` is deliberately NOT used: it answers "could *this process* execute it", which
+    folds in ownership, ACLs and the mount's `noexec` — none of which say anything about the mode
+    that belongs in the project's history. The question here is what git would record, which is the
+    stat mode.
+
+    ANY of the three bits, matching git's own rule: git stores one executable mode, so a file that is
+    executable for its owner and nobody else is still `100755` once committed.
+    """
+    import stat
+
+    try:
+        return bool(source.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+    except OSError:
+        # Unreadable metadata on a file whose CONTENT was just read successfully. Not worth failing
+        # the command over: the mode is then whatever the project already has, which is the same
+        # answer a caller who says nothing gets.
+        return False
 
 
 def _split_spec(spec: str) -> tuple[str, str]:

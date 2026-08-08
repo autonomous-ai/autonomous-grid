@@ -569,6 +569,43 @@ def _add_project(sub) -> None:
     integrate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     integrate.set_defaults(handler=cmd_remote_project)
 
+    # `commit` — a change goes in without an agent (ADR 0033 D-j, issue 20). Like integrate it takes
+    # NO member key: the relay holds the caller's own task slot while it writes.
+    committer = project_sub.add_parser(
+        "commit",
+        help="Put files into the project without running an agent",
+        description=(
+            "Commit files onto your own WIP branch, with no agent and no provider.\n\n"
+            "This is the answer to 'the agent got it 90% right, let me fix the last line'. The "
+            "alternative is `grid task create --file`, which spends your one task slot and then "
+            "runs an agent that may change the very line you are fixing.\n\n"
+            "It is always YOUR branch, so there is no member key to give. You still cannot push to "
+            "the project — the write goes through the grid, lands on exactly one ref, and holds "
+            "your one task slot while it does. So it is refused while you have a task in flight, "
+            "and the refusal names that task.\n\n"
+            "Executable bits look after themselves. Editing a file the project already has as "
+            "executable keeps it executable, and a local file that is executable is committed that "
+            "way. (Removing an executable bit is not expressible here.)\n\n"
+            "--delete takes a path already in your branch. A path that is not there is REFUSED "
+            "rather than quietly ignored, because git's own answer to deleting a file that does "
+            "not exist is to report success and do nothing.\n\n"
+            "Nothing reaches `main`: promote is still what releases work."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    committer.add_argument("project_id", help="Project id from `grid project list`.")
+    committer.add_argument(
+        "-m", "--message", required=True, metavar="MSG",
+        help="What this commit did. Required, like git's own.")
+    committer.add_argument(
+        "--file", action="append", metavar="LOCAL[:DEST]", default=None,
+        help="A file to write, repeatable. DEST defaults to the file's name. Same form as "
+             "`grid task create --file`.")
+    committer.add_argument(
+        "--delete", action="append", metavar="PATH", default=None,
+        help="A path in your branch to remove, repeatable. Refused if it is not there.")
+    committer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    committer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    committer.set_defaults(handler=cmd_remote_project)
+
     # `import` — how a project that has no commits gets a trunk at all (ADR 0033 D-f, issue 16b).
     # Since this slice a member cannot push `main` themselves, so this is the only way in.
     importer = project_sub.add_parser(
