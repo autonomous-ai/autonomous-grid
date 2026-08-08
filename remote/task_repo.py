@@ -26,6 +26,7 @@ Two properties are worth stating because they are easy to lose:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -48,6 +49,18 @@ FETCH_MARKER = "grid-task-fetch"
 # The project's trunk, matching the relay's. Only ever the initial branch of a fresh workspace repo;
 # the task branch is what is actually checked out.
 DEFAULT_BRANCH = "main"
+# Where the relay pins what a MERGE TASK has to merge (ADR 0033 D-e, issue 15). Duplicated from
+# grid-src's `task_repo.INTEGRATE_PREFIX` — the ref name is a wire contract, and this side both
+# fetches it and refuses anything that is not one.
+#
+# The refspec is `+<ref>:<ref>`, an IDENTITY mapping, so the local name is not a second lockstep
+# value: the relay writes this ref name into the prompt the agent reads, and that string has to be
+# the one in the workspace.
+INTEGRATE_PREFIX = "refs/integrate/"
+# What a merge ref may contain. The relay builds these from a uuid4, so this is deliberately wider
+# than that and still narrow enough to keep a leading `-`, a space, a `..` traversal and an empty id
+# out of a git argv.
+_INTEGRATE_REF = re.compile(re.escape(INTEGRATE_PREFIX) + r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Wall-clock ceiling for one git invocation. A fetch from a local bundle is milliseconds; this stops
 # a wedged git (a stale `index.lock` from a killed previous task) from consuming the task's whole
 # deadline before the agent ever starts.
@@ -160,6 +173,30 @@ def identity_or_default(name: str | None, email: str | None) -> GitIdentity:
         return DEFAULT_IDENTITY
     clean_name = _clean(name) or clean_email.split("@")[0] or DEFAULT_IDENTITY.name
     return GitIdentity(clean_name, clean_email)
+
+
+@dataclass(frozen=True)
+class Pushed:
+    """What `commit_and_push` landed, and what the agent left behind unresolved.
+
+    `unresolved` is a record rather than a separate query the caller makes for a reason this repo has
+    already paid for once: a fact that has to be read at ONE moment — before `git add -A`, which
+    destroys it — and a caller that forgot to ask would silently lose the guard. The same rule
+    `transcript` follows on `commit_and_push`, which is required rather than defaulted for exactly
+    that reason.
+
+    Empty on every ordinary task, and on a merge the agent really did resolve.
+
+    **`unchecked` is not the same fact as an empty `unresolved`, and collapsing the two would reopen
+    the hole.** The check can fail on its own — a git blip, or `ls-files` exceeding its 5s budget on
+    a large repository — and a caller handed `()` for that could not tell "this merge is clean" from
+    "nobody looked". It carries git's own words when that happens, so the caller can disclose it
+    rather than certify a merge nothing examined.
+    """
+
+    commit: str
+    unresolved: tuple[str, ...] = ()
+    unchecked: str = ""
 
 
 class CheckoutError(RuntimeError):
@@ -302,7 +339,7 @@ def _ensure_repo(workspace: Path) -> None:
 
 
 def materialize(workspace: Path, *, url: str, token: str, branch: str,
-                input_commit: str) -> None:
+                input_commit: str, merge_ref: str = "") -> None:
     """Bring `workspace` to exactly `input_commit` on `branch`. Raises `CheckoutError` on any failure.
 
     Raising rather than returning a status is deliberate: the ONLY safe response to input that did
@@ -313,18 +350,47 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
     Fetched from the relay's smart-HTTP front rather than from a bundle (issue 05): the same
     repository the result is pushed back to, so the provider negotiates what it is missing instead
     of downloading the project's whole history per task.
+
+    `merge_ref` is a MERGE TASK's second ref (ADR 0033 D-e, issue 15): the trunk, pinned by the relay
+    at integrate and published as `refs/integrate/<task_id>`. Fetched here, before the agent is
+    spawned, because `child_env` hands the agent no grid credential at all and that must stay true —
+    the agent merges refs that are already local.
+
+    It is fetched onto the **identical local ref name**, which is the whole reason the local name is
+    not a cross-repo lockstep value: the relay names this ref in the prompt it writes, so an identity
+    refspec means the two repositories cannot disagree about it.
+
+    *Absent ⇒ nothing extra is fetched*, which is exactly the pre-integration behaviour: an old
+    relay's claim runs as an ordinary task rather than failing in a new way.
     """
     if not branch or not input_commit:
         raise CheckoutError("the claim gave no branch or input commit to check out")
     if not url:
         raise CheckoutError("the claim gave no git remote to fetch the input from")
+    # BEFORE `_ensure_repo`, so a malformed value costs nothing and touches nothing. Validated at
+    # all because it arrives off the wire and ends up in a git argv: `_run` never goes through a
+    # shell, so the exposure is option confusion — `--upload-pack=…` read as a flag — rather than
+    # command injection, which is exactly the class this refuses cheaply.
+    #
+    # TERMINAL (a plain `CheckoutError`), never the retryable subclass: no provider can fix a
+    # malformed claim, and retrying it spends every attempt to reach `retries_exhausted`.
+    if merge_ref and not _INTEGRATE_REF.fullmatch(merge_ref):
+        raise CheckoutError(
+            f"the claim's merge_ref {merge_ref!r} is not a {INTEGRATE_PREFIX}<id> ref, so this "
+            f"provider will not hand it to git")
 
     _ensure_repo(workspace)
     try:
         _run(workspace, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
              token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+        if merge_ref:
+            # Its own invocation rather than a second refspec on the one above: a relay that has
+            # collected this ref early answers with a failure naming the ref, and combining them
+            # would lose the input fetch's success to the merge ref's failure.
+            _run(workspace, "fetch", "--quiet", url, f"+{merge_ref}:{merge_ref}",
+                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
-        # The ONE line in this function that talks to the relay, and so the only one whose failure
+        # The ONLY lines in this function that talk to the relay, and so the only ones whose failure
         # another provider might not repeat. Re-raised as the retryable subclass — see
         # `InputFetchError`. Everything above is validation and everything below is local, and both
         # stay terminal on purpose.
@@ -379,8 +445,10 @@ def _split(output: str) -> list[str]:
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
-                    message: str, transcript: Path, author: GitIdentity | None = None) -> str:
-    """Commit whatever the agent left and push `branch`. Returns the result commit.
+                    message: str, transcript: Path,
+                    author: GitIdentity | None = None) -> Pushed:
+    """Commit whatever the agent left and push `branch`. Returns the result commit and what the
+    agent left unresolved.
 
     `transcript` is this member's conversation directory inside the worktree — what
     `task_agent.transcript_dir(workspace, member_key)` returns, already built and already validated.
@@ -420,6 +488,29 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
             f"the transcript directory {transcript} is not inside the workspace {workspace}; "
             f"refusing to commit, because the pathspec would reach outside the task's worktree"
         ) from None
+
+    # BEFORE `add -A`, which is the only moment this fact exists (ADR 0033 D-e, issue 15).
+    #
+    # Measured on git 2.54.0: during a conflicted merge `git ls-files --unmerged` lists three stage
+    # entries per file, and `git add -A` clears them to ZERO — staging the conflict markers as if
+    # they were a resolution. `git commit` then succeeds where git itself would have refused, and
+    # what comes out is structurally a perfectly good merge commit. So the relay's ancestry check
+    # passes, the member's WIP branch fast-forwards, and a tree full of `<<<<<<<` becomes the base
+    # of their next task.
+    #
+    # The relay cannot make this check — the index is never pushed — so the provider is the only
+    # party that can, and only here.
+    #
+    # A check that could not RUN is carried as its own fact rather than as an empty result: the
+    # caller discloses it and lets the task complete, which is right — turning a git availability
+    # blip into a lost push would be worse than not checking — but it must not be able to read as
+    # "this merge is clean".
+    unresolved: tuple[str, ...] = ()
+    unchecked = ""
+    try:
+        unresolved = _unresolved_paths(workspace)
+    except _CouldNotCheck as exc:
+        unchecked = str(exc)
 
     try:
         _run(workspace, "add", "-A")
@@ -461,7 +552,54 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
              token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
         raise PushError(f"could not push {branch}: {exc}") from None
-    return commit
+    return Pushed(commit=commit, unresolved=unresolved, unchecked=unchecked)
+
+
+def _unresolved_paths(workspace: Path) -> tuple[str, ...]:
+    """Paths git still holds unmerged — conflicts the agent never resolved.
+
+    **The INDEX decides, not the file content, and an earlier version of this got that wrong.** It
+    looked for git's `<<<<<<<` markers in the worktree and treated an unmerged index as merely "not
+    `git add`ed". A `modify/delete` conflict destroys that reasoning: one side deletes a file, the
+    other edits it, and git leaves **no markers at all** — measured on 2.54.0, it writes the
+    surviving side's content verbatim and reports the conflict only through the index and its exit
+    status. An agent that did nothing then produced a structurally perfect two-parent merge commit
+    that passed the relay's ancestry check, and somebody's deletion was discarded in silence: the
+    exact failure ADR 0033 D-e exists to prevent, reached through a conflict type the check could not
+    see. Every non-textual conflict class was invisible the same way.
+
+    So the rule is git's own: `git commit` refuses while paths are unmerged, and this module's
+    `git add -A` is precisely what overrides that refusal. The merge prompt tells the agent to
+    `git add` or `git rm` every conflicted path, so a path still unmerged when it stops is a path
+    it did not decide about — whatever the bytes in the file happen to look like.
+
+    The accepted cost, stated so it is not rediscovered as a bug: an agent that edits a conflicted
+    file and stages nothing has its task failed, one run is wasted, and its work is still pushed for
+    the member to read. That is the cheap side of the trade against a deletion silently discarded,
+    permanently, with every other signal reading healthy.
+
+    `ls-files --unmerged` reports one line per STAGE (base, ours, theirs — and a modify/delete has
+    only two), so a path appears more than once; they are collapsed here.
+
+    Never raises. This runs on a path whose job is to preserve the agent's work, and a result that
+    could not be committed because a diagnostic failed would be strictly worse than one reported
+    unchallenged. The caller is told the check did not run rather than being handed a clean answer.
+    """
+    try:
+        listed = _run(workspace, "ls-files", "--unmerged", "-z",
+                      timeout=LS_FILES_TIMEOUT_SECONDS)
+    except CheckoutError as exc:
+        # NOT `()`, which would be indistinguishable from "checked, found nothing" — the caller has
+        # to be able to tell a clean merge from a check that never ran, or a git blip silently
+        # reopens the hole this function exists to close.
+        raise _CouldNotCheck(str(exc)) from None
+    # `<mode> <sha> <stage>\t<path>` — the path is everything after the first tab, so a path
+    # containing a space survives, and `-z` keeps one with a newline in it whole.
+    return tuple(sorted({entry.split("\t", 1)[1] for entry in listed.split("\0") if "\t" in entry}))
+
+
+class _CouldNotCheck(Exception):
+    """`ls-files` could not answer, so this result is neither clean nor known-bad."""
 
 
 def fetched_project(dest: Path) -> str | None:

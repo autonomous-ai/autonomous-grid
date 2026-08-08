@@ -5,6 +5,7 @@ Split out of `test_local_cli.py` rather than appended to it: these cover the two
 claim/run/report loop's own tests stay beside the rest of the task-loop suite.
 """
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1995,6 +1996,502 @@ def test_the_credential_is_not_replayed_to_a_redirect_target(tmp_path, monkeypat
     assert settings.get("http.followRedirects") == "false"
 
 
+def _publish_merge_target(remote, task_id, revision="main"):
+    """Put a `refs/integrate/<id>` in the relay's repo, as tier-3 integration does (ADR 0033 D-e).
+
+    The relay resolves `main` ONCE and pins it under this ref; the provider fetches the ref because
+    a bare oid is unfetchable — `uploadpack.allowAnySHA1InWant` is off. Written here with real git so
+    the fetch under test is a real fetch of a real ref.
+    """
+    ref = f"refs/integrate/{task_id}"
+    _git(remote.url, "update-ref", ref, _git(remote.url, "rev-parse", revision).stdout.strip())
+    return ref
+
+
+def test_a_merge_task_fetches_the_ref_it_must_merge_onto_the_same_name(tmp_path, monkeypatch):
+    """`merge_ref` on the claim (ADR 0033 D-e, issue 15), fetched BEFORE the agent is spawned.
+
+    The agent cannot fetch it itself and must never be able to: `child_env` hands it no grid
+    credential at all, and that is the property the whole confinement design rests on.
+
+    **Onto the IDENTICAL local name.** The refspec is `+<ref>:<ref>`, which is what keeps the local
+    ref name out of the cross-repo lockstep list — the ref the relay names in the merge prompt is the
+    ref that exists in the workspace, so there is no second literal for the two repos to disagree
+    about.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    ref = _publish_merge_target(remote, "T1")
+    pinned = _git(remote.url, "rev-parse", ref).stdout.strip()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
+                          input_commit=commit, merge_ref=ref)
+
+    assert _git(workspace, "rev-parse", ref).stdout.strip() == pinned, (
+        "the agent was told to merge a ref that is not in its workspace")
+
+
+def test_a_claim_with_no_merge_ref_fetches_nothing_extra(tmp_path, monkeypatch):
+    """*Absent ⇒ the provider merges nothing*, which is exactly the pre-integration behaviour — an
+    old relay's claim runs as an ordinary task rather than failing in a new way."""
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seen = _spy_on_git(monkeypatch)
+
+    task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
+                          input_commit=commit)
+
+    fetches = [argv for argv, _kw in seen if "fetch" in argv]
+    assert len(fetches) == 1, fetches
+
+
+def test_a_merge_ref_that_is_not_one_is_refused_before_any_git_runs(tmp_path, monkeypatch):
+    """The value comes off the wire and ends up in a git argv, so it is validated at the boundary.
+
+    `_run` never goes through a shell, so the exposure is option confusion rather than command
+    injection — a leading `-` would be read by `git fetch` as a flag. That is exactly the class this
+    refuses cheaply, and it is the same reasoning `resolve_commit` records on the relay side.
+
+    TERMINAL rather than retryable: no provider can fix a malformed claim, and retrying it spends
+    every attempt to arrive at `retries_exhausted`, which does not even carry the real reason.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    for bad in ("--upload-pack=touch /tmp/pwned", "refs/heads/main", "-x", "refs/integrate/a b",
+                "refs/integrate/../heads/main", "refs/integrate/"):
+        seen = _spy_on_git(monkeypatch)
+        with pytest.raises(task_repo.CheckoutError) as raised:
+            task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
+                                  input_commit=commit, merge_ref=bad)
+        assert not isinstance(raised.value, task_repo.InputFetchError), (
+            f"{bad!r} was treated as a retryable fetch failure")
+        assert not seen, f"{bad!r} reached git before it was refused: {seen}"
+
+
+def test_a_merge_ref_that_cannot_be_fetched_is_retryable_like_the_input(tmp_path):
+    """The same split `materialize` already makes at the network (ADR 0033 issue 16a).
+
+    A relay at its git concurrency limit, a dropped connection, a ref the retention sweep collected
+    early: all facts about THIS attempt. Reporting `failed` would be terminal, and terminal is
+    precisely the state nothing retries.
+    """
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    with pytest.raises(task_repo.InputFetchError):
+        task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
+                              input_commit=commit, merge_ref="refs/integrate/never-published")
+
+
+def test_the_loop_hands_the_merge_ref_from_the_claim_to_the_checkout(tmp_path, monkeypatch, agent):
+    """The wiring, asserted rather than assumed. A `merge_ref` the claim carried and `run_task`
+    dropped would leave the agent merging nothing — and the relay would then refuse its result as a
+    failed integration, blaming a run that did exactly what it was told."""
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    ref = _publish_merge_target(remote, "T1")
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    passed = {}
+    real = task_repo.materialize
+
+    def spy(workspace, **kwargs):
+        passed.update(kwargs)
+        return real(workspace, **kwargs)
+
+    monkeypatch.setattr(task_repo, "materialize", spy)
+
+    tasks.run_task({**_job_with_input(commit), "merge_ref": ref}, remote=remote)
+
+    assert passed.get("merge_ref") == ref, passed
+
+
+_BASE_LINES = "".join(f"line{n}\n" for n in range(1, 10))
+_OURS = _BASE_LINES.replace("line5\n", "OURS-5\n")
+_THEIRS = _BASE_LINES.replace("line5\n", "THEIRS-5\n")
+
+
+def _conflicted_remote(tmp_path, task_id="T1"):
+    """A relay repo where `task/<id>` and `refs/integrate/<id>` changed the SAME line.
+
+    The tier-3 state, built with real git: neither side can be taken automatically, so a merge in the
+    workspace stops with conflicts and leaves `MERGE_HEAD` — which is what the provider's own commit
+    then turns into a two-parent commit. Returns `(remote, input_commit, merge_ref, pinned)`.
+    """
+    from remote.task_repo import GitRemote
+
+    seed = tmp_path / f"seed-{task_id}"
+    seed.mkdir()
+    _git(seed, "init", "-q", "-b", "main", ".")
+    (seed / "shared.txt").write_text(_BASE_LINES)
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "base")
+    _git(seed, "checkout", "-q", "-b", f"task/{task_id}")
+    (seed / "shared.txt").write_text(_OURS)
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "ours")
+    _git(seed, "checkout", "-q", "main")
+    (seed / "shared.txt").write_text(_THEIRS)
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "theirs")
+
+    bare = tmp_path / f"origin-{task_id}.git"
+    _git(tmp_path, "clone", "--bare", "-q", str(seed), str(bare))
+    ref = f"refs/integrate/{task_id}"
+    pinned = _git(bare, "rev-parse", "main").stdout.strip()
+    _git(bare, "update-ref", ref, pinned)
+    return (GitRemote(url=str(bare), token="tok"),
+            _git(bare, "rev-parse", f"task/{task_id}").stdout.strip(), ref, pinned)
+
+
+def _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref):
+    """Materialize a merge task and run the merge the agent is told to run, leaving it conflicted."""
+    from remote import task_repo
+
+    task_repo.materialize(workspace, url=remote.url, token=remote.token, branch="task/T1",
+                          input_commit=input_commit, merge_ref=merge_ref)
+    # Exits 1 — that is the case. `_git` would raise on it, so this one is run directly.
+    subprocess.run(["git", "-C", str(workspace), "merge", "--no-edit", merge_ref],
+                   capture_output=True)
+
+
+def test_a_resolved_merge_is_committed_with_both_parents(tmp_path):
+    """The measurement the relay's whole ancestry check rests on (git 2.54.0).
+
+    `commit_and_push` runs `git add -A` and `git commit`, and `git commit` CONSUMES `MERGE_HEAD` —
+    so the result has two parents and reaches the ref that was merged, whether or not the agent
+    committed the merge itself. That is what makes the relay's check structural rather than a
+    question of the agent having phrased a git command correctly.
+
+    Measured rather than assumed, and landed as a test rather than a note: if this ever stops being
+    true, every merge task in the fleet starts being refused as a failed integration.
+    """
+    from remote import task_agent, task_repo
+
+    remote, input_commit, merge_ref, pinned = _conflicted_remote(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
+    # What the agent is told to do: resolve, `git add` to record that it decided, and leave the
+    # commit to the grid.
+    (workspace / "shared.txt").write_text(_OURS.replace("OURS-5\n", "OURS-5\nTHEIRS-5\n"))
+    _git(workspace, "add", "shared.txt")
+
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1",
+        message="task T1 (completed)",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+
+    parents = _git(remote.url, "rev-list", "--parents", "-n", "1",
+                   pushed.commit).stdout.split()[1:]
+    assert parents == [input_commit, pinned], parents
+    assert not pushed.unresolved, pushed.unresolved
+    # The relay's own question, asked here of real git against the real pushed result.
+    assert subprocess.run(["git", "--git-dir", remote.url, "merge-base", "--is-ancestor",
+                           pinned, pushed.commit], capture_output=True).returncode == 0
+
+
+def test_conflict_markers_the_agent_never_resolved_are_reported(tmp_path):
+    """The hole `git add -A` opens, and the only place it can be closed.
+
+    Measured: during a conflicted merge `git ls-files --unmerged` lists three stage entries, and
+    `git add -A` clears them to zero — staging the conflict markers as if they were a resolution.
+    `git commit` then succeeds where git itself would have refused, and the result is structurally a
+    perfectly good merge commit. The relay cannot see any of this: the index is never pushed.
+
+    So it is read HERE, before `add -A`, and reported. The work is still committed and pushed —
+    ADR 0032 D-e — because a user must be able to see what the agent did.
+    """
+    from remote import task_agent, task_repo
+
+    remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
+
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1",
+        message="task T1 (completed)",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+
+    assert pushed.unresolved == ("shared.txt",), pushed.unresolved
+    # Pushed anyway: the branch is the only copy of what the agent did.
+    assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() == pushed.commit
+
+
+def test_a_resolution_the_agent_left_unstaged_is_still_unresolved(tmp_path):
+    """**This assertion was the opposite way round, and the rule it encoded was wrong.**
+
+    The first version of this check read markers out of the worktree and treated an unmerged index
+    as merely "not `git add`ed", so that a resolution left unstaged would not be failed. That is
+    unsound, and a `modify/delete` conflict is the proof: git leaves NO markers for one (measured on
+    2.54.0 — the surviving side's content is written verbatim), so a marker test cannot see it at
+    all. The whole class of non-textual conflicts was invisible.
+
+    So the INDEX is the authority now, which is also git's own rule: `git commit` refuses while
+    paths are unmerged, and `commit_and_push`'s `git add -A` is what overrides that refusal. The
+    prompt tells the agent to `git add`/`git rm` every conflicted path, so anything still unmerged
+    is a path the agent did not resolve.
+
+    The cost is accepted deliberately: an agent that edits a file and stages nothing has its task
+    failed, one run is wasted, and the work is still pushed for the member to read. The alternative
+    cost is somebody's deletion silently discarded, permanently, with every signal reading healthy.
+    """
+    from remote import task_agent, task_repo
+
+    remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
+    assert "<<<<<<< " in (workspace / "shared.txt").read_text(), "the fixture never conflicted"
+    # Resolved in the worktree, deliberately NOT staged and NOT committed.
+    (workspace / "shared.txt").write_text(_OURS.replace("OURS-5\n", "OURS-5\nTHEIRS-5\n"))
+
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+
+    assert pushed.unresolved == ("shared.txt",), pushed.unresolved
+
+
+def test_a_conflict_the_agent_staged_is_resolved_however_it_chose_to_resolve_it(tmp_path):
+    """Taking one side wholesale — including deleting the file — is a judgement call, not this
+    check's business. What the check asks is only whether the agent DECIDED, and `git add`/`git rm`
+    is how git records that a person decided."""
+    from remote import task_agent, task_repo
+
+    remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
+    _git(workspace, "rm", "-q", "-f", "shared.txt")
+
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+
+    assert pushed.unresolved == (), pushed.unresolved
+
+
+def _modify_delete_remote(tmp_path, task_id="T1"):
+    """A conflict git resolves with NO conflict markers at all: one side deletes, the other edits.
+
+    Measured on git 2.54.0: `git merge` reports `CONFLICT (modify/delete)`, leaves the surviving
+    side's content in the tree verbatim, and lists the path in `ls-files --unmerged` with two stage
+    entries. There is nothing textual to find — which is why the index, not the file content, has to
+    be what decides whether the agent resolved anything.
+    """
+    from remote.task_repo import GitRemote
+
+    seed = tmp_path / f"seed-md-{task_id}"
+    seed.mkdir()
+    _git(seed, "init", "-q", "-b", "main", ".")
+    (seed / "shared.txt").write_text(_BASE_LINES)
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "base")
+    # The trunk edits the file.
+    (seed / "shared.txt").write_text(_THEIRS)
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "theirs edits")
+    _git(seed, "checkout", "-q", "-b", f"task/{task_id}", "HEAD~1")
+    # The member's branch deletes it.
+    _git(seed, "rm", "-q", "shared.txt")
+    _git(seed, "commit", "-q", "-m", "ours deletes")
+
+    bare = tmp_path / f"origin-md-{task_id}.git"
+    _git(tmp_path, "clone", "--bare", "-q", str(seed), str(bare))
+    ref = f"refs/integrate/{task_id}"
+    _git(bare, "update-ref", ref, _git(bare, "rev-parse", "main").stdout.strip())
+    return (GitRemote(url=str(bare), token="tok"),
+            _git(bare, "rev-parse", f"task/{task_id}").stdout.strip(), ref)
+
+
+def test_a_conflict_with_no_markers_at_all_is_still_caught(tmp_path):
+    """The regression for the hole a marker-based check could not see.
+
+    One side deletes a file, the other edits it. git leaves the survivor's content in the tree with
+    no markers, so an agent that does nothing produces a structurally perfect two-parent merge commit
+    that PASSES the relay's ancestry check — and the deletion somebody intended is discarded in
+    silence, which is exactly the failure ADR 0033 D-e exists to prevent, reached through a conflict
+    type the first version of this check was blind to.
+    """
+    from remote import task_agent, task_repo
+
+    remote, input_commit, merge_ref = _modify_delete_remote(tmp_path)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
+    # The evidence that a marker test is not enough: there is nothing to find.
+    assert "<<<<<<< " not in (workspace / "shared.txt").read_text()
+
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+
+    assert pushed.unresolved == ("shared.txt",), (
+        "a modify/delete conflict the agent never resolved was reported as a clean merge")
+
+
+def test_an_ordinary_task_reports_nothing_unresolved(tmp_path):
+    """No merge, no unmerged paths — the check must not invent one for every ordinary task."""
+    from remote import task_agent, task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task_repo.materialize(workspace, url=remote.url, token=remote.token, branch="task/T1",
+                          input_commit=commit)
+    (workspace / "a.txt").write_text("edited\n")
+
+    pushed = task_repo.commit_and_push(
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
+        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+
+    assert pushed.unresolved == (), pushed.unresolved
+
+
+def test_an_unresolved_merge_is_not_reported_as_a_completed_task(tmp_path, monkeypatch, agent):
+    """The provider's half of "proving it merged" (ADR 0033 D-e, issue 15).
+
+    An agent that exits 0 having left the conflict markers in place produces a structurally valid
+    merge commit, so the relay's ancestry check PASSES and the member's WIP branch fast-forwards onto
+    a tree full of `<<<<<<<`. Only the provider ever sees the index that says so.
+
+    The same direction as `translator.is_error`: this can fail a run the agent called a success, and
+    never pass one it did not.
+    """
+    from remote import tasks
+
+    remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
+    _relay_git_url(monkeypatch, remote.url)
+    # The agent runs the merge, says it is done, and resolves nothing.
+    agent(f'git merge --no-edit {merge_ref} >/dev/null 2>&1\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}\\n'\n")
+    reported = []
+    monkeypatch.setattr(tasks, "report_once",
+                        lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks._run_and_report(
+        _FakeState(), {**_job_with_input(input_commit), "merge_ref": merge_ref})
+
+    assert reported, "nothing was reported at all"
+    _task_id, fields = reported[0]
+    assert fields["state"] == "failed", fields
+    assert "shared.txt" in (fields.get("error") or ""), fields
+    # The work still reached the relay, so the user can see it and finish it by hand.
+    assert fields["result_commit"], fields
+    assert _git(remote.url, "rev-parse", "refs/heads/task/T1").stdout.strip() \
+        == fields["result_commit"]
+
+
+def test_a_commit_the_agent_makes_is_authored_by_the_member_not_the_provider(
+        tmp_path, monkeypatch, agent):
+    """ADR 0033 D-m, reached from the direction issue 15 opened — asserted on the REAL child.
+
+    Until tier 3 nothing ever asked an agent to commit; the provider made every commit itself with
+    `GIT_AUTHOR_*` from the claim. A merge task's prompt tells the agent to commit the merge, so its
+    own `git commit` now writes history.
+
+    `_GIT_CONFIG_FLOOR` was believed to make that fail loudly for want of a `user.name`. Measured on
+    git 2.54.0 with exactly the child's environment: it does NOT fail — git auto-detects
+    `<user>@<hostname>` and exits 0, authoring the requesting team's history as the provider's own
+    machine. That is the one thing ADR 0033 records as not retroactively fixable.
+
+    Asserted by making a real commit from inside the agent and reading it back with git, rather than
+    by inspecting the dict `child_env` returns: the question is what the CHILD sees.
+    """
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("echo edited > a.txt\n"
+          "git add -A\n"
+          "git commit -q -m 'the agent commits for itself'\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    outcome = tasks.run_task(
+        {**_job_with_input(commit),
+         "author_name": "Alice Nguyen", "author_email": "alice@example.com"},
+        remote=remote)
+
+    assert outcome.state == "completed", outcome.error
+    workspace = _workspace_for("proj-1", _MEMBER)
+    idents = _git(workspace, "log", "-1", "--format=%an|%ae|%cn|%ce", "HEAD").stdout.strip()
+    assert idents == f"Alice Nguyen|alice@example.com|{task_repo_default_name()}|" \
+                     f"{task_repo_default_email()}", idents
+
+
+def task_repo_default_name():
+    from remote import task_repo
+    return task_repo.DEFAULT_IDENTITY.name
+
+
+def task_repo_default_email():
+    from remote import task_repo
+    return task_repo.DEFAULT_IDENTITY.email
+
+
+def _workspace_for(project_id, member_key):
+    from remote import task_agent
+    return task_agent.workspace_for(project_id, member_key)
+
+
+def test_an_ordinary_task_may_leave_a_merge_in_progress_if_that_is_what_was_asked(
+        tmp_path, monkeypatch, agent):
+    """The grid only enforces what the GRID asked for.
+
+    A merge task's prompt is written by the relay and says "resolve the conflict", so an agent that
+    reports success having resolved nothing is contradicting its instructions. An ordinary task's
+    prompt is written by the USER, and "start merging X into Y and leave it for me to look at" is a
+    perfectly ordinary thing to ask for — failing that would be the grid overruling the person whose
+    repository it is.
+
+    So the check is gated on `merge_ref`: it is the provider's half of proving a MERGE task merged,
+    not a general opinion about what a workspace may contain.
+    """
+    from remote import tasks
+
+    remote, input_commit, _merge_ref, _pinned = _conflicted_remote(tmp_path)
+    _relay_git_url(monkeypatch, remote.url)
+    # A conflict the agent makes ENTIRELY on its own, out of refs it created — so the workspace ends
+    # in the same state a merge task's would, with nothing on the claim saying this is a merge task.
+    agent(
+        "git checkout -q -b sidebranch\n"
+        "printf 'line1\\nline2\\nline3\\nline4\\nSIDE-5\\n' > shared.txt\n"
+        "git add -A\n"
+        "git -c user.name=t -c user.email=t@invalid commit -q -m side\n"
+        "git checkout -q task/T1\n"
+        # task/T1 has to move too, or merging its own descendant is a fast-forward and there is no
+        # conflict to leave behind — which is how the first version of this test passed vacuously.
+        "printf 'line1\\nline2\\nline3\\nline4\\nMINE-5\\n' > shared.txt\n"
+        "git add -A\n"
+        "git -c user.name=t -c user.email=t@invalid commit -q -m mine\n"
+        "git merge --no-edit sidebranch >/dev/null 2>&1\n"
+        "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"left it for you\"}\\n'\n")
+    reported = []
+    monkeypatch.setattr(tasks, "report_once",
+                        lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks._run_and_report(_FakeState(), _job_with_input(input_commit))
+
+    assert reported, "nothing was reported at all"
+    _task_id, fields = reported[0]
+    assert fields["state"] == "completed", fields
+
+
 def _relay_git_url(monkeypatch, url):
     """Point the loop's remote-URL builder at a local bare repo, so the real commit/push path runs."""
     from remote import relay
@@ -2224,7 +2721,7 @@ def test_a_task_whose_agent_left_no_transcript_still_commits_and_pushes(
         workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
         transcript=task_agent.transcript_dir(workspace, _MEMBER))
 
-    listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
+    listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed.commit).stdout.split()
     assert "fix.py" in listing, listing
 
 
@@ -3216,12 +3713,16 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
 
 
 def task_repo_commit_and_push(workspace, remote, branch, member_key=_MEMBER):
-    """Commit and push what the agent left, the way `_push_result` does."""
+    """Commit and push what the agent left, the way `_push_result` does. Returns the commit.
+
+    `.commit` rather than the whole `Pushed`: every caller here wants a revision to hand to git, and
+    the other half — what the agent left unresolved — has its own tests.
+    """
     from remote import task_agent, task_repo
 
     return task_repo.commit_and_push(
         workspace, url=remote.url, token=remote.token, branch=branch, message="task T1 (completed)",
-        transcript=task_agent.transcript_dir(workspace, member_key))
+        transcript=task_agent.transcript_dir(workspace, member_key)).commit
 
 
 @pytest.mark.parametrize("body,expected_in_reason", [

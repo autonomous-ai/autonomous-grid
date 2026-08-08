@@ -235,7 +235,15 @@ _INTEGRATED = {
     "up_to_date": "{branch} already has everything on main; nothing to integrate",
     "fast_forward": "{branch} moved onto main at {commit}",
     "merged": "main was merged into {branch}; the merge commit is {commit}",
+    # Tier 3 (ADR 0033 D-e, issue 15). Nothing has moved yet — an agent is about to.
+    "merge_task": "main and {branch} changed the same lines, so task {task_id} will merge them",
 }
+
+# The statuses whose report needs a COMMIT to be meaningful, and the one that needs a task id
+# instead. A reply missing the field its own status is about is a reply this command cannot read —
+# not an integration that succeeded — and saying so is the difference between a person waiting for a
+# task that exists and a person believing work landed that did not.
+_NEEDS_COMMIT = ("fast_forward", "merged")
 
 
 def _project_integrate(args: argparse.Namespace) -> int:
@@ -250,9 +258,10 @@ def _project_integrate(args: argparse.Namespace) -> int:
     task of yours is running on. So integrating is refused while you have a task in flight, and the
     refusal names it.
 
-    Three outcomes, and they are deliberately different sentences: already up to date, a
-    fast-forward, and a real merge commit. A conflict is refused — resolving one needs an agent,
-    which this release does not run for an integration.
+    Four outcomes, and they are deliberately different sentences: already up to date, a
+    fast-forward, a real merge commit, and — when you and somebody else changed the same lines — a
+    **merge task** an agent runs to resolve it. That last one costs a slot and an agent run, and
+    nothing has moved when this command returns.
     """
     from remote import relay
 
@@ -262,20 +271,36 @@ def _project_integrate(args: argparse.Namespace) -> int:
     if _emit(args, answer):
         return 0
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    status = answer.get("status")
     branch = answer.get("branch") or "your WIP branch"
     commit = answer.get("commit") or ""
-    line = _INTEGRATED.get(answer.get("status"))
-    if line is None or (not commit and answer.get("status") != "up_to_date"):
+    task_id = answer.get("task_id") or ""
+    line = _INTEGRATED.get(status)
+    if line is None or (status in _NEEDS_COMMIT and not commit) or (
+            status == "merge_task" and not task_id):
         # A reply this command cannot read is NOT an integration that succeeded. Printing the
         # success line by default is how promote once reported work as landed for a body a proxy
         # had stripped — and the next thing somebody does on that belief is promote. There is no
         # relay old enough to be a reason for leniency: integrate is a new route, so every relay
         # that has it sends `status`.
+        #
+        # The per-status field check is what makes that guard mean anything for tier 3: a merge-task
+        # reply's whole payload IS the id, so one without it leaves nothing to watch or wait on.
         raise SystemExit(
             f"The relay's answer to integrating project {args.project_id} did not say what it did, "
             f"so this cannot be reported as an integration. "
             f"`grid project integrate {args.project_id} --json` shows what it sent.")
-    print(line.format(branch=branch, commit=commit))
+    print(line.format(branch=branch, commit=commit, task_id=task_id))
+    if status == "merge_task":
+        files = answer.get("files") or []
+        if files:
+            # What the agent is about to change. The relay sends them as DATA precisely so this does
+            # not have to be dug out of a sentence.
+            print(f"conflicts: {', '.join(str(path) for path in files)}")
+        print(f"\nNothing has moved yet. Watch it with: grid task follow {task_id}")
+        print(f"When it finishes, promote with: grid project promote {args.project_id} "
+              f"{answer.get('member_key') or '<member-key>'}")
+        return 0
     previous = answer.get("previous_commit")
     if answer.get("advanced") and previous:
         # Where the branch was before. There is no revert, so somebody putting it back needs it —

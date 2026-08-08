@@ -136,10 +136,19 @@ ENV_PASSTHROUGH_ENV = "GRID_TASK_ENV_PASSTHROUGH"
 # waiting for the agent's first `git commit`. `HOME` cannot be withheld instead: Claude Code's
 # credential lives under it.
 #
-# Two consequences, both wanted. Git tolerates the missing config (measured: warns, exits 0). And
-# the agent no longer inherits `user.name`/`user.email`, so an agent asked to commit fails loudly
-# instead of quietly authoring a stranger's repository as the human who runs the provider — the
-# identity issue 21 exists to get right.
+# Git tolerates the missing config (measured: warns, exits 0).
+#
+# ⚠️ **It does NOT stop an agent committing, and an earlier version of this comment said it did.**
+# Re-measured on git 2.54.0 with exactly this environment — a real `HOME`, both config paths at
+# `/dev/null`: `git commit` does not fail for want of `user.name`. It AUTO-DETECTS one from the OS
+# username and the hostname and exits 0, so the commit is authored `<user>@<hostname>` — the
+# provider's own machine, written into the requesting team's history, which is the precise outcome
+# issue 21 exists to prevent and the one thing ADR 0033 records as not retroactively fixable.
+#
+# Latent until ADR 0033 issue 15, because nothing had ever asked an agent to commit: the provider
+# made every commit itself, with `GIT_AUTHOR_*` set from the claim. A merge task's prompt tells the
+# agent to commit the merge. So the identity is now put on the child's environment below
+# (`_git_identity`), and an agent commit and a grid commit come out identical.
 #
 # This does NOT complete D-f's floor: the other half is `core.symlinks=false` written into the
 # workspace's own config, which belongs with import (issue 16b) where a packfile can carry a
@@ -646,8 +655,35 @@ def _require_version_for_the_sandbox(binary: str) -> None:
             f"agents unconfined deliberately.")
 
 
-def child_env() -> dict[str, str]:
+def _git_identity(author) -> dict[str, str]:
+    """Who a commit the AGENT makes is authored by (ADR 0033 D-m).
+
+    The same four variables `task_repo._env` puts on the provider's own git calls, and the same
+    split: the author is the member whose task this is, the committer is always the grid. So a merge
+    the agent commits itself and a merge the grid commits for it are indistinguishable in history.
+
+    Forced rather than allowlisted, for the reason the config floor beside it is: the danger is not a
+    variable being inherited, it is git having no answer and inventing one from the hostname.
+
+    `None` gives the pre-0033 identity on both halves — what an older relay's claim, which carries no
+    author keys, produces. Never the provider's machine.
+    """
+    from . import task_repo
+
+    identity = author or task_repo.DEFAULT_IDENTITY
+    return {
+        "GIT_AUTHOR_NAME": identity.name,
+        "GIT_AUTHOR_EMAIL": identity.email,
+        "GIT_COMMITTER_NAME": task_repo.DEFAULT_IDENTITY.name,
+        "GIT_COMMITTER_EMAIL": task_repo.DEFAULT_IDENTITY.email,
+    }
+
+
+def child_env(author=None) -> dict[str, str]:
     """The environment the agent child is handed — an ALLOWLIST (ADR 0033 D-n, issue 23 layer 1).
+
+    `author` is the project member the claim named (ADR 0033 D-m), used for commits the AGENT makes
+    — which only became possible at issue 15, when a merge task's prompt started asking for one.
 
     ADR 0028's rule, applied here: whatever we set is set **on the child process only** — never
     exported to the provider's shell, never written to a config file, never into this process's own
@@ -685,6 +721,11 @@ def child_env() -> dict[str, str]:
     # The git floor (ADR 0033 D-f). Forced rather than allowlisted, because the danger here is not a
     # variable being inherited — it is `~/.gitconfig` being found. See the constant.
     env.update(_GIT_CONFIG_FLOOR)
+    # And WHO a commit the agent makes is by (ADR 0033 D-m). After the floor, deliberately: the
+    # floor is what stops git reading a config, and this is what stops it inventing an identity
+    # instead. Forced too, so an operator's passthrough list cannot put a hostname in a team's
+    # history.
+    env.update(_git_identity(author))
     # Through the same validated read `link_transcript` uses, so the directory this process plants
     # the symlink in and the one the child writes to can never be two different places.
     config_dir = configured_claude_config_dir()

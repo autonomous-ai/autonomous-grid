@@ -89,6 +89,13 @@ _REPORT_BACKOFF_SECONDS = 2.0
 # every one of its attempts. Same reasoning as `task_events.MAX_EVENT_BYTES`.
 _MAX_SESSION_RESET_REASON_CHARS = 2_000
 
+# How many unresolved paths the failure SENTENCE names before it stops listing them. A merge across
+# a large rename conflicts in hundreds of files, and this string travels into the task's `error`
+# column and into a terminal report the relay bounds at `_MAX_RESULT_CHARS` — an unbounded list
+# would be refused with a 422, which rejects the WHOLE report and leaves the task to be reclaimed
+# and re-run into the identical refusal.
+_MAX_UNRESOLVED_NAMED = 10
+
 
 def _warn(message: str) -> None:
     print(f"\n[tasks] {message}", file=sys.stderr)
@@ -562,7 +569,12 @@ def run_task(job: dict[str, Any],
         try:
             task_repo.materialize(
                 workspace, url=remote.url, token=remote.token,
-                branch=str(job.get("branch") or ""), input_commit=str(input_commit))
+                branch=str(job.get("branch") or ""), input_commit=str(input_commit),
+                # A MERGE TASK's second ref (ADR 0033 D-e, issue 15), fetched here rather than by
+                # the agent — which has no grid credential and must not get one. Empty on every
+                # ordinary task and on every claim from a relay that predates integration, which is
+                # the pre-integration behaviour rather than a new failure.
+                merge_ref=str(job.get("merge_ref") or ""))
         except task_repo.InputFetchError as exc:
             # BEFORE the blanket handler below, and that order is the whole change (ADR 0033 issue
             # 16a, criterion 4). The fetch is the one step whose failure is about this attempt
@@ -639,7 +651,14 @@ def run_task(job: dict[str, Any],
     try:
         _returncode, _raw = _run_child(
             argv, timeout=timeout, publish=sink, cwd=str(workspace),
-            env=task_agent.child_env(), translator=translator, on_spawn=on_spawn)
+            # WHO a commit the AGENT makes is authored by (ADR 0033 D-m). Only reachable since
+            # issue 15 — a merge task's prompt is the first thing that ever asked an agent to
+            # commit — and it must be the SAME identity `_push_result` gives the provider's own
+            # commit, or one merge would name the member and the next a hostname.
+            env=task_agent.child_env(
+                author=task_repo.identity_or_default(
+                    job.get("author_name"), job.get("author_email"))),
+            translator=translator, on_spawn=on_spawn)
     except subprocess.TimeoutExpired:
         return failed(f"task timed out after {timeout:.0f}s")
     except _ChildFailed as exc:
@@ -1126,7 +1145,7 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # hostile one would have failed the task before any of this ran.
         member_key = str(job.get("member_key") or "")
         workspace = task_agent.workspace_for(str(job.get("project_id") or ""), member_key)
-        commit = task_repo.commit_and_push(
+        pushed = task_repo.commit_and_push(
             workspace, url=remote.url, token=remote.token,
             branch=str(job.get("branch") or ""),
             message=f"task {job.get('task_id')} ({outcome.state})",
@@ -1155,7 +1174,54 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         publisher.publish("task.stderr", text=reason)
         return outcome, False
 
-    return replace(outcome, result_commit=commit), True
+    if pushed.unchecked and job.get("merge_ref"):
+        # The check could not RUN — a git blip, or `ls-files` past its budget on a large repository.
+        # The task still completes: refusing to report a result because a diagnostic failed would
+        # lose the agent's whole run over a transient.
+        #
+        # But it is DISCLOSED, to the person who submitted the task and not only to this host's
+        # stderr. Otherwise "this merge was verified" and "nobody looked at this merge" are the same
+        # observation everywhere a user can see, which is the shape of the failure this whole slice
+        # exists to remove. The same rule `task.wip_not_advanced` follows, and an unknown event type
+        # renders verbatim on the client, so it needs no client release to be readable.
+        unchecked = task_stream.redact(
+            f"this merge task's result could not be checked for unresolved conflicts "
+            f"({pushed.unchecked}), so nothing has confirmed the conflict was actually resolved; "
+            f"read the diff before promoting")
+        _warn(f"task {job.get('task_id')}: {unchecked}")
+        publisher.publish("task.merge_unchecked", reason=unchecked)
+
+    if pushed.unresolved and outcome.state == "completed" and job.get("merge_ref"):
+        # A MERGE TASK whose agent never resolved the conflict (ADR 0033 D-e, issue 15). It exited
+        # 0 and said it was done, and what it left is structurally a perfectly good merge commit —
+        # so the relay's ancestry check PASSES and the member's WIP branch fast-forwards onto a tree
+        # full of `<<<<<<<`. The unmerged index is the only evidence, and it never leaves this host.
+        #
+        # **Gated on `merge_ref`, so this is only ever applied to a task the GRID asked to merge.**
+        # A merge task's prompt is the relay's own and says "resolve the conflict", so an agent
+        # reporting success having resolved nothing is contradicting its instructions. An ordinary
+        # task's prompt is the USER's, and "start merging X into Y and leave it for me to look at"
+        # is an ordinary thing to ask for — failing that would be the grid overruling the person
+        # whose repository it is.
+        #
+        # The same direction as `translator.is_error`: this can fail a run the agent called a
+        # success, and never pass one it did not. Reported AFTER the push, so the work is still on
+        # the branch for the user to read and finish by hand — a failed attempt is pushed too
+        # (ADR 0032 D-e).
+        named = ", ".join(pushed.unresolved[:_MAX_UNRESOLVED_NAMED])
+        if len(pushed.unresolved) > _MAX_UNRESOLVED_NAMED:
+            named += f" and {len(pushed.unresolved) - _MAX_UNRESOLVED_NAMED} more file(s)"
+        reason = task_stream.redact(
+            f"the agent reported success but left the merge unresolved in {named}; the conflict "
+            f"markers are still in the tree, so this is not a resolved merge")
+        _warn(f"task {job.get('task_id')}: {reason}")
+        # Everything else on the outcome is KEPT — its output and session id are how somebody works
+        # out what the agent was doing when it stopped, and the session id is what the next attempt
+        # resumes. Only the verdict changes.
+        return replace(outcome, state="failed", error=reason,
+                       result_commit=pushed.commit), True
+
+    return replace(outcome, result_commit=pushed.commit), True
 
 
 def _publisher_for(state: Any, task_id: str, job: dict[str, Any]) -> Any:

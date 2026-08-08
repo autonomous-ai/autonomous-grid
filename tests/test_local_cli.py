@@ -23264,36 +23264,96 @@ def test_project_integrate_on_an_old_relay_says_the_relay_is_old(monkeypatch, tm
     assert "relay" in str(caught.value).lower(), caught.value
 
 
-def test_project_integrate_shows_the_relays_own_words_for_a_conflict(monkeypatch, tmp_path):
-    """The refusal that actually happens once two people edit the same lines: tier 3 is issue 15, so
-    until then this is a real 409 the person has to be able to act on. Its sentence is shown, not
-    the raw D-l object."""
+def test_project_integrate_shows_the_relays_own_words_for_a_refusal(monkeypatch, tmp_path):
+    """A 409 whose `detail` is the D-l object is shown as its SENTENCE, not as raw JSON.
+
+    Since issue 15 a conflict is no longer one of these — it queues a merge task and answers 200 —
+    so the 409 that remains is `integrate_not_fast_forward`: something moved the caller's branch
+    under a request that was holding their slot.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
-        "code": "integrate_conflict",
-        "message": "main and wip/def456 both changed shared.txt, so they cannot be merged "
-                   "automatically.",
-        "files": ["shared.txt"]}}))
+        "code": "integrate_not_fast_forward",
+        "message": "Could not advance wip/def456 to abc123. Nothing was integrated; try again.",
+        "branch": "wip/def456"}}))
 
     with pytest.raises(SystemExit) as caught:
         cli.main(["project", "integrate", "P1"])
 
-    assert "shared.txt" in str(caught.value), caught.value
+    assert "wip/def456" in str(caught.value), caught.value
     assert "code" not in str(caught.value), (
         "the raw refusal object reached the user instead of its sentence")
 
 
-def test_project_integrate_help_discloses_that_a_conflict_is_refused():
-    """The PRD is explicit that the tier-3 gap is "survivable for a small team working in separate
-    areas; not survivable silently". The help is where somebody meets it before they need it."""
+def test_project_integrate_reports_a_conflict_as_the_task_that_will_resolve_it(
+        monkeypatch, tmp_path, capsys):
+    """Tier 3 (ADR 0033 D-e, issue 15). A conflict is no longer a dead end — the relay queues a
+    merge task whose agent resolves it, and the id is the only handle the person gets on that run.
+
+    The files are printed too: they are what the agent is about to change, and the whole reason the
+    relay sends them as data rather than only inside a sentence.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "branch": "wip/def456", "status": "merge_task", "advanced": False,
+        "commit": "aaa111", "previous_commit": "aaa111", "main_commit": "bbb222",
+        "task_id": "T-42", "merge_ref": "refs/integrate/T-42", "merge_commit": "bbb222",
+        "files": ["shared.txt"],
+        "message": "main and wip/def456 both changed shared.txt, so they cannot be merged "
+                   "automatically. Task T-42 will resolve it; watch it with "
+                   "`grid task follow T-42`."}))
+
+    assert cli.main(["project", "integrate", "P1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "T-42" in out, out
+    assert "shared.txt" in out, out
+    assert "grid task follow" in out, out
+
+
+def test_project_integrate_will_not_report_a_merge_task_it_was_not_given_the_id_of(
+        monkeypatch, tmp_path):
+    """The same guard the other statuses have, keyed on the field that MATTERS for this one.
+
+    A merge-task reply's whole payload is the task id: without it there is nothing to watch, nothing
+    to wait on, and nothing to say. Printing a success line anyway is how promote once reported work
+    as landed for a body a proxy had stripped.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "branch": "wip/def456", "status": "merge_task", "advanced": False,
+        "files": ["shared.txt"]}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "integrate", "P1"])
+
+    assert "P1" in str(caught.value), caught.value
+
+
+def test_project_integrate_help_discloses_what_a_conflict_costs():
+    """A conflict is no longer refused, but it is not free either: it spends an agent run and holds
+    the member's one task slot while it does. The help is where somebody meets that before they need
+    it — and it is also where the limit lives, since the relay proves the merge HAPPENED and cannot
+    prove it is right."""
     parser = cli.build_parser()
     integrate = parser._subparsers._group_actions[0].choices["project"] \
         ._subparsers._group_actions[0].choices["integrate"]
     help_text = integrate.format_help().lower()
 
     assert "conflict" in help_text, "the help does not mention conflicts at all"
+    # The OVERTURNED rule, named exactly rather than by the bare word "refused" — which is still
+    # true of the OTHER rule on this page, that integrating is refused while you have a task in
+    # flight. A user acting on the old claim would go and resolve by hand what the grid is already
+    # resolving for them.
+    assert "conflict is refused" not in help_text, (
+        "the help still says a conflict is refused; since issue 15 it queues a merge task")
+    assert "merge task" in help_text, "the help does not say a conflict becomes a merge task"
 
 
 def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):

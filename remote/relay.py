@@ -849,10 +849,15 @@ def integrate_project(signaling_url: str, access_token: str,
     is the project's, so there is nothing to send. Sending `{}` would be a wire detail with nothing
     behind it.
 
-    Three answers, and the client has to tell them apart without diffing oids: `status` is
-    `up_to_date`, `fast_forward` or `merged`. A conflict is a real **409** with `code`
-    `integrate_conflict` and the conflicted paths as a `files` field — not the bare-404 hint below,
-    which is only for a relay that predates the route.
+    Four answers, and the client has to tell them apart without diffing oids: `status` is
+    `up_to_date`, `fast_forward`, `merged` or — since ADR 0033 issue 15 — `merge_task`, which means
+    git could not decide and the relay has QUEUED a task whose agent will. That last one carries a
+    `task_id` and the conflicted paths as `files`, and reports `advanced: false`: nothing has moved,
+    and the caller's one task slot is now held until that task ends.
+
+    A conflict is therefore no longer a refusal. The **409** that remains is
+    `integrate_not_fast_forward` — something moved the caller's branch under a request holding their
+    slot — and it is not the bare-404 hint below, which is only for a relay that predates the route.
     """
     return _task_oneshot(
         signaling_url, access_token, "POST",

@@ -257,6 +257,51 @@ settle additionally requires `merge-base --is-ancestor <merged-ref> <result_comm
 that fails it is a failed integration, not a completed one. The relay is the only party that can
 make this check, being the only one holding the verdict.
 
+That check is **terminal, not a 409**. A 409 leaves the row `running`, so the reaper reclaims it at
+the lease TTL, resets the branch to the same input commit, and every attempt fails identically —
+spending the whole `max_attempts` budget on a cause no retry can change and ending at
+`retries_exhausted`, which does not even carry the real reason.
+
+**What the relay proves is that the merge HAPPENED, not that it is right — and the other half of
+that is the provider's, because the relay structurally cannot see it.** `commit_and_push` runs
+`git add -A`, and (measured, git 2.54.0) `add -A` clears a conflicted index to zero unmerged
+entries: the conflict markers are staged as if they were a resolution, `git commit` succeeds where
+git itself would have refused, and what comes out is a structurally perfect two-parent merge commit
+that passes the ancestry check. The index is never pushed, so only the provider ever sees it. It
+therefore reads `git ls-files --unmerged` **before** `add -A` and fails the task naming those paths,
+while still committing and pushing so the work stays readable (D-e's own rule, and ADR 0032 D-e's).
+
+**What counts as unresolved is git's index, never the file's contents.** An earlier draft of this
+decision said a path counted only when it was unmerged *and* still carried `<<<<<<<` markers, on the
+reasoning that an unmerged index means merely "not `git add`ed". A **modify/delete** conflict refutes
+that: one side deletes a file, the other edits it, and git leaves **no markers at all** — measured on
+2.54.0, it writes the surviving side's content verbatim and reports the conflict only through the
+index and its exit status. An agent that did nothing then produced a structurally perfect two-parent
+commit that passed the ancestry check above, and the deletion one member intended was discarded in
+silence — this decision's own failure, reached through a conflict class the marker test could not
+see. Every non-textual conflict (rename/rename, add/add of a binary, mode changes) was invisible the
+same way.
+
+So the merge prompt requires `git add` — or `git rm` — on every conflicted path, and any path still
+unmerged when the agent stops fails the integration. The accepted cost is stated rather than hidden:
+an agent that resolves a file and stages nothing has its task failed and one run is wasted, with its
+work still pushed for the member to read. That is the cheap side of a trade whose other side is
+somebody's deletion silently discarded, permanently, with every signal reading healthy.
+
+A check that could not RUN is carried as its own fact rather than as an empty result, and disclosed
+to the task's own event log: the task still completes — turning a git blip into a lost push would be
+worse — but "this merge was verified" and "nobody looked at this merge" must not be the same
+observation.
+
+Neither check catches a merge that is complete and *wrong*, which is the same class as an agent
+writing wrong code, and `docs/cli.md` says so rather than leaving it to be discovered.
+
+**The parentage is structural, whichever way the agent finishes.** If it commits the merge itself the
+merge commit is its own; if it resolves and leaves `MERGE_HEAD` in place, the provider's own
+`git commit` consumes it and produces the two-parent commit. Both make the ancestry check pass, and
+neither passes when no merge happened — so the check does not depend on the agent having phrased a
+git command correctly. Measured on git 2.54.0 and pinned by a test in each repo.
+
 **The claim payload gains the ref to merge from.** An ordinary task needs only its own branch; a
 merge task needs the provider to fetch a second ref before spawning, and the agent cannot fetch it
 itself. Sending the ref rather than a task *kind* keeps the `wip/` and `main` literals in one

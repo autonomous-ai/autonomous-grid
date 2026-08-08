@@ -554,12 +554,15 @@ def _add_project(sub) -> None:
             "task slot while it works, which is what stops an integration moving the branch a task "
             "of yours is running on — so it is refused while you have a task in flight, and the "
             "refusal names that task.\n\n"
-            "Three things can happen: your branch already has everything on `main`; it moves "
-            "straight onto `main`; or the two are merged and a merge commit is made on your "
-            "branch.\n\n"
-            "**A conflict is refused.** If you and somebody else changed the same lines, resolving "
-            "it needs an agent, and this release cannot run one for an integration — the refusal "
-            "names the files."),
+            "Four things can happen: your branch already has everything on `main`; it moves "
+            "straight onto `main`; the two are merged and a merge commit is made on your branch; "
+            "or — if you and somebody else changed the same lines, which git cannot merge on its "
+            "own — the grid queues a MERGE TASK whose agent resolves the conflict.\n\n"
+            "A merge task costs an agent run and holds your one task slot while it works, so "
+            "nothing has moved when this command returns. Watch it with `grid task follow`, then "
+            "promote.\n\n"
+            "What the grid checks is that the merge HAPPENED — the result really contains `main`. "
+            "It cannot check that the resolution is right, so read it before you promote."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     integrate.add_argument("project_id", help="Project id from `grid project list`.")
     integrate.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")

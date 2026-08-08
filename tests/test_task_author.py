@@ -123,7 +123,7 @@ class TestTheResultCommitCarriesTheMember:
             transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice Nguyen", "alice@example.com"))
 
-        assert _idents(remote.url, pushed) == f"Alice Nguyen|alice@example.com|{GRID}"
+        assert _idents(remote.url, pushed.commit) == f"Alice Nguyen|alice@example.com|{GRID}"
 
     def test_no_author_is_the_pre_0033_identity_on_both_halves(self, tmp_path, workspace):
         """What an OLD relay's payload produces, and it has to be identical, not merely similar."""
@@ -137,7 +137,7 @@ class TestTheResultCommitCarriesTheMember:
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
             transcript=_transcript_dir(path))
 
-        assert _idents(remote.url, pushed) == f"{GRID}|{GRID}"
+        assert _idents(remote.url, pushed.commit) == f"{GRID}|{GRID}"
 
     def test_blame_on_a_line_the_agent_wrote_names_the_member(self, tmp_path, workspace):
         """Issue 21's second acceptance criterion, asked of git the way a person would ask it.
@@ -285,6 +285,44 @@ class TestTheIsolationIsUnchanged:
         assert env["GIT_COMMITTER_NAME"] == "grid"
         assert env["GIT_COMMITTER_EMAIL"] == "grid@invalid"
 
+    def test_a_commit_the_agent_makes_itself_still_names_the_member(self, monkeypatch):
+        """ADR 0033 D-m, reached from the one direction issue 15 opened.
+
+        Until tier 3 the agent was never asked to commit — the provider did it, with
+        `GIT_AUTHOR_*` set from the claim. A merge task's prompt tells the agent to commit the
+        merge, so its OWN `git commit` now writes history.
+
+        `_GIT_CONFIG_FLOOR` was believed to make that fail loudly: with `GIT_CONFIG_GLOBAL` at
+        `/dev/null` the agent inherits no `user.name`. **Measured on git 2.54.0 — it does not
+        fail.** git auto-detects an identity from the OS username and hostname and exits 0, so the
+        merge commit would be authored `<user>@<hostname>`: the provider's machine, in the
+        requesting team's history, permanently. Authorship is the one thing ADR 0033 records as not
+        retroactively fixable.
+
+        So the identity is on the child's environment, exactly as it is on the provider's own git
+        calls, and an agent commit and a grid commit come out identical.
+        """
+        from remote import task_agent, task_repo
+
+        env = task_agent.child_env(
+            author=task_repo.GitIdentity("Alice Nguyen", "alice@example.com"))
+
+        assert env["GIT_AUTHOR_NAME"] == "Alice Nguyen"
+        assert env["GIT_AUTHOR_EMAIL"] == "alice@example.com"
+        # The committer is the grid on both halves of the split, whatever the author says.
+        assert env["GIT_COMMITTER_NAME"] == task_repo.DEFAULT_IDENTITY.name
+        assert env["GIT_COMMITTER_EMAIL"] == task_repo.DEFAULT_IDENTITY.email
+
+    def test_an_agent_commit_with_no_author_on_the_claim_is_the_pre_0033_identity(self):
+        """The same degrade every other half of D-m has: an older relay sends no author keys, and
+        the result is `grid <grid@invalid>` — never the provider's hostname."""
+        from remote import task_agent, task_repo
+
+        env = task_agent.child_env()
+
+        assert env["GIT_AUTHOR_NAME"] == task_repo.DEFAULT_IDENTITY.name
+        assert env["GIT_AUTHOR_EMAIL"] == task_repo.DEFAULT_IDENTITY.email
+
     def test_no_configuration_file_on_the_provider_can_reach_a_commit(
             self, tmp_path, workspace, monkeypatch):
         """Asserted by BEHAVIOUR: put a config on the host and watch it fail to matter.
@@ -312,4 +350,4 @@ class TestTheIsolationIsUnchanged:
             transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice", "alice@example.com"))
 
-        assert _idents(remote.url, pushed) == f"Alice|alice@example.com|{GRID}"
+        assert _idents(remote.url, pushed.commit) == f"Alice|alice@example.com|{GRID}"

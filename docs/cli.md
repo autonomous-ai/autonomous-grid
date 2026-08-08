@@ -953,18 +953,29 @@ stops an integration from moving the branch a task of yours is running on — so
 has to be the one that slot belongs to. Integrating is therefore **refused while you have a task in
 flight**, and the refusal names that task so you can wait on it.
 
-Three things can happen, and the command says which:
+Four things can happen, and the command says which:
 
 - your branch already contains everything on `main` — nothing moves, and that is a success;
 - your branch moves straight onto `main`, because it had nothing of its own yet;
 - `main` and your branch are merged, and a **merge commit** is made on your branch. No agent and no
-  model are involved — it is git's own three-way merge, run on the relay.
+  model are involved — it is git's own three-way merge, run on the relay;
+- you and somebody else changed the same lines, so git cannot decide: the grid queues a **merge
+  task** and an agent resolves it. The command prints the task id and the conflicting files, and
+  **nothing has moved yet** — watch it with `grid task follow <id>`, then promote.
 
-**A conflict is refused in this release.** If you and somebody else changed the same lines, resolving
-it needs an agent, and the relay does not yet run one for an integration; the refusal names the
-files. Until it does, two people working in the same lines of the same file will leave the second
-one stuck — workable for a small team working in separate areas, and worth knowing before you plan
-around it.
+A merge task is an ordinary task in every other respect: it holds your one task slot while it runs,
+it has its own event log, and it is retried if its provider dies. So you cannot create another task
+until it finishes, and the refusal names it.
+
+**What the grid checks is that the merge happened, not that it is right.** When the task settles, the
+relay requires the result to actually contain the `main` it was asked to merge — an agent that
+resolved by discarding the other side, or that changed nothing at all, is recorded as a **failed
+integration** and your branch is left alone. What no check can catch is a merge that is complete and
+*wrong*, which is the same class as an agent writing wrong code: read it before you promote.
+
+The `main` a merge task merges is **pinned when you run `integrate`**. If somebody else promotes
+while your agent is working, your merge still succeeds — you simply integrate again to pick up their
+release. That is a second round, not lost work.
 
 `wip reset` moves a member's WIP branch back to a commit you name — the way out of the one state
 nothing else can undo. If a task's result is written into git but its completion is then interrupted,
