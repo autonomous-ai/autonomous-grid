@@ -175,6 +175,39 @@ def identity_or_default(name: str | None, email: str | None) -> GitIdentity:
     return GitIdentity(clean_name, clean_email)
 
 
+def push_import(source: Path, *, url: str, token: str, local_ref: str, remote_ref: str) -> str:
+    """Push a member's own repository to the relay's import staging ref. Returns the commit.
+
+    The one git call in this module that runs against a repository grid did NOT create — the
+    member's working clone, on the member's own machine, from `grid project import`. It goes through
+    `_run` anyway, and that is worth being deliberate about rather than reaching for `subprocess`:
+    `_run` is where the bearer token is put in the ENVIRONMENT instead of on the command line
+    (`/proc/<pid>/cmdline` is world-readable and `/proc/<pid>/environ` is not), where
+    `http.followRedirects=false` stops that token being handed to whatever a redirect names, and
+    where the network ceiling that outwaits the relay's lives.
+
+    ⚠️ It also means the member's own `~/.gitconfig` does not apply to this push, and their
+    `core.hooksPath` therefore does not run. That is a side effect of reusing `_run` rather than its
+    purpose, and it is the right one: a `pre-push` hook firing because somebody typed `grid project
+    import` would be surprising, and the alternative — a second git invocation path with its own
+    idea of how to carry a credential — is the thing this repo has one `_run` to avoid.
+
+    The refspec is explicit and one-way. No `--force`: the relay's `receive.denyNonFastForwards` is
+    on, and the staging ref was deleted when the import was opened, so a fast-forward from nothing
+    is exactly what should be possible and nothing else should be.
+    """
+    if not local_ref or local_ref.startswith("-"):
+        raise CheckoutError(f"{local_ref!r} is not a ref this command can push")
+    if not remote_ref.startswith("refs/"):
+        # The relay hands this back; a bare name would let git resolve it as something else
+        # entirely. Defence in depth against a mangled reply, not against the relay.
+        raise CheckoutError(f"the relay named {remote_ref!r}, which is not a full ref name")
+    commit = _run(source, "rev-parse", "--verify", f"{local_ref}^{{commit}}").strip()
+    _run(source, "push", "--quiet", url, f"{commit}:{remote_ref}",
+         token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+    return commit
+
+
 @dataclass(frozen=True)
 class Pushed:
     """What `commit_and_push` landed, and what the agent left behind unresolved.
@@ -233,6 +266,30 @@ class PushError(RuntimeError):
     """
 
 
+# The two settings that must hold on a tree that arrived over the wire (ADR 0033 D-f), named ONCE
+# because three places carry them and a hooks path spelled twice is a hooks path that drifts:
+# `_run`'s `-c` flags, `_ensure_repo`'s write into the workspace's own config, and
+# `task_agent._GIT_CONFIG_FLOOR`, which is what the AGENT's git gets.
+#
+#   * `core.symlinks=false` makes git materialize a `120000` object as a plain file holding the
+#     target as text, so an object import allowed through cannot become a link into the provider's
+#     config directory. Import is what makes such an object reachable at all: before it, the relay
+#     wrote mode `100644` literally and had no other code path.
+#   * `core.hooksPath` pointed at nothing means no hook can run, whatever a repository's own
+#     `.git/config` says — and a persistent workspace's config is something a previous run could
+#     have written.
+#
+# ⚠️ **Measured on git 2.54.0, and it bounds what any of this may claim: `-c core.symlinks=true` on
+# the command line beats BOTH the environment floor and the repository's config.** So this stops the
+# accidental path — an ordinary `git merge` or `git checkout` materializing what a packfile carried
+# — and not an agent that has decided to make a link. Against a deliberate agent the relay's import
+# validator is the only layer, which is exactly what ADR 0033 D-f says it is.
+GIT_SAFETY_CONFIG: tuple[tuple[str, str], ...] = (
+    ("core.symlinks", "false"),
+    ("core.hooksPath", "/nonexistent/hooks"),
+)
+
+
 def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[str, str]:
     """The environment every git child gets.
 
@@ -287,20 +344,16 @@ def _run(workspace: Path, *args: str, token: str | None = None,
          author: GitIdentity | None = None) -> str:
     """One git invocation inside `workspace`, or `CheckoutError` carrying git's own words.
 
-    `-c core.symlinks=false` and `-c core.hooksPath=` are set on EVERY call rather than once at
-    clone time, because a config written into `.git/config` is itself something a previous run could
-    have changed. They are the last two layers behind "the relay only ever writes mode 100644" and
-    "git refuses to check out a path with a `.git` component":
-
-      * `core.symlinks=false` makes git materialize a symlink object as a plain file, so even an
-        object that should not exist cannot become a link into the provider's config directory.
-      * `core.hooksPath` pointed at nothing means no hook in this repository can run, whatever a
-        fetched object claims.
+    `GIT_SAFETY_CONFIG` is applied as `-c` on EVERY call rather than once at clone time, because a
+    config written into `.git/config` is itself something a previous run could have changed. See
+    that constant for what the two settings buy and — measured — what they do not.
     """
+    safety: list[str] = []
+    for key, value in GIT_SAFETY_CONFIG:
+        safety += ["-c", f"{key}={value}"]
     try:
         proc = subprocess.run(
-            ["git", "-c", "core.symlinks=false", "-c", "core.hooksPath=/nonexistent/hooks",
-             "-C", str(workspace), *args],
+            ["git", *safety, "-C", str(workspace), *args],
             capture_output=True, text=True, env=_env(token, author), timeout=timeout)
     except subprocess.TimeoutExpired:
         raise CheckoutError(f"git {args[0]} timed out after {timeout:.0f}s") from None
@@ -330,12 +383,22 @@ def _ensure_repo(workspace: Path) -> None:
     would still report `completed`, the transcript would simply never be committed, and the loss
     would only surface when a different provider found no conversation to resume. A forced add
     overrides every ignore source, so the rule cannot be shadowed by the repository's own contents.
+
+    `GIT_SAFETY_CONFIG` is written into the workspace's own config on every call too, and for a
+    narrower reason than ADR 0033 D-f gives. D-f says the environment "can be overridden by an agent
+    that decides to" — measured on git 2.54.0, that is true of the repository's config in exactly
+    the same way and to exactly the same degree (`-c` beats both), so this is not a second lock on
+    the same door. What it covers is a git that never saw `child_env` at all: an operator shelling
+    into a workspace to look at a failed task, a tool that re-execs without the environment. The
+    config travels with the directory.
     """
     if not (workspace / ".git").exists():
         _run(workspace, "init", "--quiet", f"--initial-branch={DEFAULT_BRANCH}", ".")
     exclude = workspace / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text(f"# written by grid — see ADR 0032\n/{RESERVED_DIR}/\n")
+    for key, value in GIT_SAFETY_CONFIG:
+        _run(workspace, "config", "--local", key, value)
 
 
 def materialize(workspace: Path, *, url: str, token: str, branch: str,

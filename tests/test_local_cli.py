@@ -28489,3 +28489,266 @@ def test_task_create_shows_the_relays_rejection_of_a_path(monkeypatch, tmp_path,
         cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:.git/hooks/x"])
 
     assert "reserved directory" in str(exit_info.value)
+
+
+# --- ADR 0033 issue 16b: `grid project import` ---------------------------------------------------
+
+def _local_repo(tmp_path, name="src", commits=2):
+    """A real git repository for the CLI to import. Real git, because `push_import` runs real git."""
+    import subprocess
+
+    work = tmp_path / name
+    work.mkdir()
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=str(work), check=True, capture_output=True,
+                              text=True, env=env).stdout
+
+    git("init", "--quiet", "-b", "main", ".")
+    for index in range(commits):
+        (work / f"f{index}.txt").write_text(f"{index}\n")
+        git("add", "-A")
+        git("commit", "--quiet", "-m", f"c{index}")
+    return work, git("rev-parse", "HEAD").strip()
+
+
+def test_project_import_opens_pushes_and_finishes_in_that_order(monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-f end to end through `cli.main`.
+
+    Three steps, and the middle one is a real `git push` — so this asserts the ORDER, that the push
+    went to the ref the relay named rather than one the client built, and that the pushed commit is
+    the repository's real tip.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={
+                "project_id": "P1", "member_key": "abc123",
+                "ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(200, json={
+            "project_id": "P1", "status": "imported", "commit": tip,
+            "trunk": "main", "warnings": [], "trees_read": 3})
+
+    _mock_relay(monkeypatch, handler)
+    # The push is real git against a real bare repo, so `git_remote_url` is pointed at one.
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    rc = cli.main(["project", "import", str(work), "P1"])
+
+    assert rc == 0
+    assert calls == [("POST", "/relay/v1/projects/P1/import"),
+                     ("POST", "/relay/v1/projects/P1/import/finish")]
+    landed = subprocess.run(
+        ["git", "--git-dir", str(relay_repo), "rev-parse", "refs/import/abc123"],
+        capture_output=True, text=True).stdout.strip()
+    assert landed == tip, "the push did not reach the ref the relay named"
+    out = capsys.readouterr().out
+    assert f"main is now at {tip}" in out
+
+
+def test_project_import_pushes_to_the_ref_the_relay_named_and_not_one_it_guessed(
+        monkeypatch, tmp_path):
+    """The staging ref's spelling is the relay's alone (the PRD's lockstep table says so).
+
+    Asserted with a ref this client could never have derived: if it ever starts building
+    `refs/import/<key>` itself, that is a second place that has to agree about how a member key is
+    shaped, and it would pass every other test in this file.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/not-a-member-key", "trunk": "main"})
+        return httpx.Response(200, json={"status": "imported", "commit": tip, "trunk": "main"})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    assert cli.main(["project", "import", str(work), "P1"]) == 0
+
+    landed = subprocess.run(
+        ["git", "--git-dir", str(relay_repo), "rev-parse", "refs/import/not-a-member-key"],
+        capture_output=True, text=True).stdout.strip()
+    assert landed == tip
+
+
+def test_project_import_shows_the_relays_refusal_and_the_path_it_names(monkeypatch, tmp_path):
+    """A 422 carrying `reason` and `path` beside its sentence (ADR 0033 D-l). The sentence is what
+    a person reads, and it has to arrive as words rather than a traceback."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(422, json={"detail": {
+            "code": "import_rejected", "reason": "submodule", "path": "vendor/lib",
+            "message": "This repository contains the submodule vendor/lib.", "warnings": []}})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "vendor/lib" in str(exit_info.value)
+
+
+def test_project_import_refuses_to_call_an_unreadable_reply_an_import(monkeypatch, tmp_path):
+    """The rule promote and integrate already follow. Reporting an import from a body that never
+    said so would tell somebody their team's history is on the relay on no evidence — and a proxy
+    that strips a body is all it takes."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(200, json={})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "did not say" in str(exit_info.value)
+
+
+def test_project_import_relays_the_lfs_warning_verbatim(monkeypatch, tmp_path, capsys):
+    """A warning is not a failure — the import landed. Printed verbatim, because these are the
+    relay's words about a repository this CLI never read."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(200, json={
+            "status": "imported", "commit": tip, "trunk": "main",
+            "warnings": ["This repository uses Git LFS."]})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    assert cli.main(["project", "import", str(work), "P1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Git LFS" in out
+
+
+def test_project_import_against_an_old_relay_names_the_relay(monkeypatch, tmp_path):
+    """A bare framework 404 becomes the sentence naming the relay — the same gate every other
+    project route uses, keyed on the body FastAPI owns rather than on the status."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "does not have projects yet" in str(exit_info.value)
+
+
+def test_project_import_does_not_mask_a_real_404_from_a_relay_that_has_the_route(
+        monkeypatch, tmp_path):
+    """The other half of that gate. A relay that HAS import and answers 404 for its own reason —
+    the project is not yours — must show its own words, or the fix somebody is handed is wrong."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "No such project"}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "No such project" in str(exit_info.value)
+
+
+def test_project_import_refuses_a_path_that_is_not_a_repository_before_touching_the_relay(
+        monkeypatch, tmp_path):
+    """Checked here rather than left to git, whose message arrives AFTER the relay has opened an
+    import and deleted whatever a previous attempt staged."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(200, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(plain), "P1"])
+
+    assert "not a git repository" in str(exit_info.value)
+    assert called == [], "the relay was asked to open an import for a directory with no git in it"
+
+
+def test_project_import_help_says_it_is_the_only_way_a_project_gets_a_trunk(monkeypatch, tmp_path):
+    """The help text of a consequential verb is asserted in this suite, as promote's and
+    integrate's are: since this slice a member cannot push `main`, so somebody reading `--help`
+    has to be told where a trunk comes from instead."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    parser = cli.build_parser()
+    project = parser._subparsers._group_actions[0].choices["project"]
+    text = project._subparsers._group_actions[0].choices["import"].format_help()
+
+    assert "only way a project gets a trunk" in text
+    assert "submodule" in text
+    assert "Git LFS" in text
+
+
+def test_project_import_reports_a_failed_push_as_a_sentence_not_a_traceback(monkeypatch, tmp_path):
+    """The push is the one step of this command that is not an HTTP call, and it was the one step
+    that ended in a traceback.
+
+    Steps 1 and 3 go through `relay._task_oneshot`, which turns every failure into a clean
+    `SystemExit`; `push_import` raises `CheckoutError`, a bare `RuntimeError`. `SystemExit` is this
+    repo's clean-error idiom, and a command that uses it for two of its three steps and not the
+    third is the shape somebody debugs at the wrong layer.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+
+    _mock_relay(monkeypatch, handler)
+    # A URL no git can push to, which is what a network failure or a wrong relay address looks like.
+    monkeypatch.setattr("remote.relay.git_remote_url",
+                        lambda *a, **k: str(tmp_path / "there-is-no-repo-here"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    message = str(exit_info.value)
+    assert "Could not push" in message
+    # And it says what state the project is in, because "the push failed" leaves a person wondering
+    # whether half a repository is now on the relay.
+    assert "no main" in message

@@ -886,6 +886,7 @@ grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
 grid project wip reset     <project-id> <member-key> --commit <oid> [--grid <grid>] [--json]
 grid project promote       <project-id> <member-key> [--grid <grid>] [--json]
 grid project integrate     <project-id> [--grid <grid>] [--json]
+grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
 ```
 
 **Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
@@ -915,10 +916,42 @@ branch. `main` is not touched by a task at all. That is what lets several people
 without their results racing for one ref.
 
 A project's `main` therefore has to **exist before its first task**: a project that has just been
-created has no commits, and creating a task in one is refused with a message saying so. Give it a
-first commit — push `main` while the project is idle — and tasks work from then on. That push is the
-**only** one this grid accepts to `main`, and only while the project has none: once a trunk exists,
-`promote` is the one thing that moves it.
+created has no commits, and creating a task in one is refused with a message saying so. `grid
+project import` is how it gets one. **The relay is `main`'s only writer** — a `git push` of `main` is
+refused whatever state the project is in — so import and `promote` are the two things that move it,
+and nothing else does.
+
+### Importing an existing repository
+
+`grid project import <path> <project-id>` brings a repository, with its history, into a project that
+has no `main` yet. It is the only way a project gets a trunk.
+
+Three things happen. The repository is pushed to a staging ref only you can see; the relay reads
+**every tree its history reaches**; and only a clean one becomes `main`. The reading is the slow
+part and it is why the command waits — about twenty seconds on a 29,000-commit repository.
+
+It is refused if the repository contains:
+
+- a **submodule** — a task's provider is given no credential, so an agent would find an empty
+  directory where that code should be;
+- a path under **`.grid/`** — the workspace keeps its own state there;
+- a **symlink pointing outside the repository**. Links that stay inside are fine and common, and
+  refusing them all would reject ordinary repositories.
+
+`.claude/` and `CLAUDE.md` import normally. A repository using **Git LFS** imports with a warning:
+an agent will see pointer files rather than the content they stand for.
+
+A refused import leaves the project with **no trunk**, deliberately — half a trunk would be worse,
+because `main` is the one ref nothing here rewrites. Fix what the message names and import again.
+
+A project that already has a `main` is refused. A second import would move the trunk out from under
+every member's WIP branch and nothing could integrate back, so the answer is a new project.
+
+⚠️ Two things an imported repository does not get inside a task: **tags** are hidden from providers,
+so `git describe` and version stamping do not work there; and the repository's own `CLAUDE.md` is on
+disk and readable but is **not** loaded into the agent's context, because the flag that stops a
+committed `.claude/settings.json` executing also turns off project-memory discovery. A prompt that
+depends on a repository's conventions has to say so.
 
 ### Promoting
 

@@ -405,6 +405,13 @@ relay had grown from empty. Import makes the same sentence mean "any provider ma
 checkout of any imported company repository", and that is a bigger claim than the one that was
 agreed. It is not resolved here; it is named so it is decided deliberately rather than inherited.
 
+> **Decided, 2026-08-08 (issue 24).** It ships as a **domain allowlist**: provider and client must
+> belong to the same company, and a provider only serves tasks created by a client in that domain.
+> This is a **release gate for import**, not a later refinement — until it lands, the sentence above
+> describes the shipped behaviour. The relay has no domain concept today; `UserRow.email` is where
+> one is derivable from, with two traps recorded in the issue (the `@unknown` synthesized address in
+> `apply_sync_snapshot`, and the fact that most authenticated paths never write a `UserRow` at all).
+
 The validator refuses submodules (`160000`) outright, and refuses any path under `.grid/` — closing
 on the push path the hole `task_files` already closes on the upload path. Symlinks (`120000`) are
 allowed when their target stays inside the repository and refused when it escapes: refusing all of

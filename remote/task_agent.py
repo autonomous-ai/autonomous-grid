@@ -150,10 +150,34 @@ ENV_PASSTHROUGH_ENV = "GRID_TASK_ENV_PASSTHROUGH"
 # agent to commit the merge. So the identity is now put on the child's environment below
 # (`_git_identity`), and an agent commit and a grid commit come out identical.
 #
-# This does NOT complete D-f's floor: the other half is `core.symlinks=false` written into the
-# workspace's own config, which belongs with import (issue 16b) where a packfile can carry a
-# `120000` object in the first place.
+# Since issue 16b the floor also carries `task_repo.GIT_SAFETY_CONFIG` — the `core.symlinks` and
+# `core.hooksPath` settings the PROVIDER's own git has always had as `-c` flags, which the agent's
+# git never got. Import is what makes that matter: before it the relay wrote mode `100644` literally
+# and a `120000` object could not exist in a project at all.
+#
+# Carried as `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n` rather than as files, because the two file paths
+# above are already `/dev/null` — these are settings, and that mechanism is the only one that
+# survives having no config file to write them in. Measured on git 2.54.0: it also outranks the
+# repository's own `.git/config`, so an agent that rewrites the workspace's config does not get the
+# link back. What it does NOT outrank is `-c` on the agent's own command line — see
+# `GIT_SAFETY_CONFIG` for what that bounds this to.
 _GIT_CONFIG_FLOOR = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+
+def _git_safety_env() -> dict[str, str]:
+    """`GIT_SAFETY_CONFIG` as git's own environment-borne configuration.
+
+    The count is derived from the tuple rather than written down, so adding a third setting cannot
+    leave `GIT_CONFIG_COUNT` naming two and silently dropping the new one — a miscount fails open,
+    which is the direction that must not be possible here.
+    """
+    from remote import task_repo
+
+    env = {"GIT_CONFIG_COUNT": str(len(task_repo.GIT_SAFETY_CONFIG))}
+    for index, (key, value) in enumerate(task_repo.GIT_SAFETY_CONFIG):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
 # POSIX's own shape for a variable name, so a value that could never have been a variable is caught
 # where it can be explained rather than becoming a child that behaves oddly for the life of a fleet.
 _ENV_NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -719,8 +743,15 @@ def child_env(author=None) -> dict[str, str]:
     # every other signal looks healthy. That is issue 06's bug, reached from the environment.
     env.pop(_CLAUDE_CONFIG_DIR, None)
     # The git floor (ADR 0033 D-f). Forced rather than allowlisted, because the danger here is not a
-    # variable being inherited — it is `~/.gitconfig` being found. See the constant.
+    # variable being inherited — it is `~/.gitconfig` being found, and a `120000` object an import
+    # carried being written as a real link. See the constant.
+    #
+    # The two halves are applied together and after the passthrough for the same reason the identity
+    # below is: an operator who lists `GIT_CONFIG_COUNT` — or whose environment simply holds one —
+    # would otherwise leave the count naming a different number of settings than the keys beside it,
+    # and git reads the count. That is a floor that disappears without saying so.
     env.update(_GIT_CONFIG_FLOOR)
+    env.update(_git_safety_env())
     # And WHO a commit the agent makes is by (ADR 0033 D-m). After the floor, deliberately: the
     # floor is what stops git reading a config, and this is what stops it inventing an identity
     # instead. Forced too, so an operator's passthrough list cannot put a hostname in a team's

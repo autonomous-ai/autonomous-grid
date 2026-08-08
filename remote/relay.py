@@ -610,15 +610,23 @@ _BARE_FRAMEWORK_404 = "not found"
 
 
 def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, *,
-                  missing_route_hint: str | None = None, **kwargs: Any) -> Any:
+                  missing_route_hint: str | None = None, timeout: float = _REGISTER_TIMEOUT,
+                  **kwargs: Any) -> Any:
     """One relay call. Any failure is a clean `SystemExit` carrying the relay's own words.
 
     `missing_route_hint` replaces the useless bare-404 body for an endpoint that a relay predating
     its feature simply does not have. Without it the user's entire reward for upgrading this CLI
     ahead of their relay is the words "Not Found", which reads as "the thing I asked for is gone".
+
+    `timeout` defaults to the 15s every other one-shot uses, which is right for a call the relay
+    answers out of its database. It is a parameter because ONE of these is not that: finishing an
+    import makes the relay read a whole repository's object graph, measured at 18.17s on a real
+    28,666-commit history (ADR 0033 issue 16b) — so on the default this CLI would give up on a
+    request that was going to succeed, and report a timeout for an import that then lands with
+    nobody watching.
     """
     try:
-        with _client(signaling_url, access_token, timeout=_REGISTER_TIMEOUT) as client:
+        with _client(signaling_url, access_token, timeout=timeout) as client:
             resp = client.request(method, path, **kwargs)
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         # `InvalidURL` is NOT an `HTTPError` subclass — the trap `deregister_node` records above, and
@@ -725,6 +733,43 @@ _OLD_RELAY = (
     "This grid's relay does not have projects yet — it predates project membership. "
     "Ask its operator to update it, or use a grid that has."
 )
+
+
+# How long to wait for `import/finish`. The relay walks every tree the pushed ref reaches before it
+# will set `main` — measured at **18.17s** on a real 28,666-commit repository, under its own 600s
+# ceiling (`import_graph.WALK_TIMEOUT_SECONDS`). This sits ABOVE that ceiling, deliberately and in
+# the same direction as the git-transport pair: a client that gives up first turns a refusal the
+# relay was about to explain into "the connection died", and the import either lands unobserved or
+# does not, with no way to tell from here.
+_IMPORT_FINISH_TIMEOUT = 900.0
+
+
+def open_project_import(signaling_url: str, access_token: str,
+                        project_id: str) -> dict[str, Any]:
+    """Open an import and learn where to push (``POST /relay/v1/projects/{id}/import``).
+
+    The reply carries the staging ref. It is NOT derived here: the spelling of
+    `refs/import/<member_key>` is the relay's alone (the PRD's lockstep table says so), and a client
+    that built it would be a second place that has to agree about how a member key is shaped.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/import",
+        missing_route_hint=_OLD_RELAY)
+
+
+def finish_project_import(signaling_url: str, access_token: str,
+                          project_id: str) -> dict[str, Any]:
+    """Validate what was staged and set `main` (``POST …/{id}/import/finish``).
+
+    Slow by nature — see `_IMPORT_FINISH_TIMEOUT`. A refusal comes back as a 422 whose `detail`
+    carries `reason` and `path` beside its sentence, so a caller can say which file to remove
+    without reading English.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/import/finish",
+        missing_route_hint=_OLD_RELAY, timeout=_IMPORT_FINISH_TIMEOUT)
 
 
 def create_project(signaling_url: str, access_token: str, *, name: str) -> dict[str, Any]:

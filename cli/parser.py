@@ -569,6 +569,40 @@ def _add_project(sub) -> None:
     integrate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     integrate.set_defaults(handler=cmd_remote_project)
 
+    # `import` — how a project that has no commits gets a trunk at all (ADR 0033 D-f, issue 16b).
+    # Since this slice a member cannot push `main` themselves, so this is the only way in.
+    importer = project_sub.add_parser(
+        "import",
+        help="Import an existing repository into an empty project",
+        description=(
+            "Import an existing repository, with its history, into a project that has no `main` "
+            "yet.\n\n"
+            "This is the only way a project gets a trunk. The relay is `main`'s sole writer — "
+            "promote moves it afterwards, and nothing else does — so a first `git push` of `main` "
+            "is refused.\n\n"
+            "What happens: the repository is pushed to a staging ref only you can see, the relay "
+            "reads EVERY tree its history reaches, and only then does it become `main`. The "
+            "reading is the slow part and it is why this command waits — on a 29,000-commit "
+            "repository it is about twenty seconds.\n\n"
+            "It is refused if the repository contains a submodule (a task's provider has no "
+            "credential to fetch one), a path under `.grid/`, or a symlink pointing outside the "
+            "repository. Symlinks that stay inside are fine, and so is `.claude/`. A repository "
+            "using Git LFS imports with a warning: an agent will see pointer files, not content.\n\n"
+            "A refused import leaves the project with NO trunk, on purpose — half a trunk would be "
+            "worse. Fix what it names and import again, or import into a fresh project.\n\n"
+            "Import brings a repository into an EMPTY project. A project that already has a `main` "
+            "is refused, because a second import would move the trunk out from under every "
+            "member's branch and nothing could integrate back."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    importer.add_argument("path", help="Path to the local git repository to import.")
+    importer.add_argument("project_id", help="Project id from `grid project list`.")
+    importer.add_argument(
+        "--branch", default="HEAD",
+        help="Which local ref to import (default: HEAD, i.e. whatever is checked out).")
+    importer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    importer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    importer.set_defaults(handler=cmd_remote_project)
+
 
 def _add_task(sub) -> None:
     """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).

@@ -31,6 +31,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_promote(args)
     if args.subcommand == "integrate":
         return _project_integrate(args)
+    if args.subcommand == "import":
+        return _project_import(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
     # so direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "member":
@@ -170,6 +172,96 @@ def _wip_reset(args: argparse.Namespace) -> int:
     if previous:
         print(f"was={previous}")
     return 0
+
+
+def _project_import(args: argparse.Namespace) -> int:
+    """Bring an existing repository into an empty project (ADR 0033 D-f, issue 16b).
+
+    Three steps, and the middle one is a real `git push` rather than an HTTP call this CLI makes:
+
+      1. ask the relay to open an import — it answers with the staging ref to push to;
+      2. push the local repository there over the project's own smart-HTTP front;
+      3. ask the relay to check it and set `main`.
+
+    Step 3 is the slow one. The relay reads every tree the pushed history reaches before it will let
+    it become the trunk — measured at 18.17s on a 28,666-commit repository — so the wait is expected
+    and is said out loud rather than looking like a hang.
+
+    **A refused import leaves the project with no trunk**, which is deliberate and is a state the
+    rest of the system already explains: `grid task create` refuses it with a message naming import.
+    Half a trunk would be far worse, because `main` is the one ref nothing in this design rewrites.
+    """
+    import os
+
+    from remote import relay, task_repo
+
+    source = os.path.abspath(args.path)
+    if not os.path.isdir(os.path.join(source, ".git")):
+        # Checked here rather than left to git, whose own message for this ("not a git repository")
+        # arrives AFTER the relay has already opened an import and deleted whatever was staged.
+        raise SystemExit(f"{source} is not a git repository, so there is nothing to import.")
+
+    base, token, _label = _resolve(args)
+    opened = relay.open_project_import(base, token, args.project_id)
+    ref = opened.get("ref")
+    if not ref:
+        raise SystemExit(
+            f"The relay did not say where to push the repository for project {args.project_id}, "
+            f"so nothing was uploaded. "
+            f"`grid project import {args.path} {args.project_id} --json` shows what it sent.")
+
+    url = relay.git_remote_url(base, args.project_id)
+    if not _emit_quietly(args):
+        print(f"Pushing {source} ({args.branch}) to project {args.project_id}…")
+    try:
+        commit = task_repo.push_import(source, url=url, token=token,
+                                       local_ref=args.branch, remote_ref=ref)
+    except Exception as exc:
+        # `push_import` raises `CheckoutError`, a bare `RuntimeError` — so without this the one step
+        # of this command that is not an HTTP call is also the one that ends in a traceback instead
+        # of a sentence. Steps 1 and 3 go through `relay._task_oneshot`, which turns every failure
+        # into a clean `SystemExit`; this matches them, and matches `remote_task`'s own fetch
+        # handler, which wraps its `checkout_result` call for exactly this reason.
+        #
+        # Broad, like that one: a push can fail as a `CheckoutError`, as an `OSError` on the source
+        # directory, or as whatever git's absence produces, and the user wants the reason rather
+        # than the class. Nothing sensitive travels in it — the token is in the environment, never
+        # in argv or the URL, so `_run`'s error text cannot carry it.
+        raise SystemExit(
+            f"Could not push {source} to project {args.project_id}: {exc}\n"
+            f"Nothing was imported; the project still has no {opened.get('trunk') or 'main'}.")
+    if not _emit_quietly(args):
+        print(f"Pushed {commit}. Checking it before it becomes "
+              f"{opened.get('trunk') or 'main'} — this reads the whole history and can take a "
+              f"while…")
+
+    answer = relay.finish_project_import(base, token, args.project_id)
+
+    if _emit(args, answer):
+        return 0
+    status = answer.get("status")
+    imported = answer.get("commit")
+    if status != "imported" or not imported:
+        # The same rule promote and integrate follow: a reply this command cannot read is not an
+        # import. Reporting one would tell a person their team's history is on the relay when the
+        # only evidence is a body that did not say so.
+        raise SystemExit(
+            f"The relay's answer for project {args.project_id} did not say the repository was "
+            f"imported, so this cannot be reported as one. "
+            f"`grid project import {args.path} {args.project_id} --json` shows what it sent.")
+    print(f"{answer.get('trunk') or 'main'} is now at {imported}")
+    for warning in answer.get("warnings") or ():
+        # Printed VERBATIM. These are the relay's words about a repository this CLI never read, and
+        # the only one today (Git LFS) is a fact about what an agent will find rather than an error.
+        print(f"warning: {warning}")
+    print()
+    print(f"Next: grid task create --project {args.project_id} \"<prompt>\"")
+    return 0
+
+
+def _emit_quietly(args: argparse.Namespace) -> bool:
+    """Whether progress lines should be withheld — `--json` output must stay parseable."""
+    return bool(getattr(args, "json", False))
 
 
 def _project_promote(args: argparse.Namespace) -> int:

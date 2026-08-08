@@ -560,9 +560,9 @@ def test_the_operators_own_git_configuration_does_not_reach_a_tree_from_the_wire
     floor is set on git's own variables instead.
 
     Measured: `git` tolerates an unreadable global config — warns, exits 0 — so this is about which
-    configuration applies, not about making git work. A second effect is deliberate: the agent no
-    longer inherits the operator's `user.name`/`user.email`, so an agent asked to commit fails
-    loudly rather than silently authoring a stranger's repository as the human running the provider.
+    configuration applies, not about making git work. It does **not** make an agent's commit fail
+    for want of `user.name`: re-measured on git 2.54.0, git auto-detects `<user>@<hostname>` and
+    exits 0, which is why `_git_identity` forces the identity separately (issue 21).
     """
     import os as _os
 
@@ -574,6 +574,160 @@ def test_the_operators_own_git_configuration_does_not_reach_a_tree_from_the_wire
 
     assert env["GIT_CONFIG_GLOBAL"] == _os.devnull
     assert env["GIT_CONFIG_SYSTEM"] == _os.devnull
+
+
+def test_the_git_safety_floor_outranks_an_operators_passthrough_list(monkeypatch):
+    """The floor is applied after the passthrough, and a miscount is the failure that hides.
+
+    `GIT_CONFIG_COUNT` is not a setting, it is how many settings follow — so an inherited or
+    passed-through `GIT_CONFIG_COUNT=0` leaves `GIT_CONFIG_KEY_0`/`VALUE_0` sitting in the
+    environment being read by nobody. Git does not complain; the workspace simply goes back to
+    materializing symlinks, on one provider, with every other signal healthy. That is why the count
+    is derived from the tuple and why the floor is written last.
+    """
+    from remote import task_agent, task_repo
+
+    monkeypatch.setenv("GRID_TASK_ENV_PASSTHROUGH",
+                       "GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0, GIT_CONFIG_VALUE_0")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.symlinks")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+    env = task_agent.child_env()
+
+    assert env["GIT_CONFIG_COUNT"] == str(len(task_repo.GIT_SAFETY_CONFIG))
+    settings = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+                for i in range(int(env["GIT_CONFIG_COUNT"]))}
+    assert settings == dict(task_repo.GIT_SAFETY_CONFIG)
+
+
+def _bare_repo_holding_a_symlink(tmp_path, branch):
+    """A real bare repo whose `branch` carries `docs/README -> ../README.md`. `(url, commit)`.
+
+    An INSIDE link on purpose: import refuses the escaping kind outright, so the object that
+    actually reaches a workspace is this one, and this is the object the provider has to keep from
+    becoming a link.
+    """
+    import os
+    import subprocess
+
+    def git(cwd, *args):
+        return subprocess.run(
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True,
+            env={"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+                 "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"})
+
+    seed = tmp_path / "seed-symlink"
+    (seed / "docs").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", branch, str(seed))
+    (seed / "README.md").write_text("hello\n")
+    os.symlink("../README.md", seed / "docs" / "README")
+    git(seed, "add", "-A")
+    assert "120000" in git(seed, "ls-files", "-s").stdout, (
+        "the fixture did not record a symlink, so this test would pass on an empty tree")
+    git(seed, "commit", "-q", "-m", "imported")
+    bare = tmp_path / "symlink-origin.git"
+    git(tmp_path, "clone", "--bare", "-q", str(seed), str(bare))
+    return str(bare), git(bare, "rev-parse", branch).stdout.strip()
+
+
+def test_an_imported_symlink_does_not_materialize_under_the_agents_own_git(tmp_path):
+    """ADR 0033 D-f, the provider half of import (issue 16b) — the layer that was missing.
+
+    `task_repo._run` hardens the PROVIDER's git with `-c core.symlinks=false` on every invocation.
+    The agent's own git calls got none of it, and since issue 15 a merge task's prompt *requires*
+    the agent to run git in a checkout that arrived over the wire. So a `120000` object — one the
+    import validator deliberately ALLOWS, because refusing every symlink rejects ordinary
+    repositories — became a real link the moment the agent touched git, and the next `git add -A`
+    followed it.
+
+    Run against real git with `child_env()` and nothing else, because that is the whole of what the
+    agent gets. The control below runs the identical checkout with the floor stripped out: without
+    it this asserts nothing more than "git wrote a regular file", which it might do for any reason.
+
+    ⚠️ **What this does NOT claim.** Measured on git 2.54.0: `-c core.symlinks=true` on the agent's
+    own command line beats both the environment floor and the repository's config, so neither layer
+    stops an agent that has decided to make a link. They close the ACCIDENTAL path — an ordinary
+    `git merge` or `git checkout` materializing what the packfile carried — which is the path import
+    actually creates. Against a deliberate agent the validator is the only layer, exactly as D-f
+    says.
+    """
+    import subprocess
+
+    from remote import task_agent, task_repo
+
+    url, commit = _bare_repo_holding_a_symlink(tmp_path, "task/T1")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_repo.materialize(workspace, url=url, token="", branch="task/T1", input_commit=commit)
+
+    link = workspace / "docs" / "README"
+
+    def checkout_as_the_agent(env):
+        link.unlink()
+        subprocess.run(["git", "checkout", "--", "."], cwd=str(workspace),
+                       capture_output=True, text=True, check=True, env=env)
+
+    checkout_as_the_agent(task_agent.child_env())
+    assert not link.is_symlink(), (
+        "the agent's own git re-created an imported 120000 object as a real symlink")
+    assert link.read_text() == "../README.md", "the link's target should be the file's content"
+
+    # The control. Same tree, same command, the floor removed — and now it IS a link, which is what
+    # makes the assertion above evidence rather than a coincidence.
+    unfloored = {k: v for k, v in task_agent.child_env().items()
+                 if not k.startswith("GIT_CONFIG_")}
+    subprocess.run(["git", "config", "--local", "--unset-all", "core.symlinks"],
+                   cwd=str(workspace), capture_output=True, check=False)
+    checkout_as_the_agent(unfloored)
+    assert link.is_symlink(), (
+        "without the floor git did not create a symlink either, so this test proves nothing")
+
+
+def test_the_workspaces_own_config_holds_for_a_git_that_gets_none_of_grids_environment(tmp_path):
+    """The second half of D-f's floor, and what it is actually worth.
+
+    ADR 0033 asks for `core.symlinks=false` in the workspace's own config *as well as* on each
+    invocation. The reason given — "env can be overridden by an agent that decides to" — turns out
+    not to be the reason, measured: an agent's `-c core.symlinks=true` beats the repository's config
+    just as easily as it beats the environment, and rewriting the repository's config does not beat
+    the environment at all.
+
+    What this layer does buy is the case the environment cannot reach: **a git that was not started
+    from `child_env`.** An operator shelling into a workspace to look at a failed task, a tool the
+    agent installed that re-execs without the environment, a future refactor that reorders the
+    floor. The config travels with the directory, so it holds for all of them.
+
+    Written on EVERY call, beside `info/exclude` and for the same stated reason: a persistent
+    workspace's config is something a previous run could have changed.
+    """
+    import subprocess
+
+    from remote import task_repo
+
+    url, commit = _bare_repo_holding_a_symlink(tmp_path, "task/T1")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_repo.materialize(workspace, url=url, token="", branch="task/T1", input_commit=commit)
+
+    link = workspace / "docs" / "README"
+    link.unlink()
+    # No grid environment whatsoever — not the floor, not the identity, nothing. Only `PATH`, or git
+    # cannot be found at all.
+    import os
+    bare_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path / "home")}
+    subprocess.run(["git", "checkout", "--", "."], cwd=str(workspace),
+                   capture_output=True, text=True, check=True, env=bare_env)
+
+    assert not link.is_symlink(), (
+        "a git run without grid's environment re-created the imported 120000 object as a link")
+
+    for key, value in task_repo.GIT_SAFETY_CONFIG:
+        got = subprocess.run(["git", "config", "--local", "--get", key], cwd=str(workspace),
+                             capture_output=True, text=True)
+        assert got.stdout.strip() == value, f"{key} is not in the workspace's own config"
 
 
 def test_the_cli_process_environment_is_untouched(monkeypatch):
