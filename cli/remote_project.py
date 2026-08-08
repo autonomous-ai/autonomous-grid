@@ -31,6 +31,10 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_promote(args)
     if args.subcommand == "integrate":
         return _project_integrate(args)
+    if args.subcommand == "status":
+        return _project_status(args)
+    if args.subcommand == "check":
+        return _project_check(args)
     if args.subcommand == "commit":
         return _project_commit(args)
     if args.subcommand == "import":
@@ -400,6 +404,145 @@ def _project_integrate(args: argparse.Namespace) -> int:
         # Where the branch was before. There is no revert, so somebody putting it back needs it —
         # and `grid project wip reset` is the command that takes it.
         print(f"was={previous}")
+    return 0
+
+
+def _project_status(args: argparse.Namespace) -> int:
+    """Where the project is, from your side (ADR 0033 D-l, issue 19a).
+
+    Two of these were answerable before only by performing a write. "How far behind am I" meant
+    attempting a promote and reading the refusal — a call that either releases work or refuses it,
+    used as a query. "What holds my slot" meant attempting a create and reading the 409.
+
+    It is also the change signal: `main_commit` moves on a promote or an import, and every member's
+    tip moves when their work settles, integrates or is committed — so an application watches this
+    instead of polling `git fetch`.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.project_status(base, token, args.project_id)
+
+    if _emit(args, answer):
+        return 0
+    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    branch = answer.get("branch")
+    if not branch:
+        # A reply this command cannot read is NOT a status — the same rule promote, integrate,
+        # commit and import all follow. Printing the template with blanks in it would read as "you
+        # have no work", which is the one answer nobody should get from a body a proxy mangled.
+        raise SystemExit(
+            f"The relay's answer for project {args.project_id} did not say which branch is yours, "
+            f"so this cannot be reported as a status. "
+            f"`grid project status {args.project_id} --json` shows what it sent.")
+
+    trunk = answer.get("trunk") or "main"
+    print(f"project {args.project_id}")
+    print(f"{trunk}={answer.get('main_commit') or '(none yet)'}")
+    print(f"{branch}={answer.get('wip_commit') or '(nothing yet)'}")
+
+    ahead, behind = answer.get("ahead"), answer.get("behind")
+    if ahead is None or behind is None:
+        # Absent, not zero. `0/0` would read as "up to date with main", and the next thing somebody
+        # does on that belief is promote a branch that does not exist.
+        print(f"\nNothing to compare yet — run a task, or `grid project commit {args.project_id}`.")
+    else:
+        can_promote = answer.get("can_promote")
+        if can_promote is not True and can_promote is not False:
+            # TRI-STATE, exactly as `_project_promote` treats `advanced` and for the same measured
+            # reason: a silently-defaulted "no" is how promote once reported a release for a body a
+            # proxy had stripped. Here it would print a self-contradiction — the relay defines
+            # `can_promote` as exactly `behind == 0`, so a reply keeping the distances and dropping
+            # it says "ahead=3 behind=0" and then "Behind main, so a promote would be refused".
+            #
+            # Deliberately NOT derived from `behind == 0` on this side: that would put the relay's
+            # rule in a second place, and the two would then be free to disagree about a fact only
+            # one of them can see.
+            raise SystemExit(
+                f"The relay's answer for project {args.project_id} did not say whether "
+                f"{branch} can be promoted, so this cannot be reported as a status. "
+                f"`grid project status {args.project_id} --json` shows what it sent.")
+        print(f"\nahead={ahead}  behind={behind}")
+        if can_promote:
+            print(f"Ready to release: grid project promote {args.project_id} "
+                  f"{answer.get('member_key') or '<member-key>'}")
+        else:
+            print(f"Behind {trunk}, so a promote would be refused. "
+                  f"Fix it with: grid project integrate {args.project_id}")
+
+    active = answer.get("active_task") or {}
+    if active.get("id"):
+        # The whole point of "who holds my slot, and since when". Without the id there is nothing to
+        # wait on, read or follow.
+        since = active.get("created_at")
+        print(f"\nYour task slot is held by {active['id']} ({active.get('state') or 'unknown'}"
+              + (f", since {since}" if since else "") + ")")
+        print(f"Watch it with: grid task follow {active['id']}")
+
+    queue = answer.get("queue") or {}
+    if queue.get("queued") or queue.get("running"):
+        # The relay's own view of why nothing is moving. It cannot say a provider has withdrawn
+        # itself on a rate-limit reading — nothing publishes that yet — but a deep queue with
+        # nothing running is the observable that sends somebody to look.
+        print(f"\nproject queue: {queue.get('queued', 0)} queued, "
+              f"{queue.get('running', 0)} running")
+        if queue.get("oldest_queued_at"):
+            print(f"oldest wait started {queue['oldest_queued_at']}")
+    return 0
+
+
+# What the relay says integrating WOULD do, and how to say that to a person. A dict rather than a
+# chain of `if`s for `_INTEGRATED`'s reason: the one thing this must never do is print a line for a
+# `status` it does not know, so an unknown one is a lookup that misses rather than an `else` that
+# guesses. Every line is in the CONDITIONAL, because nothing has happened.
+_WOULD_INTEGRATE = {
+    "up_to_date": "{branch} already has everything on main; integrating would do nothing",
+    "fast_forward": "{branch} would move straight onto main — no merge commit, nothing to review",
+    "merged": "main would be merged into {branch} cleanly, leaving a merge commit",
+    "merge_task": "main and {branch} both changed the same lines, so integrating would queue a "
+                  "merge task for an agent to resolve",
+}
+
+
+def _project_check(args: argparse.Namespace) -> int:
+    """Would integrating conflict? (ADR 0033 D-l, issue 19a.)
+
+    Integration **is** the conflict check without this: asking costs your one task slot and, when
+    the answer is "they conflict", queues a paid agent run to resolve them. This spends neither, and
+    for the same reason it answers while you already have a task in flight — which is exactly when
+    `grid project integrate` refuses you.
+
+    Nothing here moves a ref or creates a task, so every line is written in the conditional.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.preview_integration(base, token, args.project_id)
+
+    if _emit(args, answer):
+        return 0
+    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    status = answer.get("status")
+    branch = answer.get("branch") or "your WIP branch"
+    line = _WOULD_INTEGRATE.get(status)
+    if line is None:
+        # A reply this command cannot read is not a check that ran. The same rule promote and
+        # integrate follow, and it matters more here: somebody acts on this by deciding NOT to
+        # integrate, and a silent default would make that decision for them.
+        raise SystemExit(
+            f"The relay's answer for project {args.project_id} did not say what integrating would "
+            f"do, so this cannot be reported as a check. "
+            f"`grid project check {args.project_id} --json` shows what it sent.")
+
+    print(line.format(branch=branch))
+    ahead, behind = answer.get("ahead"), answer.get("behind")
+    if ahead is not None and behind is not None:
+        print(f"ahead={ahead}  behind={behind}")
+    files = answer.get("files") or []
+    if files:
+        # The relay sends them as DATA precisely so this does not have to be dug out of a sentence.
+        print(f"conflicts: {', '.join(str(path) for path in files)}")
+    print(f"\nNothing has changed. Do it with: grid project integrate {args.project_id}")
     return 0
 
 

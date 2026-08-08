@@ -951,6 +951,76 @@ def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, A
     )
 
 
+def list_tasks(signaling_url: str, access_token: str, project_id: str, *,
+               mine: bool = True, states: list[str] | None = None,
+               limit: int | None = None, after: str | None = None) -> dict[str, Any]:
+    """The tasks in one project (``GET /relay/v1/tasks``). ADR 0033 D-l, issue 19a.
+
+    Nothing listed tasks before this: `get_task` answers one id at a time, and the id came from the
+    create call — so an application that lost it, or a person asking "what has run today", had to
+    clone the project and read `task/*` refs over the git front.
+
+    `mine=False` widens it to every member's tasks in the project, which is issue 19a's decision on
+    ADR 0033's own reading that fencing a shared project's reads on `owner_id` is the wrong default.
+
+    `states` is repeatable and the relay does not check the VALUES — a state nobody writes simply
+    matches nothing, so a new one needs no client release.
+    """
+    params: dict[str, Any] = {"project_id": project_id}
+    # Sent as the strings the relay parses. Every query parameter on that route is declared as a
+    # string there so its refusals carry a `code` like the rest of the plane, rather than falling to
+    # FastAPI's list-shaped validation error.
+    if not mine:
+        params["mine"] = "false"
+    if states:
+        params["state"] = list(states)
+    if limit is not None:
+        params["limit"] = str(limit)
+    if after:
+        params["after"] = after
+    return _task_oneshot(
+        signaling_url, access_token, "GET", "/relay/v1/tasks",
+        params=params, missing_route_hint=_OLD_RELAY)
+
+
+def project_status(signaling_url: str, access_token: str,
+                   project_id: str) -> dict[str, Any]:
+    """Where a project is, from the caller's side (``GET /relay/v1/projects/{id}/status``).
+
+    ADR 0033 D-l, issue 19a. Two things were answerable before this only by performing a write:
+    *how far behind is my branch* (attempt a promote and read the refusal) and *what holds my slot*
+    (attempt a create and read the 409). Both are reads now.
+
+    It is also the project's **change signal**. `main_commit` moves on a promote or an import, and
+    each member's tip moves when a task of theirs settles, integrates or commits — so an application
+    notices either by diffing an oid it already holds, instead of polling `git fetch` against the
+    transport issue 16a exists to rescue.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/status",
+        missing_route_hint=_OLD_RELAY)
+
+
+def preview_integration(signaling_url: str, access_token: str,
+                        project_id: str) -> dict[str, Any]:
+    """What integrating WOULD do (``GET /relay/v1/projects/{id}/integrate/preview``).
+
+    ADR 0033 D-l, issue 19a. Before it, integration *was* the conflict check: asking cost the
+    member's one task slot and, when the answer was "they conflict", queued a paid agent run to
+    resolve them.
+
+    The `status` vocabulary is `integrate_project`'s own — `up_to_date`, `fast_forward`, `merged`,
+    `merge_task` — deliberately, so a caller branches on one set of four words rather than mapping a
+    preview enum onto the real one. It writes nothing and holds no slot, so it answers while the
+    caller already has a task in flight, which is exactly when they want it.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/integrate/preview",
+        missing_route_hint=_OLD_RELAY)
+
+
 def set_model_price(
     signaling_url: str,
     access_token: str,

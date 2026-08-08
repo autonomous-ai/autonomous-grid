@@ -886,6 +886,8 @@ grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
 grid project wip reset     <project-id> <member-key> --commit <oid> [--grid <grid>] [--json]
 grid project promote       <project-id> <member-key> [--grid <grid>] [--json]
 grid project integrate     <project-id> [--grid <grid>] [--json]
+grid project status        <project-id> [--grid <grid>] [--json]
+grid project check         <project-id> [--grid <grid>] [--json]
 grid project commit        <project-id> -m <message> [--file <local[:dest]>]… [--delete <path>]…
                                         [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
@@ -1012,6 +1014,33 @@ The `main` a merge task merges is **pinned when you run `integrate`**. If somebo
 while your agent is working, your merge still succeeds — you simply integrate again to pick up their
 release. That is a second round, not lost work.
 
+### Asking before you spend anything
+
+Two commands answer questions that previously needed a write.
+
+```
+grid project status <project-id>
+grid project check  <project-id>
+```
+
+`grid project status` shows where `main` is, where your WIP branch is, how far ahead and behind it
+is, whether a promote would be accepted, what is holding your one task slot and since when, and how
+deep the project's queue is. Before it, "how far behind am I" meant attempting a promote and reading
+the refusal — a call that either releases work or refuses it, used as a question.
+
+`grid project check` is the **dry run of `integrate`**. Integration *is* the conflict check without
+it: asking costs your one task slot, and when the answer is that you and somebody else changed the
+same lines it queues a merge task — a paid agent run. `check` spends neither. It reports the same
+four answers `integrate` does (already up to date, a straight fast-forward, a clean merge, or a
+conflict), names the files a conflict would touch, and changes nothing.
+
+Because it holds no slot, `check` answers **while you already have a task in flight** — which is
+exactly when `integrate` refuses you.
+
+`grid project status` is also how an application notices the project changed without running
+`git fetch`: `main` moves on a promote or an import, and each member's branch moves when their work
+settles, integrates or is committed, so a changed commit id is the signal.
+
 ### Committing without an agent
 
 `grid project commit` puts files into the project with **no agent, no provider and no model**. It is
@@ -1063,6 +1092,8 @@ result for a reason nobody caused.
 ```
 grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <id>] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
+grid task list   --project <id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
+                 [--grid <grid>] [--json]
 grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
 ```
@@ -1078,6 +1109,16 @@ resumable: every event carries a sequence number, and a stream that drops is rea
 one seen — nothing is lost and nothing is repeated. `--after-seq <n>` attaches at a cursor by hand
 (the default, `-1`, means from the very start); `--json` emits one `{"seq": …, "event": {…}}` object
 per line for a script to consume.
+
+`list` shows a project's tasks, oldest first. By default it shows **your own**; `--all` widens it to
+every member's, because a project is shared and a team wants to see what the team ran. `--state` is
+repeatable, and paging is by cursor — the command prints the `--after` to continue with when there is
+more, rather than silently stopping at the limit.
+
+Reading a task is fenced on **project membership**, not on who created it: any member of a project
+can `get`, `list` and `follow` any task in it. That is deliberate — a member can already clone the
+project and read any task branch — and it is what makes reviewing a colleague's run possible without
+one.
 
 `follow` exits with the task's own outcome — `0` for `completed`, non-zero for `failed` /
 `timed_out`, or if the stream ended without ever saying how the task finished.

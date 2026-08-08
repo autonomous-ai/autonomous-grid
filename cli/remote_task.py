@@ -66,6 +66,8 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
         return _task_follow(args)
     if args.subcommand == "fetch":
         return _task_fetch(args)
+    if args.subcommand == "list":
+        return _task_list(args)
     # argparse (required=True + choices) guarantees the rest is `get`; guard explicitly anyway, so
     # direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "get":
@@ -672,6 +674,67 @@ def _task_fetch(args: argparse.Namespace) -> int:
     # `failed` task especially, the file list is the point of fetching at all.
     for path in sorted(p for p in dest.rglob("*") if p.is_file() and ".git" not in p.parts):
         print(f"  {path.relative_to(dest)}")
+    return 0
+
+
+# How much of a prompt a listed row shows. The prompt is up to 100 KB, and a table is unreadable
+# the moment one row wraps — `grid task get <id>` is where the whole thing lives.
+_PROMPT_COLUMN = 48
+
+
+def _task_list(args: argparse.Namespace) -> int:
+    """The tasks in a project (ADR 0033 D-l, issue 19a).
+
+    Nothing listed tasks before this. `grid task get` answers one id at a time and the id came from
+    `grid task create`, so somebody who closed their terminal had to clone the project and read
+    `task/*` refs by hand.
+
+    `--all` widens it from the caller's own runs to every member's, which is the point on a shared
+    project: a team wants to see what the team ran, and the relay fences the answer on membership.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.list_tasks(base, token, args.project, mine=not args.all,
+                              states=list(args.state or ()), limit=args.limit,
+                              after=args.after)
+    if getattr(args, "json", False):
+        print(json.dumps(answer, indent=2))
+        return 0
+
+    tasks = answer.get("tasks")
+    if not isinstance(tasks, list):
+        # A reply this command cannot read is NOT an empty project — the same rule
+        # `grid project status`, `check`, `promote`, `integrate`, `commit` and `import` all follow.
+        # The two collapsed here until issue 19a's review: a body a proxy had stripped came back as
+        # `{}`, and somebody polling a shared project was told nobody was working. The check is on
+        # the PRESENCE of `tasks`, not its truthiness — an empty list is a real answer.
+        raise SystemExit(
+            f"The relay's answer for project {args.project} did not contain a task list, so this "
+            f"cannot be reported as one. "
+            f"`grid task list --project {args.project} --json` shows what it sent.")
+
+    if not tasks:
+        # Said rather than printed as an empty table, which reads as a display bug.
+        print(f"No tasks in project {args.project}.")
+        print(f"\nCreate one with: grid task create --project {args.project} \"<prompt>\"")
+        return 0
+
+    print(f"{'TASK':38}  {'STATE':10}  {'MEMBER':34}  PROMPT")
+    for task in tasks:
+        prompt = " ".join(str(task.get("prompt") or "").split())
+        if len(prompt) > _PROMPT_COLUMN:
+            prompt = prompt[:_PROMPT_COLUMN - 1] + "…"
+        print(f"{str(task.get('id') or '?'):38}  "
+              f"{str(task.get('state') or '?'):10}  "
+              # `member_key` and not `owner_id`: the key is what `grid project promote` and
+              # `grid project member list` both speak, and `grid:<network>:<sub>` is unreadable in
+              # a column. Absent when the author has since left the project.
+              f"{str(task.get('member_key') or '(not a member)'):34}  {prompt}")
+    if answer.get("next_after"):
+        # There is more. Said out loud, because a page that silently stops at the limit reads as the
+        # whole history — and this is the flag that continues it.
+        print(f"\nMore: grid task list --project {args.project} --after {answer['next_after']}")
     return 0
 
 

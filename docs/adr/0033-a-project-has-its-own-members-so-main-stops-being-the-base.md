@@ -601,6 +601,46 @@ So every 4xx in this plane carries a **stable machine-readable code** alongside 
 before the application exists rather than retrofitted under one already matching on text. The
 sentence stays, and stays human: the code is what the client branches on.
 
+**As built (issue 19a).** All 120 4xx sites in the plane go through `task_errors`, and two questions
+the design left open are answered here rather than inherited:
+
+- **A code exists so a client can act differently, so shape validation shares one.** Fifty codes for
+  "name must be a string" / "limit must be 1..200" would be fifty chances for a client to disagree
+  with the server about which applies, and a client's handling of all of them is identical. Those
+  answer `invalid_request` and name the offending `field`; a refusal a client acts on
+  (`promote_not_fast_forward`, `member_has_active_task`, `project_has_no_trunk`) keeps its own code
+  and its own fields. `body_limit`'s 413 is the one carve-out — that middleware fronts the inference
+  plane too, so recoding it changes a contract for callers with nothing to do with this feature.
+- **The project-shaped 404 is coded, and its code must not discriminate.** `no_such_project` is
+  answered identically for "no such project" and "you are not in it", because the id is the only
+  thing between one team's source and another's. That is safe only while the code is the *same* one
+  in both cases, which is why the sentence and the code are now produced together, once
+  (`task_errors.no_such_project`) instead of copied into five modules by hand.
+- **The read surface.** `GET /tasks` (nothing listed tasks at all), `GET /projects/{id}/status`
+  (how far behind, and what holds the caller's slot — a promote attempt was the only way to ask),
+  and `GET /projects/{id}/integrate/preview` (the dry-run: integration *was* the conflict check, and
+  asking cost a task slot and could queue a paid agent run). The preview shares ONE tier decision
+  with the integration it predicts (`project_integrate.decide_tier`), because a preview that
+  disagrees is worse than no preview.
+- **A project member may read another member's task.** The Consequences below call `owner_id` "the
+  wrong default for a shared project", and this takes that decision: `GET /tasks/{id}` and the event
+  stream fence on `project_members`. Nothing new is disclosed — a member can already clone the
+  project and fetch any `task/<id>` branch, and the committed `.grid/agent/<key>/` transcript is
+  shared by construction. The 404/403 split is kept: a task id is an opaque uuid, and collapsing the
+  pair makes "did my create land?" unanswerable.
+- **The status read is the change signal**, rather than a new activity table. `main_commit` moves on
+  a promote or an import and each member's tip moves on a settle, an integration or a commit, so an
+  application diffs an oid it already holds. A durable activity log was rejected because tiers 1 and
+  2 of an integration and `project commit` all DELETE their task row, so there is nothing in the
+  database to build one from without adding writes at five more sites.
+
+**Deferred to issue 19b, with the mechanism already chosen rather than left open**: cancelling a task
+(the relay writes a terminal state and the provider's next lease renewal gets the 403 its renewer
+already kills on), and making a provider's capacity withdrawal member-visible (a `tasks_paused_until`
+key in the heartbeat's `load`, following `unhealthy_models` — absent ⇒ nothing withheld, so the
+rollout is free in both directions). `/status`'s `queue` block ships the half of "why is nothing
+moving" the relay can answer alone.
+
 ### D-n — The provider confines the agent, and hands it the confinement per invocation
 
 A task is arbitrary code execution as the provider's user, by design — the agent has to run builds,

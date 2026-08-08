@@ -28957,3 +28957,297 @@ def test_project_import_reports_a_failed_push_as_a_sentence_not_a_traceback(monk
     # And it says what state the project is in, because "the push failed" leaves a person wondering
     # whether half a repository is now on the relay.
     assert "no main" in message
+
+
+# ---------------------------------------------------------------------------
+# ADR 0033 D-l / issue 19a — the read surface an application needs.
+#
+# Three commands, and each answers a question that previously required either a clone or a write:
+# `grid task list` (nothing listed tasks at all), `grid project status` (how far behind am I, and
+# what holds my slot — answerable only by attempting a promote), and `grid project check` (would
+# integrating conflict — answerable only by integrating, which spends the slot and may pay for an
+# agent run).
+# ---------------------------------------------------------------------------
+
+
+def test_task_list_gets_the_list_route_for_a_project(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"tasks": [
+            {"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "fix the parser",
+             "owner_id": "grid:n:alice", "member_key": "def456",
+             "created_at": "2026-08-08T10:00:00+00:00", "attempt": 1, "max_attempts": 3},
+        ], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/tasks")
+    assert seen["query"]["project_id"] == "P1"
+    out = capsys.readouterr().out
+    assert "t-1" in out and "completed" in out and "fix the parser" in out
+
+
+def test_task_list_all_asks_for_the_whole_project(monkeypatch, tmp_path, capsys):
+    """`mine=false` is what makes a shared project renderable. Without it a member sees only their
+    own runs, which is the `owner_id` default ADR 0033 calls wrong for a shared project."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"tasks": [], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1", "--all"])
+
+    assert rc == 0
+    assert seen["query"]["mine"] == "false"
+
+
+def test_task_list_says_so_rather_than_printing_an_empty_table(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"tasks": [], "next_after": None}))
+
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "no tasks" in out, out
+
+
+def test_task_list_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A relay predating issue 19a has no `/relay/v1/tasks` list, so it answers the framework's bare
+    404. Reported as "Not Found" it reads as "your project is gone"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--project", "P1"])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_status_reports_the_trunk_the_branch_and_the_distance(
+        monkeypatch, tmp_path, capsys):
+    """The question promote's refusal used to be the only way to ask — and asking it that way was a
+    write that either released work or refused it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "trunk": "main",
+            "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+            "ahead": 3, "behind": 2, "can_promote": False,
+            "active_task": {"id": "t-9", "state": "running", "created_at": "2026-08-08T10:00:00Z",
+                            "deadline_at": None, "provider_id": "node-A", "attempt": 1,
+                            "max_attempts": 3},
+            "members": [{"member_key": "def456", "role": "owner", "branch": "wip/def456",
+                         "commit": "b" * 40, "active_task_id": "t-9"}],
+            "queue": {"queued": 2, "running": 1, "oldest_queued_at": "2026-08-08T09:00:00Z"}})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/status")
+    out = capsys.readouterr().out
+    assert "wip/def456" in out
+    assert "3" in out and "2" in out, "the distance is not shown"
+    # The slot holder, by id — a person who cannot create a task needs to know what to wait for.
+    assert "t-9" in out
+
+
+def test_project_status_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    """The same rule promote, integrate, commit and import all follow. A reply with no `branch` is
+    not a status — printing the template with blanks in it reads as "you have no work"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "status", "P1"])
+
+    assert "P1" in str(caught.value)
+
+
+def test_project_check_previews_an_integration_without_performing_one(
+        monkeypatch, tmp_path, capsys):
+    """The whole value of the command: it is a GET, and it never reaches the integrate route."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "branch": "wip/def456", "trunk": "main",
+            "status": "merged", "would_conflict": False, "files": [],
+            "main_commit": "a" * 40, "source_commit": "b" * 40, "ahead": 1, "behind": 1})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "check", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/integrate/preview")
+    out = capsys.readouterr().out.lower()
+    assert "merge" in out
+    # It must say nothing happened. A person reading "main was merged into wip/def456" from a
+    # preview would believe their branch had moved.
+    assert "would" in out or "nothing" in out, out
+
+
+def test_project_check_names_the_files_a_conflict_would_touch(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "branch": "wip/def456", "trunk": "main",
+        "status": "merge_task", "would_conflict": True, "files": ["a.txt", "src/b.py"],
+        "main_commit": "a" * 40, "source_commit": "b" * 40, "ahead": 1, "behind": 1}))
+
+    rc = cli.main(["project", "check", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "a.txt" in out and "src/b.py" in out
+    assert "grid project integrate P1" in out, "it does not say how to act on the answer"
+
+
+def test_project_check_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "check", "P1"])
+
+    assert "P1" in str(caught.value)
+
+
+def test_project_check_help_says_it_spends_nothing():
+    """The reason to reach for it over `grid project integrate`. Somebody who does not know it is
+    free will use the one that costs a task slot and possibly an agent run."""
+    parser = cli.build_parser()
+    check = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["check"]
+    help_text = check.format_help().lower()
+
+    assert "conflict" in help_text
+    assert "slot" in help_text or "agent" in help_text, (
+        "the help does not say what checking costs compared with integrating")
+
+
+def test_task_list_passes_the_filters_and_the_cursor_through(monkeypatch, tmp_path, capsys):
+    """`--state`, `--limit` and `--after` are the flags a paging client actually uses, and each of
+    them reaches the relay as a STRING — every query parameter on that route is declared as one
+    there so its refusals carry a `code` rather than falling to FastAPI's list-shaped validation
+    error."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = request.url.params
+        return httpx.Response(200, json={"tasks": [], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1", "--state", "queued", "--state", "running",
+                   "--limit", "5", "--after", "t-7"])
+
+    assert rc == 0
+    assert seen["query"].get_list("state") == ["queued", "running"]
+    assert seen["query"]["limit"] == "5"
+    assert seen["query"]["after"] == "t-7"
+
+
+def test_task_list_says_there_is_another_page(monkeypatch, tmp_path, capsys):
+    """A page that silently stops at the limit reads as the whole history. The relay hands back the
+    cursor rather than leaving the client to derive one, so this prints the command that continues."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "tasks": [{"id": "t-1", "state": "completed", "prompt": "p", "member_key": "def456"}],
+        "next_after": "t-1"}))
+
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--after t-1" in out, out
+
+
+def test_task_list_will_not_report_a_reply_it_cannot_read_as_an_empty_project(
+        monkeypatch, tmp_path):
+    """"Nobody has run anything" and "I could not read the answer" must not print the same line.
+
+    The sibling commands added in this same slice — `grid project status` and `grid project check` —
+    both refuse a reply missing the key their own report is about. This one collapsed them: a body a
+    proxy had stripped came back as `{}`, and a team member polling a shared project was told "No
+    tasks in project P1" and would reasonably conclude nobody was working.
+
+    The distinction is the PRESENCE of `tasks`, not its truthiness — an empty list is a real answer.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--project", "P1"])
+
+    assert "P1" in str(caught.value)
+
+
+def test_project_status_will_not_guess_can_promote_from_its_absence(monkeypatch, tmp_path):
+    """`can_promote` is the same class of field as promote's `advanced`, and gets the same rule.
+
+    `_project_promote` refuses a reply whose `advanced` is anything but an explicit True/False,
+    because a silently-defaulted "no" is how promote once reported a release for a body a proxy had
+    stripped. This treated a missing `can_promote` as False and printed an actionable line — and
+    because the relay defines it as exactly `behind == 0`, a reply keeping `ahead`/`behind` and
+    dropping it produced a self-contradiction: "ahead=3 behind=0" followed by "Behind main, so a
+    promote would be refused."
+
+    There is no relay old enough to be a reason for leniency: `/status` is a new route, so every
+    relay that has it sends the key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 3, "behind": 0}))            # `can_promote` missing
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "status", "P1"])
+
+    assert "P1" in str(caught.value)
+
+
+def test_project_status_reports_a_promotable_branch_as_promotable(monkeypatch, tmp_path, capsys):
+    """The positive control for the guard above — without it, "refuse when absent" is satisfied by
+    refusing everything."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 3, "behind": 0, "can_promote": True,
+        "active_task": None, "members": [], "queue": {}}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "grid project promote P1 def456" in out, out

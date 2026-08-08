@@ -569,6 +569,45 @@ def _add_project(sub) -> None:
     integrate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     integrate.set_defaults(handler=cmd_remote_project)
 
+    # `status` and `check` — the two questions that used to need a WRITE to answer (ADR 0033 D-l,
+    # issue 19a). Both are pure reads: neither moves a ref, neither takes the caller's task slot.
+    status = project_sub.add_parser(
+        "status",
+        help="Where the project is: your branch, how far it is from main, what holds your slot",
+        description=(
+            "Where the project is, from your side.\n\n"
+            "Two of these were answerable before only by attempting something: how far behind your "
+            "branch is (attempt a promote and read the refusal) and what is holding your one task "
+            "slot (attempt a create and read the refusal). Both are reads now, and neither costs "
+            "anything.\n\n"
+            "It is also how an application notices the project changed without running `git fetch`: "
+            "`main` moves on a promote or an import, and each member's branch moves when their work "
+            "settles, integrates, or is committed."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    status.add_argument("project_id", help="Project id from `grid project list`.")
+    status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_remote_project)
+
+    check = project_sub.add_parser(
+        "check",
+        help="Ask whether integrating would conflict, without integrating",
+        description=(
+            "Ask what `grid project integrate` would do, without doing it.\n\n"
+            "Integration IS the conflict check without this command: asking costs your one task "
+            "slot, and when the answer is that you and somebody else changed the same lines it "
+            "queues a merge task — a paid agent run.\n\n"
+            "This spends neither. It moves no ref, creates no task, and holds no slot — so it "
+            "answers even while you already have a task in flight, which is exactly when "
+            "`grid project integrate` refuses you.\n\n"
+            "It reports one of four answers, the same four integrate itself reports: already up to "
+            "date, a straight fast-forward, a clean merge, or a conflict that would need an agent."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    check.add_argument("project_id", help="Project id from `grid project list`.")
+    check.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    check.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    check.set_defaults(handler=cmd_remote_project)
+
     # `commit` — a change goes in without an agent (ADR 0033 D-j, issue 20). Like integrate it takes
     # NO member key: the relay holds the caller's own task slot while it writes.
     committer = project_sub.add_parser(
@@ -692,6 +731,31 @@ def _add_task(sub) -> None:
     fetch.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     fetch.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     fetch.set_defaults(handler=cmd_remote_task)
+
+    # `list` — nothing listed tasks at all before ADR 0033 issue 19a. `grid task get` answers one id
+    # at a time, and the id came from `grid task create`, so somebody who closed their terminal had
+    # to clone the project and read `task/*` refs by hand.
+    listing = task_sub.add_parser("list", help="List the tasks in a project")
+    listing.add_argument(
+        "--project", required=True, metavar="ID",
+        help="Project ID to list, from `grid project list`.")
+    listing.add_argument(
+        "--all", action="store_true",
+        help="Every member's tasks, not only your own. A project is shared, so this is how a team "
+             "sees what the team ran.")
+    listing.add_argument(
+        "--state", action="append", default=None, metavar="STATE",
+        help="Only tasks in this state (queued, running, completed, failed, timed_out). "
+             "Repeatable.")
+    listing.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="How many to show (default 50, maximum 200).")
+    listing.add_argument(
+        "--after", default=None, metavar="TASK_ID",
+        help="Continue from a previous page — the task id the last page printed.")
+    listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    listing.set_defaults(handler=cmd_remote_task)
 
 
 def _add_price(sub) -> None:
