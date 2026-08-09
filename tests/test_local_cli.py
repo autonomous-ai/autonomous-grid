@@ -24843,6 +24843,133 @@ def test_task_loop_404_budget_resets_after_a_success(monkeypatch):
     assert reported == ["T1", "T2"]     # never retired, despite 2*(budget-1) total 404s
 
 
+def tasks_403_budget():
+    from remote import tasks
+    return tasks._REFUSED_CLAIM_403_BUDGET
+
+
+def test_task_loop_retires_when_the_relay_refuses_this_provider(monkeypatch, capsys):
+    """A relay that PERSISTENTLY 403s has decided this node may not claim, and no amount of asking
+    changes that.
+
+    Every 403 `/tasks/claim` can answer is a permanent configuration fact — the caller is not a
+    registered provider, its token carries no node, or (ADR 0033 D-f, issue 24) this grid does not
+    serve its account's email domain. Before this the loop treated all three exactly as it treats a
+    500: warn, back off five seconds, ask again, forever. A misconfigured provider therefore wrote
+    one line to stderr every five seconds for the life of the process and nothing ever read it.
+
+    Keyed on the STATUS and not on a parsed refusal `code`, deliberately: the status already carries
+    the whole verdict here, so this stays clear of the rule that says the lease renewer's
+    `CANCELLED_CODE` is the ONE parsed `detail` this provider reads. A second reader would be a
+    second thing a reworded relay could break, bought for nothing.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    # A claimable job AFTER the budget, and the assertion is that it is never reached. Without it
+    # this test passes against the UNFIXED loop: `_task_loop_state` retires the loop itself once its
+    # script runs out, so `tasks_stop.is_set()` would be true for the fixture's reason, not the
+    # code's.
+    tasks, state, fake_claim = _task_loop_state(
+        [relay.RelayError("this grid does not serve your domain", status=403)]
+        * tasks_403_budget()
+        + [{"task_id": "T-after", "prompt": "x"}])
+    reported = []
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == []               # retired on the budget, never reached the work behind it
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()      # the engine keeps serving inference
+    # The relay's own words survive to the operator, because only the relay knows WHICH refusal.
+    assert "does not serve your domain" in capsys.readouterr().err
+
+
+def test_task_loop_survives_a_transient_403(monkeypatch):
+    """One 403 is not proof of a decision. An intermediary can answer 403 on its own account, and
+    retiring every provider in the fleet on a single proxy blip is the failure the 404 budget above
+    exists to avoid — the same reasoning, the same shape."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        relay.RelayError("blip", status=403), {"task_id": "T1", "prompt": "x"},
+    ])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]
+    assert not state.stop.is_set()
+
+
+def test_task_loop_403_budget_resets_after_a_success(monkeypatch):
+    """Consecutive, not cumulative — and it must not share a counter with the 404 budget, or a
+    provider alternating between the two retires on a pair of unrelated blips."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    claims = ([relay.RelayError("blip", status=403)] * (tasks_403_budget() - 1)
+              + [relay.RelayError("blip", status=404)] * (tasks_404_budget() - 1)
+              + [{"task_id": "T1", "prompt": "x"}]
+              + [relay.RelayError("blip", status=403)] * (tasks_403_budget() - 1)
+              + [{"task_id": "T2", "prompt": "y"}])
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1", "T2"]
+
+
+def test_task_loop_403_and_404_budgets_do_not_leak_into_each_other(monkeypatch):
+    """Interleaved refusals must clear each other's counter — in BOTH directions.
+
+    The 404 branch `continue`s, so it skips every line below it, including the `consecutive_403s = 0`
+    that guards the 403 check. A 403 clears the 404 counter (that reset sits above the branch) but a
+    404 did NOT clear the 403 one, so the reset was one-directional and "consecutive" was a lie on
+    one side: `403, 404, 403, 404, 403` retired the provider announcing "3 consecutive 403s" with no
+    two 403s adjacent.
+
+    `test_task_loop_403_budget_resets_after_a_success` could not catch it, because it puts a
+    SUCCESSFUL claim between the two runs — and a success resets both counters unconditionally, so
+    the missing reset never mattered. Interleaving with no success in between is the case that
+    separates them.
+
+    A load balancer or a relay mid-rollout answering a mix of the two is exactly this shape, and the
+    cost is a provider that stops claiming until somebody restarts the process.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    claims = []
+    for _ in range(tasks_403_budget()):
+        claims.append(relay.RelayError("refused", status=403))
+        claims.append(relay.RelayError("blip", status=404))
+    claims.append({"task_id": "T1", "prompt": "x"})
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]           # never retired: no two refusals of either kind were adjacent
+
+
 def test_task_loop_retires_when_the_token_is_rejected(monkeypatch):
     """An unrefreshable 401 retires the TASK loop only. The poll loop stops the whole engine on the
     same signal, but a task credential going bad is not a reason to stop serving inference."""
@@ -29582,6 +29709,53 @@ def test_project_status_stays_quiet_about_a_fleet_that_is_all_serving(
     # so it passed against a build that cheerfully announced "0 of 2 providers have withdrawn".
     assert "withdrawn" not in out
     assert "provider" not in out
+
+
+def test_project_status_says_when_this_grid_does_not_serve_you(monkeypatch, tmp_path, capsys):
+    """The one state `online` gets exactly backwards (ADR 0033 D-f, issue 24).
+
+    The fleet count is grid-wide, so a member whose own domain is not on the relay's allowlist is
+    shown the providers serving OTHER PEOPLE: a healthy `online: 2` beside a task no provider will
+    ever be offered. Worse than saying nothing — it is a wrong explanation, and it reads as "the
+    grid is busy" right up until `queue_expired` four hours later.
+
+    It has to print BEFORE the `paused` gate, because nothing is paused in this case: a fleet that
+    is entirely healthy and entirely unavailable to this member is the whole failure.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
+        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None, "serves_you": False}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "domain" in out
+    # And it must NOT read as a capacity problem, which is the opposite action.
+    assert "withdrawn" not in out
+
+
+def test_project_status_says_nothing_about_domains_when_the_relay_omits_the_key(
+        monkeypatch, tmp_path, capsys):
+    """*Absent ⇒ served*, which is the pre-24 behaviour exactly — a relay with no allowlist serves
+    everybody, and one predating this slice sends no key at all. Keyed on an explicit `False` and
+    never on falsiness, so a missing key cannot invent a refusal that is not happening."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
+        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    assert "domain" not in capsys.readouterr().out.lower()
 
 
 def test_project_status_says_when_a_queue_has_nobody_to_serve_it(monkeypatch, tmp_path, capsys):

@@ -630,6 +630,21 @@ def _print_providers(providers: dict | None) -> None:
         # an older relay produces, and it beats "2 of None providers have withdrawn" — the sibling
         # rule to `grid task list`'s, which learned it the same way in 19a's review.
         return
+    if providers.get("serves_you") is False:
+        # The one state `online` gets exactly BACKWARDS (ADR 0033 D-f, issue 24). The count is
+        # fleet-wide, so a member outside the relay's served-domain allowlist is shown the providers
+        # serving other people — a healthy number beside work no provider will ever be offered,
+        # which reads as "the grid is busy" until the task expires hours later.
+        #
+        # Printed before the `paused` gate below, because nothing here IS paused: a fleet entirely
+        # healthy and entirely unavailable to this member is the whole failure. Nothing about the
+        # queue can express it, and no action the member takes alone can fix it.
+        #
+        # `is False`, never falsiness: *absent ⇒ served*, which is both a relay predating this slice
+        # and every relay with no allowlist configured. A missing key must not invent a refusal.
+        print("This grid does not serve your account's email domain, so no provider will claim "
+              "your tasks. Ask whoever runs this grid to add your domain.")
+        return
     if online == 0:
         # The state a queue depth alone cannot express, and the one that needs a different action
         # from every other: the work is not slow, there is nobody to do it.

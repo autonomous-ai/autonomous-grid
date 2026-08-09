@@ -411,6 +411,39 @@ agreed. It is not resolved here; it is named so it is decided deliberately rathe
 > describes the shipped behaviour. The relay has no domain concept today; `UserRow.email` is where
 > one is derivable from, with two traps recorded in the issue (the `@unknown` synthesized address in
 > `apply_sync_snapshot`, and the fact that most authenticated paths never write a `UserRow` at all).
+>
+> **As built.** `TASK_SERVED_DOMAINS`, a comma-separated list on the relay's own config, parsed and
+> enforced by `task_domains.py`; grid-apis is untouched. The rule is **membership in the list for
+> both sides**, not equality between them — two people on `gmail.com` are not one company, so
+> equality would authorize strangers on any consumer mail host to each other's repositories. With
+> the single entry that "provider and client same company" describes, the two coincide.
+>
+> **Empty is the off switch**, and that is what makes the gate shippable rather than a flag day: a
+> `users` row is written only on the GRID-token path, so a gate demanding a resolvable domain
+> unconditionally would refuse every task in both unit suites, in the cross-repo E2E
+> (`GRID_MODE=false`), and in any non-Grid deployment. Unset ⇒ the claim query is byte-identical to
+> the pre-24 one. Set ⇒ the gate fails **closed**: an unresolvable domain is refused, never waved
+> through. That refusal is safe because in Grid mode both sides always resolve —
+> `grid_auth._upsert_identity` writes the `UserRow` and the `NodeRow` bound to it on the caller's
+> first authenticated request.
+>
+> Trap 1 closes structurally: an unresolvable domain is `None`, `None` is not in the list, so
+> `@unknown` matches nobody *including another `@unknown`* with no special case — and
+> `task_domains.validate_config()` refuses to boot on an allowlist containing the sentinel, so that
+> holds against a typo as well as against convention.
+>
+> Three enforcement points, not one. The filter is **in the claim SELECT** rather than after it,
+> because `attempt` is incremented by the guarded UPDATE (popping a task and putting it back spends
+> a real attempt on a provider never allowed to run it) and the candidate SELECT is capped (a filter
+> applied afterwards starves a provider whose eligible task sits past the cap). `_require_provider`
+> refuses a provider whose *own* owner is unserved, before the long poll, so a misconfigured fleet
+> does not look like an idle one. And `task_git._access` narrows the tasks a caller holds a lease
+> on — the claim filter structurally cannot cover a task already `running` when the relay restarts
+> into this code, and that lease is a checkout of the whole repository.
+>
+> A task in another domain is **invisible** (204, the 404-not-403 rule); only the provider's own
+> ineligibility is a refusal, because that discloses nothing and is the one thing that can explain a
+> permanently empty queue.
 
 The validator refuses submodules (`160000`) outright, and refuses any path under `.grid/` — closing
 on the push path the hole `task_files` already closes on the upload path. Symlinks (`120000`) are

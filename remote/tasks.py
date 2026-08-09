@@ -82,6 +82,24 @@ _MAX_COLLECTED_CHARS = 256 * 1024
 # simultaneously, for the life of each process. Counted consecutively, and reset by any non-404, so
 # unrelated blips spread over days never accumulate into a retirement.
 _MISSING_PLANE_404_BUDGET = 3
+# How many CONSECUTIVE 403s from the claim endpoint mean "this relay has decided" rather than
+# "something transient". Every 403 that route can answer is a permanent configuration fact — the
+# caller is not a registered provider, its token carries no node id, its scope is missing, or (ADR
+# 0033 D-f, issue 24) this grid does not serve its account's email domain — so asking again cannot
+# change any of them.
+#
+# Before this, a 403 fell into the generic branch and was treated exactly like a 500: warn, back off
+# five seconds, ask again, for the life of the process. That is one stderr line every five seconds
+# saying the same thing, which is the shape of a message nobody reads.
+#
+# Keyed on the STATUS, never on a parsed refusal `code`. The status already carries the whole
+# verdict, so this stays clear of the rule that `remote/task_lease.CANCELLED_CODE` is the ONE parsed
+# `detail` this provider reads — there, the status genuinely could not express the distinction; here
+# it can, and a second reader of a `detail` body would be a second thing a reworded relay breaks.
+#
+# Its OWN counter, not the 404 one: a provider alternating between the two would otherwise retire on
+# a pair of unrelated blips neither of which was persistent.
+_REFUSED_CLAIM_403_BUDGET = 3
 # Attempts to land a terminal report before giving up. Worth retrying at all because this is the one
 # loss that is salvageable cheaply: the child already ran, so only the last message went missing, and
 # a report that lands here saves a whole second attempt on another provider. Bounded and small — a
@@ -740,7 +758,10 @@ def task_loop(state: Any, capacity: Any = None) -> None:
     not given one, and the task waits for a provider that can run it.
     """
     capacity = capacity if capacity is not None else task_capacity.shared()
+    # Two counters, not one: a provider alternating between a missing plane and a refusal would
+    # otherwise retire on a pair of unrelated blips neither of which was persistent.
     consecutive_404s = 0
+    consecutive_403s = 0
     while not (state.stop.is_set() or state.tasks_stop.is_set()):
         pause = _capacity_pause(capacity)
         if pause > 0:
@@ -759,6 +780,12 @@ def task_loop(state: Any, capacity: Any = None) -> None:
         except relay.RelayError as exc:
             if getattr(exc, "status", None) == 404:
                 consecutive_404s += 1
+                # Symmetric to the `consecutive_404s = 0` below, and it has to live INSIDE this
+                # branch rather than beneath it: every path out of here `continue`s or returns, so
+                # the resets below are unreachable from a 404. Without it the clearing was
+                # one-directional and "consecutive" was a lie on one side — `403, 404, 403, 404,
+                # 403` retired the provider announcing three consecutive 403s with no two adjacent.
+                consecutive_403s = 0
                 if consecutive_404s >= _MISSING_PLANE_404_BUDGET:
                     # Persistently absent, so retrying cannot make the endpoint appear. Retire
                     # rather than log the same 404 every few seconds for the life of the process.
@@ -771,17 +798,33 @@ def task_loop(state: Any, capacity: Any = None) -> None:
                 state.tasks_stop.wait(_CLAIM_BACKOFF_SECONDS)
                 continue
             consecutive_404s = 0
+            if getattr(exc, "status", None) == 403:
+                consecutive_403s += 1
+                if consecutive_403s >= _REFUSED_CLAIM_403_BUDGET:
+                    # A decision, not a fault. Retiring says it once, with the relay's own words —
+                    # only the relay knows WHICH refusal, and a domain refusal and a role refusal
+                    # want different things done about them.
+                    _warn(f"this grid's relay refuses this provider's claims "
+                          f"({consecutive_403s} consecutive 403s) — task serving retired "
+                          f"(inference is unaffected): {exc}")
+                    state.tasks_stop.set()
+                    return
+                _warn(f"claim 403 ({consecutive_403s}/{_REFUSED_CLAIM_403_BUDGET}); retrying — an "
+                      f"intermediary answers this too: {exc}")
+                state.tasks_stop.wait(_CLAIM_BACKOFF_SECONDS)
+                continue
+            consecutive_403s = 0
             _warn(f"claim failed ({exc}); retrying")
             state.tasks_stop.wait(_CLAIM_BACKOFF_SECONDS)
             continue
         except (Exception, SystemExit) as exc:
             # Never let an unexpected claim fault escape into the thread and vanish.
-            consecutive_404s = 0
+            consecutive_404s = consecutive_403s = 0
             _warn(f"unexpected claim error ({exc!r}); retrying")
             state.tasks_stop.wait(_CLAIM_BACKOFF_SECONDS)
             continue
 
-        consecutive_404s = 0
+        consecutive_404s = consecutive_403s = 0
         if job is None:  # 204 — nothing queued; claim again
             continue
 
