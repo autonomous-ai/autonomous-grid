@@ -54,6 +54,13 @@ refusal, and the split is load-bearing rather than fussy:
     on version skew, and the exact inversion of this repo's degrade rule (an absent feature must fail
     back to the OLD behaviour, never to a new failure). So a 404 stops the renewals and leaves the
     agent alone, falling back to the relay's own lease expiry and deadline.
+  * **404 carrying `task_cancelled`** is the one exception, and it is why the ambiguity above had to
+    be resolved by something other than the status (ADR 0033 D-l, issue 19b). A member cancelling
+    their task leaves the row terminal with its `provider_id` intact, so the relay's fence answers
+    404 rather than 403 — the answer this file refuses to kill on. The refusal CODE is therefore
+    the discriminator, and it is the only parsed `detail` this provider reads anywhere. The
+    ambiguity is untouched: a relay with no lease route sends no code at all, so *absent ⇒ the
+    behaviour immediately above*, and there is no rollout order.
 
 Killing is never required for correctness — D-c's fence holds whatever the loser does. It is a
 saving, so it is only spent on certainty.
@@ -93,6 +100,21 @@ RENEW_INTERVAL_SECONDS = 30.0
 # AGENT. See `_renew_once`.
 _LEASE_IS_SOMEONE_ELSES = 403
 _NO_SUCH_TASK_OR_ROUTE = 404
+
+# The refusal code that turns the ambiguous 404 above into a verdict (ADR 0033 D-l, issue 19b): a
+# project member cancelled this task. **Hand-duplicated** with grid-src's
+# `task_errors.CANCELLED_CODE` and kept in lockstep by editing both repos — there is no
+# compile-time link between the copies, and `tests/test_task_lease.py` parses grid-src rather than
+# restating the string, because a typo on either side compiles and passes every unit test in both.
+#
+# ⚠️ This is the ONLY place this provider reads a parsed `detail` rather than keying on the status.
+# It is not a widening of the rule that says it should not: the status cannot express the
+# distinction at all here, because a relay too old to have the lease route answers 404 as well.
+# *Absent ⇒ the pre-19b behaviour* — stop renewing, leave the agent running — so an old relay, a
+# proxy that mangled the body, and a 404 about anything else all degrade to exactly what this file
+# did before. **No rollout order**: the relay side is useful on its own (the slot is freed), and a
+# fleet gains the saving as it updates.
+CANCELLED_CODE = "task_cancelled"
 _VERDICT_STATUSES = frozenset({_LEASE_IS_SOMEONE_ELSES, _NO_SUCH_TASK_OR_ROUTE})
 
 # How long `close()` waits for the thread to notice. Bounded because the caller is on its way to
@@ -279,6 +301,23 @@ class LeaseRenewer:
                     f"work can no longer be delivered",
                     stop_the_agent=True)
                 return False
+            if status == _NO_SUCH_TASK_OR_ROUTE and getattr(exc, "code", None) == CANCELLED_CODE:
+                # The one 404 that is NOT ambiguous (ADR 0033 D-l, issue 19b). A member stopped this
+                # task; the relay has already freed their slot and this child's work can no longer
+                # be delivered, so every reason the 403 branch stops the agent applies here too.
+                #
+                # Keyed on the CODE and never on the status, because only the code can separate this
+                # from the case below — a cancelled row keeps its `provider_id`, so the relay's
+                # fence answers 404 rather than the 403 this renewer already killed on.
+                #
+                # `lost` stays False, deliberately: it means "another provider took this task over",
+                # which drives a different sentence in `_supervise_one_task`. Nobody took a
+                # cancelled task, and reporting a takeover would send somebody looking for a
+                # provider that does not exist.
+                self._give_up(
+                    f"task {self._task_id} was cancelled by a project member",
+                    stop_the_agent=True)
+                return False
             if status == _NO_SUCH_TASK_OR_ROUTE:
                 # AMBIGUOUS, and the ambiguity is a fleet-wide hazard rather than a corner case.
                 # `POST /tasks/{id}/lease` is newer than the rest of the tasks plane, so a relay that
@@ -313,8 +352,9 @@ class LeaseRenewer:
         does, which is the whole point of authorizing on the lease rather than on liveness. It is a
         saving, not a safety measure — it stops the operator's own agent subscription being spent on
         a result the relay will refuse. So it is only ever done on an answer that can mean nothing
-        else (403), never on an ambiguous one (404), because the cost of killing a healthy agent is
-        the work itself while the cost of leaving one running is some wasted quota.
+        else — a 403, or since issue 19b a 404 that NAMES itself `task_cancelled` — and never on a
+        bare one, because the cost of killing a healthy agent is the work itself while the cost of
+        leaving one running is some wasted quota.
         """
         _warn(f"{why}; lease renewal has stopped "
               + ("and the agent is being terminated" if stop_the_agent

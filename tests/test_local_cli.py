@@ -12658,25 +12658,106 @@ def test_task_serving_retires_only_when_no_worker_could_start(monkeypatch, tmp_p
 
 
 def test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON(monkeypatch, tmp_path):
-    """Task capacity is client-side and stops at this process's edge. It deliberately adds nothing to
-    the heartbeat: the relay routes inference on `load`, and a provider out of TASK headroom is still
-    a perfectly good provider of inference. Publishing it would also make it a cross-repo lockstep
-    value, and there is nothing on the other side that needs one — a provider that stops claiming is
-    simply not handed a task."""
+    """Task capacity adds exactly ONE key to the heartbeat, and nothing the relay routes on.
+
+    ⚠️ **This test used to assert `state.load() == before`** — that capacity reached the wire at all
+    was the thing it pinned, and ADR 0033 D-l (issue 19b) overturned it: with several members on one
+    subscription, a provider's self-withdrawal has to be visible to the people waiting on it. What
+    survives is the half that was always the real point, and it is narrower than the old assertion
+    looked: the relay routes INFERENCE on `load`, and a provider out of TASK headroom is still a
+    perfectly good provider of inference. So every routing key must be byte-identical, and
+    `tasks_paused_until` must be the only difference.
+    """
     from shared.system import gpu
 
     from remote import task_capacity
 
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
     state = _serve_state(monkeypatch, tmp_path)
     before = state.load()
+    assert task_capacity.PAUSED_LOAD_KEY not in before
 
-    gate = task_capacity.TaskCapacity()
     gate.observe({"status": "rejected", "rateLimitType": "five_hour",
                   "resetsAt": int(time.time() + 3600)})
 
     assert gate.pause_seconds() > 0.0        # this provider really is out of task headroom
-    assert state.load() == before            # ...and the inference plane's wire payload is untouched
+    after = state.load()
+    assert set(after) - set(before) == {task_capacity.PAUSED_LOAD_KEY}
+    # ...and every key the relay ROUTES on is untouched, which is what the old assertion was for.
+    assert {k: v for k, v in after.items() if k != task_capacity.PAUSED_LOAD_KEY} == before
+
+
+def test_a_provider_out_of_task_headroom_says_when_it_comes_back(monkeypatch, tmp_path):
+    """The key a team reads. Issue 19a's `/status` could say how deep the queue was and not why
+    nothing was moving, because nothing published this."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+
+    published = state.load()[task_capacity.PAUSED_LOAD_KEY]
+
+    # ISO 8601, UTC, and parseable — the shape every other timestamp on this wire has. A float would
+    # make the relay guess at units, and the relay's half of this is a fail-open reader.
+    from datetime import datetime, timezone
+
+    parsed = datetime.fromisoformat(published)
+    assert parsed.tzinfo is not None
+    ahead = (parsed - datetime.now(timezone.utc)).total_seconds()
+    assert 3400.0 < ahead <= 3601.0, published
+
+
+def test_a_provider_that_came_back_stops_publishing_the_pause(monkeypatch, tmp_path):
+    """Absent is the wire's "nothing withheld" (ADR 0019's polarity corollary), so recovery is the
+    key disappearing rather than a second key saying it recovered. Without this a provider that came
+    back an hour ago still reads as withdrawn to every member of every project."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+    assert task_capacity.PAUSED_LOAD_KEY in state.load()
+
+    gate.observe({"status": "allowed", "rateLimitType": "five_hour"})
+
+    assert task_capacity.PAUSED_LOAD_KEY not in state.load()
+
+
+def test_the_heartbeat_never_fails_over_a_capacity_reading(monkeypatch, tmp_path, capsys):
+    """The bound this key must not cross. `load()` is what the heartbeat is built from, and a
+    heartbeat that raises is a provider that TTLs out of the grid entirely — it would stop serving
+    inference over a telemetry value about tasks. So the fold is best-effort in the same way the
+    codex quota and the seat allowance already are."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+
+    class _Exploding:
+        def paused_until(self):
+            raise RuntimeError("the capacity gate is broken")
+
+    monkeypatch.setattr(task_capacity, "shared", _Exploding)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    load = state.load()
+
+    assert task_capacity.PAUSED_LOAD_KEY not in load
+    assert load["platform"] == "linux", "the rest of the heartbeat was lost with it"
 
 
 def test_a_provider_saturated_with_inference_can_still_take_a_task(monkeypatch):
@@ -29251,3 +29332,270 @@ def test_project_status_reports_a_promotable_branch_as_promotable(monkeypatch, t
     assert rc == 0
     out = capsys.readouterr().out
     assert "grid project promote P1 def456" in out, out
+
+
+# ---------------------------------------------------------------------------
+# ADR 0033 D-l / issue 19b — stopping a task, and seeing why nothing is moving.
+#
+# The two criteria 19a split off, and both overturn something already written down: cancellation was
+# deferred by ADR 0032, and task capacity was documented as deliberately unpublished. `grid task
+# cancel` is the first verb here that ENDS somebody's work, and `grid project status` gains the half
+# of "why is nothing moving" the relay could not answer before.
+# ---------------------------------------------------------------------------
+
+
+def test_task_cancel_posts_to_the_cancel_route_and_says_what_happened(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "id": "t-1", "project_id": "P1", "state": "failed", "error": "cancelled",
+            "prompt": "fix the parser", "member_key": "def456"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "cancel", "t-1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/t-1/cancel")
+    assert seen["auth"] == "Bearer AT"
+    # No body at all. The route is addressed by the task id and fenced on the caller's own identity,
+    # so anything here would be a second way to say who is cancelling what.
+    assert seen["body"] == b""
+    out = capsys.readouterr().out
+    assert "t-1" in out and "cancelled" in out.lower()
+
+
+def test_task_cancel_refuses_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    """The rule every sibling in this plane follows since 19a's review: an answer this command
+    cannot read is NOT a successful cancellation. Reporting one would tell somebody their colleague's
+    hour-long merge task had been stopped when nothing had happened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "t-1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert "t-1" in str(caught.value)
+
+
+def test_task_cancel_against_a_relay_that_has_never_heard_of_it_says_so(monkeypatch, tmp_path):
+    """A bare framework 404 is an old relay, not a missing task, and the two need opposite actions.
+
+    Its own sentence rather than the project routes' `_OLD_RELAY`: that one says "this relay does
+    not have projects yet", which would be wrong here and would send somebody to check a feature
+    that is working.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert "relay" in str(caught.value).lower()
+    assert "cancel" in str(caught.value).lower()
+
+
+def test_task_cancel_shows_a_real_refusal_in_the_relays_own_words(monkeypatch, tmp_path):
+    """And the other side of that gate: a 404 ABOUT the task must not be reported as an old relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_task", "message": "Task not found"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert str(caught.value) == "Task not found"
+
+
+def test_task_cancel_on_an_already_ended_task_shows_the_relays_sentence(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "task_already_ended", "state": "completed",
+        "message": "This task already ended (completed), so there is nothing to cancel."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert "already ended" in str(caught.value)
+
+
+def test_task_cancel_help_says_it_stops_a_run_that_is_paid_for():
+    """Somebody reading `--help` should learn that this ends a run in flight, and that a project is
+    shared so it may not be their own. The same reasoning `grid project check`'s help carries: the
+    cost of the verb belongs in the sentence that offers it."""
+    parser = cli.build_parser()
+    cancel = parser._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["cancel"]
+    help_text = cancel.format_help().lower()
+
+    assert "slot" in help_text or "agent" in help_text, (
+        "the help does not say what cancelling frees or stops")
+    assert "member" in help_text or "project" in help_text, (
+        "the help does not say a project is shared, so this may not be your own task")
+
+
+def test_project_status_says_a_provider_has_withdrawn_and_when_it_returns(
+        monkeypatch, tmp_path, capsys):
+    """The criterion: a withdrawn provider is visible to every member, with the time it comes back.
+    Without it a member sees a queue and no reason, which is what six people on one subscription
+    were left with."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 2, "paused": 1, "resumes_at": "2026-08-09T11:30:00+00:00"}}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "2" in out and "1" in out
+    assert "2026-08-09T11:30:00+00:00" in out, "the time it comes back is the actionable half"
+    assert "paused" in out.lower() or "withdraw" in out.lower()
+
+
+def test_project_status_stays_quiet_about_a_fleet_that_is_all_serving(
+        monkeypatch, tmp_path, capsys):
+    """Nothing is wrong, so nothing is said. A line reading "0 paused" on every healthy poll is the
+    kind of noise that makes the one that matters invisible."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "queue": {"queued": 3, "running": 1, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    # Asserted on the words the code actually prints, not on the word this feature is called by.
+    # An earlier version of this test looked for "paused", which never appears in the sentence —
+    # so it passed against a build that cheerfully announced "0 of 2 providers have withdrawn".
+    assert "withdrawn" not in out
+    assert "provider" not in out
+
+
+def test_project_status_says_when_a_queue_has_nobody_to_serve_it(monkeypatch, tmp_path, capsys):
+    """The state a queue depth alone cannot express, and the one that needs a different action from
+    everybody else's: work waiting on a grid with no provider at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
+        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 0, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    assert "no provider" in capsys.readouterr().out.lower()
+
+
+def test_project_status_from_a_relay_too_old_to_report_providers_still_works(
+        monkeypatch, tmp_path, capsys):
+    """*Absent ⇒ nothing said.* The whole block is new in 19b, so a relay that predates it sends no
+    `providers` key at all and the rest of the status must render exactly as it did."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "queue": {"queued": 1, "running": 0, "oldest_queued_at": None}}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "wip/def456" in out
+    assert "paused" not in out.lower() and "no provider" not in out.lower()
+
+
+def test_a_cancelled_event_is_rendered_as_a_sentence(capsys):
+    """`grid task follow` shows who stopped the run. On stderr with the other disclosures — it says
+    nothing about the result and everything about why there is not one."""
+    from cli import remote_task
+
+    remote_task._render(7, {"type": "task.cancelled", "by": "def456"}, as_json=False)
+
+    err = capsys.readouterr().err
+    assert "cancel" in err.lower()
+    assert "def456" in err
+
+
+def test_project_status_says_nothing_about_a_provider_block_it_cannot_read(
+        monkeypatch, tmp_path, capsys):
+    """A partial `providers` block is not a fleet report. Saying nothing is what an older relay
+    produces anyway, and it beats printing "2 of None providers have withdrawn" — the same rule
+    `grid task list` learned in 19a's review, applied before it can be learned the same way."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
+        "providers": {"paused": 2}}))          # no `online` at all
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "None" not in out
+    assert "withdrawn" not in out.lower()
+
+
+def test_task_cancel_says_the_reason_not_only_the_state(monkeypatch, tmp_path, capsys):
+    """`failed` on its own reads as "the agent broke", which is the one thing that did not happen.
+    The reason is also what tells a later `grid task get` the two apart."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "P1", "state": "failed", "error": "cancelled"}))
+
+    cli.main(["task", "cancel", "t-1"])
+
+    out = capsys.readouterr().out
+    assert "failed" in out and "cancelled" in out
+
+
+@pytest.mark.parametrize("providers,why", [
+    ({"online": True, "paused": True, "resumes_at": None}, "booleans, which subclass int"),
+    ({"online": "2", "paused": "1", "resumes_at": None}, "numbers sent as strings"),
+    ({"online": 2, "paused": -1, "resumes_at": None}, "a negative count"),
+], ids=["booleans", "strings", "negative"])
+def test_project_status_never_renders_a_provider_count_that_is_not_one(
+        monkeypatch, tmp_path, capsys, providers, why):
+    """`isinstance(x, int)` is True for `bool`, so the obvious guard lets `True` through and prints
+    "True of True providers have withdrawn". The same trap `remote/task_capacity._resets_at`
+    excludes by hand on the other side of this wire."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
+        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
+        "providers": providers}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "withdrawn" not in out.lower(), why
+    assert "True" not in out and "no provider" not in out.lower(), why

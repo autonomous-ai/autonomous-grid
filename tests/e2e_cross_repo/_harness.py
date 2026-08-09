@@ -11,9 +11,11 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -104,9 +106,22 @@ def git_ls_remote(url: str, ref: str, *, bearer: str) -> str:
 class Provider:
     """One provider process, and the two different ways it can stop."""
 
-    def __init__(self, proc, node_id):
+    def __init__(self, proc, node_id, log_path=None):
         self.proc = proc
         self.node_id = node_id
+        #: Where this process's merged stdout+stderr is being written. A FILE, never an undrained
+        #: `subprocess.PIPE` — see `conftest.spawn_provider` for what that cost.
+        self.log_path = log_path
+
+    def output(self) -> str:
+        """Everything this provider has said so far. `""` before it has said anything.
+
+        Read from disk rather than from a pipe, so a test may look at it WHILE the provider is still
+        running — which is the only useful moment for most of what it says.
+        """
+        if self.log_path is None or not Path(self.log_path).exists():
+            return ""
+        return Path(self.log_path).read_text(errors="replace")
 
     def die(self):
         """`SIGKILL` — no cleanup, no final report, no goodbye to the relay.
@@ -130,18 +145,78 @@ class Provider:
 # ------------------------------------------------------------------------- the client, for real
 
 def create(relay_base, bearer, prompt, *, project, files=None):
-    """One task in the project called `project`, creating that project if it is not there yet.
+    """One task in the project called `project`, creating and seeding that project if it is new.
 
-    Two calls, and the first one is the point rather than setup noise: a task is posted to a project
-    **id** since ADR 0033 issue 10, and a name is resolved only by `POST /relay/v1/projects`, under
-    the caller's own ownership. This is exactly the sequence `grid task create` runs, so the E2E
-    exercises the real client path and every call site above stays as it was.
+    Three calls, and none of them is setup noise — each is a step `grid task create` or
+    `grid project import` really runs:
+
+      * a task is posted to a project **id** since ADR 0033 issue 10, and a name is resolved only by
+        `POST /relay/v1/projects`, under the caller's own ownership;
+      * since issue 16b a project has no `main` until something imports one, and a member may no
+        longer push one themselves — the relay is the trunk's sole writer. `create_task` refuses a
+        project with no trunk outright, so seeding is now part of standing a project up rather than
+        an optional convenience.
     """
     from remote import relay as relay_client
 
     project_id = relay_client.create_project(relay_base, bearer, name=project)["id"]
+    seed_trunk(relay_base, bearer, project_id)
     return relay_client.create_task(
         relay_base, bearer, prompt=prompt, project_id=project_id, files=files)
+
+
+def seed_trunk(relay_base, bearer, project_id):
+    """Give a project the `main` a task has to be cut from, through the real import route.
+
+    ⚠️ **This is what issue 16b took away and nothing here replaced.** Before it, a member could
+    push `main` themselves while the project was idle, and `create` relied on that without ever
+    saying so. 16b made the relay the trunk's only writer — promote and import, nothing else — and
+    from that commit every module in this directory failed at its first `H.create` with "has no main
+    yet". Both unit suites stayed green, because neither of them creates a project the way a person
+    does. That is the same blind spot this whole directory exists for, so the fix goes through the
+    real three-step import rather than reaching into the relay's bare repository on disk.
+
+    Idempotent by ASKING, not by remembering: `/status` already reports `main_commit`, so a project
+    that has a trunk is skipped without this helper keeping a set of ids it hopes is accurate. It
+    also means the check cannot drift from what `create_task` will refuse on, since both read the
+    same ref.
+    """
+    from remote import relay as relay_client, task_repo
+
+    if relay_client.project_status(relay_base, bearer, project_id).get("main_commit"):
+        return
+
+    opened = relay_client.open_project_import(relay_base, bearer, project_id)
+    ref = opened["ref"]
+    source = Path(tempfile.mkdtemp(prefix="e2e-seed-"))
+    try:
+        _git(source, "init", "-q", "-b", "main")
+        (source / "README.md").write_text("seeded by the cross-repo E2E\n")
+        _git(source, "add", "README.md")
+        _git(source, "commit", "-q", "-m", "seed")
+        task_repo.push_import(
+            source, url=relay_client.git_remote_url(relay_base, project_id), token=bearer,
+            local_ref="main", remote_ref=ref)
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+    answer = relay_client.finish_project_import(relay_base, bearer, project_id)
+    assert answer.get("status") == "imported", answer
+
+
+# Hermetic git for the seed repository: no system or global config, no ambient identity. Otherwise a
+# developer's own `~/.gitconfig` — a `commit.gpgsign`, an `init.defaultBranch` — decides what this
+# harness pushes, and the failure lands on somebody else's machine.
+_SEED_GIT_ENV = {
+    "PATH": os.environ.get("PATH", ""),
+    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": "/nonexistent",
+    "GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e2e@invalid",
+    "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e2e@invalid",
+}
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True,
+                          text=True, env=_SEED_GIT_ENV).stdout
 
 
 def get(relay_base, bearer, task_id):

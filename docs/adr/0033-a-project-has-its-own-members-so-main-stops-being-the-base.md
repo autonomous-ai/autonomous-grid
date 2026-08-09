@@ -641,6 +641,37 @@ key in the heartbeat's `load`, following `unhealthy_models` — absent ⇒ nothi
 rollout is free in both directions). `/status`'s `queue` block ships the half of "why is nothing
 moving" the relay can answer alone.
 
+**As built (issue 19b).** Both shipped, and the first of them not by the mechanism named above.
+
+- ⚠️ **"The next lease renewal gets the 403" is wrong, and it was measured rather than reasoned
+  about.** A cancelled row keeps its `provider_id`, so `tasks._refuse_unleased` falls *past* the
+  "another provider holds this" branch — that one requires `provider_id != caller` — and answers
+  **404 `task_not_running`**, which is exactly the answer the renewer deliberately does NOT kill on,
+  because a relay too old to have the lease route sends an indistinguishable one. Left as written,
+  cancel would free the member's slot at once and the agent would go on spending the operator's
+  subscription until it finished by itself. So the kill signal is the refusal **code**
+  (`task_cancelled`) on that 404, which makes the renewer the one place a provider reads a parsed
+  `detail`. The ambiguity the 404 branch protects is untouched — no code means no verdict — so
+  *absent ⇒ the pre-19b behaviour* and there is **no rollout order**.
+  The relay-side branch is gated on **terminal state AND the error slug**, never the slug alone:
+  `error` also carries whatever a provider reported, and a reclaim leaves the previous attempt's on a
+  requeued row, so the slug by itself would kill a healthy agent.
+- **A terminal `failed` with a reason, not a fourth state.** `TERMINAL_STATES` is a lockstep set the
+  provider reports verbatim and `TASK_ACTIVE_STATES` is its complement and the predicate of
+  `tasks_one_active_per_member`, so a new state costs a lockstep release and buys nothing the slug
+  does not. Writing `failed` is also what frees the slot. `preparing` is refused with its own code: it
+  is the in-flight half of a create, an integrate or a commit, and ending it strands a git operation.
+- **Membership is the fence**, the same one `GET /tasks/{id}` uses. On a shared project the colleague
+  whose merge task has been stuck for an hour is precisely who needs to stop it, and cancel discloses
+  nothing a read does not. The event log records who did it, by `member_key`.
+- **Nothing is rewound.** No ref is touched, so `grid task fetch` still works on a cancelled task —
+  and the provider is fenced anyway, because `task_git._access` grants push on `state == 'running'`.
+- **Capacity is published, and only published.** `tasks_paused_until` reaches `/status` as
+  `providers: {online, paused, resumes_at}`, fleet-wide because the task queue is. Nothing routes on
+  it and nothing consults it before handing out work — the claim path is untouched, and a paused
+  provider still simply does not ask. `resumes_at` is the EARLIEST of the paused nodes, because when
+  the fleet next regains capacity is the number a team decides on.
+
 ### D-n — The provider confines the agent, and hands it the confinement per invocation
 
 A task is arbitrary code execution as the provider's user, by design — the agent has to run builds,

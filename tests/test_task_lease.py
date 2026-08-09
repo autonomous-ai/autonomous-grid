@@ -285,6 +285,195 @@ def test_a_404_stops_renewing_but_never_kills_the_agent(monkeypatch):
     assert proc.poll() is None, "the agent was stopped some other way"
 
 
+def test_a_404_that_says_the_task_was_cancelled_does_stop_the_agent(monkeypatch):
+    """The one 404 that is not ambiguous (ADR 0033 D-l, issue 19b).
+
+    A member cancelling their task frees their slot on the relay immediately. What the relay cannot
+    do is stop the agent: this renewer holds a live child and keeps paying for it out of the
+    OPERATOR's own Claude subscription until something tells it not to. The issue was drafted saying
+    a cancelled row's next renewal answers 403 — the answer this renewer already kills on — and that
+    was measured to be false: a cancelled row keeps its `provider_id`, so grid-src's
+    `_refuse_unleased` falls past the "someone else holds it" branch and answers 404.
+
+    So the discriminator is the refusal CODE, which every 4xx in that plane has carried since issue
+    19a. The ambiguity the 404 branch exists to protect is untouched: a relay with no lease route at
+    all answers FastAPI's bare `{"detail": "Not Found"}`, which carries no code and still leaves the
+    agent alone. *Absent ⇒ today's behaviour*, so there is no rollout order — a fleet gains the
+    saving as it updates.
+    """
+    from remote import task_lease
+
+    calls = []
+
+    def _cancelled(signaling_url, token, task_id):
+        calls.append(task_id)
+        raise task_lease.relay.RelayError(
+            "This task was cancelled", status=404, code=task_lease.CANCELLED_CODE)
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", _cancelled)
+
+    proc = _FakeProc(alive=True)
+    renewer = task_lease.LeaseRenewer(_FakeState(), "t-1", interval=0.01)
+    renewer.attach(proc)
+    renewer.start()
+    try:
+        assert _wait_for(lambda: proc.killed)
+    finally:
+        renewer.close()
+
+    assert len(calls) == 1, "it kept renewing after an answer that no retry can change"
+    # `lost` is False, and that is not an oversight. It means "another provider took this task over",
+    # which drives a different sentence in `_supervise_one_task` — nobody took a cancelled task, it
+    # was stopped, and reporting a takeover would send somebody looking for a provider that does not
+    # exist.
+    assert renewer.lost is False
+
+
+def test_a_404_carrying_some_other_code_still_leaves_the_agent_running(monkeypatch):
+    """The negative control for the branch above, and the one that matters most.
+
+    `task_not_running` is what an ordinary terminal task answers — most often because an earlier
+    report of this provider's own landed and only the acknowledgement was lost. Killing on it would
+    be killing on every 404 again, which is the fleet-wide hazard the 404 branch exists to avoid.
+    """
+    from remote import task_lease
+
+    calls = []
+
+    def _ended(signaling_url, token, task_id):
+        calls.append(task_id)
+        raise task_lease.relay.RelayError(
+            "Task not found or no longer running", status=404, code="task_not_running")
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", _ended)
+
+    proc = _FakeProc(alive=True)
+    renewer = task_lease.LeaseRenewer(_FakeState(), "t-1", interval=0.01)
+    renewer.attach(proc)
+    renewer.start()
+    try:
+        assert _wait_for(lambda: len(calls) >= 1)
+        time.sleep(0.15)  # many renewal intervals
+    finally:
+        renewer.close()
+
+    assert len(calls) == 1
+    assert not proc.killed, "a coded 404 that is not a cancellation killed a healthy agent"
+
+
+def _lease_against(monkeypatch, response, _real=None):
+    """Call the real `relay.renew_task_lease` against a canned HTTP response, and return the error.
+
+    Real request-building and real response-parsing, no network — the same shape `test_local_cli`'s
+    `_mock_relay` uses. Patching the module function (as the `renewals` fixture does) is right for
+    testing the RENEWER, and useless for testing what the renewer is handed: a hand-built
+    `RelayError` would prove only that this test can set an attribute. The code has to come off a
+    body the relay could really send.
+    """
+    import httpx
+
+    from remote import relay
+
+    real = _real or httpx.Client
+    monkeypatch.setattr(
+        relay.httpx, "Client",
+        lambda *a, **k: real(*a, **{**k, "transport": httpx.MockTransport(lambda _req: response)}))
+    with pytest.raises(relay.RelayError) as caught:
+        relay.renew_task_lease("http://relay.test", "tok", "t-1")
+    return caught.value
+
+
+def test_a_cancelled_lease_refusal_arrives_with_its_code_on_the_error(monkeypatch):
+    """End to end through the real client: the relay's coded 404 becomes `RelayError.code`."""
+    import httpx
+
+    exc = _lease_against(monkeypatch, httpx.Response(404, json={
+        "detail": {"code": "task_cancelled", "message": "This task was cancelled"}}))
+
+    assert (exc.status, exc.code) == (404, "task_cancelled")
+
+
+def test_an_old_relays_bare_404_carries_no_code_at_all(monkeypatch):
+    """The degrade, proven against the body FastAPI really sends for an unmatched route.
+
+    This is the case the whole 404 branch exists for, so it is asserted on the wire rather than
+    argued: no code means the renewer takes the leave-the-agent-alone path.
+    """
+    import httpx
+
+    exc = _lease_against(monkeypatch, httpx.Response(404, json={"detail": "Not Found"}))
+
+    assert (exc.status, exc.code) == (404, None)
+
+
+@pytest.mark.parametrize("body,why", [
+    (b"<html>gateway timeout</html>", "a proxy's HTML error page"),
+    (b"", "an empty body"),
+    (b'{"detail": {"code": 7}}', "a code that is not a string"),
+    (b'{"detail": ["not", "a", "dict"]}', "FastAPI's own list-shaped validation detail"),
+])
+def test_a_body_this_provider_cannot_read_is_never_mistaken_for_a_cancellation(
+        monkeypatch, body, why):
+    """Every unreadable shape means "no code was stated", never a guess and never a traceback.
+
+    A renewal runs on a background thread, so an exception escaping the parse would not merely lose
+    the code — it would take the renewer down and leave the lease to lapse on a task that is running
+    perfectly. `json.loads` can raise well outside `ValueError`, which is why the guard is broad.
+    """
+    import httpx
+
+    exc = _lease_against(monkeypatch, httpx.Response(404, content=body))
+
+    assert exc.code is None, why
+
+
+def test_a_deeply_nested_body_does_not_take_the_renewal_thread_down(monkeypatch):
+    """The reason the parse guard is `except Exception` and not `except ValueError`.
+
+    Every other unreadable body above fails with a `JSONDecodeError`, which IS a `ValueError` — so a
+    narrowed guard passes all of them and still has a hole. `json` parses recursively, and past the
+    interpreter's stack limit it raises `RecursionError`, a `RuntimeError`. That would escape a
+    ValueError-only guard, escape `_renew_once`'s handler as an unrecognised failure, and — because
+    a renewal runs on a background thread — end the renewer for a task that is running perfectly.
+    """
+    import httpx
+
+    exc = _lease_against(monkeypatch, httpx.Response(404, content=b"[" * 200_000))
+
+    assert exc.code is None
+
+
+def test_the_cancel_code_this_provider_kills_on_is_the_one_the_relay_sends():
+    """The lockstep check, parsed out of grid-src rather than restated here.
+
+    There is no compile-time link between the copies. A typo on either side compiles, passes every
+    unit test in BOTH repositories, and silently disables the kill — the provider goes on paying for
+    an agent nobody is waiting for, and the only symptom is a subscription bill.
+    """
+    from remote import task_lease
+
+    assert task_lease.CANCELLED_CODE == _relay_string_constant(
+        "CANCELLED_CODE", module="task_errors.py")
+
+
+def test_the_capacity_load_key_this_provider_publishes_is_the_one_the_relay_reads():
+    """The other lockstep value this slice adds (ADR 0033 D-l, issue 19b).
+
+    Filed here rather than in `test_task_capacity.py` because this module is where the cross-repo
+    register is checked — the lease TTL pair and the git-transport pair are already parsed out of
+    grid-src from these helpers, and one home for "does the duplicate still agree" is what stops a
+    second copy of the parser drifting.
+
+    A typo in either copy of the key is silent in a way the cancel code's is not: no test fails and
+    no error is logged, the relay simply never sees a withdrawal and a whole team watches an
+    unexplained queue — which is the failure this slice exists to remove.
+    """
+    from remote import task_capacity
+
+    assert task_capacity.PAUSED_LOAD_KEY == _relay_string_constant(
+        "PAUSED_LOAD_KEY", module="task_capacity.py")
+
+
 def test_a_verdict_before_the_agent_is_spawned_still_stops_the_renewer(monkeypatch):
     """The verdict latch, on the one path where killing the child cannot do the stopping for it.
 
@@ -787,14 +976,28 @@ def test_a_beat_is_never_started_after_close_was_called(monkeypatch):
     assert beats == [], "a snapshot was started after the renewer had been closed"
 
 
+def _relay_module(name):
+    """One of grid-src's private_server modules, as a path. Three helpers below read constants out
+    of that package, and the worktree location was written out at each of them — so a moved
+    checkout meant three edits, and a missed one is a lockstep check that skips instead of failing.
+
+    Machine-specific on purpose, like the value it replaces: the two repositories are separate
+    installs with no import path between them, and every caller here skips rather than fails when it
+    is absent (`GRID_SRC_REPO` is the cross-repo E2E's override; this side has deliberately never
+    needed one, because a developer without the worktree simply cannot check the duplicates).
+    """
+    import pathlib
+
+    return pathlib.Path(
+        "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
+        "/grid_cli/private_server") / name
+
+
 def _relay_config_constant(name):
     """A default out of grid-src's `config.py`, parsed rather than imported. See `_relay_constant`."""
     import ast
-    import pathlib
 
-    source = pathlib.Path(
-        "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
-        "/grid_cli/private_server/config.py")
+    source = _relay_module("config.py")
     if not source.exists():
         pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
     for node in ast.walk(ast.parse(source.read_text())):
@@ -853,11 +1056,8 @@ def _relay_constant(name, module="tasks.py"):
     than a second copy of this function.
     """
     import ast
-    import pathlib
 
-    source = pathlib.Path(
-        "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"
-        "/grid_cli/private_server") / module
+    source = _relay_module(module)
     if not source.exists():
         pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
     for node in ast.parse(source.read_text()).body:
@@ -865,6 +1065,30 @@ def _relay_constant(name, module="tasks.py"):
                 getattr(t, "id", None) == name for t in node.targets):
             return _numeric(node.value, name)
     raise AssertionError(f"{name} is no longer defined in grid-src's tasks.py")
+
+
+def _relay_string_constant(name, module):
+    """A STRING constant out of a grid-src module, parsed rather than imported.
+
+    A sibling of `_relay_constant` rather than a widening of it: that one funnels through `_numeric`,
+    which refuses anything that is not an integer expression precisely so a constant it cannot read
+    is an error instead of a silently skipped check. Teaching it to also accept strings would make
+    "this is not a number" and "this is a string I understand" the same answer.
+    """
+    import ast
+
+    source = _relay_module(module)
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == name for t in node.targets):
+            value = node.value
+            assert isinstance(value, ast.Constant) and isinstance(value.value, str), (
+                f"grid-src's {name} is no longer a plain string literal, so this lockstep check "
+                f"cannot read it — teach this helper the new shape rather than deleting the check")
+            return value.value
+    raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
 
 
 # `ast.literal_eval` accepts `+` and `-` only (for complex literals), so a size written the way

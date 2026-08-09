@@ -235,3 +235,103 @@ def test_a_recognised_refusal_is_still_a_refusal():
     capacity.observe(_blocked(status="rejected", resets_in=1200.0))
 
     assert capacity.pause_seconds() > 0.0
+
+
+# ---------------------------------------------------------------------------
+# ADR 0033 D-l / issue 19b — the withdrawal becomes visible to the team.
+#
+# ADR 0032 published none of this on purpose, and CLAUDE.md recorded the reason: a task is claimed
+# from a durable queue at poll time, so a provider that does not ask is simply not given one and the
+# relay needs to know nothing. **That argument was written for one member per project.** With six
+# other people on the same subscription, one member's rate-limit reading withdraws the provider from
+# the whole team for the vendor's window, and the explanation reaches only the client whose task was
+# running — everybody else sees a queued task and, past the deadline, a silent reaping.
+#
+# So the reading is published, and ONLY published: nothing consults it to route, to claim, or to
+# hand out work. It is for people to read.
+# ---------------------------------------------------------------------------
+
+
+def test_a_serving_provider_publishes_no_pause_at_all():
+    """Absent is the wire's "nothing withheld", exactly as `unhealthy_models` is (ADR 0019). A
+    healthy provider's heartbeat stays byte-identical to a pre-19b build, which is what makes the
+    rollout free in both directions."""
+    from remote import task_capacity
+
+    assert task_capacity.TaskCapacity().paused_until() is None
+
+
+def test_a_withdrawn_provider_publishes_when_it_comes_back():
+    """A TIMESTAMP, not a boolean. "Paused" with no "until" tells a team to keep watching; a reset
+    time tells them whether to wait or to add a provider, which are the only two things they can
+    do."""
+    from remote import task_capacity
+
+    capacity = task_capacity.TaskCapacity()
+    capacity.observe(_blocked(resets_in=1800.0))
+
+    until = capacity.paused_until()
+
+    assert until is not None
+    # The vendor's own window, in wall clock, within a second of where `pause_seconds` says it is.
+    assert abs(until - (time.time() + capacity.pause_seconds())) < 1.0
+    assert 1700.0 < until - time.time() <= 1801.0
+
+
+def test_the_published_time_is_derived_from_the_block_and_not_from_the_vendors_stamp():
+    """One clock, not two.
+
+    `resetsAt` arrives on the vendor's wall clock and is converted to a MONOTONIC deadline once, at
+    the moment the block is taken, so that a later clock step can neither extend nor shorten it —
+    `test_a_wall_clock_step_cannot_move_a_block_already_taken` pins that. Publishing the raw stamp
+    instead would reintroduce the thing that conversion removed, and would also republish a value
+    the two-week sanity ceiling had already refused. So this is `now + pause_seconds()`, and a clock
+    step moves the published time with the clock rather than un-pausing the provider.
+    """
+    from remote import task_capacity
+
+    capacity = task_capacity.TaskCapacity()
+    capacity.observe(_blocked(resets_in=1800.0))
+    before = capacity.paused_until()
+
+    real = time.time
+    try:
+        time.time = lambda: real() + 600.0        # the wall clock jumps ten minutes forward
+        after = capacity.paused_until()
+    finally:
+        time.time = real
+
+    assert after - before == pytest.approx(600.0, abs=1.0)
+    assert capacity.pause_seconds() > 1700.0, "the block itself must not have moved"
+
+
+def test_a_reading_with_no_believable_window_publishes_nothing():
+    """The fail-open rule reaches the wire too. A spent reading whose reset this build will not
+    believe takes no block — so there is nothing to publish, and publishing "paused, until unknown"
+    would tell a team to stop waiting on a provider that is still claiming."""
+    from remote import task_capacity
+
+    capacity = task_capacity.TaskCapacity()
+    capacity.observe(_blocked(resets_in=40 * 24 * 3600.0))    # past the two-week ceiling
+
+    assert capacity.pause_seconds() == 0.0
+    assert capacity.paused_until() is None
+
+
+def test_a_window_that_has_run_out_publishes_nothing_again():
+    """Recovery needs no fresh reading. Once the block's own deadline passes, `pause_seconds` is
+    0.0 and the key must disappear from the heartbeat — otherwise a provider that came back an hour
+    ago still reads as withdrawn to every member of every project."""
+    from remote import task_capacity
+
+    capacity = task_capacity.TaskCapacity()
+    capacity.observe(_blocked(resets_in=1800.0))
+    assert capacity.paused_until() is not None
+
+    real = time.monotonic
+    try:
+        time.monotonic = lambda: real() + 1801.0
+        assert capacity.pause_seconds() == 0.0
+        assert capacity.paused_until() is None
+    finally:
+        time.monotonic = real

@@ -1028,6 +1028,12 @@ is, whether a promote would be accepted, what is holding your one task slot and 
 deep the project's queue is. Before it, "how far behind am I" meant attempting a promote and reading
 the refusal — a call that either releases work or refuses it, used as a question.
 
+When there is a queue it also says **who could be working on it**: how many providers are online, how
+many have withdrawn because their own Claude subscription is out of headroom, and when the first of
+those starts claiming again. A queue depth on its own cannot tell a busy grid from an empty one or
+from a withdrawn one, and those need three different actions — wait, run `grid join`, or wait until a
+named time. Nothing is printed when the whole fleet is serving.
+
 `grid project check` is the **dry run of `integrate`**. Integration *is* the conflict check without
 it: asking costs your one task slot, and when the answer is that you and somebody else changed the
 same lines it queues a merge task — a paid agent run. `check` spends neither. It reports the same
@@ -1101,6 +1107,7 @@ grid task list   --project <id> [--all] [--state <state>]… [--limit <n>] [--af
                  [--grid <grid>] [--json]
 grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
+grid task cancel <task-id> [--grid <grid>] [--json]
 ```
 
 **Remote-only.** Hand the grid a coding task and read the result back later. Unlike a chat request,
@@ -1139,6 +1146,19 @@ against projects you own, and only an id ever reaches the relay.
 `preparing`, `queued` or `running` is refused, so *your* tasks in a project are strictly sequential
 and each starts from the last one's result. Other members are unaffected: a project with five people
 in it runs five tasks at once, one each. Use different projects to run your own tasks in parallel.
+
+`grid task cancel <task-id>` ends a task that has not finished and gives that slot back at once.
+Before it existed the only way out of a task nobody wanted any more was to wait for its deadline —
+up to an hour — and the usual reason to reach for it is a conflict-resolution task queued by
+`grid project integrate`. **Any member may cancel any task in the project**, which is the point on a
+shared one: the colleague whose merge has been stuck all afternoon is often the person who needs to
+stop it, and the event log records who did.
+
+The slot is free immediately; the agent itself stops within about half a minute, on the provider's
+next lease renewal. Against a provider that has not been updated yet it simply runs to completion
+with nothing waiting on it — harmless, and the reason this needs no particular rollout order.
+**Nothing is rewound**: the task's branch is left exactly where the agent got to, so
+`grid task fetch` still works on a cancelled task.
 
 ### Sending files with a task
 

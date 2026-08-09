@@ -101,7 +101,7 @@ def test_03_the_workspace_tree_is_published_while_the_agent_is_still_working(
         f"the agent's new file never appeared in the tree: {trees!r}")
 
 
-def test_04_the_client_fetches_exactly_what_the_agent_produced_and_main_moved(
+def test_04_the_client_fetches_what_the_agent_produced_and_the_wip_branch_moved(
         relay, owner_token, spawn_provider, tmp_path):
     """Issue 05: fetch over the relay's git front with the grid token, no SSH key anywhere."""
     from remote import relay as relay_client, task_repo
@@ -122,19 +122,33 @@ def test_04_the_client_fetches_exactly_what_the_agent_produced_and_main_moved(
 
     assert (dest / "out" / "result.txt").read_text() == "ZEBRA-4417"
 
-    # `main` advanced to the result, which is what makes it the base the project's next task is cut
-    # from — the property D-e exists to provide.
-    assert done["result_commit"] in H.git_ls_remote(url, "refs/heads/main", bearer=owner_token)
+    # The AUTHOR'S WIP BRANCH advanced to the result, which is what makes it the base their next
+    # task is cut from — the property D-e exists to provide.
+    #
+    # ⚠️ This assertion used to name `refs/heads/main`, and ADR 0033 D-c moved it: a settle
+    # fast-forwards `wip/<member_key>` and `main` is written by promote and import alone. It had
+    # been failing since issue 12 and nothing noticed, because this whole directory has been red
+    # since 16b took away the member-push bootstrap `H.create` was relying on.
+    branch = relay_client.project_status(relay, owner_token, done["project_id"])["branch"]
+    assert done["result_commit"] in H.git_ls_remote(url, f"refs/heads/{branch}",
+                                                    bearer=owner_token)
+    # ...and `main` did NOT move. It is still the seeded import, because nothing has promoted.
+    assert done["result_commit"] not in H.git_ls_remote(url, "refs/heads/main", bearer=owner_token)
 
 
-def test_05_a_failed_task_pushes_its_branch_but_never_moves_main(
+def test_05_a_failed_task_pushes_its_branch_but_never_moves_the_wip_branch(
         relay, owner_token, spawn_provider):
-    """D-e's asymmetry: the user can still see what the agent did, and the trunk stays known-good."""
+    """D-e's asymmetry: the user can still see what the agent did, and the base stays known-good.
+
+    The base a task is cut from is `wip/<member_key>` since ADR 0033 D-c, so that — not `main` — is
+    the ref a failure must leave alone. `main` is left alone too, by construction: nothing but a
+    promote or an import writes it at all.
+    """
     from remote import relay as relay_client
 
     spawn_provider("A")
     good = H.create(relay, owner_token, "WRITE kept.txt first", project="p-failure")["id"]
-    main_before = H.await_state(relay, owner_token, good, {"completed"})["result_commit"]
+    wip_before = H.await_state(relay, owner_token, good, {"completed"})["result_commit"]
 
     bad = H.create(
         relay, owner_token, "WRITE broken.txt half; FAIL the agent gave up",
@@ -142,11 +156,12 @@ def test_05_a_failed_task_pushes_its_branch_but_never_moves_main(
     failed = H.await_state(relay, owner_token, bad, {"failed"})
 
     assert failed.get("result_commit"), "a failed attempt must still push its branch"
-    assert failed["result_commit"] != main_before
+    assert failed["result_commit"] != wip_before
 
     url = relay_client.git_remote_url(relay, failed["project_id"])
-    assert main_before in H.git_ls_remote(url, "refs/heads/main", bearer=owner_token), (
-        "main moved on a FAILED task — it is no longer a known-good base")
+    branch = relay_client.project_status(relay, owner_token, failed["project_id"])["branch"]
+    assert wip_before in H.git_ls_remote(url, f"refs/heads/{branch}", bearer=owner_token), (
+        "the WIP branch moved on a FAILED task — the next task is no longer cut from a good base")
 
 
 def test_06_a_provider_killed_mid_task_loses_it_and_another_one_finishes_the_work(
@@ -257,3 +272,107 @@ def test_08_both_commits_of_a_task_name_the_member_who_asked_for_it(
         ["git", "blame", "--line-porcelain", "authored.txt"],
         cwd=str(dest), capture_output=True, text=True, check=True).stdout
     assert "author Alice Nguyen" in blamed, blamed
+
+
+def test_09_cancelling_a_task_frees_the_slot_at_once_and_really_stops_the_agent(
+        relay, owner_token, spawn_provider, workspace_root):
+    """ADR 0033 D-l / issue 19b, at the ONE place both halves of it exist together.
+
+    The relay's half and the provider's half are proven separately by each repository's own suite,
+    and both would stay green if they disagreed about the single string that joins them. That string
+    is the refusal code `task_cancelled`, carried on a **404** — and 404 is the one answer the
+    renewer deliberately refuses to kill on, because a relay too old to have the lease route sends
+    an indistinguishable one. So a typo in either copy of the code does not fail anything: it just
+    leaves the agent running on the operator's own subscription, for as long as the task would have
+    taken, with nobody waiting for it. This is the only test that can see that.
+
+    Both halves are asserted through behaviour rather than through the wire:
+
+      * the SLOT, by creating a second task in the same project — which the
+        `tasks_one_active_per_member` index would refuse outright if the first still held it;
+      * the AGENT, by that second task actually finishing. The provider here runs ONE worker, and
+        the cancelled task's agent was told to sleep for 90 seconds. If it were still running, there
+        would be nothing free to claim the second task and this would time out.
+    """
+    from remote import relay as relay_client
+
+    provider = spawn_provider("A")
+    task_id = H.create(
+        relay, owner_token, "WRITE alive-4417.txt yes; SLEEP 90; WRITE never.txt x",
+        project="p-cancel")["id"]
+    running = H.await_state(relay, owner_token, task_id, {"running"}, timeout=60)
+    assert running["provider_id"] == provider.node_id
+
+    # ⚠️ Waiting for `running` is NOT waiting for the agent, and getting this wrong made an earlier
+    # version of this test pass against a provider that killed nothing. The relay writes `running`
+    # at CLAIM; the provider then checks the repository out and only then spawns. Cancelling in that
+    # window refuses the CHECKOUT instead — the task ends, the worker frees, and every relay-side
+    # assertion below is satisfied without the kill ever being reached.
+    #
+    # The proof of life is a file the agent writes, watched on disk. Waiting for one of its EVENTS
+    # was tried and is not equivalent: an event reaches the relay only when the publisher's batch
+    # flushes, and when that lagged the wait returned after the agent had already finished — so the
+    # cancel landed on a task with no child left, and the test failed for a reason that had nothing
+    # to do with what it was testing. The file appears the moment the agent runs.
+    assert H.wait_for(lambda: next(workspace_root.rglob("alive-4417.txt"), None),
+                      timeout=60, interval=0.2), (
+        "the agent never started, so there was nothing to stop")
+
+    answer = relay_client.cancel_task(relay, owner_token, task_id)
+
+    assert (answer.get("state"), answer.get("error")) == ("failed", "cancelled"), answer
+
+    # The slot, immediately. This create is refused with `member_has_active_task` if the cancelled
+    # row is still active — so it is the index itself answering, not a field we chose to read.
+    second = H.create(relay, owner_token, "SAY freed", project="p-cancel")
+    assert second["id"] != task_id
+
+    # The AGENT, from the provider's own account of what it did with the refusal it was given.
+    #
+    # A timing observable was tried first — "one worker, so the next task cannot start until the
+    # sleeping agent is gone" — and it is too loose to trust: the provider claims, checks out and
+    # reports around the same window, so the same wall clock covers both outcomes often enough to
+    # be flaky in BOTH directions. The provider says which branch it took, in one line, and that is
+    # the branch this whole slice is about.
+    assert H.wait_for(lambda: "was cancelled by a project member" in provider.output() or None,
+                      timeout=30, interval=0.2), (
+        "the provider did not stop the agent on a cancelled lease refusal. Its own log says which "
+        f"branch it took instead:\n{provider.output()[-2000:]}")
+    # ...and it must NOT have taken the ambiguous-404 path, which leaves the agent running. Both
+    # sentences mention the task, so the wait above alone would pass on a provider that logged both.
+    assert "The agent is left running" not in provider.output(), provider.output()[-2000:]
+
+    events = list(relay_client.stream_task_events(relay, owner_token, task_id, after_seq=-1))
+    cancelled = [payload for _, payload in events if payload.get("type") == "task.cancelled"]
+    assert cancelled, f"the log does not say the task was cancelled: {events!r}"
+    assert cancelled[0].get("by"), "the log does not say WHO cancelled it"
+    terminal = [payload for _, payload in events if payload.get("type") == "task.terminal"]
+    assert terminal and terminal[-1].get("error") == "cancelled", terminal
+
+
+def test_10_a_cancelled_tasks_branch_is_still_there_to_fetch(
+        relay, owner_token, spawn_provider):
+    """Cancel ends the task; it does not rewind the repository (ADR 0033 issue 19b).
+
+    A member who stops a run still wants to see how far it got, and `grid task fetch` resolves the
+    branch by name. Asserted over the real git front rather than against the relay's own answer,
+    because the ref is what a fetch actually needs and the fence in front of it is what decides
+    whether a member can reach it.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    created = H.create(
+        relay, owner_token, "SLEEP 90; WRITE never.txt x", project="p-cancel-branch")
+    task_id = created["id"]
+    # The URL names the project by ID, never by the name `H.create` resolved — a name is not an
+    # address in this design (ADR 0033 D-a), and the git front does not accept one.
+    url = relay_client.git_remote_url(relay, created["project_id"])
+    H.await_state(relay, owner_token, task_id, {"running"}, timeout=60)
+    before = H.git_ls_remote(url, f"refs/heads/task/{task_id}", bearer=owner_token)
+    assert before, "the task branch should exist while it is running"
+
+    relay_client.cancel_task(relay, owner_token, task_id)
+
+    after = H.git_ls_remote(url, f"refs/heads/task/{task_id}", bearer=owner_token)
+    assert after == before, "cancelling rewound the task's branch"

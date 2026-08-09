@@ -682,7 +682,9 @@ def _add_project(sub) -> None:
 
 
 def _add_task(sub) -> None:
-    """Remote-only `grid task create|get` — hand the grid a coding task, read the result back (ADR 0032).
+    """Remote-only `grid task` — hand the grid a coding task, watch it, read the result back, stop it.
+
+    `create | get | list | follow | fetch | cancel` (ADR 0032; `list` and `cancel` are ADR 0033 D-l).
 
     Gated in local mode by dispatch (`task` is in `REMOTE_ONLY`). `--grid` is a FLAG, not a leading
     positional: the prompt that follows is free-form, and an optional positional in front of it is
@@ -757,6 +759,32 @@ def _add_task(sub) -> None:
     listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     listing.set_defaults(handler=cmd_remote_task)
+
+    # `cancel` — the first verb here that ENDS somebody's work (ADR 0033 D-l, issue 19b). It gets a
+    # long description for the reason `project check` does: what the verb costs, or in this case
+    # frees and stops, belongs in the sentence that offers it.
+    cancel = task_sub.add_parser(
+        "cancel",
+        help="Stop a queued or running task and free the member's task slot",
+        description=(
+            "Stop a task that has not finished, and give its member their one task slot back.\n\n"
+            "Until this existed the only way out of a task nobody wanted any more was to wait for "
+            "its deadline — up to an hour — with that member unable to start anything else. A "
+            "conflict-resolution task queued by `grid project integrate` is the usual reason to "
+            "reach for it.\n\n"
+            "A project is shared, so any member may cancel any task in it: the colleague whose "
+            "merge has been stuck all afternoon is often the person who needs to stop it. The "
+            "event log records who did.\n\n"
+            "The slot is free immediately. The agent itself stops within about half a minute, on "
+            "the provider's next lease renewal — and on a provider that has not been updated yet "
+            "it runs to completion, harmlessly, with nothing waiting on it.\n\n"
+            "Nothing is rewound: the task's branch is left exactly where the agent got to, so "
+            "`grid task fetch` still works on it."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    cancel.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    cancel.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    cancel.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    cancel.set_defaults(handler=cmd_remote_task)
 
 
 def _add_price(sub) -> None:

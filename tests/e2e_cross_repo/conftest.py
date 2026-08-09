@@ -150,6 +150,7 @@ def workspace_root(tmp_path_factory):
 def spawn_provider(relay, provider_nodes, fake_agent_bin, workspace_root, tmp_path_factory):
     """A provider process running this repo's real `task_loop` against the fake agent."""
     started: list[H.Provider] = []
+    logs: list = []
 
     def _spawn(label="A"):
         node_id, node_token = provider_nodes[label]
@@ -167,13 +168,28 @@ def spawn_provider(relay, provider_nodes, fake_agent_bin, workspace_root, tmp_pa
             "GRID_TASK_CLAUDE_CONFIG_DIR": str(tmp_path_factory.mktemp(f"claude-config-{label}")),
             "GRID_TASK_TIMEOUT_SECONDS": "120",
         }
+        # ⚠️ **A FILE, not an undrained `subprocess.PIPE`.** This used to be a pipe nobody read, and
+        # that is not merely untidy: a pipe's buffer is 64 KB, and a provider that fills it blocks
+        # in `write` — mid-task, holding a lease, with no error anywhere. It changed what this
+        # harness measured rather than merely hiding output. Found by mutation while adding the
+        # cancel test (ADR 0033 issue 19b): with the pipe, deleting a letter from the lockstep
+        # refusal code still PASSED; with the log on disk the same mutant fails, because the
+        # provider then really does stay busy with the agent it was supposed to stop.
+        #
+        # It also gives a test something to read while the provider is still running, which
+        # `H.Provider.output()` exposes.
+        log_path = tmp_path_factory.mktemp(f"provider-log-{label}") / "provider.log"
+        handle = open(log_path, "w", buffering=1)
+        logs.append(handle)
         proc = subprocess.Popen(
             [sys.executable, str(_HERE / "provider_process.py")],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        provider = H.Provider(proc, node_id)
+            env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
+        provider = H.Provider(proc, node_id, log_path=log_path)
         started.append(provider)
         return provider
 
     yield _spawn
     for provider in started:
         provider.stop()
+    for handle in logs:
+        handle.close()

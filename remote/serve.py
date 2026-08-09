@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from remote import (
     api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
-    codex_auth, codex_oauth,
+    codex_auth, codex_oauth, task_capacity,
 )
 from shared.handlers import HANDLERS
 from shared import run_records
@@ -1556,6 +1556,32 @@ class _ServeState:
         with self._lock:
             self._sweep = result
 
+    @staticmethod
+    def _task_pause_stamp() -> str | None:
+        """When this provider claims tasks again, as an ISO-8601 UTC string — or `None` while it is
+        claiming now (ADR 0033 D-l, issue 19b).
+
+        ISO 8601 and not a float, because the relay's half is a fail-open reader and a bare number
+        would make it guess at units; every other timestamp on this wire is already a string.
+
+        **Best-effort, exactly like the codex quota and the seat allowance beside it.** `load()` is
+        what the heartbeat is built from, and a heartbeat that raises is a provider that TTLs out of
+        the grid entirely — it would stop serving inference over a telemetry value about tasks. So
+        the failure of a reading is the absence of a key, which is already the wire's "nothing to
+        report".
+        """
+        try:
+            paused_until = task_capacity.shared().paused_until()
+            if paused_until is None:
+                return None
+            from datetime import datetime, timezone
+
+            return datetime.fromtimestamp(paused_until, tz=timezone.utc).isoformat()
+        except Exception as exc:  # noqa: BLE001 — telemetry must never fail a heartbeat
+            _warn(f"could not read this provider's task-capacity pause ({exc}); the heartbeat is "
+                  f"being sent without it")
+            return None
+
     def load(self) -> dict[str, Any]:
         with self._lock:
             load = {"active_tasks": self._inflight}
@@ -1585,6 +1611,17 @@ class _ServeState:
         seat_quota = self._seat_quota()
         if seat_quota:
             load["quota"] = seat_quota
+        # When this provider's own Claude subscription lets it claim TASKS again (ADR 0033 D-l,
+        # issue 19b). OUTSIDE `_lock`, with the other cross-module reads: `task_capacity.shared()`
+        # carries its own lock, and taking ours around it would order two locks for no reason.
+        #
+        # Nothing the relay ROUTES on: a provider out of task headroom serves inference perfectly
+        # well, which is the property `test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON`
+        # still pins. This is published so the members waiting on a queue can see why it is not
+        # moving, and for nothing else.
+        paused_until = self._task_pause_stamp()
+        if paused_until:
+            load[task_capacity.PAUSED_LOAD_KEY] = paused_until
         return load
 
     def _seat_quota(self) -> dict[str, Any] | None:

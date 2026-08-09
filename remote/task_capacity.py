@@ -58,6 +58,25 @@ _SPENT_STATUSES = frozenset({"rejected"})
 # the free text it forwards.
 _MAX_TRUSTED_PAUSE_SECONDS = 14 * 24 * 3600.0
 
+# The heartbeat `load` key this provider publishes its own withdrawal under (ADR 0033 D-l, issue
+# 19b). **Hand-duplicated** with grid-src's `task_capacity.PAUSED_LOAD_KEY` and kept in lockstep by
+# editing both repos — there is no compile-time link between the copies.
+#
+# ADR 0032 published none of this on purpose, and the reason was sound for one member per project: a
+# task is claimed from a durable queue at poll time, so a provider that does not ask is simply not
+# given one. With six other people on the same subscription it stops being sound — one member's
+# reading withdraws the provider from the whole team, and the explanation reaches only the client
+# whose task happened to be running.
+#
+# It is PUBLISHED and nothing more. Nothing routes on it, nothing consults it before handing out
+# work, and the claim path is untouched: a paused provider still simply does not ask. That is why
+# this is telemetry beside `platform` and `codex_rate_limits` rather than a second gate.
+#
+# *Absent ⇒ nothing withheld*, in both directions — an old provider never sends it, an old relay
+# stores it in `NodeRow.load` and ignores it, and a provider that is serving emits nothing. So the
+# rollout is free either way, like `unhealthy_models` and the author pair.
+PAUSED_LOAD_KEY = "tasks_paused_until"
+
 
 def _warn(message: str) -> None:
     print(f"\n[tasks] {message}", file=sys.stderr)
@@ -145,6 +164,29 @@ class TaskCapacity:
         if until is None:
             return 0.0
         return max(0.0, until - time.monotonic())
+
+    def paused_until(self) -> float | None:
+        """When this provider starts claiming again, as unix seconds — or `None` while it is
+        claiming now (ADR 0033 D-l, issue 19b).
+
+        The published half of `pause_seconds`, and the only thing about capacity that leaves this
+        process. A TIMESTAMP rather than a boolean because "paused" alone tells a team to keep
+        watching, while a reset time tells them whether to wait or to add a provider — which are the
+        only two things they can do about it.
+
+        Derived from the block, never from the vendor's `resetsAt`. That stamp was converted to a
+        MONOTONIC deadline once, at the moment the block was taken, precisely so a later clock step
+        could not move it — and republishing the raw value would undo that, as well as republish a
+        window `_pause_for`'s two-week ceiling had already refused. Converting back at read time
+        means a clock step moves the ANSWER with the clock, which is right: the reader's clock is
+        the one the answer is for.
+        """
+        pause = self.pause_seconds()
+        # `0.0` is the same fact as "never blocked": absent from the heartbeat, nothing withheld.
+        # Recovery therefore needs no fresh reading — the block simply stops being published.
+        if pause <= 0.0:
+            return None
+        return time.time() + pause
 
 
 # One provider process runs against one Claude subscription, so there is one reading of it. Held

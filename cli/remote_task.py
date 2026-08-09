@@ -68,6 +68,8 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
         return _task_fetch(args)
     if args.subcommand == "list":
         return _task_list(args)
+    if args.subcommand == "cancel":
+        return _task_cancel(args)
     # argparse (required=True + choices) guarantees the rest is `get`; guard explicitly anyway, so
     # direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "get":
@@ -576,6 +578,17 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
                 f"reset; anything it did outside git is not, and work an interrupted settle "
                 f"already merged into your wip/ branch stays there "
                 f"(`grid project wip reset` moves it back).", file=sys.stderr)
+    elif kind == "task.cancelled":
+        # Somebody stopped this run (ADR 0033 D-l, issue 19b). On stderr with the other
+        # disclosures: it says nothing about the result and everything about why there is not one,
+        # and on a shared project the person reading this is often not the person who did it.
+        #
+        # `by` is a member key, which is what `grid project member list` and `grid project promote`
+        # both speak. Absent is ordinary — an older relay, or a canceller who has since left the
+        # project — and is worth saying rather than printing `None`.
+        by = event.get("by")
+        print(f"[{seq}] cancelled by " + (f"project member {by}" if by else "a project member")
+              + ". The task's branch is left where the agent got to.", file=sys.stderr)
     elif kind == "task.result":
         # The agent's own account of the run, one event at the end. `is_error` here is the AGENT's
         # claim about itself; the task's real outcome is `task.terminal`'s, which prints after it.
@@ -735,6 +748,46 @@ def _task_list(args: argparse.Namespace) -> int:
         # There is more. Said out loud, because a page that silently stops at the limit reads as the
         # whole history — and this is the flag that continues it.
         print(f"\nMore: grid task list --project {args.project} --after {answer['next_after']}")
+    return 0
+
+
+def _task_cancel(args: argparse.Namespace) -> int:
+    """Stop a queued or running task and give its member their slot back (ADR 0033 D-l, issue 19b).
+
+    **No confirmation, on purpose.** Every other consequential verb here — promote, integrate,
+    commit — does the thing it is asked to do, and an application driving this CLI would have to
+    pass a `--yes` on every call. Knowing whose task it is would also cost a `GET` first. The
+    accountability is the relay's event log, which records the member who cancelled.
+
+    A cancelled task's branch is left where the agent got to, so `grid task fetch` still works on it.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.cancel_task(base, token, args.task_id)
+
+    if getattr(args, "json", False):
+        print(json.dumps(answer, indent=2))
+        return 0
+
+    state = answer.get("state")
+    if not state:
+        # A reply this command cannot read is NOT a cancellation — the rule every sibling in this
+        # plane follows. Reporting one would tell somebody their colleague's hour-long merge task
+        # had been stopped when nothing had happened, and the slot is what they would act on next.
+        raise SystemExit(
+            f"The relay's answer for task {args.task_id} did not say what state the task is now in, "
+            f"so this cannot be reported as a cancellation. "
+            f"`grid task cancel {args.task_id} --json` shows what it sent.")
+
+    # The state AND the reason. `failed` alone reads as "the agent broke", which is the one thing
+    # that did not happen — and `error` is what tells a later `grid task get` the two apart.
+    reason = answer.get("error")
+    print(f"task {args.task_id} cancelled — it is now {state}"
+          + (f" ({reason})" if reason else ""))
+    # The branch is deliberately not rewound, so whatever the agent had done is still fetchable.
+    # Said out loud, because "cancelled" reads as "undone" and here it is not.
+    print(f"Its branch is left where the agent got to: grid task fetch {args.task_id}")
     return 0
 
 

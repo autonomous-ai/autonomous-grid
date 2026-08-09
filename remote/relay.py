@@ -88,12 +88,20 @@ class RelayError(Exception):
     ``terminal`` is the third category ``status`` cannot express: the request could not be *built* at
     all, so nothing was ever asked and waiting cannot change the answer. A malformed relay address
     fails that way — it is as fatal as a 403, but it carries no status to say so.
+
+    ``code`` is the relay's machine-readable refusal code (ADR 0033 D-l) when the caller asked for
+    one, and ``None`` otherwise — which is every caller but the lease renewer. It exists because one
+    provider-side decision cannot be made from the status alone: a cancelled task and an old relay
+    with no lease route both answer 404, and only one of them means "stop the agent". See
+    ``renew_task_lease``. Defaulting to ``None`` is what keeps every other raiser unchanged.
     """
 
-    def __init__(self, *args: Any, status: int | None = None, terminal: bool = False) -> None:
+    def __init__(self, *args: Any, status: int | None = None, terminal: bool = False,
+                 code: str | None = None) -> None:
         super().__init__(*args)
         self.status = status
         self.terminal = terminal
+        self.code = code
 
 
 def _client(signaling_url: str, access_token: str, *, timeout: float | httpx.Timeout) -> httpx.Client:
@@ -397,6 +405,13 @@ def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> Non
     Lease-fenced like the other two provider writes, so ``.status`` matters: 403 means the lease
     moved to another provider and 404 means the task already ended — both verdicts no retry can
     change, unlike a 5xx or a bare transport failure.
+
+    **The one place in this repository where a provider reads a parsed ``detail``** (ADR 0033 D-l,
+    issue 19b). The status is no longer the whole answer for 404: a task a member CANCELLED and a
+    relay too old to have this route both answer 404, and the renewer must stop the agent for the
+    first and must not for the second. Only the refusal code separates them, so it is lifted onto
+    the error here — for this call and no other. ``_guard`` is untouched, so every other caller in
+    this module raises exactly the error it raised before.
     """
     try:
         with _client(signaling_url, access_token, timeout=_TASK_EVENT_TIMEOUT) as client:
@@ -407,8 +422,13 @@ def renew_task_lease(signaling_url: str, access_token: str, task_id: str) -> Non
         raise RelayError(f"renew_task_lease transport error: {exc}") from None
     # The body carries the new expiry, and nothing here reads it: this side already knows its own
     # renewal cadence, and treating the relay's clock as authoritative would make a clock skew look
-    # like a lease that had already lapsed. The STATUS is the whole answer.
-    _guard(resp, "renew_task_lease")
+    # like a lease that had already lapsed. The STATUS, plus the code below, is the whole answer.
+    try:
+        _guard(resp, "renew_task_lease")
+    except RelayError as exc:
+        # Rebuilt rather than mutated, so the error a caller sees is one object with one set of
+        # fields — and so `_guard` keeps producing the same message for every other call site.
+        raise RelayError(*exc.args, status=exc.status, code=refusal_code(resp)) from None
 
 
 def publish_task_events(
@@ -642,6 +662,41 @@ def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str,
             raise SystemExit(missing_route_hint)
         raise SystemExit(message)
     return resp.json() if resp.content else {}
+
+
+def refusal_code(resp: httpx.Response) -> str | None:
+    """The relay's machine-readable refusal code, or `None` when the answer does not carry one.
+
+    The other half of `_task_error_message`: that one pulls out the sentence a PERSON reads, this
+    one the string a program branches on (ADR 0033 D-l). Split rather than one function returning a
+    pair, because the two have different callers with nothing in common — every CLI command wants
+    the sentence, and exactly one provider-side call wants the code.
+
+    `None` is the ordinary answer and is never an error. A relay predating ADR 0033 sends a
+    plain-string `detail`; a relay with no such route at all sends FastAPI's bare
+    `{"detail": "Not Found"}`; a proxy may send something that is not JSON. All three mean "no code
+    was stated", which every caller must already treat as the pre-19b behaviour — so this function
+    cannot raise, and a shape it does not recognise is silently `None` rather than a guess.
+
+    The `except` is deliberately broad, for `_task_error_message`'s reason: a hostile or truncated
+    body can raise well outside `ValueError` — `json` recurses, and `RecursionError` is a
+    `RuntimeError`, not a `ValueError`. This function only ever produces an OPTIONAL string, so
+    there is nothing it could usefully re-raise, and letting anything escape would turn a lease
+    refusal into a traceback on a renewal thread.
+    """
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        return None
+    if not isinstance(detail, dict):
+        # A plain-string `detail` (every relay before ADR 0033, and every endpoint outside this
+        # plane), or a shape nobody here writes. Either way no code was stated.
+        return None
+    code = detail.get("code")
+    # `isinstance`, never a bare truthiness test: the value is the relay's, and a client that
+    # compared a non-string to its own constant would silently never match — which for the one
+    # caller of this function means never stopping a cancelled agent.
+    return code if isinstance(code, str) else None
 
 
 def _task_error_message(resp: httpx.Response) -> str:
@@ -940,6 +995,33 @@ def commit_project(signaling_url: str, access_token: str, project_id: str, *,
         signaling_url, access_token, "POST",
         f"/relay/v1/projects/{quote(project_id, safe='')}/commit",
         json=body, missing_route_hint=_OLD_RELAY)
+
+
+# A relay that predates ADR 0033 issue 19b has no cancel route, and answers the same bare framework
+# 404 an unknown TASK id would produce on a relay that does. Its own sentence rather than
+# `_OLD_RELAY`: that one says the relay has no projects, which is both wrong here and would send
+# somebody to check a feature that is working perfectly.
+_OLD_RELAY_NO_CANCEL = (
+    "This grid's relay cannot cancel a task — it predates the cancel route. Ask its operator to "
+    "update it. The task will still end at its own deadline."
+)
+
+
+def cancel_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
+    """End a queued or running task, freeing its member's slot (``POST /relay/v1/tasks/{id}/cancel``).
+
+    No body. The route is addressed by the task id and fenced on the caller's own identity, so
+    anything sent here would be a second way of saying who is cancelling what — the reasoning
+    `integrate_project` records for the same shape.
+
+    Fenced on project MEMBERSHIP relay-side, not ownership: on a shared project the colleague whose
+    merge task has been stuck for an hour is precisely who needs to stop it.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        # The id is user input going into a path.
+        f"/relay/v1/tasks/{quote(task_id, safe='')}/cancel",
+        missing_route_hint=_OLD_RELAY_NO_CANCEL)
 
 
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
