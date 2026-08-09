@@ -29694,3 +29694,952 @@ def test_project_status_never_renders_a_provider_count_that_is_not_one(
     out = capsys.readouterr().out
     assert "withdrawn" not in out.lower(), why
     assert "True" not in out and "no provider" not in out.lower(), why
+
+
+# --- ADR 0033 issue 17: the git credential helper -------------------------------------------------
+#
+# Every shape asserted here was measured against real git 2.54.0 driving a real `git http-backend`
+# behind a server that accepts ONLY `Authorization: Bearer` and answers a bare 401 otherwise — the
+# relay's git front exactly (grid-src `relay._bearer_or_api_key`). What git sends a `get` helper,
+# verbatim and in this order:
+#
+#     capability[]=authtype
+#     capability[]=state
+#     protocol=http
+#     host=127.0.0.1:56220
+#
+# `host` carries the port. `path` is absent, because `credential.useHttpPath` defaults to false.
+
+# A JWT-shaped stand-in: three dot-separated segments, so `credentials.claims_from_token` and
+# anything else that inspects it behaves as it would on a real grid token.
+_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtZW1iZXIifQ.signature"
+
+
+def _git_get(host="relay.example", protocol="https", *, authtype=True):
+    """What git writes to a helper's stdin for a `get`, in git's own order."""
+    lines = ["capability[]=authtype", "capability[]=state"] if authtype else []
+    lines += [f"protocol={protocol}", f"host={host}"]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _networks(url="https://relay.example", network_id="n1", token=_TOKEN):
+    return [{"network_id": network_id, "name": "team", "signaling_url": url,
+             "access_token": token, "refresh_token": "RT"}]
+
+
+def test_credential_get_answers_the_bearer_scheme_the_relay_accepts():
+    """The tracer bullet, and the whole reason this helper is not the textbook one.
+
+    A classic helper answers `username`/`password`, which git turns into **Basic** — measured, the
+    relay refuses it (`Basic eC1hY2Nlc3MtdG9rZW46…` → 401 → `fatal: Authentication failed`), because
+    `_bearer_or_api_key` reads `Bearer` and `x-api-key` and nothing else. git's `authtype`/
+    `credential` pair is what lets a helper name the scheme, and git concatenates the two with one
+    space to build the header verbatim.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond(
+        "get", _git_get(), networks=_networks(), network_id="n1")
+
+    assert reply.stdout.splitlines() == [
+        # The capability directive MUST come first: `git-credential(1)` says a directive has to
+        # precede any value depending on it.
+        "capability[]=authtype",
+        "authtype=Bearer",
+        f"credential={_TOKEN}",
+        "quit=1",
+    ]
+
+
+def test_credential_get_refuses_a_host_that_is_not_the_pinned_grids_relay():
+    """The grid is pinned in the clone's config, and the HOST is still checked against it.
+
+    `.git/config` is a file people copy. Trusting the pinned id alone would mean an attacker who can
+    get a member to `git remote set-url origin https://theirs.example/…` — or who ships a repository
+    with that config already in it — receives a year-long grid token, because git would happily run
+    our helper for their host and we would happily answer.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond(
+        "get", _git_get(host="attacker.example"),
+        networks=_networks(url="https://relay.example"), network_id="n1")
+
+    assert reply.stdout == ""
+    assert _TOKEN not in reply.stdout and _TOKEN not in reply.stderr
+    assert "attacker.example" in reply.stderr, "a silent refusal here is a debugging dead end"
+
+
+def test_credential_get_says_nothing_at_all_to_a_git_that_cannot_carry_a_scheme():
+    """A git too old for `authtype` gets NOTHING — deliberately, and not a username/password pair.
+
+    Falling back to Basic looks like graceful degradation and is the opposite. Measured against the
+    relay's shape: git sends `Basic eC1hY2Nlc3MtdG9rZW46…`, the relay answers 401, git calls the
+    helper's `erase` and reports `fatal: Authentication failed` — so the member sees an
+    authentication error rather than "your git is too old", every time, forever. Worse, the token
+    has by then been put on the wire in a header the relay never reads.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond(
+        "get", _git_get(authtype=False), networks=_networks(), network_id="n1")
+
+    assert reply.stdout == ""
+    assert _TOKEN not in reply.stderr
+    # The member has to be told what to do, and there is exactly one thing: upgrade git.
+    assert "git" in reply.stderr.lower() and "authtype" in reply.stderr
+
+
+@pytest.mark.parametrize("stored,protocol,host,gives,why", [
+    ("https://relay.example", "https", "relay.example", True, "the ordinary case"),
+    ("https://RELAY.Example", "https", "RELAY.Example", True,
+     "git does NOT lower-case the host it sends — measured"),
+    ("https://relay.example:443", "https", "relay.example:443", True,
+     "git does NOT strip a default port either, so an explicit one must match on both sides"),
+    ("https://[::1]:8443", "https", "[::1]:8443", True, "an IPv6 literal keeps its brackets"),
+    ("http://127.0.0.1:8123", "http", "127.0.0.1:8123", True, "the loopback relay the E2E uses"),
+    ("https://relay.example", "https", "relay.example.", False,
+     "a trailing dot is a different name and git passes it through verbatim"),
+    ("https://relay.example", "https", "relay.example:443", False,
+     "an explicit port against a stored URL without one — fails CLOSED, which is the safe way"),
+    ("https://relay.example", "http", "relay.example", False,
+     "a protocol DOWNGRADE: the same host over plaintext must not get a year-long token"),
+    ("https://relay.example", "https", "relay.example.evil.test", False,
+     "a suffix, in case the comparison were ever loosened to a prefix or `endswith`"),
+], ids=["plain", "mixed-case", "explicit-port", "ipv6", "loopback", "trailing-dot",
+        "port-asymmetry", "downgrade", "suffix"])
+def test_credential_get_matches_the_host_the_way_git_actually_sends_it(
+        stored, protocol, host, gives, why):
+    """The security check, against how git really shapes `host` — measured, not assumed.
+
+    Every one of these was read off git 2.54.0 by logging what it hands a helper for a given URL.
+    Two are worth stating out loud because the obvious implementation gets them wrong:
+
+      * git does **not** lower-case the host, so a comparison that did not would refuse a member
+        whose stored URL differs only in case;
+      * git does **not** strip a default port, so `https://relay.example:443` arrives with the
+        `:443` still on it.
+
+    The downgrade row is the one that matters most. Nothing else here would hand a year-long grid
+    token to a plaintext listener on the right hostname.
+    """
+    from remote import git_credential
+
+    networks = _networks(url=stored)
+    raw = f"capability[]=authtype\nprotocol={protocol}\nhost={host}\n".encode("utf-8")
+
+    reply = git_credential.respond("get", raw, networks=networks, network_id="n1")
+
+    assert (_TOKEN in reply.stdout) is gives, why
+
+
+@pytest.mark.parametrize("networks,why", [
+    (["oops"], "a list of strings — a hand-edited `networks = [\"…\"]`"),
+    ({"team": {}}, "a `[networks]` TABLE: tomllib parses it as a dict, and iterating yields KEYS"),
+    ([None], "a null entry"),
+    ([{"network_id": "n1"}, "junk"], "the target grid is present, but a later entry is malformed"),
+], ids=["list-of-strings", "table-not-array", "null-entry", "good-then-junk"])
+def test_credential_get_survives_a_credentials_file_whose_networks_are_not_records(networks, why):
+    """`credentials.toml` is PARSED, not validated, and the shape of the list is part of that.
+
+    Each FIELD was already guarded — the token is checked for type and shape, the URL for
+    parseability — but the guard stopped at the entries themselves. `n.get(...)` on a string raises
+    `AttributeError`, which nothing between here and the process boundary catches, so a member with
+    one hand-edited line in their store gets a raw Python traceback in the middle of a `git pull`.
+
+    The last row is the one that shows the blast radius: a malformed entry ANYWHERE in the list
+    takes out the lookup for every grid, because the scan raises on the first bad element it reaches
+    rather than skipping it.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond("get", _git_get(), networks=networks, network_id="n1")
+
+    assert reply.stdout == "", why
+    assert reply.stderr.startswith("grid:"), (
+        f"a refusal with no `grid:` line is indistinguishable from git's own noise ({why})")
+
+
+@pytest.mark.parametrize("operation", ["store", "erase", "some-future-verb"])
+def test_credential_says_nothing_for_every_operation_that_is_not_get(operation):
+    """`store` is handed the credential back, and must not repeat it anywhere.
+
+    Measured — after a successful fetch git runs the helper again with `store` and this on stdin:
+
+        capability[]=authtype
+        authtype=Bearer
+        credential=<the token>
+        protocol=http
+        host=127.0.0.1:56220
+
+    So `store` is the one operation that receives the secret rather than producing it. It succeeds
+    and writes nothing: git treats a failing `store` as an error, and a helper that persisted it
+    would be the thing this whole design exists to avoid.
+
+    `erase` matters for the same reason from the other side — measured, git calls it after any
+    authentication failure — and an unknown verb is answered identically because
+    `gitcredentials(7)` says a helper "should silently ignore" one, which is what leaves room for
+    git to add operations without breaking every installed helper.
+    """
+    from remote import git_credential
+
+    raw = (f"capability[]=authtype\nauthtype=Bearer\ncredential={_TOKEN}\n"
+           f"protocol=https\nhost=relay.example\n").encode("utf-8")
+
+    reply = git_credential.respond(operation, raw, networks=_networks(), network_id="n1")
+
+    assert reply == git_credential.Reply(), f"{operation!r} answered {reply!r}"
+    assert _TOKEN not in reply.stdout + reply.stderr
+
+
+@pytest.mark.parametrize("raw,why", [
+    (b"\xff\xfe not utf-8 at all\n", "invalid UTF-8 raises UnicodeDecodeError on decode"),
+    (b"", "an empty pipe — git died, or something else invoked us"),
+    (b"garbage with no equals sign\n", "a line that is not key=value"),
+    (b"capability[]=authtype\nprotocol=https\n", "a request naming no host at all"),
+], ids=["not-utf8", "empty", "no-equals", "no-host"])
+def test_credential_get_never_raises_on_input_it_cannot_read(raw, why):
+    """A helper that raises is a helper git cannot use, and the traceback goes to the member.
+
+    `bytes.decode("utf-8")` raises `UnicodeDecodeError` — a `ValueError`, so the obvious spelling
+    turns a mangled pipe into a Python traceback in the middle of someone's `git pull`. Nothing on
+    this stdin is trustworthy: it is whatever wrote to the pipe.
+
+    Note what the empty-host row protects. Without an explicit comparison against the grid's own
+    endpoint, "" == "" would make a request naming no host match a record recording no URL, and the
+    token would go out to whoever asked.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond("get", raw, networks=_networks(), network_id="n1")
+
+    assert reply.stdout == "", why
+    assert _TOKEN not in reply.stderr, why
+
+
+@pytest.mark.parametrize("raw,why", [
+    (b"capability[]=authtype\nprotocol=https\nhost=relay.example",
+     "git closes the pipe; there is no trailing newline to rely on"),
+    (b"capability[]=authtype\r\nprotocol=https\r\nhost=relay.example\r\n",
+     "CRLF: `splitlines()` handles it, a hand-rolled `split(chr(10))` leaves a trailing CR"),
+    (b"capability[]=authtype\nprotocol=HTTPS\nhost=Relay.Example\n",
+     "a host and scheme are case-insensitive; a stored URL need not match byte-for-byte"),
+    (b"capability[]=state\ncapability[]=authtype\nprotocol=https\nhost=relay.example\n",
+     "capability order is git's, not ours"),
+], ids=["no-trailing-newline", "crlf", "mixed-case", "capability-order"])
+def test_credential_get_still_answers_a_request_framed_a_little_differently(raw, why):
+    """The positive control for the row above, and the reason it is a separate test.
+
+    Every one of these IS a valid request and must produce the credential. Folded in with the
+    unreadable inputs they would have been asserted to produce nothing — which is how a parser that
+    quietly refuses everything passes a suite that only ever measures refusals.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond("get", raw, networks=_networks(), network_id="n1")
+
+    assert f"credential={_TOKEN}" in reply.stdout, why
+
+
+@pytest.mark.parametrize("token,why", [
+    ("", "a bundle stored without a token, or one a failed refresh emptied"),
+    (None, "the key absent entirely — `_record` drops None fields, so this shape is real"),
+    (17, "not a string at all; `credentials.toml` is parsed, not validated"),
+    ("good\nquit=0", "a newline ENDS the value and the rest becomes a protocol directive"),
+    ("good\rmore", "a bare CR — git refuses one in the protocol unless protectProtocol is off"),
+], ids=["empty", "absent", "not-a-string", "newline", "carriage-return"])
+def test_credential_get_refuses_a_stored_token_that_is_not_one_clean_line(token, why):
+    """The reply is line-oriented, so a value carrying a newline is not a value — it is more lines.
+
+    `credentials.toml` is a parsed file, not a validated one: a half-written bundle, a hand-edited
+    store, or a refresh that wrote something odd all arrive here. A token containing a newline would
+    let whatever follows it become a credential DIRECTIVE — `quit=0` re-enabling the helper chain,
+    or a second `credential=` line — from a file this process merely reads.
+
+    Refusing is the whole answer. There is no repair that is not a guess about what the member
+    meant, and a guess here is a guess about a credential.
+    """
+    from remote import git_credential
+
+    networks = _networks()
+    if token is None:
+        networks[0].pop("access_token")
+    else:
+        networks[0]["access_token"] = token
+
+    reply = git_credential.respond("get", _git_get(), networks=networks, network_id="n1")
+
+    assert reply.stdout == "", why
+    assert "credential=" not in reply.stdout, why
+    assert reply.stderr, "refusing without saying so leaves `git pull` with no explanation at all"
+
+
+# --- ADR 0033 issue 17: the `grid credential` command --------------------------------------------
+
+
+def _as_stdin(monkeypatch, raw: bytes):
+    """Stand in for the pipe git hands the helper — a real binary stream with a `.buffer`."""
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8"))
+
+
+def _seed_credential_grid(monkeypatch, tmp_path, url="https://relay.example"):
+    """A signed-in member with one grid — and NO control-plane mock, deliberately.
+
+    `_seed_running_remote_grid` installs `_mock_lifecycle`, which would let a control-plane call
+    through unnoticed. This helper exists so a call has nowhere to land.
+    """
+    _seed_remote(monkeypatch, tmp_path, networks=[{
+        "network_id": "n1", "name": "team", "signaling_url": url,
+        "access_token": _TOKEN, "refresh_token": "RT"}], active="team")
+
+
+@pytest.mark.parametrize("mode", ["remote", "local"])
+def test_grid_credential_get_answers_in_either_mode_without_touching_the_network(
+        monkeypatch, tmp_path, capsys, mode):
+    """git runs the helper in whatever mode `grid mode` happens to be, so it cannot be remote-only.
+
+    A member who ran `grid mode local` would otherwise find `git pull` broken inside a clone, by a
+    setting that has nothing to do with the clone.
+
+    And it makes NO network call at all — asserted by leaving the control plane with nowhere to
+    land, not by inspecting the code. The CLI's usual `_resolve()` path
+    (`remote_grid.resolve_relay_base` → `control_plane.get_managed_network_status`) would put a
+    control-plane round trip in front of every IDE fetch, break `git pull` against a healthy relay
+    whenever the control plane blips, and make every non-creator member take the 403 fallback each
+    time.
+    """
+    from remote import control_plane
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode(mode)
+    monkeypatch.setattr(control_plane, "get_managed_network_status",
+                        lambda *a, **k: pytest.fail("the credential helper called the control plane"))
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "get", "--grid", "n1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"credential={_TOKEN}" in out
+    assert "authtype=Bearer" in out
+
+
+@pytest.mark.parametrize("operation", ["store", "erase"])
+def test_grid_credential_store_and_erase_change_nothing_under_grid_home(
+        monkeypatch, tmp_path, capsys, operation):
+    """"Nothing writes a token to disk" is asserted against the disk, not against the code.
+
+    `store` is the operation that receives the credential BACK — measured, git hands it
+    `authtype=Bearer` and `credential=<the token>` on stdin after a successful fetch. So the file
+    tree under `GRID_HOME` before and after is the honest test: a helper that persisted anything,
+    anywhere, fails it. `erase` is here because git calls it after every authentication failure and
+    a helper that took it literally would sign the member out of their grid.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    before = {p: p.read_bytes() for p in sorted(tmp_path.rglob("*")) if p.is_file()}
+    _as_stdin(monkeypatch, (f"capability[]=authtype\nauthtype=Bearer\ncredential={_TOKEN}\n"
+                            f"protocol=https\nhost=relay.example\n").encode("utf-8"))
+
+    rc = cli.main(["credential", operation, "--grid", "n1"])
+
+    assert rc == 0, "git treats a failing store/erase as an error over whatever the member was doing"
+    assert capsys.readouterr().out == "", "git ignores this output; producing any is a mistake"
+    after = {p: p.read_bytes() for p in sorted(tmp_path.rglob("*")) if p.is_file()}
+    assert after == before, f"`credential {operation}` wrote under GRID_HOME"
+
+
+def test_grid_credential_accepts_an_operation_this_build_has_never_heard_of(
+        monkeypatch, tmp_path, capsys):
+    """The argparse surface must not be `choices=`, and this is the test that says why.
+
+    `gitcredentials(7)`: a helper receiving an operation it does not know "should silently ignore
+    the request. This leaves room for future operations to be added (older helpers will just ignore
+    the new requests)." A `choices=` list would turn a future git verb into an argparse usage error
+    with exit code 2 — which git reports as a broken helper, over whatever the member was doing,
+    on a version of git that is perfectly fine.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "some-verb-from-2030", "--grid", "n1"])
+
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_grid_credential_get_signed_out_explains_itself_instead_of_crashing(
+        monkeypatch, tmp_path, capsys):
+    """A member who ran `grid logout` still has clones, and their IDE still runs `git fetch`.
+
+    The store is simply gone then — `load_credentials()` answers `{}`. That must be a sentence
+    naming the fix, not a traceback and not silence: git prints the helper's stderr, and it is the
+    only place the real reason can appear. What the member sees otherwise is
+    `fatal: could not read Username`, which names neither grid nor sign-in.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "get", "--grid", "n1"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "grid login" in captured.err
+
+
+def test_grid_credential_get_survives_a_corrupt_credential_store(monkeypatch, tmp_path, capsys):
+    """The store being unreadable is not the same as it being absent, and only one was covered.
+
+    `credentials.load_toml` raises `SystemExit` on a TOML parse error — the CLI's clean-error idiom
+    everywhere else, and exactly wrong here. Nothing between `cmd_credential` and the process
+    boundary catches it (`dispatch` is a bare `args.handler(args) or 0`), so the helper exits **1**,
+    contradicting the contract this module states in its own docstring: it always exits 0, because
+    git reports a failing helper as an error over whatever the member was actually doing.
+
+    The message still has to reach them — with the `grid:` prefix every other refusal carries, so it
+    reads as this tool's diagnosis rather than as more of git's output.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    (tmp_path / "credentials.toml").write_text("this is not = = valid toml [[[\n")
+    state.set_mode("remote")
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "get", "--grid", "n1"])
+
+    assert rc == 0, "a helper that exits non-zero is reported by git as a broken helper"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("grid:"), captured.err
+    assert "credentials.toml" in captured.err, "the member has to be told WHICH file to look at"
+
+
+def test_grid_credential_never_raises_when_git_closes_the_pipe(monkeypatch, tmp_path, capsys):
+    """git can go away mid-conversation, and the helper must not turn that into a traceback.
+
+    A `BrokenPipeError` on either side of the exchange — reading the request, or writing the reply —
+    is an ordinary consequence of the parent being killed, and it is an `OSError`, which nothing
+    here would otherwise catch.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    class _Severed:
+        def read(self, *_a):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    _as_stdin(monkeypatch, b"")
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=_Severed()))
+
+    assert cli.main(["credential", "get", "--grid", "n1"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+# --- ADR 0033 issue 17: `grid project clone` -----------------------------------------------------
+
+_MEMBER_KEY = "abc123abc123abc123abc123abc1231f"
+
+
+def _relay_bare_repo(tmp_path, *, member_key=_MEMBER_KEY, name="relay.git", with_wip=True):
+    """A bare repository shaped like the relay's: a `main`, and the member's `wip/<key>` past it.
+
+    ⚠️ `with_wip=False` is the state of every project nobody has run a task in yet, and it is the
+    DEFAULT state, not an edge case: the relay creates a member's WIP branch when one of their tasks
+    settles or when they commit — never when a project is created or joined. This fixture seeded the
+    branch unconditionally at first, so no unit test could see it, and `--track origin/<branch>`
+    failed against the real relay at the first clone. Found by `tests/e2e_cross_repo/`.
+
+    Real git, because `clone_project` runs real git. A local path is a perfectly good git "URL", so
+    the whole init/config/fetch/checkout path runs with no HTTP server in the way — what HTTP adds
+    (the credential) is proved separately, against the real relay, in `tests/e2e_cross_repo/`.
+    """
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"}
+    work = tmp_path / "relay-seed"
+    work.mkdir()
+
+    def git(*args, cwd=work):
+        return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True,
+                              text=True, env=env).stdout
+
+    git("init", "--quiet", "-b", "main", ".")
+    (work / "trunk.txt").write_text("on main\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "trunk")
+    trunk_tip = git("rev-parse", "HEAD").strip()
+    wip_tip = None
+    refs = ["main"]
+    if with_wip:
+        git("checkout", "--quiet", "-b", f"wip/{member_key}")
+        (work / "mine.txt").write_text("the member's own work\n")
+        git("add", "-A")
+        git("commit", "--quiet", "-m", "wip")
+        wip_tip = git("rev-parse", "HEAD").strip()
+        refs.append(f"wip/{member_key}")
+
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "--bare", "--quiet", "-b", "main", str(bare)], check=True)
+    git("push", "--quiet", str(bare), *refs)
+    return bare, trunk_tip, wip_tip
+
+
+def _status_reply(member_key=_MEMBER_KEY, **over):
+    body = {"project_id": "P1", "member_key": member_key, "trunk": "main",
+            "branch": f"wip/{member_key}", "main_commit": "a" * 40, "wip_commit": "b" * 40,
+            "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+            "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
+            "providers": {"online": 1, "paused": 0, "resumes_at": None}}
+    body.update(over)
+    return body
+
+
+def test_project_clone_checks_out_the_members_own_wip_branch(monkeypatch, tmp_path, capsys):
+    """A clone lands on the member's own work, not on the trunk.
+
+    `main` moves only on a promote (ADR 0033 D-b), so a project whose members have not released yet
+    has a trunk holding none of their task results. Cloning to `main` would show an empty-looking
+    project to the person who just watched a task finish. Both refs are fetched; only the checkout
+    differs.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk_tip, wip_tip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    rc = cli.main(["project", "clone", "P1", str(dest)])
+
+    assert rc == 0, capsys.readouterr().out
+    head = subprocess.run(["git", "-C", str(dest), "rev-parse", "--abbrev-ref", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    assert head == f"wip/{_MEMBER_KEY}"
+    assert (dest / "mine.txt").read_text() == "the member's own work\n"
+    # The trunk came too — integrating and promoting both need it locally.
+    trunk = subprocess.run(["git", "-C", str(dest), "rev-parse", "refs/remotes/origin/main"],
+                           capture_output=True, text=True)
+    assert trunk.returncode == 0, "main was not fetched"
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip() == wip_tip
+
+
+def test_project_clone_works_for_a_member_whose_branch_the_relay_has_not_made_yet(
+        monkeypatch, tmp_path, capsys):
+    """The state of every member who has not run a task, which is everybody on day one.
+
+    A WIP branch is written by the RELAY — when a task settles, or on `grid project commit`. It does
+    not exist because a project was created or because somebody joined it. So `--track
+    origin/wip/<key>` fails outright ("not a commit and a branch cannot be created from it") for the
+    most ordinary case there is.
+
+    This was invisible to the unit suite until the cross-repo E2E hit it, because the fixture here
+    always seeded the branch. The clone now cuts the member's branch from the trunk, configures the
+    upstream by hand (`--set-upstream-to` needs the remote ref to exist, which is the whole problem),
+    and SAYS so — a clone whose `git log` shows only somebody else's commits needs explaining.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, trunk_tip, wip_tip = _relay_bare_repo(tmp_path, with_wip=False)
+    assert wip_tip is None
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(wip_commit=None)))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, capsys.readouterr().out
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(dest), *args],
+                              capture_output=True, text=True).stdout.strip()
+
+    assert git("rev-parse", "--abbrev-ref", "HEAD") == f"wip/{_MEMBER_KEY}"
+    assert git("rev-parse", "HEAD") == trunk_tip, "the branch should start at the trunk"
+    # The upstream is configured even though the remote ref does not exist yet, so the member's
+    # first `git pull` after their first task lands just works.
+    assert git("config", "--local", "--get", f"branch.wip/{_MEMBER_KEY}.remote") == "origin"
+    assert git("config", "--local", "--get",
+               f"branch.wip/{_MEMBER_KEY}.merge") == f"refs/heads/wip/{_MEMBER_KEY}"
+    out = capsys.readouterr().out
+    assert "nothing on it yet" in out, "a clone showing only somebody else's history needs a word"
+
+
+def test_project_clone_refuses_a_project_that_has_no_trunk_either(monkeypatch, tmp_path):
+    """No `main` and no WIP branch is not an empty clone — it is a project nothing has imported.
+
+    Left to git this is `checkout: 'origin/main' is not a commit`, which reads as a broken clone.
+    It is not broken: ADR 0033 issue 16b made the relay the trunk's only writer, so the answer is
+    `grid project import`, and that is what the message has to say.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    empty = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", "-b", "main", str(empty)], check=True)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(main_commit=None)))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(empty))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(tmp_path / "clone")])
+
+    assert "grid project import" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_writes_no_credential_anywhere_and_leaves_global_git_config_alone(
+        monkeypatch, tmp_path, capsys):
+    """The acceptance criterion, asserted by SEARCHING for the token rather than by inspection.
+
+    Every byte under the clone — working tree and `.git/` alike — is read back and checked for the
+    token. Reading `.git/config` and being satisfied it looks clean is how the same property was
+    lost elsewhere: `git config` is not the only file in `.git`, and `FETCH_HEAD`, a packed-refs
+    file or a stray log would each hold it just as permanently.
+
+    The global config is a separate assertion because a credential helper is exactly the kind of
+    setting that is normally installed globally, and installing it there would follow the member
+    into every unrelated repository on the machine.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    global_config = tmp_path / "the-members-own-gitconfig"
+    global_config.write_text("[user]\n\tname = Someone\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    before = global_config.read_bytes()
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, capsys.readouterr().out
+
+    holding = [p for p in dest.rglob("*") if p.is_file() and _TOKEN.encode() in p.read_bytes()]
+    assert holding == [], f"the token was written to {[str(p) for p in holding]}"
+    assert global_config.read_bytes() == before, "the member's global git config was modified"
+
+
+def test_project_clone_configures_the_helper_for_this_grids_relay_and_nothing_wider(
+        monkeypatch, tmp_path, capsys):
+    """The helper is scoped to the relay, resets whatever the member had, and names its grid.
+
+    The empty-value reset is measured, not defensive: with a global `credential.helper` in place and
+    no reset, git consults that one FIRST, sends its username/password as Basic, is refused by the
+    relay, and never asks our helper for a credential at all — only for an `erase`. So the reset has
+    to come first in config order, and it has to be there.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, capsys.readouterr().out
+
+    def config(key):
+        return subprocess.run(["git", "-C", str(dest), "config", "--local", "--get-all", key],
+                              capture_output=True, text=True).stdout.splitlines()
+
+    helpers = config("credential.https://relay.example.helper")
+    assert helpers[0] == "", "the reset must come first, or an inherited helper answers instead"
+    assert len(helpers) == 2 and helpers[1].startswith("!"), helpers
+    # The `!` shell form, not a bare absolute path: a path containing a space is unrunnable
+    # unquoted, and a quoted one stops looking like a path so git tries `git credential-'/Users/…'`.
+    assert "credential --grid n1" in helpers[1], helpers[1]
+    assert config("http.https://relay.example.proactiveAuth") == ["auto"]
+    # Scoped: nothing was written that would apply to any other host.
+    unscoped = subprocess.run(["git", "-C", str(dest), "config", "--local", "--get-all",
+                               "credential.helper"], capture_output=True, text=True)
+    assert unscoped.stdout.strip() == "", "an unscoped helper would answer for every host"
+
+
+def test_project_clone_refuses_a_git_that_could_never_authenticate_before_writing_anything(
+        monkeypatch, tmp_path):
+    """Fail closed, and fail BEFORE the directory exists.
+
+    A git with no `authtype` can only send Basic, which the relay refuses (measured). Building the
+    clone anyway would leave a directory whose every `git pull` says
+    `fatal: Authentication failed` — a message that names the relay and blames it, for a fault that
+    is entirely local and has a one-line fix.
+    """
+    from remote import project_clone
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(project_clone, "credential_capabilities", lambda: frozenset({"state"}))
+    monkeypatch.setattr(
+        project_clone, "clone_project",
+        lambda *a, **k: pytest.fail("built a clone this machine's git cannot authenticate"))
+    dest = tmp_path / "clone"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(dest)])
+
+    assert "authtype" in str(caught.value), str(caught.value)
+    assert "upgrade git" in str(caught.value).lower(), "the member needs to be told the fix"
+    assert not dest.exists(), "a refused clone left a directory behind"
+
+
+@pytest.mark.parametrize("network_id", ["n1", "grid-0123456789abcdef", "a_b-c.9"])
+def test_the_helper_command_written_into_a_clone_parses_back_to_the_same_grid(network_id):
+    """The config is a command this CLI has to be able to read back — every time, forever.
+
+    A round trip rather than a string comparison: `.git/config` outlives the process that wrote it,
+    and the thing that matters is not how the line looks but that `shlex` and then argparse recover
+    exactly the grid that was pinned. Anything that survives quoting but not parsing produces a
+    clone that fails on every single credential lookup, with a message about argparse.
+    """
+    from remote import project_clone
+
+    written = project_clone.helper_command(network_id)
+
+    assert written.startswith("!"), "the `!` form is what makes quoting possible at all"
+    # git runs the value through a shell and APPENDS the operation, so this is the real argv.
+    argv = shlex.split(written[1:])[1:] + ["get"]
+    parsed = cli.build_parser().parse_args(argv)
+    assert parsed.command == "credential"
+    assert parsed.grid == network_id
+    assert parsed.operation == "get"
+
+
+def test_the_helper_command_refuses_a_grid_id_argparse_would_read_as_a_flag():
+    """`shlex.quote` does NOT quote a leading `-`, and that is the whole bug.
+
+    Its safe set is `[\\w@%+=:,./-]`, so `shlex.quote("-evil")` returns `-evil` **unquoted**
+    (measured). Baked into the config that becomes `--grid -evil`, which argparse reads as a flag
+    rather than as `--grid`'s value: `error: argument --grid: expected one argument`, exit 2, on
+    every credential lookup for that clone until somebody hand-edits `.git/config`.
+
+    `remote_grid._NETWORK_ID_RE` does not catch it either — `[A-Za-z0-9_-]+` allows a dash anywhere,
+    including first. Server-issued ids are `grid-<hex>` so this needs a hand-edited store to reach,
+    the same threat class the token-shape guards already take seriously; the difference is that this
+    one is written to disk ONCE and then fails forever, so it is refused at the moment it would be
+    written rather than at every use.
+    """
+    from remote import project_clone
+
+    with pytest.raises(project_clone.CloneError) as caught:
+        project_clone.helper_command("-evil")
+
+    assert "-evil" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_does_not_blame_the_git_version_when_git_is_missing_entirely(
+        monkeypatch, tmp_path):
+    """"Upgrade git" is a confident diagnosis, and it must not be given for a different illness.
+
+    `credential_capabilities()` answers an empty set for three different facts: git is too old, git
+    is not installed, and the probe timed out. Only the first is fixed by upgrading. Told to upgrade
+    a git that is not there, the member is also falsely reassured that `grid task fetch` still
+    works — it shells out to git too.
+
+    The `try/except` in `credential_capabilities` had no coverage at all: the one test touching it
+    monkeypatched the whole function away.
+    """
+    from remote import project_clone
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def no_git(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(project_clone.subprocess, "run", no_git)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(tmp_path / "clone")])
+
+    message = str(caught.value)
+    assert "git" in message.lower()
+    assert "upgrade" not in message.lower(), (
+        f"told to upgrade a git that is not installed: {message}")
+    assert "grid task fetch" not in message, "and reassured that a git-shelling command still works"
+
+
+def test_project_clone_says_push_is_refused_and_what_to_do_instead(monkeypatch, tmp_path, capsys):
+    """The obvious next action inside a real clone is `git push`, and it will not work.
+
+    Left unsaid, the relay's refusal reads as a permissions bug and gets filed as one. It is not:
+    the WIP branch is written by the grid alone so that a task in flight cannot have the ground
+    moved under it (ADR 0033 D-h). Saying only "refused" is half the message — the member has
+    somewhere to put their work, and it has to be named.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+
+    assert cli.main(["project", "clone", "P1", str(tmp_path / "clone")]) == 0
+
+    out = capsys.readouterr().out
+    assert "git push" in out and "refused" in out
+    assert "grid project commit P1" in out
+    assert "grid project integrate P1" in out
+
+
+def test_project_clone_refuses_to_reset_a_branch_over_somebody_elses_directory(
+        monkeypatch, tmp_path, capsys):
+    """`git checkout -B` resets a branch to the fetched tip, which over a stranger's repository is
+    silent data loss — the same hazard `grid task fetch`'s guard exists for, where it was a real
+    defect once. A directory holding a `grid task fetch` result is called out by name, because a
+    member who has been using one is exactly who reaches for this command next.
+    """
+    from remote import project_clone
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(
+        project_clone, "clone_project",
+        lambda *a, **k: pytest.fail("cloned over a directory this command did not make"))
+
+    mine = tmp_path / "my-real-project"
+    (mine / ".git").mkdir(parents=True)
+    (mine / "fix.py").write_text("the user's own uncommitted work\n")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(mine)])
+
+    assert "was not created by" in str(caught.value), str(caught.value)
+    assert (mine / "fix.py").read_text() == "the user's own uncommitted work\n"
+
+    # A `grid task fetch` directory gets the same refusal plus the sentence that resolves it.
+    from remote import task_repo
+
+    (mine / ".git" / task_repo.FETCH_MARKER).write_text("P1\n")
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(mine)])
+    assert "grid task fetch" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_updates_a_clone_it_already_made_but_not_another_projects(
+        monkeypatch, tmp_path, capsys):
+    """Re-cloning in place is how a member updates; re-cloning over ANOTHER project is a mistake.
+
+    The marker carries the project id for exactly this reason. Without it the second clone would
+    fetch a different repository's refs into the first one's directory and check out a branch that
+    happens to share a name — leaving a working tree belonging to neither project.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, "re-cloning in place was refused"
+
+    # The SECOND half of idempotency, and the one a "did it exit 0" assertion sails past: every
+    # write here has to be re-runnable. `config --add` accumulates, so a second clone would leave
+    # two helper entries and two resets — and the reset works BY position, so a duplicated pair
+    # reads `"", helper, "", helper`, where the second reset discards the first helper. It would
+    # still work, until a third value was ever added, and then it would not.
+    helpers = subprocess.run(
+        ["git", "-C", str(dest), "config", "--local", "--get-all",
+         "credential.https://relay.example.helper"],
+        capture_output=True, text=True).stdout.splitlines()
+    assert len(helpers) == 2, f"the config accumulated across clones: {helpers}"
+    assert helpers[0] == "" and helpers[1].startswith("!"), helpers
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(project_id="P2")))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P2", str(dest)])
+    assert "holds project P1" in str(caught.value), str(caught.value)
+
+
+@pytest.mark.parametrize("with_wip", [True, False], ids=["branch-exists", "started-from-trunk"])
+def test_project_clone_refuses_to_re_clone_over_local_commits_it_would_discard(
+        monkeypatch, tmp_path, capsys, with_wip):
+    """Re-cloning must never throw away work the grid has never seen.
+
+    `git checkout -B` resets a branch to the given commit, and its only safety net is a DIRTY
+    WORKING TREE — measured on git 2.54.0: an uncommitted edit makes it refuse with `error: Your
+    local changes… would be overwritten`, but a COMMITTED one is discarded in silence, exit 0.
+
+    That is not a misuse case, it is the documented one. `git push` is refused by design, so a local
+    commit is the only git-native way a member checkpoints between `grid project commit` calls, and
+    `docs/cli.md` invites resolving a conflict by hand in the clone. Re-cloning is meanwhile how a
+    member picks up somebody else's promote. The two together are a data-loss path through the
+    happy flow.
+
+    `_refuse_unusable_destination` cannot catch this: it asks whether the directory is ours, which
+    it is. The check has to compare the local branch against what is about to be fetched.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path, with_wip=with_wip)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0
+    branch = f"wip/{_MEMBER_KEY}"
+    # What the checkout would have been reset TO — the member's own branch once the relay has made
+    # one, the trunk before that.
+    git_target = f"origin/{branch}" if with_wip else "origin/main"
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(dest), *args], capture_output=True,
+                              text=True, env={**os.environ, "GIT_AUTHOR_NAME": "m",
+                                              "GIT_AUTHOR_EMAIL": "m@invalid",
+                                              "GIT_COMMITTER_NAME": "m",
+                                              "GIT_COMMITTER_EMAIL": "m@invalid"})
+
+    (dest / "precious.py").write_text("work the grid has never seen\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "my own local commit")
+    tip = git("rev-parse", "HEAD").stdout.strip()
+    assert git("status", "--porcelain").stdout == "", "the tree is CLEAN — that is the whole trap"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(dest)])
+
+    message = str(caught.value)
+    assert "1 commit" in message, message
+    assert (dest / "precious.py").read_text() == "work the grid has never seen\n"
+    assert git("rev-parse", "HEAD").stdout.strip() == tip, "the local commit was discarded"
+    # And the member is told how to LOOK at what they have and how to LAND it — a refusal that only
+    # says no leaves them with work they cannot push and no named way forward.
+    assert f"log {git_target}..{branch}" in message, message
+    assert "grid project commit P1" in message, message
+    assert "branch my-work" in message, message
+
+
+def test_task_fetch_into_a_project_clone_names_the_two_git_commands_instead(
+        monkeypatch, tmp_path, capsys):
+    """A clone already HAS the task branch, so "pass --into with a new directory" is the wrong fix.
+
+    The guard is not loosened to let the checkout through — `git checkout -- .` overwrites a
+    same-named file without complaining, and a clone is full of the member's own work in progress.
+    What changes is the sentence: somebody holding a real clone reaches a result with two git
+    commands and has no reason to call `grid task fetch` at all.
+
+    A third branch, not a rewording of the second: two existing tests assert the exact substring
+    "was not created by" for a directory that is nobody's, and that message is still right for one.
+    """
+    from remote import project_clone, task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    clone = tmp_path / "my-clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / project_clone.CLONE_MARKER).write_text("p1\n")
+    (clone / "in-progress.py").write_text("half-finished work\n")
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda *a, **k: pytest.fail("checked out over the member's own clone"))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(clone)])
+
+    message = str(caught.value)
+    assert "git fetch" in message and "git checkout" in message, message
+    assert "task/T1" in message, "the member has to be told WHICH branch, not just the verbs"
+    assert "was not created by" not in message, "that is the message for a directory that is nobody's"
+    assert (clone / "in-progress.py").read_text() == "half-finished work\n"

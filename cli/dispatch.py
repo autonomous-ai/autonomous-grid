@@ -42,6 +42,12 @@ AGNOSTIC = frozenset({
     # `train` talks to whatever rollout endpoint its config names (a local proxy or a hosted
     # relay URL work identically), so it is deliberately mode-blind like `engine`/`agent`.
     "train",
+    # git's credential helper (ADR 0033 D-h). AGNOSTIC rather than REMOTE_ONLY even though only a
+    # remote grid has a relay to clone from: git runs this on every operation inside a clone, in
+    # whatever mode `grid mode` happens to be, so a local-mode refusal would break `git pull` in a
+    # directory that has nothing to do with the member's current mode. It reads `credentials.toml`
+    # and nothing else, which is not a mode-specific file.
+    "credential",
 })
 
 # Mode-gated commands: real local behaviour today; a clear stub in remote mode until later slices

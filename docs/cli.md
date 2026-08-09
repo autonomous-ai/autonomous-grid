@@ -891,6 +891,7 @@ grid project check         <project-id> [--grid <grid>] [--json]
 grid project commit        <project-id> -m <message> [--file <local[:dest]>]… [--delete <path>]…
                                         [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
+grid project clone         <project-id> [<directory>] [--grid <grid>] [--json]
 ```
 
 **Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
@@ -924,6 +925,42 @@ created has no commits, and creating a task in one is refused with a message say
 project import` is how it gets one. **The relay is `main`'s only writer** — a `git push` of `main` is
 refused whatever state the project is in — so import and `promote` are the two things that move it,
 and nothing else does.
+
+### Cloning a project onto your own machine
+
+`grid project clone <project-id> [<directory>]` gives you an ordinary git repository you can open in
+an editor, read, branch and commit in locally.
+
+**No token is written anywhere.** `grid task fetch` avoids storing one by handing it to each git
+command it runs itself, which does not survive a real clone that your IDE fetches on a timer with
+nothing of ours in the call path. So the clone is configured to run `grid credential` whenever git
+needs one — scoped to that grid's relay, in the clone's own config, leaving your global git config
+untouched. Because git asks each time, a **refreshed token is used automatically**, where a token
+written into `.git/config` once would expire in place. The helper reads only your local credential
+store: `git pull` keeps working when the control plane is unreachable.
+
+You are put on **your own WIP branch**, not the trunk. `main` moves only when somebody promotes, so
+it may hold none of your work. If none of your tasks has landed yet your branch does not exist on the
+grid at all, and the clone starts it at the trunk and tells you so.
+
+**`git push` is refused**, and that is the design rather than a permission to ask for. Your branch is
+written by the grid alone — a task settling, or an integrate — both of which hold your one task slot.
+A push holds nothing, so it could fast-forward your branch while a task of yours is running and break
+that task's result. To land work from a clone: `grid project commit` for files, `grid project
+integrate` to bring the trunk in, or `grid task create` for an agent. Resolving a conflict by hand in
+your clone and handing the result to an integration is the intended path.
+
+Re-running `grid project clone` on the same directory **updates** it, which is how you pick up
+somebody else's promote. If you have made local commits the grid has not seen, it **refuses** rather
+than updating: your branch would be reset to the fetched tip and those commits would be gone. The
+refusal names the commits, and `grid project commit` is how you land them.
+
+This needs a git that reports `authtype` from `git credential capability`; the relay accepts no
+credential scheme an older git can send, and the clone refuses up front rather than leaving you a
+directory that fails on every fetch. `grid task fetch` works meanwhile.
+
+`grid credential` itself is not a command to type — the clone writes it into `.git/config` and git
+runs it.
 
 ### Importing an existing repository
 

@@ -13,6 +13,7 @@ import httpx  # noqa: F401
 
 from ._main import cmd_internal_media_server, cmd_internal_server, main
 from .auth import cmd_login, cmd_logout, cmd_sync
+from .credential import cmd_credential
 from .remote_grid import (
     cmd_remote_down,
     cmd_remote_info,
@@ -82,6 +83,7 @@ __all__ = [
     "cmd_login",
     "cmd_logout",
     "cmd_sync",
+    "cmd_credential",
     "cmd_remote_up",
     "cmd_remote_down",
     "cmd_remote_ls",

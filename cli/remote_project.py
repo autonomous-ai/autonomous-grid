@@ -39,6 +39,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_commit(args)
     if args.subcommand == "import":
         return _project_import(args)
+    if args.subcommand == "clone":
+        return _project_clone(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
     # so direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "member":
@@ -178,6 +180,110 @@ def _wip_reset(args: argparse.Namespace) -> int:
     if previous:
         print(f"was={previous}")
     return 0
+
+
+def _project_clone(args: argparse.Namespace) -> int:
+    """A member's own working clone of a project (ADR 0033 D-h, issue 17).
+
+    `grid task fetch` gets a task's RESULT onto disk and gets away with never writing the token into
+    `.git/config` by handing it to each git child through the environment. A real clone is used by
+    the member's own git — from an IDE, on a schedule, with nothing of ours in the call path — so the
+    credential has to be something git can come back and ask for. It configures a helper (`grid
+    credential`) in the clone's own config, scoped to that grid's relay, which also means a refreshed
+    token is picked up instead of one written once expiring in place.
+    """
+    from pathlib import Path
+
+    from remote import project_clone, relay
+
+    from . import remote_grid
+
+    # The grid's id, for pinning the clone's helper. Read from the same record `_resolve` selects,
+    # so a `--grid` naming one grid can never write another's id into the config.
+    rec = remote_grid._select(getattr(args, "grid", None))
+    network_id = remote_grid._network_id(rec)
+    base, token, label = _resolve(args)
+
+    # Before anything is written: a git that cannot carry a Bearer credential would leave a
+    # directory whose every `git pull` fails, blaming the relay.
+    try:
+        project_clone.require_credential_capability()
+    except project_clone.CloneError as exc:
+        raise SystemExit(f"Cannot clone project {args.project_id}: {exc}")
+
+    status = relay.project_status(base, token, args.project_id)
+    branch = status.get("branch")
+    if not branch:
+        # A reply this command cannot read is not a project — the same rule `_project_status`,
+        # promote, integrate, commit and import all follow. Guessing `wip/<key>` here would put the
+        # relay's ref-naming rule in a second place, free to disagree with it.
+        raise SystemExit(
+            f"The relay's answer for project {args.project_id} did not say which branch is yours, "
+            f"so there is nothing to clone. "
+            f"`grid project status {args.project_id} --json` shows what it sent.")
+    trunk = status.get("trunk") or "main"
+
+    dest = Path(args.directory) if getattr(args, "directory", None) else Path(args.project_id)
+    _refuse_unusable_destination(dest, args.project_id)
+
+    try:
+        cloned = project_clone.clone_project(
+            dest, url=relay.git_remote_url(base, args.project_id), project_id=args.project_id,
+            branch=branch, trunk=trunk, relay_base=base, network_id=network_id)
+    except project_clone.CloneError as exc:
+        raise SystemExit(f"Could not clone project {args.project_id}: {exc}")
+
+    if _emit(args, {"project_id": args.project_id, "path": str(cloned.path),
+                    "branch": cloned.branch, "trunk": cloned.trunk, "grid": label,
+                    "started_from_trunk": cloned.started_from_trunk}):
+        return 0
+
+    print(f"project {args.project_id} cloned into {cloned.path}")
+    print(f"on {cloned.branch} (your branch); {cloned.trunk} is here too")
+    if cloned.started_from_trunk:
+        # Said out loud because the clone otherwise looks like somebody else's repository: the
+        # relay creates a member's WIP branch when their first task settles, so until then `git log`
+        # here shows only the trunk.
+        print(f"Your branch has nothing on it yet, so it starts at {cloned.trunk}. It appears on "
+              f"the grid when your first task lands.")
+    print("\nNo credential was written: git asks grid for one each time, so a refreshed token is "
+          "used automatically.")
+    # Said here because it is the obvious next action inside a real clone, and because the relay's
+    # refusal on its own would read as a permissions bug (ADR 0033 D-h).
+    print("\n`git push` is refused. Your branch is written by the grid alone, so that a task "
+          "running right now cannot have the ground moved under it. To land work from this clone:")
+    print(f"  grid project commit {args.project_id} --file <path>   # files, no agent")
+    print(f"  grid project integrate {args.project_id}              # bring {cloned.trunk} in")
+    print(f"  grid task create --project {args.project_id} --prompt '…'")
+    return 0
+
+
+def _refuse_unusable_destination(dest, project_id: str) -> None:
+    """A directory this command may write into, or a clean refusal naming why not.
+
+    `git checkout -B` resets a branch to the fetched tip, which over somebody else's repository is
+    silent data loss — the same hazard `grid task fetch`'s guard exists for, and it has already been
+    a real defect there once. A directory a previous clone of THIS project made is the one
+    exception, because re-cloning in place is how a member updates.
+    """
+    from remote import project_clone, task_repo
+
+    if dest.exists() and not dest.is_dir():
+        raise SystemExit(f"Cannot clone into {dest}: it exists and is not a directory.")
+    if not (dest.is_dir() and any(dest.iterdir())):
+        return
+    held = project_clone.cloned_project(dest)
+    if held is None:
+        fetched = task_repo.fetched_project(dest)
+        extra = (" It holds a `grid task fetch` result; clone somewhere else and use the clone "
+                 "from now on." if fetched else "")
+        raise SystemExit(
+            f"Cannot clone into {dest}: it already has files in it and was not created by "
+            f"`grid project clone`. Name a new directory.{extra}")
+    if held != project_id:
+        raise SystemExit(
+            f"Cannot clone into {dest}: it holds project {held}, not {project_id}. "
+            f"Name a different directory.")
 
 
 def _project_import(args: argparse.Namespace) -> int:

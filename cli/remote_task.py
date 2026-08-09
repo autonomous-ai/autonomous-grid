@@ -642,7 +642,7 @@ def _task_fetch(args: argparse.Namespace) -> int:
     into the clone's `.git/config`. A result directory is a thing people zip up and pass around, and
     a grid access token lives a year.
     """
-    from remote import relay, task_repo
+    from remote import project_clone, relay, task_repo
 
     base, token, _label = _resolve(args)
     task = relay.get_task(base, token, args.task_id)
@@ -686,6 +686,17 @@ def _task_fetch(args: argparse.Namespace) -> int:
         # The presence of `.git` is NOT that proof, and using it as such was a real defect: the
         # user's own repository has one too, so `--into ~/my-project` (or running the command inside
         # it) sailed past the guard and destroyed uncommitted work.
+        # A `grid project clone` is checked FIRST and refused with its own sentence (ADR 0033 D-h,
+        # issue 17). The guard is not loosened for it — a clone is full of work in progress, and
+        # `git checkout -- .` overwrites a same-named file without complaining — but "pass --into
+        # with a new directory" is the wrong fix there: the clone already has the task branch, and
+        # two git commands reach it without this command being involved at all.
+        cloned = project_clone.cloned_project(dest)
+        if cloned is not None:
+            raise SystemExit(
+                f"Cannot fetch into {dest}: it is a `grid project clone`, which already has "
+                f"task {args.task_id}'s branch. Get the result there with "
+                f"`git fetch origin task/{args.task_id}` then `git checkout task/{args.task_id}`.")
         held = task_repo.fetched_project(dest)
         if held is None:
             raise SystemExit(

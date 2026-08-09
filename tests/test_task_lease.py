@@ -491,6 +491,51 @@ def test_the_queue_expired_reason_this_client_explains_is_the_one_the_relay_writ
         "QUEUE_EXPIRED", module="task_reaper.py")
 
 
+def test_the_auth_scheme_the_credential_helper_names_is_the_one_the_relay_parses():
+    """The fourth lockstep value in the register (ADR 0033 D-h, issue 17).
+
+    The credential helper answers `authtype=Bearer`, and git builds the header by joining that to
+    the credential with a single space. The relay's `_bearer_or_api_key` reads the header by
+    stripping a `"Bearer "` prefix. Two spellings of one wire value, in repositories that share no
+    code.
+
+    Read out of the FUNCTION rather than off a module constant, because grid-src spells it as a
+    literal at the point of use and giving it a name over there is a cross-repo change this slice
+    deliberately does not make. What the check buys is the same thing every other row buys: if the
+    relay ever moves to another scheme, or drops Bearer, this fails here instead of every member's
+    `git pull` failing with `fatal: Authentication failed` and no clue why.
+    """
+    from remote import git_credential
+
+    literals = _relay_function_strings("_bearer_or_api_key", module="relay.py")
+
+    assert f"{git_credential.AUTH_SCHEME} " in literals, (
+        f"grid-src's `_bearer_or_api_key` no longer reads a "
+        f"{git_credential.AUTH_SCHEME!r} prefix, so the credential helper's `authtype` names a "
+        f"scheme the relay does not accept. Its literals are: {sorted(literals)}")
+
+
+def _relay_function_strings(name, module):
+    """Every string literal inside one of grid-src's functions, parsed rather than imported.
+
+    A sibling of `_relay_string_constant` rather than a widening of it: that one reads a
+    module-level assignment, and this one reads the body of a function, because not every value in
+    the cross-repo register is spelled as a named constant on both sides. Kept separate so
+    "I could not find the constant" and "I could not find the function" stay different failures.
+    """
+    import ast
+
+    source = _relay_module(module)
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    for node in ast.walk(ast.parse(source.read_text())):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return {
+                child.value for child in ast.walk(node)
+                if isinstance(child, ast.Constant) and isinstance(child.value, str)}
+    raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
+
+
 def test_the_queue_budget_stays_longer_than_the_run_budget():
     """The inequality, not just the two names (ADR 0033 D-k, issue 18).
 

@@ -34,6 +34,7 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .credential import cmd_credential
 from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
@@ -91,8 +92,37 @@ def build_parser() -> argparse.ArgumentParser:
     _add_engine_setup(sub)
     _add_launch(sub)
     _add_train(sub)
+    _add_credential(sub)
 
     return parser
+
+
+def _add_credential(sub) -> None:
+    """`grid credential <operation>` — git's credential-helper protocol (ADR 0033 D-h, issue 17).
+
+    Not a command anybody types: `grid project clone` writes it into the clone's `.git/config` and
+    git runs it on every operation against that relay.
+
+    The operation is a free-form positional rather than a `choices=` list, and that is the protocol
+    speaking, not laxity — `gitcredentials(7)` says a helper receiving an operation it does not
+    know "should silently ignore the request. This leaves room for future operations to be added
+    (older helpers will just ignore the new requests)." `choices=` would make a future git verb an
+    argparse usage error with exit code 2, which git reports as a broken helper.
+    """
+    credential = sub.add_parser(
+        "credential",
+        help="git credential helper (used by `grid project clone`; not typed by hand)",
+        description=(
+            "Answer git's credential-helper protocol on stdin/stdout.\n\n"
+            "`grid project clone` configures this in the clone's own `.git/config`, scoped to that\n"
+            "grid's relay, so no token is ever written to disk and a refreshed one is picked up\n"
+            "automatically. Reads only the local credential store — never the network."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    credential.add_argument("operation", help="get, store or erase — git supplies this.")
+    credential.add_argument(
+        "--grid", default=None,
+        help="Grid whose credential this clone uses. Written by `grid project clone`.")
+    credential.set_defaults(handler=cmd_credential)
 
 
 def _add_grid_lifecycle(sub) -> None:
@@ -679,6 +709,35 @@ def _add_project(sub) -> None:
     importer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     importer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     importer.set_defaults(handler=cmd_remote_project)
+
+    # `clone` — a member's own working copy, with a credential helper instead of a stored token
+    # (ADR 0033 D-h, issue 17). `grid task fetch` still exists and is still the right thing for one
+    # task's result; this is for working in the project.
+    cloner = project_sub.add_parser(
+        "clone",
+        help="Clone a project's repository, configured to ask grid for a credential each time",
+        description=(
+            "Clone a project into a directory you name, on YOUR branch.\n\n"
+            "No token is written anywhere. The clone is configured to run `grid credential` when\n"
+            "git needs one, scoped to this grid's relay and to this clone alone — your global git\n"
+            "config is untouched. Because git asks each time, a refreshed token is picked up\n"
+            "automatically, where a token written into `.git/config` would expire in place.\n\n"
+            "You are put on your own WIP branch, not on the trunk: `main` moves only when somebody\n"
+            "promotes, so it may hold none of your work yet. The trunk is fetched too.\n\n"
+            "`git push` is REFUSED, and that is the design rather than a permission to request.\n"
+            "Your branch is written by the grid alone — task settle and integrate, both of which\n"
+            "hold your task slot — so a push could move the ground under a task that is running.\n"
+            "Land work with `grid project commit`, `grid project integrate`, or a task.\n\n"
+            "Needs a git that reports `authtype` from `git credential capability`; the relay\n"
+            "accepts no credential scheme an older git can send."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    cloner.add_argument("project_id", help="Project id from `grid project list`.")
+    cloner.add_argument(
+        "directory", nargs="?", default=None,
+        help="Where to put it (default: a directory named after the project id).")
+    cloner.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    cloner.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    cloner.set_defaults(handler=cmd_remote_project)
 
 
 def _add_task(sub) -> None:
