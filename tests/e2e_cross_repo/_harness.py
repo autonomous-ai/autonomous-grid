@@ -40,6 +40,12 @@ BOOT_TIMEOUT_SECONDS = 90.0
 LEASE_SECONDS = 6
 REAPER_SECONDS = 1
 RENEW_SECONDS = 0.5
+# The two budgets ADR 0033 D-k splits, scaled the same way and keeping the same INEQUALITY (the run
+# budget inside the queue budget). Used only by the relay that tests the queue clock: the ordinary
+# `relay` fixture keeps the production defaults, because a short run budget there would reap the
+# long-running agents the other modules deliberately spawn.
+QUEUE_BUDGET_SECONDS = 12
+RUN_BUDGET_SECONDS = 3
 SCOPES = [
     "inference:create", "inference:models", "inference:resume",
     "provider:heartbeat", "provider:update", "provider:poll", "provider:submit", "provider:error",
@@ -80,6 +86,63 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def start_relay(root, *, extra_env=None):
+    """Boot grid-src's `server:app` under a real uvicorn and wait for it. Returns `(proc, base)`.
+
+    Here rather than in `conftest.py` for that file's own reason — pytest owns a conftest's module
+    identity, so importing from it yields two copies of one module. Factored out when a second relay
+    was needed (ADR 0033 issue 18): the budgets it splits are read from the environment at import
+    time, so a relay with a different clock is a different PROCESS, and two copies of forty lines of
+    boot-and-poll would be two places for the health check to drift.
+    """
+    import httpx
+
+    require_relay_repo()
+    port = free_port()
+    env = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite+aiosqlite:///{root / 'e2e.db'}",
+        "KEYS_PATH": str(root / "keys"),
+        "JWT_SECRET": SECRET,
+        "PLATFORM_FEE_PERCENT": "10.0",
+        "TASK_REPO_ROOT": str(root / "projects"),
+        "TASK_LEASE_SECONDS": str(LEASE_SECONDS),
+        "TASK_REAPER_INTERVAL_SECONDS": str(REAPER_SECONDS),
+        "TASK_CLAIM_TIMEOUT_SECONDS": "3",
+        "GRID_MODE": "false",
+        "PYTHONPATH": str(RELAY_SERVER_DIR),
+        **(extra_env or {}),
+    }
+    proc = subprocess.Popen(
+        [str(RELAY_PYTHON), "-m", "uvicorn", "server:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        cwd=str(RELAY_SERVER_DIR), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS
+    while True:
+        if proc.poll() is not None:
+            pytest.fail(f"the relay exited before serving:\n{proc.communicate()[0]}")
+        try:
+            if httpx.get(f"{base}/relay/v1/health", timeout=2.0).status_code < 500:
+                return proc, base
+        except httpx.HTTPError:
+            pass
+        if time.monotonic() > deadline:
+            proc.kill()
+            pytest.fail(f"the relay did not come up within {BOOT_TIMEOUT_SECONDS:.0f}s")
+        time.sleep(0.2)
+
+
+def stop_relay(proc) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def wait_for(predicate, timeout=25.0, interval=0.2):

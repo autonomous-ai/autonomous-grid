@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -53,52 +52,31 @@ def relay(relay_home):
     needs — a test that poked the row would prove the reclaim function works, not that anything calls
     it.
     """
-    import httpx
-
-    H.require_relay_repo()
-    root = relay_home
-    port = H.free_port()
-    env = {
-        **os.environ,
-        "DATABASE_URL": f"sqlite+aiosqlite:///{root / 'e2e.db'}",
-        "KEYS_PATH": str(root / "keys"),
-        "JWT_SECRET": H.SECRET,
-        "PLATFORM_FEE_PERCENT": "10.0",
-        "TASK_REPO_ROOT": str(root / "projects"),
-        "TASK_LEASE_SECONDS": str(H.LEASE_SECONDS),
-        "TASK_REAPER_INTERVAL_SECONDS": str(H.REAPER_SECONDS),
-        "TASK_CLAIM_TIMEOUT_SECONDS": "3",
-        "GRID_MODE": "false",
-        "PYTHONPATH": str(H.RELAY_SERVER_DIR),
-    }
-    proc = subprocess.Popen(
-        [str(H.RELAY_PYTHON), "-m", "uvicorn", "server:app",
-         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
-        cwd=str(H.RELAY_SERVER_DIR), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + H.BOOT_TIMEOUT_SECONDS
-    while True:
-        if proc.poll() is not None:
-            pytest.fail(f"the relay exited before serving:\n{proc.communicate()[0]}")
-        try:
-            if httpx.get(f"{base}/relay/v1/health", timeout=2.0).status_code < 500:
-                break
-        except httpx.HTTPError:
-            pass
-        if time.monotonic() > deadline:
-            proc.kill()
-            pytest.fail(f"the relay did not come up within {H.BOOT_TIMEOUT_SECONDS:.0f}s")
-        time.sleep(0.2)
+    proc, base = H.start_relay(relay_home)
     try:
         yield base
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        H.stop_relay(proc)
+
+
+@pytest.fixture(scope="session")
+def relay_short_budgets(tmp_path_factory):
+    """A SECOND relay, whose queue and run budgets are seconds rather than hours.
+
+    Its own process because grid-src reads both budgets from the environment at import time, and its
+    own database because a task reaped after three seconds must not appear in the queue every other
+    module's assertions read. The ordinary `relay` keeps the production defaults deliberately: a
+    three-second run budget there would reap the long-running agents those tests spawn on purpose,
+    and the failure would look like a provider bug.
+    """
+    proc, base = H.start_relay(tmp_path_factory.mktemp("relay-budgets"), extra_env={
+        "TASK_QUEUE_DEADLINE_SECONDS": str(H.QUEUE_BUDGET_SECONDS),
+        "TASK_DEADLINE_SECONDS": str(H.RUN_BUDGET_SECONDS),
+    })
+    try:
+        yield base
+    finally:
+        H.stop_relay(proc)
 
 
 @pytest.fixture(scope="session")

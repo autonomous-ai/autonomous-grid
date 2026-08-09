@@ -19,7 +19,8 @@ prevent.
 **Silence is not death.** Nothing here reads the child's output, tracks idle time, or infers a hang
 from quiet: a task legitimately produces nothing for ten minutes while a build or a test suite runs.
 A genuinely stuck task is caught by its own `deadline_at` on the relay, and by `tasks.task_timeout()`
-here — never by an idle timer.
+here — never by an idle timer. Since ADR 0033 D-k that relay-side budget is the RUN budget, running
+from the claim rather than from the create, so it measures the same span this renewer covers.
 
 **Before the child exists, it renews anyway**, and that is a deliberate exception rather than an
 oversight. The pre-spawn phase is a real `git fetch` whose own ceiling is

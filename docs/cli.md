@@ -1149,7 +1149,8 @@ in it runs five tasks at once, one each. Use different projects to run your own 
 
 `grid task cancel <task-id>` ends a task that has not finished and gives that slot back at once.
 Before it existed the only way out of a task nobody wanted any more was to wait for its deadline —
-up to an hour — and the usual reason to reach for it is a conflict-resolution task queued by
+an hour if it was running, and up to four if it was still waiting for a provider — and the usual
+reason to reach for it is a conflict-resolution task queued by
 `grid project integrate`. **Any member may cancel any task in the project**, which is the point on a
 shared one: the colleague whose merge has been stuck all afternoon is often the person who needs to
 stop it, and the event log records who did.
@@ -1221,9 +1222,23 @@ the relay advances it, and only for a task it saw succeed.
 A task's `state` is `queued` (waiting for a provider), `running` (claimed), or one of the terminal
 `completed` / `failed` / `timed_out`. `get` prints the result on success and the error on failure.
 
+**Waiting and running are bounded separately.** A task gets four hours to find a provider and, from
+the moment one claims it, a fresh hour to run — so a task that sat in a busy queue all morning still
+gets its whole hour when its turn comes, rather than the remainder of one clock. `claimed_at` on the
+task says which of the two it is being measured against: absent means nobody has taken it yet.
+
+That is also why a `timed_out` task says *which* budget it spent, and the difference matters because
+the two call for opposite actions:
+
+| `error` | What happened | What to do |
+|---|---|---|
+| `queue_expired` | Its time ran out while it was **waiting** for a provider. Usually it never ran at all; a task whose provider died goes back on the queue clock, so `attempt` may be above zero. | Add task-serving providers — `grid project status` says how many are online and how many are paused. |
+| `deadline_exceeded` | An agent was working on it and did not finish in time. | Look at the task: narrow the prompt, or split it. |
+
 `follow` refuses a task that is past its deadline but never finished (`410`), rather than holding a
 stream open on work nothing will advance — distinct from a task that does not exist (`404`) or
-belongs to someone else (`403`).
+belongs to someone else (`403`). A merely *queued* task is not that case, however long it has been
+waiting: its stream stays open, because a provider may still take it.
 
 Serving tasks is **opt-in on the provider side** and off by default: an engine claims tasks only when
 started with `GRID_TASKS=1` in its environment (`GRID_TASKS=1 grid join …`). A provider without it
@@ -1274,9 +1289,14 @@ log keeps one sequence across the whole task, so a client attached across a retr
 never sees its cursor come to mean something else.
 
 Retries are capped (3 attempts by default). A task that exhausts them fails with
-`retries_exhausted`, and its project unlocks so you can create the next task on it. Separately, any
-task that outlives its deadline — including one sitting `queued` on a grid with no provider at all —
-is ended as `timed_out`, so a project can never be locked indefinitely by work nothing is doing.
+`retries_exhausted`, and its slot unlocks so you can create the next task. A retried task goes back
+onto the *queue* clock, so time spent waiting for a second provider is not charged to the run budget
+the first one was using — and if nobody picks it up, it ends as `queue_expired` rather than being
+blamed for running too long.
+
+Separately, any task that outlives whichever budget applies to it — including one sitting `queued` on
+a grid with no provider at all, which is given the longer of the two — is ended as `timed_out`, so a
+slot can never be held indefinitely by work nothing is doing.
 
 One case worth knowing: if the agent clones another repository into the workspace, git records it as
 a submodule reference whose objects the relay does not have, and the push fails with git's own

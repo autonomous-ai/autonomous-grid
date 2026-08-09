@@ -40,6 +40,26 @@ MAX_FILES = 200
 # than handing back the input files as though they were the result.
 _TERMINAL_STATES = frozenset({"completed", "failed", "timed_out"})
 
+# The terminal reason meaning "no provider ever claimed this task" (ADR 0033 D-k, issue 18).
+# LOCKSTEP with grid-src's `task_reaper.QUEUE_EXPIRED`, kept in step by editing both repos;
+# `tests/test_task_lease.py` parses that module rather than restating the string.
+#
+# ⚠️ The ONE terminal `error` this client branches on rather than printing verbatim, and the reason
+# is that `queue_expired` and `deadline_exceeded` are one word apart and call for OPPOSITE actions —
+# add providers, or fix the task. The slug is still printed either way; what the branch adds is the
+# sentence saying which of the two a reader is looking at.
+#
+# *Absent ⇒ an old relay sends `deadline_exceeded` as it always did*, so nothing here changes; a
+# newer relay against an older CLI prints the new slug with no sentence. No rollout order.
+QUEUE_EXPIRED = "queue_expired"
+# Phrased about the BUDGET, not about the attempt count, because `queue_expired` does not mean
+# `attempt == 0`. A task whose provider died is put back on the queue clock, so one that nobody
+# picks up again ends this way having already run once — and "no provider ever claimed it" would be
+# flatly false for exactly the row a team stares at when a fleet is flapping.
+_QUEUE_EXPIRED_NOTE = ("it ran out of time WAITING for a provider rather than while running — the "
+                       "grid is short of task capacity, not the task at fault. "
+                       "`grid project status` says who is online and paused.")
+
 
 def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
     """(relay_base, access_token, label) for the selected grid. Clean SystemExit if signed-out."""
@@ -598,6 +618,15 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
     elif kind == "task.terminal":
         error = event.get("error")
         print(f"[{seq}] {event.get('state')}" + (f": {error}" if error else ""))
+        if error == QUEUE_EXPIRED:
+            # The relay's word stays on the line above, verbatim like every other reason. This says
+            # what it means, because `timed_out` reads as "the task hung" and this one did not run
+            # at all (ADR 0033 D-k).
+            #
+            # On stdout with the line it explains, unlike the `task.retry` and `task.rate_limit`
+            # diagnostics: this is part of the terminal report, and a reader piping stdout to a log
+            # must not end up with the outcome and not the reason for it.
+            print(f"[{seq}] {_QUEUE_EXPIRED_NOTE}")
     else:
         # Verbatim, minus the type we already printed — enough to be useful without pretending to
         # understand a shape this build has never seen.
@@ -809,6 +838,8 @@ def _task_get(args: argparse.Namespace) -> int:
         print(f"session={task['claude_session_id']}")
     if task.get("error"):
         print(f"error={task['error']}")
+        if task["error"] == QUEUE_EXPIRED:
+            print(_QUEUE_EXPIRED_NOTE)
     result = task.get("result_text")
     if result:
         print("\n--- result ---")

@@ -586,6 +586,54 @@ So the two budgets separate: a queue TTL that bounds waiting, and a run deadline
 **claim**. The terminal reason distinguishes "never picked up" from "ran too long", because they are
 the same word today and they call for opposite actions — add providers, or fix the task.
 
+**As built (issue 18).** Four things the decision left open are answered here rather than inherited.
+
+- **One column, re-anchored — not two deadlines.** `deadline_at` keeps its name and gains a stable
+  meaning: *when this task ends if nothing changes*. It is written `created_at + queue budget` at
+  create, rewritten `claimed_at + run budget` by `_claim_one`, and rewritten back to the queue's by
+  `_requeue`. That matters because five separate readers already consult that one column — the
+  reaper's candidate select and its guarded UPDATE, the 410 gate, the SSE stream's own exit, and both
+  read surfaces — so a second deadline column would have been a second thing each of them had to
+  choose between. It is also what makes the 410 rule correct with **no code change at all**: the gate
+  reads whichever budget applies, so it cannot drift from what the reaper enforces. `claimed_at` is
+  the new column, and it carries the fact the reason is derived from.
+- **`timed_out` stays one state; the slug carries the distinction.** `queue_expired` joins
+  `deadline_exceeded` and `retries_exhausted` in `error`, for the reason issue 19b gave for not
+  adding a state: `TERMINAL_STATES` is a lockstep set the provider reports verbatim and
+  `TASK_ACTIVE_STATES` is its complement and the predicate of `tasks_one_active_per_member`, so a new
+  state costs a lockstep release and buys nothing the slug does not.
+- **The retry goes back onto the queue clock**, which the issue's "unchanged" list did not
+  anticipate. Leaving it alone would have left the bug intact one level down: a task whose provider
+  died rejoins a queue that is hours long while still measured against that provider's run deadline,
+  and is reported `deadline_exceeded` — "fix the task" — for waiting. The re-anchor is to
+  `created_at`, never to now, so waiting stays bounded from when the member asked and a fleet that
+  keeps dying cannot extend it one window at a time. Worst-case lifetime is therefore
+  `queue budget + attempts × run budget` — seven hours at the shipped 4h/1h/3, against one hour
+  before — and `grid task cancel` (19b) is what makes that affordable, which is why it landed first.
+- **`task_deadline_seconds` keeps its name** and now means the run budget. Renaming it would leave an
+  operator's existing `TASK_DEADLINE_SECONDS` reading nothing and silently revert them to the
+  default, which is a worse failure than a name that has narrowed. The new knob is
+  `TASK_QUEUE_DEADLINE_SECONDS` (4h), and the inequality between them is load-bearing rather than
+  incidental: a queue budget SHORTER than a run budget reintroduces this bug in miniature.
+  ⚠️ **It is enforced at BOOT, not only in a test** (`config.validate_task_budgets`, fatal, beside
+  the git ≥ 2.38 check). Review found that the cross-repo assertion in autonomous-grid's
+  `tests/test_task_lease.py` AST-parses the two DEFAULTS out of `config.py` — so it guards what
+  grid-src ships and is structurally blind to what an operator sets, and it skips entirely in CI,
+  which checks out one repository. Inverted, the pair produces a relay that boots, serves every
+  request, logs nothing, and reaps each reclaimed task on the next tick with its attempt already
+  spent and a reason pointing at capacity: `_requeue` anchors to `created_at`, so a queue window
+  shorter than the run the task just had is already in the past when it is written. A refusal to
+  boot is the only place that can be caught, because it is the only place both numbers are read
+  together.
+
+⚠️ **The measurement that changed how this is tested.** httpx's `ASGITransport` buffers a response
+body before returning the object, so `client.stream(...)` **never returns** on a stream that has no
+end — and a live queued task's stream having no end is exactly what D-k is for. Every existing
+stream test in grid-src works because its task is terminal. So the in-process test drives
+`read_task_events` as a function (the refusal is an exception; the stream is a return value it never
+iterates), and the real-socket assertion lives in autonomous-grid's cross-repo E2E, which needs no
+provider and no agent and is the cheapest test in that directory.
+
 ### D-l — The client is software, so a refusal is data
 
 Every refusal in the task plane is a prose `detail` string: the create-time 409 carries no task id,

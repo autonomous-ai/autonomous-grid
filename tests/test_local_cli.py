@@ -22307,6 +22307,30 @@ def test_task_follow_does_not_retry_a_refusal(monkeypatch, tmp_path, capsys):
     assert "expired" in capsys.readouterr().err.lower()
 
 
+def test_task_follow_shows_a_coded_refusals_own_sentence_not_its_json(
+        monkeypatch, tmp_path, capsys):
+    """Since ADR 0033 D-l every 4xx in this plane carries `detail={"code","message",...}`.
+
+    The one-shot task routes already render `message`; the follow path builds its text from
+    `resp.text`, so the object arrives on the reader's terminal as raw JSON with the sentence the
+    relay wrote buried inside it. The sentence is the whole reason the relay writes one.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(410, json={"detail": {
+        "code": "task_expired", "message": "Task expired (past its deadline)"}}))
+    rc = cli.main(["task", "follow", "T1"])
+
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "Task expired (past its deadline)" in err
+    assert '"code"' not in err, f"the refusal object reached the reader verbatim:\n{err}"
+
+
 def test_task_follow_json_emits_one_object_per_line(monkeypatch, tmp_path, capsys):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -23906,6 +23930,77 @@ def test_task_get_json_echoes_the_relay_reply(monkeypatch, tmp_path, capsys):
     cli.main(["task", "get", "T1", "--json"])
 
     assert json.loads(capsys.readouterr().out) == reply
+
+
+def test_task_get_says_a_task_nobody_claimed_needs_providers_not_a_fix(
+        monkeypatch, tmp_path, capsys):
+    """`queue_expired` and `deadline_exceeded` are one word apart and call for opposite actions
+    (ADR 0033 D-k, issue 18). Printing the slug alone leaves the reader to know which is which."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "timed_out", "error": "queue_expired", "attempt": 0}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "error=queue_expired" in out, "the slug itself is still reported verbatim"
+    assert "provider" in out.lower(), (
+        "a task that expired waiting has to point at capacity — telling someone to fix a task "
+        f"that never ran is the failure this slice exists to remove:\n{out}")
+
+
+def test_the_queue_expired_sentence_is_true_of_a_retried_task_too(monkeypatch, tmp_path, capsys):
+    """`queue_expired` does not mean `attempt == 0`, and the sentence must not say it does.
+
+    A task whose provider died is requeued onto the queue clock (`claimed_at` cleared), so if
+    nobody picks it up again it ends `queue_expired` with `attempt = 1` — it DID run once. The slug
+    names the budget that was spent, which is the honest fact; a sentence claiming "no provider ever
+    claimed it" would be flatly false for that row, and it is the row a team is most likely to be
+    staring at when a fleet is flapping.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "timed_out", "error": "queue_expired", "attempt": 2}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out.lower()
+    # The exact overclaims, spelled out rather than a vague "never": the first draft of this test
+    # searched for a word the sentence did not contain and passed without looking at anything.
+    for overclaim in ("ever claimed", "never claimed", "never ran"):
+        assert overclaim not in out, (
+            f"the sentence says {overclaim!r}, which is false of a task that ran once and was then "
+            f"requeued — `queue_expired` names the budget, not the attempt count:\n{out}")
+    assert "provider" in out
+
+
+def test_task_get_does_not_blame_capacity_for_a_task_that_really_ran(
+        monkeypatch, tmp_path, capsys):
+    """The positive control. The advice must not fire on the reason that was already correct."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "timed_out", "error": "deadline_exceeded", "attempt": 1}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "error=deadline_exceeded" in out
+    assert "no provider" not in out.lower()
+
+
+def test_task_follow_says_which_budget_a_timed_out_task_spent(capsys):
+    """The same distinction where a person actually watches a task end."""
+    from cli import remote_task
+
+    remote_task._render(9, {"type": "task.terminal", "state": "timed_out",
+                            "error": "queue_expired"}, as_json=False)
+
+    out = capsys.readouterr().out
+    assert "timed_out: queue_expired" in out, "the relay's own word, verbatim"
+    assert "provider" in out.lower()
 
 
 def test_task_get_percent_encodes_the_id_in_the_path(monkeypatch, tmp_path):

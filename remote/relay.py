@@ -499,7 +499,15 @@ def stream_task_events(
             ) as resp:
                 if resp.status_code >= 400:
                     resp.read()  # a streamed response has no `.text` until it is drained
-                    _guard(resp, "stream_task_events")
+                    if resp.status_code == 401:
+                        raise RelayUnauthorized()
+                    # The relay's OWN sentence, not the object carrying it (ADR 0033 D-l). Every
+                    # 4xx in this plane answers `detail={"code","message",…}` since issue 19a, and
+                    # `_guard` builds its message from `resp.text` — so this is the one place a
+                    # person still reads a refusal and the JSON reached them verbatim. Falls back
+                    # to the truncated body for a reply with no `message`, which is what
+                    # `_task_error_message` already does for every one-shot task route.
+                    raise RelayError(_task_error_message(resp), status=resp.status_code)
                 seq: int | None = None
                 for line in resp.iter_lines():
                     if line.startswith("id:"):

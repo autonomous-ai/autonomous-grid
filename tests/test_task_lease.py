@@ -474,6 +474,47 @@ def test_the_capacity_load_key_this_provider_publishes_is_the_one_the_relay_read
         "PAUSED_LOAD_KEY", module="task_capacity.py")
 
 
+def test_the_queue_expired_reason_this_client_explains_is_the_one_the_relay_writes():
+    """The third lockstep value in the register (ADR 0033 D-k, issue 18).
+
+    Terminal `error` slugs are otherwise displayed verbatim and never compared — the rule
+    `task.retry`'s `reason` follows — and this one is the deliberate exception, because
+    `queue_expired` and `deadline_exceeded` call for OPPOSITE actions and a client that cannot tell
+    them apart tells a team to fix a task that never ran.
+
+    A typo on either side is silent in the register's usual way: nothing fails, the sentence simply
+    never prints, and the reader is back to reading `timed_out` and guessing which kind it was.
+    """
+    from cli import remote_task
+
+    assert remote_task.QUEUE_EXPIRED == _relay_string_constant(
+        "QUEUE_EXPIRED", module="task_reaper.py")
+
+
+def test_the_queue_budget_stays_longer_than_the_run_budget():
+    """The inequality, not just the two names (ADR 0033 D-k, issue 18).
+
+        run deadline  <  queue deadline
+
+    A queue budget SHORTER than a run budget reintroduces the bug this slice removes, in miniature:
+    a task would be given up on for waiting sooner than one is given up on for working, so a fleet
+    only slightly behind demand would reap tasks whose agents would have finished comfortably.
+
+    ⚠️ **This guards the DEFAULTS in source, and nothing more.** `_relay_config_constant` parses the
+    second argument of the `os.getenv` call, so what it sees is what grid-src ships — never what an
+    operator sets via `TASK_QUEUE_DEADLINE_SECONDS`. It also SKIPS whenever the grid-src worktree is
+    not beside this one, which includes CI (`.github/workflows/ci.yml` checks out one repository).
+    The runtime enforcement is therefore grid-src's own `config.validate_task_budgets`, which
+    refuses to boot; this test is the cheap guard against the shipped pair drifting.
+    """
+    run = _relay_config_constant("task_deadline_seconds")
+    queue = _relay_config_constant("task_queue_deadline_seconds")
+
+    assert run < queue, (
+        f"the relay gives a task {queue}s to find a provider but {run}s to run — waiting is bounded "
+        f"more tightly than working, so a backlog is reaped before it is served")
+
+
 def test_a_verdict_before_the_agent_is_spawned_still_stops_the_renewer(monkeypatch):
     """The verdict latch, on the one path where killing the child cannot do the stopping for it.
 

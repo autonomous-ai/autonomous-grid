@@ -16,6 +16,8 @@ Run:  .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_cross_repo.py -q
 from __future__ import annotations
 
 import sys
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _harness as H  # noqa: E402
 
 sys.path.insert(0, str(H.GRID_REPO))
+
+from cli import remote_task  # noqa: E402
 
 
 def test_01_a_task_with_a_file_reaches_the_agent_and_its_result_comes_back(
@@ -376,3 +380,61 @@ def test_10_a_cancelled_tasks_branch_is_still_there_to_fetch(
 
     after = H.git_ls_remote(url, f"refs/heads/task/{task_id}", bearer=owner_token)
     assert after == before, "cancelling rewound the task's branch"
+
+
+def test_11_a_task_nobody_serves_waits_on_its_own_clock_and_says_so(
+        relay_short_budgets, owner_token):
+    """The queue is not the run, over the wire (ADR 0033 D-k, issue 18).
+
+    **No provider is spawned** — that is the condition being tested, and it makes this the cheapest
+    test in the directory: no agent, no git checkout, no subscription.
+
+    Three things neither unit suite can see, because each mocks the other side:
+
+      * the task OUTLIVES the run budget while queued. Both halves of that live in grid-src, but a
+        client is what suffers when it is wrong, and the client is here.
+      * following it does not answer 410. This repo's unit test has to call the endpoint as a
+        FUNCTION — measured: httpx's `ASGITransport` never returns for a stream that has no end, so
+        the status of a live queued task's stream is unobservable in-process. Over a real socket the
+        headers arrive immediately, which makes this the only place the fix is checked as HTTP.
+      * the reason on the wire is the string this repo branches on. `test_task_lease.py` proves the
+        two CONSTANTS agree by parsing grid-src; only this can prove the relay actually SENDS it,
+        which is the failure mode a lockstep test structurally cannot reach (see `test_09`).
+    """
+    import httpx
+
+    created = H.create(relay_short_budgets, owner_token, "WRITE never.txt x", project="p-queue")
+    task_id = created["id"]
+
+    # ⚠️ FIRST, prove the clock this test's timings assume is the clock the relay is on. Every
+    # sleep below is meaningless otherwise: with the production budgets a task is `queued` at five
+    # seconds too, so an ignored `TASK_QUEUE_DEADLINE_SECONDS` would leave every assertion here
+    # passing for the wrong reason. The window is readable on the wire — `deadline_at` at create is
+    # `created_at + queue budget` — so the test can check it instead of trusting the fixture.
+    window = (datetime.fromisoformat(created["deadline_at"])
+              - datetime.fromisoformat(created["created_at"]))
+    assert window == timedelta(seconds=H.QUEUE_BUDGET_SECONDS), (
+        f"this relay is queueing on a {window} window, not the {H.QUEUE_BUDGET_SECONDS}s one the "
+        f"fixture asked for — the scaled budgets are not reaching the process")
+
+    # Past the RUN budget, and nothing has claimed it. Before this slice the task would already be
+    # `timed_out` here, with `attempt = 0`, having never run.
+    time.sleep(H.RUN_BUDGET_SECONDS + 2)
+    waiting = H.get(relay_short_budgets, owner_token, task_id)
+    assert waiting["state"] == "queued", waiting
+    assert waiting["claimed_at"] is None, waiting
+
+    # Opened and abandoned deliberately: a live queued task's stream has no end, and having one is
+    # the point. `stream=True` means httpx hands back the headers without draining the body.
+    with httpx.Client(timeout=10.0) as client:
+        with client.stream("GET", f"{relay_short_budgets}/relay/v1/tasks/{task_id}/events",
+                           headers={"Authorization": f"Bearer {owner_token}"}) as following:
+            assert following.status_code == 200, (
+                "a member following their own queued task was told the stream had expired while "
+                f"the task record still said `queued` ({following.status_code})")
+
+    ended = H.await_state(relay_short_budgets, owner_token, task_id, {"timed_out"}, timeout=60)
+    assert ended["error"] == remote_task.QUEUE_EXPIRED, (
+        f"the relay ended an unclaimed task with {ended['error']!r}, which is not the reason this "
+        f"client explains as a capacity shortfall")
+    assert ended["attempt"] == 0, ended

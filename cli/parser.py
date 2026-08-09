@@ -769,9 +769,9 @@ def _add_task(sub) -> None:
         description=(
             "Stop a task that has not finished, and give its member their one task slot back.\n\n"
             "Until this existed the only way out of a task nobody wanted any more was to wait for "
-            "its deadline — up to an hour — with that member unable to start anything else. A "
-            "conflict-resolution task queued by `grid project integrate` is the usual reason to "
-            "reach for it.\n\n"
+            "its deadline — an hour if it was running, and up to four if it was still waiting for "
+            "a provider — with that member unable to start anything else. A conflict-resolution "
+            "task queued by `grid project integrate` is the usual reason to reach for it.\n\n"
             "A project is shared, so any member may cancel any task in it: the colleague whose "
             "merge has been stuck all afternoon is often the person who needs to stop it. The "
             "event log records who did.\n\n"

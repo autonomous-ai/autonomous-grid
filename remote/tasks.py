@@ -49,6 +49,12 @@ _STDERR = object()
 # relay's deadline simply keeps working on a task that has already been given up on; one whose budget
 # is shorter fails it early. Neither corrupts anything, which is why this is a tunable default rather
 # than a value the claim payload has to carry.
+#
+# Since ADR 0033 D-k (issue 18) the two line up more closely than they used to, and nothing here had
+# to change for that. `task_deadline_seconds` is now the RUN budget and starts at the claim, so this
+# 3600 is measured against the same span rather than against an hour a task may already have spent
+# waiting in a queue — which is what used to make a long wait look, from here, like an agent that
+# had barely started before the relay gave up on it.
 DEFAULT_TASK_TIMEOUT_SECONDS = 3600.0
 TASK_TIMEOUT_ENV = "GRID_TASK_TIMEOUT_SECONDS"
 # Back-off after a transient claim failure, so an unreachable relay is retried without spinning.

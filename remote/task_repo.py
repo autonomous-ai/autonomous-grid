@@ -77,6 +77,12 @@ _GIT_TIMEOUT_SECONDS = 120
 # (3600s), or one checkout can eat the task's whole budget and the reaper ends it before the agent
 # runs. `tests/test_task_lease.py` pins both inequalities against grid-src's own source.
 #
+# That second inequality got STRICTER in meaning without changing in value (ADR 0033 D-k, issue 18).
+# `task_deadline_seconds` is now the RUN budget, starting at the claim, so these 900s are measured
+# against a full fresh hour rather than against whatever an hour-long single budget had left after
+# the task sat in a queue — which is the case that used to make a large first fetch fail for reasons
+# nothing here could see.
+#
 # Raised from 300s for ADR 0033 issue 16a: a real 581 MiB / 29,133-commit repository takes ~11s to
 # fetch on a fast local disk, and the relay is allowed ten minutes for the case that is not fast.
 _GIT_NETWORK_TIMEOUT_SECONDS = 900
