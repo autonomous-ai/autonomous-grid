@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from remote import (
     api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
-    codex_auth, codex_oauth,
+    codex_auth, codex_oauth, throughput,
 )
 from shared.handlers import HANDLERS
 from shared import run_records
@@ -1428,6 +1428,11 @@ class _ServeState:
         # Loopback URLs of this identity's CLI seats, read once at startup — the heartbeat asks
         # each for its allowance. Empty for an identity that serves no seat.
         self._seat_urls: list[str] = []
+        # Decode rate (tokens/sec) of the most recently served request that could be timed, guarded
+        # by _lock. None until this node has actually served one — the grid page then shows nothing,
+        # which is the truth: a node that has answered nothing has no measured throughput. Deliberately
+        # the LATEST sample rather than an average, so the figure tracks what the node is doing now.
+        self._tok_s: float | None = None
 
     def set_codex_quota(self, quota: dict[str, Any]) -> None:
         """Record the seat's latest rate-limit snapshot; the next heartbeat carries it to the relay.
@@ -1551,6 +1556,19 @@ class _ServeState:
         with self._lock:
             self._sweep = result
 
+    def set_throughput(self, tok_s: float | None) -> None:
+        """Record the decode rate of the request that just finished. Called from every poll worker,
+        so it takes the lock; ``None`` (an unmeasurable job — media, a reply too short to time) is
+        ignored rather than clearing, so one un-timeable request does not blank the gauge."""
+        if tok_s is None or tok_s <= 0:
+            return
+        with self._lock:
+            self._tok_s = float(tok_s)
+
+    def throughput(self) -> float | None:
+        with self._lock:
+            return self._tok_s
+
     def load(self) -> dict[str, Any]:
         with self._lock:
             load = {"active_tasks": self._inflight}
@@ -1569,6 +1587,12 @@ class _ServeState:
         load.update(gpu.load_snapshot())
         # OS/arch so the grid knows what a node runs: linux / macos-arm64 / macos-x86_64 / windows / other.
         load["platform"] = host.platform_kind()
+        load.update(_disk_load())
+        # Decode throughput measured on this node's OWN traffic (never a synthetic benchmark), absent
+        # until a real request has been served — see `throughput.py`.
+        tok_s = self.throughput()
+        if tok_s is not None:
+            load["tok_s"] = round(tok_s, 1)
         # Codex seat quota (when this engine serves a seat) — surfaced per-node on /grid/overview. The
         # value only changes on a served response / the join seed; the heartbeat just re-ships the last.
         if codex_quota:
@@ -2113,7 +2137,8 @@ def handle_job(state: _ServeState, job: dict[str, Any]) -> None:
         elif is_stream:
             _forward_stream(state, txn, "messages" if wire_format == "anthropic" else endpoint,
                             forward_body, read_timeout, target,
-                            headers=_forward_headers(state, target, snap), api_kind=api_kind)
+                            headers=_forward_headers(state, target, snap), api_kind=api_kind,
+                            measure=True)
         else:
             _forward_whole(state, txn, "messages" if wire_format == "anthropic" else endpoint,
                            forward_body, read_timeout, target,
@@ -2370,10 +2395,18 @@ def _forward_responses_stream(
             if on_headers is not None:
                 on_headers(resp.headers)
             if resp.status_code == 200:
+                # Metered like the chat stream, and reachable by every kind that serves the dialect —
+                # an openai engine, a local engine whose `/responses` probe succeeded, and the codex
+                # seat, which reaches this function through `_forward_codex`. The blocks are already
+                # whole events here, but the meter re-splits on newlines regardless, so it needs no
+                # knowledge of which forward it is wrapping.
+                meter = throughput.StreamMeter()
                 _submit_response(
                     state, txn, stream=True,
-                    content=_traced_stream(txn, _iter_event_blocks(resp.iter_bytes())),
+                    content=_traced_stream(txn, _iter_event_blocks(meter.measure(resp.iter_bytes()))),
                 )
+                meter.flush()
+                state.set_throughput(meter.tok_s)
                 return None
             resp.read()  # drain inside the context so .text is readable after it closes
             return _UpstreamFailure(resp.status_code, resp.headers, resp.text)
@@ -2436,6 +2469,38 @@ def _forward_codex(
         return
 
 
+def _disk_load() -> dict[str, float]:
+    """``disk_total_gb`` / ``disk_used_gb`` for the volume holding this node's model store.
+
+    Measured at ``paths.models_dir()``, not at ``~``: a box with its models on a separate NVMe would
+    otherwise report the home volume, which is not the space the next `grid pull` consumes. Walks up
+    to the first directory that exists, since the store is created lazily and a node can heartbeat
+    before it has pulled anything.
+
+    The measurement itself is `host.disk_gb`, which carries this repo's psutil→``statvfs`` ladder —
+    psutil is optional here, so calling it directly would report nothing on every box without it.
+    One ``statvfs`` per heartbeat, which is why nothing is memoized: unlike the GPU probe there is no
+    process to spawn, and caching the total would still leave usage needing the same call.
+
+    Returns ``{}`` on any failure — a node that cannot stat its own volume reports no disk rather
+    than zeros, which the grid page would render as a full drive.
+    """
+    try:
+        from shared import paths
+        from shared.system import host
+
+        target = paths.models_dir()
+        while not target.exists() and target != target.parent:
+            target = target.parent
+        measured = host.disk_gb(str(target))
+    except Exception:  # noqa: BLE001 — telemetry must never fail a heartbeat
+        return {}
+    if measured is None:
+        return {}
+    total_gb, used_gb = measured
+    return {"disk_total_gb": total_gb, "disk_used_gb": used_gb}
+
+
 def _forward_whole(
     state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float, target_url: str,
     headers: dict[str, str], api_kind: str | None = None,
@@ -2443,22 +2508,36 @@ def _forward_whole(
     import httpx
 
     timeout = httpx.Timeout(connect=10, read=read_timeout, write=30, pool=10)
+    started = time.monotonic()
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{target_url}/{endpoint}", json=body, headers=headers)
     if resp.status_code != 200:
         _warn_api_auth_failure(api_kind, resp.status_code)
         _try_submit_error(state, txn, f"engine error {resp.status_code}: {resp.text[:200]}")
         return
+    # Every caller of this forward is a text dialect (chat, anthropic /messages, non-stream
+    # responses) — media never reaches here — so the reply always has a usage object to read, in one
+    # spelling or another. Measured before the submit so a relay-side failure doesn't cost the sample.
+    state.set_throughput(throughput.whole_body_tok_s(resp.content, time.monotonic() - started))
     _submit_response(state, txn, content=resp.content, stream=False)
 
 
 def _forward_stream(
     state: _ServeState, txn: str, endpoint: str, body: dict[str, Any], read_timeout: float, target_url: str,
-    headers: dict[str, str], api_kind: str | None = None,
+    headers: dict[str, str], api_kind: str | None = None, measure: bool = False,
 ) -> None:
+    """Forward one streamed job, passing the engine's SSE bytes through verbatim.
+
+    ``measure`` times the decode rate for the node's `tok_s`. It is opt-in per call site rather than
+    always-on because THIS function also carries media: a ComfyUI reply is a multi-megabyte base64
+    image in a single unbroken SSE line, and a meter hunting that line for a newline would buffer the
+    whole image. Media has no tokens to count anyway, so the media call site simply leaves it off and
+    the meter never sees those bytes.
+    """
     import httpx
 
     timeout = httpx.Timeout(connect=10, read=read_timeout, write=None, pool=10)
+    meter = throughput.StreamMeter() if measure else None
     with httpx.Client(timeout=timeout) as client:
         with client.stream(
             "POST", f"{target_url}/{endpoint}", json=body, headers=headers,
@@ -2471,8 +2550,16 @@ def _forward_stream(
             # Pass the engine's SSE bytes straight through while its stream is open. A streamed 401 can't
             # replay the iterator, so `_submit_response` re-raises it; `handle_job` then reports via
             # `_try_submit_error` so the consumer still gets a terminal signal.
-            _submit_response(state, txn, content=_traced_stream(txn, engine_resp.iter_bytes()), stream=True)
+            chunks = engine_resp.iter_bytes()
+            if meter is not None:
+                chunks = meter.measure(chunks)
+            _submit_response(state, txn, content=_traced_stream(txn, chunks), stream=True)
             _debug(f"stream txn={txn} submit_response returned (relay accepted the full stream) t={time.time():.3f}")
+    # After the submit returned, so a stream that died mid-flight (which re-raises out of
+    # `_submit_response`) records nothing rather than a rate computed from a truncated reply.
+    if meter is not None:
+        meter.flush()
+        state.set_throughput(meter.tok_s)
 
 
 # Defensive bound on one buffered SSE event block: the real stream's largest block is ~1.4 KB of
