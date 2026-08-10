@@ -4262,3 +4262,140 @@ def _raising(exc):
         raise exc
 
     return _run
+
+
+# --- The package-manager cache environment (F-02, measured on the dev VM 2026-08-10) --------------
+
+
+def test_the_cache_variables_point_inside_the_writable_tree(tmp_path):
+    """Every manager is redirected to the one directory beside the workspace the sandbox grants.
+
+    Asserted against `task_sandbox.cache_dir` rather than against a literal path, because the whole
+    point is that the policy and the environment cannot disagree: a second spelling would grant one
+    directory and use another, and the symptom is the `EROFS` this fixes with the policy looking
+    correct.
+    """
+    from remote import task_agent, task_sandbox
+
+    workspace = tmp_path / "projects" / "p" / "m" / "workspace"
+    cache = task_sandbox.cache_dir(workspace)
+
+    env = task_agent.child_env(workspace=workspace)
+
+    for name in ("npm_config_cache", "YARN_CACHE_FOLDER", "PIP_CACHE_DIR", "XDG_CACHE_HOME"):
+        assert name in env, f"{name} unset — that manager falls back to the read-only shared cache"
+        assert str(cache) in env[name], f"{name} points outside the tree the sandbox made writable"
+
+
+def test_TMPDIR_is_never_pointed_into_the_cache_tree(tmp_path):
+    """The redirect that broke every task on the dev VM, pinned so it cannot come back.
+
+    Claude Code's sandbox binds Unix domain sockets under `TMPDIR`, and `sun_path` is **108 bytes**
+    — a kernel limit nothing in the error text mentions. MEASURED against the real provider layout:
+    `/var/grid-provider/projects/<uuid-36>/<member_key-32>/cache/tmp` is already 107 bytes, so a
+    socket inside it is 128 and `bind()` answers `AF_UNIX path too long`. The agent then reports
+    `Sandbox is required but failed to initialize: Failed to create bridge sockets after 5
+    attempts`, every Bash call fails, and the task still ends `completed`.
+
+    Adding `TMPDIR` here looks like symmetry with the cache variables. It is not: a cache path is
+    only ever opened as a file, and a temp path gets a socket bound in it.
+    """
+    from remote import task_agent, task_sandbox
+
+    workspace = tmp_path / "projects" / "p" / "m" / "workspace"
+    cache = str(task_sandbox.cache_dir(workspace))
+
+    env = task_agent.child_env(workspace=workspace)
+
+    assert cache not in env.get("TMPDIR", ""), (
+        "TMPDIR under the cache tree exceeds sun_path (108) and kills the sandbox outright")
+
+
+def test_the_real_provider_layout_leaves_no_room_for_a_socket_under_the_cache(tmp_path):
+    """The measurement itself, so the reason above is a number rather than a story.
+
+    Uses the real shapes — a 36-character project uuid and a 32-character member key — under the
+    documented default root. If a future layout makes this comfortably short, the constraint above
+    can be revisited on evidence instead of being deleted on taste.
+    """
+    from remote import task_sandbox
+
+    workspace = Path("/var/grid-provider/projects") / ("p" * 36) / ("m" * 32) / "workspace"
+    tmp_under_cache = task_sandbox.cache_dir(workspace) / "tmp"
+
+    # 108 is `sizeof(sockaddr_un.sun_path)`; a socket FILE still has to fit inside the directory.
+    assert len(str(tmp_under_cache)) > 108 - len("/claude-0/bridge.sock")
+
+
+def test_cargo_home_is_deliberately_not_redirected(tmp_path):
+    """`CARGO_HOME` holds credentials and installed binaries, not only a cache.
+
+    Moving it per task would silently drop an operator's toolchain, so it is left alone — and this
+    says so, because "add the rest of the managers" is the obvious next edit.
+    """
+    from remote import task_agent
+
+    env = task_agent.child_env(workspace=tmp_path / "projects" / "p" / "m" / "workspace")
+
+    assert "CARGO_HOME" not in env
+
+
+def test_a_call_with_no_workspace_sets_no_cache_variables(tmp_path):
+    """The parameter is optional, so the callers that only want the identity floor keep working.
+
+    Pinned because the failure is silent in the other direction too: a cache variable pointing at a
+    path no policy granted is worse than none at all.
+
+    `TMPDIR` is deliberately NOT in this list. It is on the passthrough allowlist (`:114`), so the
+    provider's own value reaches the child whether or not a workspace was given — which is the
+    pre-existing behaviour, and the one `task_sandbox.policy` already agrees with because it reads
+    the same variable. What must not appear is a value this function invented.
+    """
+    import os
+
+    from remote import task_agent
+
+    env = task_agent.child_env()
+
+    for name in ("npm_config_cache", "YARN_CACHE_FOLDER", "PIP_CACHE_DIR", "XDG_CACHE_HOME"):
+        assert name not in env
+    assert env.get("TMPDIR", "") == os.environ.get("TMPDIR", ""), (
+        "TMPDIR must pass through untouched when no workspace was given")
+
+
+def test_ensure_cache_creates_the_tree_before_any_agent_runs(tmp_path):
+    """The sandbox grants `<member>/workspace` and `<member>/cache`, never `<member>/` itself.
+
+    So a package manager handed `…/cache/npm` can make its own subdirectories and could never make
+    `cache`. Left to the agent, the bug returns wearing a different errno.
+    """
+    from remote import task_agent, task_sandbox
+
+    workspace = tmp_path / "projects" / "p" / "m" / "workspace"
+    task_agent.ensure_workspace(workspace)
+
+    cache = task_agent.ensure_cache(workspace)
+
+    assert cache == task_sandbox.cache_dir(workspace)
+    assert cache.is_dir()
+    # The SAME mode discipline as the workspace beside it, asserted by comparison rather than
+    # against a literal: `_DIR_MODE` is 0o755 and the umask keeps its say, so a hard-coded 0o700
+    # would encode this developer's umask rather than the rule. What must hold either way is that
+    # nothing outside the owner can WRITE (ADR 0027).
+    assert cache.stat().st_mode == workspace.stat().st_mode
+    assert (cache.stat().st_mode & 0o022) == 0
+
+
+def test_ensure_cache_is_idempotent(tmp_path):
+    """A second task for the same (project, member) finds the tree warm, and must not fail on it."""
+    from remote import task_agent
+
+    workspace = tmp_path / "projects" / "p" / "m" / "workspace"
+    task_agent.ensure_workspace(workspace)
+
+    first = task_agent.ensure_cache(workspace)
+    (first / "npm" ).mkdir()
+    second = task_agent.ensure_cache(workspace)
+
+    assert first == second
+    assert (second / "npm").is_dir(), "an existing cache must survive — otherwise it is never warm"

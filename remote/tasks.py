@@ -562,6 +562,10 @@ def run_task(job: dict[str, Any],
     try:
         workspace = task_agent.ensure_workspace(
             task_agent.workspace_for(str(job.get("project_id") or ""), member_key))
+        # The writable cache tree beside it, created in the same guarded block so a provider whose
+        # task root is unwritable fails here — as "could not create …" on a task that cost nothing —
+        # rather than three minutes later as an `EROFS` inside somebody's `npm install`.
+        task_agent.ensure_cache(workspace)
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
         binary = task_agent.resolve_binary()
@@ -681,7 +685,10 @@ def run_task(job: dict[str, Any],
             # commit, or one merge would name the member and the next a hostname.
             env=task_agent.child_env(
                 author=task_repo.identity_or_default(
-                    job.get("author_name"), job.get("author_email"))),
+                    job.get("author_name"), job.get("author_email")),
+                # Same workspace the confinement policy was built around, so the cache variables
+                # name the one directory beside it that the policy made writable.
+                workspace=workspace),
             translator=translator, on_spawn=on_spawn)
     except subprocess.TimeoutExpired:
         return failed(f"task timed out after {timeout:.0f}s")

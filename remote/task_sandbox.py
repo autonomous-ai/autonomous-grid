@@ -60,14 +60,48 @@ DEFAULT_ALLOWED_DOMAINS = (
 _CREDENTIAL_DIRS = (".grid", ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker")
 _CREDENTIAL_FILES = (".netrc", ".npmrc", ".pypirc", ".git-credentials")
 
-# Where package managers keep their caches, re-allowed inside the denied home. Without these a task
-# that installs anything re-downloads it at best and fails at worst, and acceptance rests on a normal
-# build-and-test task still passing. `allowRead` is documented to take precedence over `denyRead`;
-# it does **not** override a `credentials.files` deny entry, which was measured rather than assumed.
+# Where package managers keep their caches, re-allowed READ-ONLY inside the denied home, so an
+# already-populated provider cache is reused instead of re-downloaded. `allowRead` is documented to
+# take precedence over `denyRead`; it does **not** override a `credentials.files` deny entry, which
+# was measured rather than assumed.
+#
+# ⚠️ **Read-only, and the WRITE side is deliberately somewhere else — see `cache_dir`.** These are
+# the provider's own caches, shared by every task and every MEMBER on this box. Making them writable
+# is a one-line change and it opens a cross-member contamination channel: one member's task could
+# plant a package in `~/.npm` that another member's task then installs, on a provider neither of
+# them chose. ADR 0033 D-g exists to keep members out of each other's state; a shared writable cache
+# would put it back at a layer nobody looks at.
 _BUILD_CACHE_DIRS = (
     ".cache", ".npm", ".yarn", ".pnpm-store", ".cargo", ".rustup", ".gradle", ".m2", ".bun",
     ".local/share/uv", ".local/share/pnpm", ".nvm", ".pyenv", ".rbenv",
 )
+
+# The one writable scratch tree a task gets outside its workspace, and the name is a sibling of
+# `workspace` rather than a directory inside it — **`task_repo.commit_and_push` runs `git add -A`**,
+# so a cache under the workspace would be committed into the team's history, hundreds of megabytes
+# of `node_modules` at a time, on the first task that installed anything.
+#
+# It exists because read-only caches do not degrade, they FAIL. MEASURED on the dev VM against
+# Claude Code 2.1.226: with only the read-only grant above, a plain `npm install` dies with
+# `EROFS: read-only file system, open '/root/.npm/_cacache/tmp/…'` and `node` then reports
+# `MODULE_NOT_FOUND` — npm treats an unwritable cache as fatal. `pip` survives the same policy only
+# because it degrades to no-cache, which is why "pip install works" was true and misleading: it was
+# true of the single ecosystem that happens to forgive this.
+#
+# Per (project, member), like the workspace it sits beside, so it is warm on the second task and
+# still isolated between members.
+CACHE_DIR_NAME = "cache"
+
+
+def cache_dir(workspace: Path) -> Path:
+    """The writable cache tree beside `workspace`, for the task's package managers.
+
+    Derived in ONE place because two consumers must agree exactly: this module grants it in
+    `allowWrite`, and `task_agent.child_env` points `npm_config_cache` and friends at it. Two
+    spellings of the same path would grant one directory and use another — and the symptom would be
+    the `EROFS` this function exists to remove, with the policy looking correct.
+    """
+    return workspace.parent / CACHE_DIR_NAME
 
 # NOT set, and the omission is a decision rather than an oversight: `sandbox.enableWeakerNetworkIsolation`.
 #
@@ -248,6 +282,16 @@ def policy(workspace: Path, config_dir: Path) -> dict:
     # managers, `python3 -c`. Read-only here would confine the agent into failing rather than into
     # safety, and a temp directory is not somewhere secrets are kept: it is granted on both axes.
     writable = [workspace_path]
+    # The per-(project, member) cache tree, on both axes for exactly the reason stated above the
+    # temp directory — and it is the same sentence that was NOT applied to `_BUILD_CACHE_DIRS`,
+    # which is how `npm install` came to fail on every real repository. Granted here rather than by
+    # widening the home caches, so nothing shared between members becomes writable.
+    # `workspace_path` is already a resolved STRING, so the sibling is derived from it as a `Path`
+    # and resolved again — the cache may not exist yet when the policy is built, and `resolve()` is
+    # non-strict, so this is the same real path the child will be handed.
+    cache = _resolved(cache_dir(Path(workspace_path)))
+    allowed.append(cache)
+    writable.append(cache)
     tmp = os.getenv("TMPDIR")
     if tmp:
         allowed.append(_resolved(Path(tmp)))

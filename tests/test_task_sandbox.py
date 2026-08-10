@@ -33,6 +33,7 @@ configured, so only a test that proves the *denial* is worth anything.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -335,3 +336,67 @@ def test_confinement_is_on_unless_an_operator_turns_it_off(monkeypatch):
     # "confined" rather than "unconfined and nobody noticed".
     monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "flase")
     assert task_sandbox.enabled() is True
+
+
+# --- The writable cache tree (F-02, measured on the dev VM 2026-08-10) ----------------------------
+#
+# `_BUILD_CACHE_DIRS` grants the provider's package caches READ-ONLY, and a read-only cache does not
+# degrade — it FAILS. Measured against Claude Code 2.1.226 in a real task: a plain `npm install`
+# died with `EROFS: read-only file system, open '/root/.npm/_cacache/tmp/…'` and `node` then
+# reported `MODULE_NOT_FOUND`. `pip` survived the identical policy only because it degrades to
+# no-cache, which is why "pip install works" was both true and misleading.
+#
+# The fix is a writable tree BESIDE the workspace rather than widening the shared home caches. These
+# tests pin all three properties that makes it depend on, because getting any one wrong reintroduces
+# a different bug: it must be writable, it must NOT be inside the workspace, and the shared caches
+# must stay read-only.
+
+
+def test_the_cache_tree_is_writable_so_a_package_manager_can_use_it(tmp_path, config_dir):
+    """The regression itself. Read-only here is the `EROFS` that stopped every npm install."""
+    from remote import task_sandbox
+
+    workspace = tmp_path / "projects" / "p" / "m" / "workspace"
+
+    filesystem = task_sandbox.policy(workspace, config_dir)["sandbox"]["filesystem"]
+
+    cache = str(task_sandbox.cache_dir(workspace).resolve())
+    assert cache in filesystem["allowRead"]
+    assert cache in filesystem["allowWrite"], "a read-only cache fails npm outright, not gracefully"
+
+
+def test_the_cache_tree_is_a_SIBLING_of_the_workspace_never_inside_it(tmp_path):
+    """`task_repo.commit_and_push` runs `git add -A`.
+
+    A cache under the workspace would therefore be committed into the team's history — a
+    `node_modules` at a time, permanently, on the first task that installed anything. This is the
+    property that decides where the directory goes, so it is asserted on the path itself rather
+    than inferred from the policy.
+    """
+    from remote import task_sandbox
+
+    workspace = tmp_path / "projects" / "p" / "m" / "workspace"
+    cache = task_sandbox.cache_dir(workspace)
+
+    assert cache.parent == workspace.parent
+    assert workspace not in cache.parents
+    assert not str(cache).startswith(str(workspace) + os.sep)
+
+
+def test_the_SHARED_home_caches_stay_read_only(tmp_path, config_dir):
+    """The security half, and the reason the fix is not the one-line version.
+
+    `~/.npm`, `~/.cargo` and the rest belong to the PROVIDER and are shared by every task and every
+    member on the box. Writable, they are a cross-member contamination channel — one member's task
+    plants a package another member's task then installs — which is exactly what ADR 0033 D-g
+    exists to prevent. A future "just make the caches writable" fix fails here.
+    """
+    from remote import task_sandbox
+
+    filesystem = task_sandbox.policy(tmp_path / "workspace", config_dir)["sandbox"]["filesystem"]
+
+    for cache in task_sandbox._BUILD_CACHE_DIRS:
+        resolved = str((Path.home() / cache).resolve())
+        assert resolved in filesystem["allowRead"]
+        assert resolved not in filesystem["allowWrite"], (
+            f"{cache} is shared between members; writable makes it a contamination channel")

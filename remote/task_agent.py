@@ -287,6 +287,26 @@ def ensure_workspace(path: Path) -> Path:
     return path
 
 
+def ensure_cache(workspace: Path) -> Path:
+    """Create the writable cache tree beside `workspace`, before any agent runs.
+
+    It has to exist up front: the sandbox grants exactly `<member_key>/workspace` and
+    `<member_key>/cache`, and NOT the `<member_key>/` directory that holds them — so a package
+    manager handed `…/cache/npm` can create its own subdirectories but could never create `cache`
+    itself. Left to the agent, the very failure this fixes comes back wearing a different errno.
+
+    Only the cache root: there is deliberately no `tmp` beneath it, because `TMPDIR` is not
+    redirected here — see `_cache_env` for the 108-byte `sun_path` limit that decided it.
+
+    Reuses `ensure_workspace` for the mode discipline instead of restating it — the same
+    `_DIR_MODE`, the same refusal on a symlink, the same "only levels we create get their mode
+    from us".
+    """
+    cache = Path(task_sandbox.cache_dir(workspace))
+    ensure_workspace(cache)
+    return cache
+
+
 # Every character Claude Code replaces when it turns a working directory into a transcript-directory
 # name. MEASURED, not read out of documentation: a session run in `/private/tmp/grid_enc/a_b.c-d`
 # landed in `~/.claude/projects/-private-tmp-grid-enc-a-b-c-d` (2.1.222, macOS, 2026-08-05). The
@@ -703,11 +723,59 @@ def _git_identity(author) -> dict[str, str]:
     }
 
 
-def child_env(author=None) -> dict[str, str]:
+def _cache_env(workspace: Path) -> dict[str, str]:
+    """Point every package manager's cache and temp at the writable tree beside the workspace.
+
+    The sandbox denies `$HOME`, and `task_sandbox` re-allows the provider's package caches
+    READ-ONLY on purpose — they are shared by every member on the box. A read-only cache does not
+    degrade, it fails: MEASURED on the dev VM, a plain `npm install` dies with
+    `EROFS: read-only file system, open '/root/.npm/_cacache/tmp/…'`, and `node` then reports
+    `MODULE_NOT_FOUND`. `pip` survived the same policy only because it degrades to no-cache.
+
+    So each manager is redirected to `task_sandbox.cache_dir(workspace)` — writable, per
+    (project, member), warm on the second task, and a SIBLING of the workspace so
+    `commit_and_push`'s `git add -A` never sees it.
+
+    The names are the managers' own documented variables, not a guess: npm reads
+    `npm_config_cache`, yarn `YARN_CACHE_FOLDER`, pip `PIP_CACHE_DIR`, and `XDG_CACHE_HOME` catches
+    the tools that follow the base-directory spec (uv among them). `CARGO_HOME` is deliberately
+    absent — it holds credentials and installed binaries, not only a cache, and moving it per task
+    would silently drop an operator's toolchain.
+
+    ⚠️ **`TMPDIR` is NOT here, and it was — for one deploy, on the dev VM, where it broke every
+    task.** Pointing it at `<cache>/tmp` looked symmetrical and is fatal: Claude Code's sandbox
+    creates Unix domain sockets under `TMPDIR`, and `sun_path` is **108 bytes**, a kernel limit no
+    error message mentions. MEASURED on the dev VM against the real layout — the cache tmp path is
+    already **107** bytes (`/var/grid-provider/projects/<uuid-36>/<member_key-32>/cache/tmp`), so a
+    socket inside it is 128 and `bind()` answers `AF_UNIX path too long`. What the agent sees is
+    `Sandbox is required but failed to initialize: Failed to create bridge sockets after 5
+    attempts`, EVERY Bash call fails, and — the part that makes it dangerous — the task still ends
+    `completed`.
+
+    So the redirection stops at caches, whose paths are only ever opened as files. `/tmp` stays
+    unwritable and that is accepted: the bug this function exists for was npm's CACHE
+    (`/root/.npm/_cacache`), and an agent that wants scratch space has a writable workspace.
+    Anything added here later must be a path a package manager opens, never one a socket is bound
+    in.
+    """
+    cache = Path(task_sandbox.cache_dir(workspace))
+    return {
+        "npm_config_cache": str(cache / "npm"),
+        "YARN_CACHE_FOLDER": str(cache / "yarn"),
+        "PIP_CACHE_DIR": str(cache / "pip"),
+        "XDG_CACHE_HOME": str(cache / "xdg"),
+    }
+
+
+def child_env(author=None, workspace: Path | None = None) -> dict[str, str]:
     """The environment the agent child is handed — an ALLOWLIST (ADR 0033 D-n, issue 23 layer 1).
 
     `author` is the project member the claim named (ADR 0033 D-m), used for commits the AGENT makes
     — which only became possible at issue 15, when a merge task's prompt started asking for one.
+
+    `workspace` is what the package-manager cache variables are derived from. Optional so the two
+    callers that only want the identity floor keep working, but a task that spawns an agent must
+    pass it — without it `npm install` fails outright (see `_cache_env`).
 
     ADR 0028's rule, applied here: whatever we set is set **on the child process only** — never
     exported to the provider's shell, never written to a config file, never into this process's own
@@ -762,4 +830,9 @@ def child_env(author=None) -> dict[str, str]:
     config_dir = configured_claude_config_dir()
     if config_dir is not None:
         env[_CLAUDE_CONFIG_DIR] = str(config_dir)
+    # LAST, and forced like the git floor above: an operator's passthrough list naming
+    # `npm_config_cache` would otherwise point a package manager at a path the sandbox does not
+    # grant, and the failure is the `EROFS` this exists to remove.
+    if workspace is not None:
+        env.update(_cache_env(workspace))
     return env
