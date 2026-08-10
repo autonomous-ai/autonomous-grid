@@ -29,6 +29,28 @@ def _claude_config_dir_is_never_the_real_one(monkeypatch, tmp_path_factory, requ
 
 
 @pytest.fixture(autouse=True)
+def _no_test_reads_a_real_process_environment(monkeypatch):
+    """No test may decide anything from a **real** process's environment.
+
+    `orphan_sweep` spares a match it can prove runs from a different `GRID_HOME`, reading
+    `/proc/<pid>/environ` through `shared.process_home.home_of`. Every sweep test feeds a fabricated
+    process table, so its pids are made-up numbers — and on Linux a made-up number often names a
+    real, live, unrelated process whose home is not the `tmp_path` the test set. That match would be
+    spared and the test would fail on a coincidence of the machine it ran on, which is the flake
+    class this file exists to prevent.
+
+    Answering "unknown" is also the *truthful* answer for a pid that names nothing, so this narrows
+    nothing the suite is entitled to see. A test that means to exercise the check patches `home_of`
+    itself; `monkeypatch.setattr` in the test runs after this fixture, so its value wins. The real
+    reader keeps its own positive control in `tests/test_process_home.py`, which calls the
+    underlying `_read_environ` and is therefore untouched by this.
+    """
+    from shared import process_home
+
+    monkeypatch.setattr(process_home, "home_of", lambda pid: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_test_leaves_a_project_workspace_reserved():
     """`tasks._WORKSPACES_IN_USE` is process-global, and a leak from one test breaks OTHERS.
 

@@ -108,6 +108,40 @@ Choices a future reader will otherwise re-litigate:
   case-folding to `s`, and a trailing newline that `$` matches before). It lives in `shared/` because
   `shared/` may not import `remote/` and both halves of a teardown need it.
 
+- **An argv names a grid; it does not name an installation — so the sweep reads the child's own
+  `GRID_HOME`.** Added after this ADR was accepted, on the strength of dev-VM finding E-03. The two
+  bullets above bound what a *stranger* can make the sweep kill; neither bounds what a **colleague**
+  can. Two accounts serving one grid from one provider box spawn children whose command lines agree
+  in every token — measured on the dev VM, both were byte-identical down to the engine id `remote` —
+  so `grid leave` run from one `GRID_HOME` unregistered and killed the other account's provider, at
+  exit 0, with nothing said. Same uid, so EPERM never fires; same grid, so the marker and the network
+  id are supposed to match. That topology is not exotic: a small team running its own provider box is
+  the premise of ADR 0032, and the finding took minutes to hit on the first box that had two.
+
+  The discriminator is `GRID_HOME`, because it is what the run records, the credentials, the engine
+  logs and the node identity are all keyed by — two of them on one box are two installations by
+  definition. It is read from `/proc/<pid>/environ` (`shared/process_home.py`), and every match that
+  can be **proven** to belong to a different one is dropped before anything is signalled, with a
+  stderr line naming the pid and the home. Proven, never suspected: unknown is treated as ours, so
+  this can only ever make a sweep kill less.
+
+  Pinning the *engine id* instead was the obvious alternative and is measurably not enough — both
+  children on the dev VM carried the same one — and it would have cost the record-less orphan, which
+  is the only thing the sweep uniquely reaps.
+
+  **Linux only, and that is where the hole is.** `/proc/<pid>/environ` is readable by the process's
+  own uid and by root, which is exactly the case in question: a different user's match is already
+  declined at signal time and reported as `foreign`, so what was left open is same-uid,
+  different-`GRID_HOME` — and there the file is readable. macOS has no equivalent (measured on 26.6:
+  `ps -E` and `ps eww` print no environment even for the caller's own child) and Windows would need a
+  remote-thread PEB read. On both, the answer is unknown and the behaviour is exactly what it was.
+
+  ⚠️ **This overturns ADR 0025's "the sweep's scope is the process table, not `GRID_HOME`" residual**,
+  which reasoned that two configs sharing a grid id are one grid to this CLI. That holds for a *local*
+  grid id, which is an accident when it collides. It does not hold for a remote network id, which is
+  shared **by design** — several accounts joining one grid is what a grid is *for* — and the residual
+  was accepted without the remote case being separated from the local one.
+
 Consequences. A `grid leave` that could not see the box, or found a live child of this grid it was
 not allowed to stop, now says so on the line that reports success — the same class of honesty
 `scanned=False` already had, extended to the two cases that looked identical to a clean run. Three

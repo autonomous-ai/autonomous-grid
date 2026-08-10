@@ -17,6 +17,15 @@ id), unrelated commands (no marker), a bystander that merely mentions the marker
 ``pgrep``/``watch``/wrapper — one token after it), and the leave process itself (own pid, via
 ``exclude_pids``) are never touched.
 
+What the argv cannot say is **which installation** a child belongs to, and that gap is not pedantic:
+a network id is *shared by design*, so two accounts serving one grid from one provider box spawn
+children agreeing in every token, and one operator's leave reaped the other's provider in silence
+(dev-VM finding E-03). ``shared.process_home`` supplies the missing discriminator — the child's own
+``GRID_HOME`` — and every match it can **prove** belongs to another one is dropped from the scan
+before anything is signalled, naming what it spared. It answers *unknown* off Linux and for anything
+it cannot pin down, and unknown is treated as ours, so this can only ever narrow a sweep, never widen
+one.
+
 It lives in ``shared/`` rather than under one mode because both modes' leave uses it, exactly as
 ``shared.run_records`` holds the record format and teardown they share.
 
@@ -49,7 +58,7 @@ import time
 from collections.abc import Iterable
 from typing import NamedTuple
 
-from shared import process_identity, run_records, win_paths
+from shared import process_home, process_identity, run_records, win_paths
 
 
 # How many unreadable rows (see ``_WIN_UNREADABLE_MARKER``) a scan may contain and still be treated
@@ -321,6 +330,38 @@ def _match_orphan_pids(
     """The pids of ``_match_engine_children``, in process-table order — for every caller that acts on
     the whole match set rather than deciding per child."""
     return list(_match_engine_children(table_output, marker, *pinned, exclude_pids=exclude_pids))
+
+
+def _drop_other_homes(matched: dict[int, str]) -> dict[int, str]:
+    """``matched`` minus every child we can prove serves this grid from a **different**
+    ``GRID_HOME`` — and a stderr line naming each one.
+
+    The argv match is still the whole identity test; this only takes away pids that are provably
+    somebody else's installation (see ``shared.process_home``, and the E-03 paragraph above). A pid
+    whose home is unknown — every pid off Linux, every process another user owns, every environment
+    we could not pin down — is kept, so the record-less orphan this sweep exists to reap is never
+    stranded by a check that could not run.
+
+    It is **named, not silently skipped**, for the reason the whole feature exists: the bug was not
+    that a process was killed, it was that nothing said so. A leave that quietly declined to touch a
+    child would be the same defect facing the other way — an operator hunting a stray provider with
+    no line telling them which box's ``GRID_HOME`` it answers to. Quiet in the ordinary case by
+    construction: a single-installation box produces no entries at all.
+
+    Applied where the process table is turned into matches rather than at each caller, so the local
+    leave, the remote leave and ``grid logout`` cannot disagree about it — the drift ``caveats``
+    documents one screen up.
+    """
+    others = process_home.other_home_pids(matched)
+    if not others:
+        return matched
+    for pid, home in sorted(others.items()):
+        print(
+            f"Note: engine child pid {pid} serves this grid from a different installation "
+            f"(GRID_HOME {home}); left it alone.",
+            file=sys.stderr,
+        )
+    return {pid: engine_id for pid, engine_id in matched.items() if pid not in others}
 
 
 def _count_unreadable(table_output: str) -> int:
@@ -672,7 +713,13 @@ def find_orphans(
     excluded = frozenset(exclude_pids) | {os.getpid()}
     found: dict[str, tuple[int, ...]] = {}
     for network_id in network_ids:
-        matched = _match_orphan_pids(output, marker, network_id, exclude_pids=excluded)
+        # Another installation's live child is not this identity's to report on: `grid logout` reads
+        # this to decide which grids still need tearing down before it deletes the credentials that
+        # address them, and a neighbour's provider would make it refuse to finish over a process it
+        # has no business stopping.
+        matched = _drop_other_homes(
+            _match_engine_children(output, marker, network_id, exclude_pids=excluded)
+        )
         if matched:
             found[network_id] = tuple(matched)
     return ScanResult(found, unreadable=_count_unreadable(output))
@@ -705,7 +752,7 @@ def scan_engine_children(
         return None
     excluded = frozenset(exclude_pids) | {os.getpid()}
     return Scan(
-        _match_engine_children(output, marker, *pinned, exclude_pids=excluded),
+        _drop_other_homes(_match_engine_children(output, marker, *pinned, exclude_pids=excluded)),
         _ppid_by_pid(output),
         _count_unreadable(output),
     )

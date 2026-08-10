@@ -5886,6 +5886,76 @@ def test_sweep_orphans_never_targets_its_own_pid(monkeypatch):
     assert orphan_sweep.sweep_orphans("__remote-engine", "n1") == orphan_sweep.SweepResult((), (), ())
 
 
+# --- a second GRID_HOME on the same box (dev-VM finding E-03) ------------------------------------
+# The sweep's discriminator is the argv, and the argv is the identity of a *grid*, not of an
+# installation. Two accounts serving one grid from one provider box — the shared host ADR 0032 is
+# written for — spawn children that agree in every token, so one operator's leave reaped the other's
+# provider and said nothing. Reproduced live on the dev VM before it was reproduced here.
+
+def test_sweep_orphans_spares_a_child_that_belongs_to_another_grid_home(monkeypatch, capsys):
+    """A match we can PROVE runs from a different `GRID_HOME` is left alone, and named on stderr.
+
+    Both rows carry the same network id and the same marker; only the environment separates them.
+    Killing 222 is E-03: the other account's provider goes down mid-task, unregistered, with the
+    operator told only that their own grid was left.
+    """
+    from shared import orphan_sweep, process_home
+
+    ps = "\n".join([
+        "  111 /opt/grid-public/bin/grid __remote-engine n1 codex",   # ours
+        "  222 /opt/grid-public/bin/grid __remote-engine n1 claude",  # the other account's
+    ])
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: ps)
+    monkeypatch.setattr(process_home, "home_of",
+                        {111: "/root/.grid-provider", 222: "/root/.grid-provider3"}.get)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
+                        lambda pid: pid != 222 or pytest.fail("swept another GRID_HOME's child"))
+
+    result = orphan_sweep.sweep_orphans("__remote-engine", "n1")
+    assert result.reaped == (111,)
+    assert result.survivors == () and result.foreign == ()  # spared, not failed — nothing is wrong here
+    err = capsys.readouterr().err
+    assert "222" in err and "/root/.grid-provider3" in err  # never silent: it names pid AND home
+
+
+def test_sweep_orphans_still_reaps_a_child_whose_home_it_cannot_read(monkeypatch):
+    """The positive control that keeps the fix from becoming a bigger bug than E-03.
+
+    macOS and Windows can read no process's environment at all (measured on macOS 26.6: `ps -E`
+    prints none even for the caller's own child), so `home_of` answers `None` for every match there.
+    Unknown must stay killable, or the record-less orphan this whole sweep exists to reap is stranded
+    on every platform but Linux — with `grid leave` reporting a clean teardown over it.
+    """
+    from shared import orphan_sweep, process_home
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  111 /bin/grid __remote-engine n1 codex")
+    monkeypatch.setattr(process_home, "home_of", lambda pid: None)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: True)
+
+    assert orphan_sweep.sweep_orphans("__remote-engine", "n1").reaped == (111,)
+
+
+def test_find_orphans_never_reports_another_grid_homes_child(monkeypatch):
+    """The detect-only half inherits the same rule, and it matters for a different reason.
+
+    `grid logout` reads this to decide which grids still have a live child before it deletes the
+    credentials that address them. Another account's provider is not this identity's to report, tear
+    down, or be warned about — the sign-out would refuse to complete over somebody else's process.
+    """
+    from shared import orphan_sweep, process_home, run_records
+
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  222 /bin/grid __remote-engine n1 claude")
+    monkeypatch.setattr(process_home, "home_of", lambda pid: "/root/.grid-provider3")
+
+    scan = orphan_sweep.find_orphans(run_records.REMOTE_ENGINE_MARKER, ["n1"])
+    assert scan.found == {}  # absent, not an empty tuple — callers write `if nid in found`
+    assert scan.scanned is True  # we read the table fine; there is simply nothing of ours on it
+
+
 # --- detect-only pass (grid-leave issue 13) ------------------------------------------------------
 # `grid logout` has to decide WHICH grids to tear down before it touches any of them, and a
 # record-less orphan is only visible in the process table. `find_orphans` answers that question for

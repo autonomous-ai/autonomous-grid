@@ -145,6 +145,16 @@ branch is never reached, and the aliasing predates this change (before it, that 
 those records unconditionally). The honest statement is that two grids sharing an id are one grid to
 every part of this CLI, and leaving it reaps its children wherever they are.
 
+⚠️ **Half of that residual has since been overturned — see the `GRID_HOME` bullet added to
+[ADR 0024](./0024-what-the-argv-sweep-may-kill-and-what-it-can-see.md).** The paragraph above answers
+for a *local* grid id, where a collision is an accident and the two configs really are one grid; that
+part stands. It was written as though the same reasoning covered **remote**, and it does not: a
+network id is shared **by design**, so two accounts joining one grid from one provider box is the
+ordinary case rather than a misconfiguration — and dev-VM finding E-03 is one operator's `grid leave`
+tearing down the other's provider at exit 0 in silence. A sweep now drops any match it can prove runs
+from a different `GRID_HOME`. Recorded here rather than edited away, because the reasoning that
+generalised a local property to the remote one is what a future reader needs to see.
+
 **The `__engine` marker's collision surface is measured, not assumed.** ADR 0024 justified the
 argument-count discriminator against a real process table for `__remote-engine`; the shorter local
 marker deserved the same and had not had it. Measured on a developer box with a full desktop and
