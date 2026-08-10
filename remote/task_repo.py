@@ -684,7 +684,7 @@ def fetched_project(dest: Path) -> str | None:
         return None
 
 
-def checkout_result(dest: Path, *, url: str, token: str, branch: str, commit: str,
+def checkout_result(dest: Path, *, url: str, token: str, branch: str, commit: str = "",
                     project_id: str = "") -> None:
     """Put a task's finished branch into a directory the CLIENT chose.
 
@@ -698,8 +698,8 @@ def checkout_result(dest: Path, *, url: str, token: str, branch: str, commit: st
     is what makes the marker below the whole guard rather than a nicety: the CALLER must establish
     that this directory is one of ours before calling.
     """
-    if not branch or not commit:
-        raise CheckoutError("this task has no result to fetch yet")
+    if not branch:
+        raise CheckoutError("this task has no branch to fetch")
 
     _ensure_repo(dest)
     # Written before the checkout, so a fetch interrupted halfway still leaves a directory the next
@@ -708,5 +708,14 @@ def checkout_result(dest: Path, *, url: str, token: str, branch: str, commit: st
     _run(dest, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
          token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     _run(dest, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
-    _run(dest, "reset", "--quiet", commit)
+    # The PINNED commit whenever the task reported one, and the branch tip only when it did not.
+    # Never the tip as a shortcut for the pinned case: the row's `result_commit` is what that task
+    # actually produced, and a branch can have moved since — a retry pushes the same ref.
+    #
+    # The tip arm exists for a task that ended with no result at all: a cancelled one, whose agent
+    # was killed before `commit_and_push` ran (ADR 0033 D-l, issue 19b). Its branch still holds the
+    # task's INPUT, and `grid task cancel` promises exactly that branch — a promise it has to make
+    # before the outcome is known, because the agent does not die until the next lease beat. The
+    # caller is responsible for saying which of the two arrived; see `cli/remote_task._task_fetch`.
+    _run(dest, "reset", "--quiet", commit or f"refs/heads/{branch}")
     _run(dest, "checkout", "--quiet", "--", ".")

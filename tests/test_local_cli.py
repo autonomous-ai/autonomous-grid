@@ -23905,20 +23905,86 @@ def test_task_fetch_defaults_the_destination_to_the_task_id(monkeypatch, tmp_pat
     assert asked["token"] == "AT"
 
 
-def test_task_fetch_reports_a_finished_task_that_recorded_no_result(monkeypatch, tmp_path):
-    """Terminal but with nothing pushed is a real state — an attempt that died before it could
-    commit. Saying so beats an obscure git error about a commit that does not exist."""
+def test_task_fetch_serves_the_branch_of_a_task_that_recorded_no_result(
+        monkeypatch, tmp_path, capsys):
+    """Terminal with nothing pushed is a real state — a cancelled attempt whose agent was killed
+    before `commit_and_push` ran. This USED to be refused with "no result to fetch", and that made
+    `grid task cancel` a liar: it prints "Its branch is left where the agent got to:
+    `grid task fetch <id>`" while the branch sat on the relay holding the task's input.
+
+    The promise cannot be made conditional at its own end — cancel returns at once and the agent
+    does not die until the next lease beat, so nobody knows yet whether a result will land. So the
+    branch is served, and the output SAYS which of the two arrived. Refusing was one way to stop
+    "input" reading as "result"; saying so is the other, and it is the one that keeps the promise.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    checked = {}
+
+    def _checkout(dest, **kwargs):
+        checked.update(kwargs)
+        Path(dest).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(task_repo, "checkout_result", _checkout)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": None}))
+
+    assert cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "out")]) == 0
+
+    out = capsys.readouterr().out
+    assert "may hold only the task's input" in out, out
+    # The branch is what gets fetched, and no commit is invented to stand in for the missing one.
+    assert checked.get("branch") == "task/T1", checked
+    assert not checked.get("commit"), checked
+
+
+def test_task_fetch_still_refuses_a_task_with_no_branch_at_all(monkeypatch, tmp_path):
+    """The arm that is still a refusal, kept honest: no branch means nowhere to look.
+
+    Without this the change above would read as "fetch never refuses", and a relay that sent a task
+    with no branch would reach `checkout_result` to fail there with a git message instead.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "id": "T1", "state": "failed", "branch": "task/T1", "project_id": "p1",
+        "id": "T1", "state": "failed", "branch": None, "project_id": "p1",
         "result_commit": None}))
 
     with pytest.raises(SystemExit) as caught:
         cli.main(["task", "fetch", "T1"])
 
     assert "no result to fetch" in str(caught.value)
+
+
+def test_task_fetch_resets_to_the_PINNED_commit_when_the_task_reported_one(
+        monkeypatch, tmp_path):
+    """The normal path must not drift to the branch tip.
+
+    `result_commit` is what THAT task produced; a branch can have moved since, because a retry
+    pushes the same ref. The tip is a fallback for the no-result case only.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    checked = {}
+
+    def _checkout(dest, **kwargs):
+        checked.update(kwargs)
+        Path(dest).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(task_repo, "checkout_result", _checkout)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "deadbee"}))
+
+    assert cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "out")]) == 0
+
+    assert checked.get("commit") == "deadbee", checked
 
 
 def test_task_get_json_echoes_the_relay_reply(monkeypatch, tmp_path, capsys):

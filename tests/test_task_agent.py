@@ -4399,3 +4399,103 @@ def test_ensure_cache_is_idempotent(tmp_path):
 
     assert first == second
     assert (second / "npm").is_dir(), "an existing cache must survive — otherwise it is never warm"
+
+
+def test_the_unresolved_message_names_the_index_and_never_claims_markers(
+        tmp_path, monkeypatch, agent):
+    """What the failure SAYS, on the conflict class where the old wording was false.
+
+    The message used to assert "the conflict markers are still in the tree". For a modify/delete
+    conflict there are none — git writes the surviving side verbatim and reports the conflict only
+    through the index (`_modify_delete_remote` measures that). So in precisely the case this guard
+    exists to catch, the explanation sent the reader hunting for a string that is not there, and the
+    natural conclusion from not finding it is that the grid is wrong.
+
+    It also pointed at the wrong tool. `git status` and `git ls-files --unmerged` answer this
+    question; grep does not.
+
+    Asserted on the message rather than on `pushed.unresolved` because the tuple was always right —
+    it is the sentence built from it that was not, and nothing pinned the sentence at all.
+    """
+    from remote import tasks
+
+    remote, input_commit, merge_ref = _modify_delete_remote(tmp_path)
+    _relay_git_url(monkeypatch, remote.url)
+    # Runs the merge, claims success, resolves nothing — and leaves no markers behind to find.
+    agent(f'git merge --no-edit {merge_ref} >/dev/null 2>&1\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}\\n'\n")
+    reported = []
+    monkeypatch.setattr(tasks, "report_once",
+                        lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks._run_and_report(
+        _FakeState(), {**_job_with_input(input_commit), "merge_ref": merge_ref})
+
+    assert reported, "nothing was reported at all"
+    error = reported[0][1].get("error") or ""
+    assert reported[0][1]["state"] == "failed", reported[0][1]
+    assert "shared.txt" in error, error
+    assert "index" in error, f"the message must name what actually decided: {error!r}"
+    assert "marker" not in error.lower(), (
+        f"a modify/delete conflict leaves no markers; claiming otherwise sends the reader "
+        f"looking for a string that is not there: {error!r}")
+
+
+def test_checkout_result_resets_to_the_PINNED_commit_not_the_branch_tip(tmp_path):
+    """`result_commit` is what THAT task produced; the branch can have moved since.
+
+    A retry pushes the same ref, so the tip and the commit a task reported are different facts. The
+    tip is the fallback for a task that reported NO commit — never a shortcut for the pinned case.
+
+    Driven against a real repository, because a mock of `checkout_result` can only check what the
+    caller PASSES. The client-side tests do exactly that and are blind here: replacing `commit` with
+    the branch tip inside this function left every one of them green.
+    """
+    from remote import task_repo
+
+    remote, first = _remote_for(tmp_path, "task/T1", {"a.txt": "first\n"})
+    # The branch moves on, exactly as a retry's push would move it. Done through the seed clone so
+    # the bare repo is advanced the way a real push advances it.
+    seed = tmp_path / "seed-origin.git"
+    _git(seed, "checkout", "-q", "task/T1")
+    (seed / "a.txt").write_text("second\n")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "retry")
+    _git(seed, "push", "-q", str(remote.url), "task/T1")
+    assert _git(remote.url, "rev-parse", "task/T1").stdout.strip() != first
+
+    dest = tmp_path / "pinned"
+    dest.mkdir()
+
+    task_repo.checkout_result(dest, url=remote.url, token="tok", branch="task/T1", commit=first)
+
+    assert (dest / "a.txt").read_text() == "first\n", "fetched the branch tip, not the pinned commit"
+
+
+def test_checkout_result_takes_the_branch_tip_when_no_commit_was_recorded(tmp_path):
+    """The cancelled-task arm (ADR 0033 D-l, issue 19b).
+
+    An agent killed before `commit_and_push` leaves a branch holding the task's input and no
+    `result_commit` at all. `grid task cancel` promises that branch, so this has to be able to serve
+    it — the client says which of the two arrived.
+    """
+    from remote import task_repo
+
+    remote, _commit = _remote_for(tmp_path, "task/T1", {"a.txt": "input\n"})
+    dest = tmp_path / "tip"
+    dest.mkdir()
+
+    task_repo.checkout_result(dest, url=remote.url, token="tok", branch="task/T1")
+
+    assert (dest / "a.txt").read_text() == "input\n"
+
+
+def test_checkout_result_still_refuses_when_there_is_no_branch(tmp_path):
+    """No branch is nowhere to look, and that stays a refusal rather than a git error."""
+    from remote import task_repo
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+
+    with pytest.raises(task_repo.CheckoutError):
+        task_repo.checkout_result(tmp_path / "d", url=remote.url, token="tok",
+                                  branch="", commit=commit)

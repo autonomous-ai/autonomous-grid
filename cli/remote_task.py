@@ -656,10 +656,24 @@ def _task_fetch(args: argparse.Namespace) -> int:
             f"Watch it with `grid task follow {args.task_id}`.")
     commit, branch, project_id = (
         task.get("result_commit"), task.get("branch"), task.get("project_id"))
-    if not (commit and branch and project_id):
+    if not (branch and project_id):
+        # Nothing ADDRESSABLE — no branch to fetch from, so there is genuinely nowhere to look.
         raise SystemExit(
             f"Task {args.task_id} finished as {state} but recorded no result to fetch. "
             f"`grid task get {args.task_id}` shows what it did report.")
+    # A missing `result_commit` used to be refused here too, and that made `grid task cancel` a
+    # liar: it prints "Its branch is left where the agent got to: grid task fetch <id>", and this
+    # command then answered "recorded no result to fetch" — while the branch was on the relay all
+    # along, holding at least the task's input.
+    #
+    # The promise cannot be made conditional at its own end: cancel returns immediately and the
+    # agent does not die until the next lease beat, so at the moment the sentence is printed nobody
+    # knows whether a result will land. So the fix belongs here — serve what exists, and SAY which
+    # of the two it is. Refusing was one way to keep "input" from reading as "result"; saying so is
+    # the other, and it is the one that keeps the promise.
+    if not commit:
+        print(f"Task {args.task_id} recorded no result, so this is the branch as the grid last "
+              f"saw it — it may hold only the task's input.")
     if task.get("branch_pruned"):
         # Refused HERE rather than letting git answer, because everything else about an old task
         # still looks fetchable — the commit and the branch name are both on the row. git's own
@@ -721,7 +735,7 @@ def _task_fetch(args: argparse.Namespace) -> int:
              "branch": branch, "path": str(dest)}, indent=2))
         return 0
 
-    print(f"task {args.task_id} ({state}) at {commit}")
+    print(f"task {args.task_id} ({state}) at {commit or branch}")
     print(f"fetched into {dest}")
     # Named so the user can see WHAT arrived rather than being told that something did — on a
     # `failed` task especially, the file list is the point of fetching at all.

@@ -1267,9 +1267,17 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         named = ", ".join(pushed.unresolved[:_MAX_UNRESOLVED_NAMED])
         if len(pushed.unresolved) > _MAX_UNRESOLVED_NAMED:
             named += f" and {len(pushed.unresolved) - _MAX_UNRESOLVED_NAMED} more file(s)"
+        # Says INDEX, not markers, and that is the same correction `_unresolved_paths` already
+        # carries in code: a **modify/delete** conflict leaves no `<<<<<<<` anywhere — measured on
+        # git 2.54.0, git writes the surviving side verbatim and reports the conflict only through
+        # the index. Naming markers sent the reader hunting for a string that is not there, in
+        # precisely the conflict class this guard exists to catch, and the natural conclusion is
+        # that the grid is wrong. It also pointed at the wrong tool: `git status` and
+        # `git ls-files --unmerged` answer this, grep does not.
         reason = task_stream.redact(
-            f"the agent reported success but left the merge unresolved in {named}; the conflict "
-            f"markers are still in the tree, so this is not a resolved merge")
+            f"the agent reported success but left {named} unmerged in git's index; whatever the "
+            f"files look like, git still has an unresolved conflict there, so this is not a "
+            f"resolved merge")
         _warn(f"task {job.get('task_id')}: {reason}")
         # Everything else on the outcome is KEPT — its output and session id are how somebody works
         # out what the agent was doing when it stopped, and the session id is what the next attempt
