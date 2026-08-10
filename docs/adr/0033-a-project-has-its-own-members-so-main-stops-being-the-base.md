@@ -322,8 +322,16 @@ is **69%**, giving an expected 3.2 attempts against a `max_attempts` of 3 — so
 of a conflicting integration becomes `retries_exhausted` on work that merged correctly every time.
 
 So integration resolves `main` **once**, records that commit, and publishes it under a relay-authored
-ref (`refs/integrate/<task_id>`) which D-i's allowlist un-hides for that task's provider alone. The
-provider fetches the pinned ref; settle checks ancestry against the recorded commit. `main` moving
+ref (`refs/integrate/<task_id>`) which D-i's allowlist un-hides for that task's lease holder alone.
+The provider fetches the pinned ref; settle checks ancestry against the recorded commit.
+
+**"Lease holder", not "provider", and the distinction cost a release.** D-i's allowlist has an arm
+for a provider and an arm for a member, and one caller is frequently **both** — a small team runs
+its own provider, so the account holding the lease is also a project member. Written as two
+descriptions, the member arm was implemented as an early return: wider for branches, narrower for
+`refs/integrate/*`, which lives outside `refs/heads/` precisely so that no member clones it. The
+result was that tier-3 integration could not complete at all on that topology. The two arms are a
+**union**, never a choice; anything added to one has to be answered for in the other. `main` moving
 during a merge is then simply a promote the member has to integrate again — a second round, not a
 destroyed one.
 
