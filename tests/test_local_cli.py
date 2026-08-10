@@ -25047,16 +25047,27 @@ def test_task_loop_survives_a_transient_403(monkeypatch):
 
 
 def test_task_loop_403_budget_resets_after_a_success(monkeypatch):
-    """Consecutive, not cumulative — and it must not share a counter with the 404 budget, or a
-    provider alternating between the two retires on a pair of unrelated blips."""
+    """Consecutive, not cumulative: a SUCCESSFUL claim is what clears each counter here.
+
+    ⚠️ The two kinds are kept in separate runs on purpose, and an earlier version of this test did
+    not do that — it wrote `403, 403, 404, 404, success, 403, 403, success`, which reads as a
+    thorough interleave and proves less than it looks. The 404 branch clears the 403 counter on its
+    own, so those 404s did the resetting and the success reset was never load-bearing: deleting
+    `consecutive_404s = consecutive_403s = 0` from the success path left this test GREEN, which is
+    how it was found (dev-VM Phase G, G4). A test named for a reset must be arranged so nothing but
+    that reset can be doing the work.
+    """
     _fast_task_backoff(monkeypatch)
     from remote import relay
 
     claims = ([relay.RelayError("blip", status=403)] * (tasks_403_budget() - 1)
-              + [relay.RelayError("blip", status=404)] * (tasks_404_budget() - 1)
               + [{"task_id": "T1", "prompt": "x"}]
               + [relay.RelayError("blip", status=403)] * (tasks_403_budget() - 1)
-              + [{"task_id": "T2", "prompt": "y"}])
+              + [{"task_id": "T2", "prompt": "y"}]
+              + [relay.RelayError("blip", status=404)] * (tasks_404_budget() - 1)
+              + [{"task_id": "T3", "prompt": "z"}]
+              + [relay.RelayError("blip", status=404)] * (tasks_404_budget() - 1)
+              + [{"task_id": "T4", "prompt": "w"}])
     tasks, state, fake_claim = _task_loop_state(claims)
     reported = []
 
@@ -25066,7 +25077,50 @@ def test_task_loop_403_budget_resets_after_a_success(monkeypatch):
 
     tasks.task_loop(state)
 
-    assert reported == ["T1", "T2"]
+    assert reported == ["T1", "T2", "T3", "T4"]
+
+
+@pytest.mark.parametrize("interruption", [
+    pytest.param(lambda relay: relay.RelayError("upstream unavailable", status=503), id="503"),
+    pytest.param(lambda relay: relay.RelayError("no status at all"), id="statusless-relay-error"),
+    pytest.param(lambda _relay: RuntimeError("something nobody anticipated"), id="unexpected"),
+])
+def test_task_loop_403_budget_is_cleared_by_ANY_other_claim_failure(monkeypatch, interruption):
+    """A 403 counter that only two branches can clear is a counter that lies on every other branch.
+
+    The 404 interleave below was found by review and fixed; the *generic* failure paths — a relay
+    error that is neither 403 nor 404, and an exception nobody anticipated — each carry their own
+    reset, and nothing measured them. Deleting `consecutive_403s = 0` from the generic
+    `RelayError` path left the whole suite green (dev-VM Phase G, G4).
+
+    503 is not a hypothetical shape, which is why it leads this list: restarting `grid-apis` on the
+    dev VM drops `grid_proxy` for a beat, and the provider's own log from that run shows nine
+    consecutive `claim failed (503)` lines immediately before the domain 403s started. A provider
+    behind a flapping intermediary sees `403, 503, 403, 503, 403` and, without the reset, retires
+    task serving announcing "3 consecutive 403s" with no two of them adjacent — the identical defect
+    the 404 branch was fixed for, on a branch nobody had checked.
+
+    The statusless case is its own row because `getattr(exc, "status", None)` is how both budgets are
+    keyed: a `RelayError` carrying no status must fall to the generic path, not to either counter.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    claims = []
+    for _ in range(tasks_403_budget() * 2):  # far past the budget if the reset does not happen
+        claims.append(relay.RelayError("refused", status=403))
+        claims.append(interruption(relay))
+    claims.append({"task_id": "T1", "prompt": "x"})
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]  # never retired: no two 403s were ever adjacent
 
 
 def test_task_loop_403_and_404_budgets_do_not_leak_into_each_other(monkeypatch):
