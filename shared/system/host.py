@@ -132,6 +132,51 @@ def _memory_snapshot() -> tuple[int, int, float]:
     return 0, 0, 0.0
 
 
+def memory_used_mb() -> float | None:
+    """System memory in use, in MB — or None when this box cannot truly measure it.
+
+    None, not 0, and the distinction is the whole point: `_memory_snapshot`'s ``sysconf`` fallback
+    reports available == total because it has no way to ask, and a caller subtracting those would
+    publish a confident "0 MB in use" for a machine it never measured. Only psutil answers this
+    honestly, so only psutil is trusted here.
+
+    Used by the Apple Silicon VRAM path, where the GPU shares this pool — see `gpu.load_snapshot`.
+    """
+    try:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        used = int(mem.total) - int(mem.available)
+    except Exception:  # noqa: BLE001 — a probe, never a failure path
+        return None
+    return used / (1024 * 1024) if used > 0 else None
+
+
+def disk_gb(path: str) -> tuple[float, float] | None:
+    """``(total_gb, used_gb)`` for the volume containing ``path``, or None when it cannot be read.
+
+    Goes through `_disk_snapshot`, so it inherits the psutil→``statvfs``→zeros ladder the rest of
+    this module uses — psutil is an OPTIONAL dependency here and a probe that imported it directly
+    would silently report nothing on every box that does without it.
+
+    ``used`` is ``total - free``, which counts the filesystem's reserved blocks as used and so runs
+    slightly above what ``df`` shows. The alternative (psutil's own ``used``) does not exist on the
+    ``statvfs`` path, and one definition that works everywhere beats two that disagree by platform.
+
+    None rather than zeros on failure: a caller reporting telemetry must be able to say "unknown",
+    and a zeroed pair would render as an empty disk.
+    """
+    try:
+        usage = _disk_snapshot(path)
+        total, free = float(usage.total), float(usage.free)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    gib = 1024 ** 3
+    return round(total / gib, 1), round((total - free) / gib, 1)
+
+
 def _disk_snapshot(home_dir: str):
     try:
         import psutil

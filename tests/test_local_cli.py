@@ -12381,6 +12381,10 @@ def _serve_state(monkeypatch, tmp_path, **overrides):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     # Pin the heartbeat's platform tag so load-shape assertions are deterministic across runner OSes.
     monkeypatch.setattr(host, "platform_kind", lambda: "linux")
+    # Same reason, for the disk gauge: its figures are whatever volume the runner happens to have, so
+    # the shared fixture reports "unmeasurable" and the load-shape assertions below stay exact. The
+    # disk contract itself is covered by `test_serve_load_reports_disk*`, which opt back in.
+    monkeypatch.setattr(host, "disk_gb", lambda path: None)
     kwargs = dict(
         signaling_url="https://relay.example", node_id="node-1", network_id="n1",
         llm_url="http://127.0.0.1:8081/v1", access_token="AT", refresh_token="RT",
@@ -21362,6 +21366,66 @@ def test_serve_load_omits_vram_without_gpu(monkeypatch, tmp_path):
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
     load = _serve_state(monkeypatch, tmp_path).load()
     assert load == {"active_tasks": 0, "platform": "linux"}   # no VRAM keys when no GPU; platform always present
+
+
+def test_serve_load_reports_disk_of_the_model_volume(monkeypatch, tmp_path):
+    """The grid page's storage gauge: whatever volume holds the model store, not the home directory —
+    a node with its models on a separate drive must report the drive a pull actually fills."""
+    from shared import paths
+    from shared.system import gpu, host
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+    measured: dict[str, str] = {}
+    monkeypatch.setattr(
+        host, "disk_gb", lambda path: measured.update(path=path) or (3755.0, 541.4)
+    )
+
+    load = state.load()
+
+    assert load["disk_total_gb"] == 3755.0
+    assert load["disk_used_gb"] == 541.4
+    assert measured["path"].startswith(str(paths.models_dir().parent))
+
+
+def test_serve_load_omits_disk_when_the_volume_cannot_be_read(monkeypatch, tmp_path):
+    """A box that cannot stat its volume reports NOTHING, never zeros: the page renders an absent
+    figure as blank but a zeroed one as a full drive, which would read as an alarm nobody raised."""
+    from shared.system import gpu, host
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(host, "disk_gb", lambda path: None)
+    load = _serve_state(monkeypatch, tmp_path).load()
+
+    assert "disk_total_gb" not in load and "disk_used_gb" not in load
+
+
+def test_serve_load_omits_throughput_until_a_request_has_been_served(monkeypatch, tmp_path):
+    """`tok_s` is measured, never benchmarked — so a node that has answered nothing reports nothing
+    rather than a synthetic warm-up figure describing a machine that was idle at start-up."""
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+    assert "tok_s" not in state.load()
+
+    state.set_throughput(248.72)
+    assert state.load()["tok_s"] == 248.7
+
+
+def test_serve_state_keeps_the_last_measurable_throughput(monkeypatch, tmp_path):
+    """An un-timeable job (media, a reply too short to time) leaves the gauge alone instead of
+    blanking it — the node did not get slower, that one request simply carried no measurement."""
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+
+    state.set_throughput(100.0)
+    state.set_throughput(None)
+    state.set_throughput(0)
+
+    assert state.throughput() == 100.0
 
 
 def _poll_loop_state_and_poll(job_then_none):
