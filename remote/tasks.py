@@ -100,6 +100,24 @@ _MISSING_PLANE_404_BUDGET = 3
 # Its OWN counter, not the 404 one: a provider alternating between the two would otherwise retire on
 # a pair of unrelated blips neither of which was persistent.
 _REFUSED_CLAIM_403_BUDGET = 3
+# What brings task serving back, appended to every retirement a serve child SURVIVES (dev-VM finding
+# G-02). Retiring is a one-way door and nothing said so: `tasks_stop` is set in eight places and
+# cleared in none, and `_ServeState` is built once per serve child — so repairing the cause does not
+# re-arm anything. Every retirement that carries this is a condition somebody fixes: a served-domain
+# allowlist, a role, a relay that gains its tasks plane, a credential.
+#
+# ⚠️ It names BOTH commands because the obvious shortcut is a no-op, measured on the dev VM: a bare
+# `grid join` against a live child answers "Already serving on <grid>; nothing to append." and leaves
+# the pid untouched. An operator whose grid has just been fixed is otherwise told everything is fine
+# while the whole fleet stays retired — the same shape as the `queue_expired` message that sent a
+# member to a `grid project status` which said nothing (G-01).
+#
+# Deliberately NOT on the two `_start_task_workers` failures or on `_serve_loop`'s teardown. Those
+# print while the operator is watching `grid join`, or while the child is on its way out; this is for
+# the retirements that happen hours later, unattended, into a log.
+RESUME_HINT = ("This stays off until the serve child restarts — fixing the cause is not enough. "
+               "Once it is: `grid leave <grid>` then `grid join <grid> …` (a bare re-join answers "
+               "\"Already serving\" and changes nothing).")
 # Attempts to land a terminal report before giving up. Worth retrying at all because this is the one
 # loss that is salvageable cheaply: the child already ran, so only the last message went missing, and
 # a report that lands here saves a whole second attempt on another provider. Bounded and small — a
@@ -781,7 +799,7 @@ def task_loop(state: Any, capacity: Any = None) -> None:
             job = claim_once(state)
         except relay.RelayUnauthorized:
             _warn("relay rejected the token and refresh is unavailable — task serving retired "
-                  "(inference is unaffected)")
+                  f"(inference is unaffected). {RESUME_HINT}")
             state.tasks_stop.set()
             return
         except relay.RelayError as exc:
@@ -797,7 +815,7 @@ def task_loop(state: Any, capacity: Any = None) -> None:
                     # Persistently absent, so retrying cannot make the endpoint appear. Retire
                     # rather than log the same 404 every few seconds for the life of the process.
                     _warn(f"this grid's relay has no tasks plane ({consecutive_404s} consecutive "
-                          "404s) — task serving retired")
+                          f"404s) — task serving retired. {RESUME_HINT}")
                     state.tasks_stop.set()
                     return
                 _warn(f"claim 404 ({consecutive_404s}/{_MISSING_PLANE_404_BUDGET}); retrying — a "
@@ -813,7 +831,7 @@ def task_loop(state: Any, capacity: Any = None) -> None:
                     # want different things done about them.
                     _warn(f"this grid's relay refuses this provider's claims "
                           f"({consecutive_403s} consecutive 403s) — task serving retired "
-                          f"(inference is unaffected): {exc}")
+                          f"(inference is unaffected): {exc}. {RESUME_HINT}")
                     state.tasks_stop.set()
                     return
                 _warn(f"claim 403 ({consecutive_403s}/{_REFUSED_CLAIM_403_BUDGET}); retrying — an "

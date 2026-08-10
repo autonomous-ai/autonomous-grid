@@ -2836,7 +2836,10 @@ def _supervise_tasks(loop: Callable[[_ServeState], None], state: _ServeState) ->
     try:
         loop(state)
     except BaseException as exc:  # noqa: BLE001 — a loop-level fault must fail loud, not vanish
-        print(f"\n{threading.current_thread().name} stopped unexpectedly: {exc!r}", file=sys.stderr)
+        from . import tasks  # imported here for the same reason the caller does: keep it off startup
+
+        print(f"\n{threading.current_thread().name} stopped unexpectedly: {exc!r}. "
+              f"{tasks.RESUME_HINT}", file=sys.stderr)
         traceback.print_exc()
         state.tasks_stop.set()
 

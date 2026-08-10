@@ -25174,6 +25174,69 @@ def test_task_loop_retires_when_the_token_is_rejected(monkeypatch):
     assert not state.stop.is_set()
 
 
+@pytest.mark.parametrize("claims, because", [
+    pytest.param(lambda relay: [relay.RelayUnauthorized()], "an unrefreshable token", id="401"),
+    pytest.param(lambda relay: [relay.RelayError("gone", status=404)] * 9, "no tasks plane", id="404"),
+    pytest.param(lambda relay: [relay.RelayError("refused", status=403)] * 9, "refused claims",
+                 id="403"),
+])
+def test_every_retirement_the_child_survives_names_how_to_come_back(monkeypatch, capsys, claims,
+                                                                    because):
+    """Retiring is one-way, and until now nothing said so (dev-VM finding G-02).
+
+    `state.tasks_stop` is set in eight places and cleared in none, and `_ServeState` is built once
+    per serve child — so no amount of fixing the cause re-arms task serving. Every condition here is
+    one somebody REPAIRS: a served-domain allowlist, a role, a relay that gains its tasks plane, a
+    credential. After Phase G I had to restart both providers by hand to get task serving back, and
+    the log gave no hint that was needed.
+
+    ⚠️ The remedy is `leave` **then** `join`, and the obvious shortcut does not work — measured on
+    the dev VM: a bare `grid join` against a live child answers *"Already serving on dt-multi;
+    nothing to append."* and leaves the pid untouched. So an operator whose grid has just been fixed
+    is told everything is fine while the fleet stays retired. That is why the sentence names both
+    commands and says what a re-join does.
+
+    Same class as G-01 and F-05: a message that states a fact and leaves out the one action that
+    follows from it.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay, tasks as tasks_mod
+
+    tasks, state, fake_claim = _task_loop_state(claims(relay))
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+
+    tasks.task_loop(state)
+
+    err = capsys.readouterr().err
+    assert "retired" in err, because
+    assert tasks_mod.RESUME_HINT in err, f"{because}: retirement said nothing about coming back"
+    assert state.tasks_stop.is_set()
+
+
+def test_the_task_worker_supervisor_also_names_how_to_come_back(monkeypatch, capsys):
+    """The other unattended retirement, and the same one-way door.
+
+    A task worker that dies outside `task_loop`'s own guard retires task serving for the life of the
+    process. It is the one retirement here that is nobody's *configuration* — but the operator's
+    action is identical, and a caller who has to know which of two silences means "restart me" has
+    been given a puzzle instead of a message.
+    """
+    from remote import serve, tasks as tasks_mod
+
+    state = SimpleNamespace(tasks_stop=threading.Event(), stop=threading.Event())
+
+    def boom(_state):
+        raise RuntimeError("a fault outside the loop's own guard")
+
+    serve._supervise_tasks(boom, state)
+
+    err = capsys.readouterr().err
+    assert "stopped unexpectedly" in err
+    assert tasks_mod.RESUME_HINT in err
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()  # a task-plane fault must never take inference down with it
+
+
 def test_task_loop_stops_when_the_engine_stops(monkeypatch):
     """`state.stop` retires the task loop too — teardown must not leave it running."""
     tasks, state, _ = _task_loop_state([])
