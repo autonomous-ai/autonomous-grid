@@ -29953,6 +29953,88 @@ def test_project_status_says_nothing_about_domains_when_the_relay_omits_the_key(
     assert "domain" not in capsys.readouterr().out.lower()
 
 
+def test_project_status_says_you_are_unserved_even_when_the_queue_is_EMPTY(
+        monkeypatch, tmp_path, capsys):
+    """The moment a member most needs this sentence is the one it used to be withheld in (dev-VM
+    finding G-01).
+
+    `queue_expired`'s terminal message tells them, by name, to run `grid project status` — and
+    expiring is what EMPTIES the queue, so the advice landed on a status that said nothing about
+    providers at all. Measured on the dev VM both ways: the sentence appeared while the task was
+    still queued and vanished the moment it timed out. A member outside the allowlist therefore saw
+    a healthy-looking project and no cause, which is the whole failure D-f exists to name.
+
+    Being unserved is a fact about the CALLER, not about the queue. It does not become true when
+    work is waiting and it does not stop being true when the waiting ends.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
+        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None, "serves_you": False}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "domain" in out
+    assert "withdrawn" not in out  # still not a capacity problem — the opposite action
+
+
+def test_project_status_with_an_empty_queue_says_nothing_about_a_fleet_that_serves_you(
+        monkeypatch, tmp_path, capsys):
+    """The other half of G-01's fix, and the reason it is not "print the fleet block always".
+
+    `paused`, `online` and `resumes_at` answer "why is my work waiting", so with nothing waiting
+    they are a report nobody asked for — the noise rule the queue gate was written for, and which
+    still applies. Only the caller-fact moves out from behind it. Here a provider really has
+    withdrawn and it is still correct to say nothing.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
+        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 1, "resumes_at": "2026-08-09T11:30:00+00:00",
+                      "serves_you": True}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "withdrawn" not in out
+    assert "domain" not in out
+
+
+@pytest.mark.parametrize("queued", [0, 2], ids=["empty-queue", "queue-waiting"])
+def test_project_status_says_you_are_unserved_even_when_the_COUNTS_are_unreadable(
+        monkeypatch, tmp_path, capsys, queued):
+    """One rule on both paths, so the empty-queue branch cannot become a second dialect.
+
+    `serves_you` is its own readable fact — an explicit `False` — and does not depend on `online`
+    and `paused` being numbers this command can render. Leaving it behind the count guard would
+    make a relay with one unreadable counter withhold the only sentence the caller can act on, and
+    would do it differently depending on whether anything happened to be queued.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
+        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "queue": {"queued": queued, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": None, "paused": "many", "serves_you": False}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "domain" in out
+    assert "many" not in out  # the unreadable counts are still never rendered
+
+
 def test_project_status_says_when_a_queue_has_nobody_to_serve_it(monkeypatch, tmp_path, capsys):
     """The state a queue depth alone cannot express, and the one that needs a different action from
     everybody else's: work waiting on a grid with no provider at all."""

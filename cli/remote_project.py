@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import json
 
+from . import project_providers
+
 
 def cmd_remote_project(args: argparse.Namespace) -> int:
     if args.subcommand == "create":
@@ -601,6 +603,7 @@ def _project_status(args: argparse.Namespace) -> int:
         print(f"Watch it with: grid task follow {active['id']}")
 
     queue = answer.get("queue") or {}
+    providers = answer.get("providers")
     if queue.get("queued") or queue.get("running"):
         # The relay's own view of why nothing is moving, in two halves: how much work is waiting
         # (the project's) and who could take it (the fleet's).
@@ -608,72 +611,14 @@ def _project_status(args: argparse.Namespace) -> int:
               f"{queue.get('running', 0)} running")
         if queue.get("oldest_queued_at"):
             print(f"oldest wait started {queue['oldest_queued_at']}")
-        _print_providers(answer.get("providers"))
+        project_providers.print_providers(providers)
+    else:
+        # Nothing is waiting, so there is no fleet report to give — but "this grid does not serve
+        # your domain" is not a fleet report, and an empty queue is exactly the state a member is in
+        # when they follow `queue_expired`'s advice to run this command (G-01). Same helper as the
+        # branch above, so the two can never answer differently.
+        project_providers.print_unserved(providers)
     return 0
-
-
-def _count(value) -> bool:
-    """Whether `value` is a number of things this command may print.
-
-    `isinstance(value, bool)` first, because **`bool` subclasses `int`** — so a bare
-    `isinstance(value, int)` accepts `True` and renders "True of True providers have withdrawn",
-    which is exactly the unreadable-reply case the caller is trying to stay silent about. The same
-    trap `remote/task_capacity._resets_at` already excludes by hand on the other side of this wire.
-    """
-    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
-
-
-def _print_providers(providers: dict | None) -> None:
-    """Who could take the work, and when the rest come back (ADR 0033 D-l, issue 19b).
-
-    Only ever printed beside a queue that is not empty: this answers "why is my work waiting", and
-    a fleet report on a project with nothing queued is a fact nobody asked for.
-
-    Silent when everything is serving, for the same reason. A line reading "0 paused" on every
-    healthy poll is the kind of noise that makes the one that matters invisible.
-
-    *Absent ⇒ nothing said.* A relay predating this slice sends no `providers` key at all, and the
-    rest of the status renders exactly as it did — the same degrade every other 19b value has.
-    """
-    if not isinstance(providers, dict):
-        return
-    online = providers.get("online")
-    paused = providers.get("paused")
-    if not _count(online) or not _count(paused):
-        # A block this command cannot read is not a fleet report. Saying nothing is the same thing
-        # an older relay produces, and it beats "2 of None providers have withdrawn" — the sibling
-        # rule to `grid task list`'s, which learned it the same way in 19a's review.
-        return
-    if providers.get("serves_you") is False:
-        # The one state `online` gets exactly BACKWARDS (ADR 0033 D-f, issue 24). The count is
-        # fleet-wide, so a member outside the relay's served-domain allowlist is shown the providers
-        # serving other people — a healthy number beside work no provider will ever be offered,
-        # which reads as "the grid is busy" until the task expires hours later.
-        #
-        # Printed before the `paused` gate below, because nothing here IS paused: a fleet entirely
-        # healthy and entirely unavailable to this member is the whole failure. Nothing about the
-        # queue can express it, and no action the member takes alone can fix it.
-        #
-        # `is False`, never falsiness: *absent ⇒ served*, which is both a relay predating this slice
-        # and every relay with no allowlist configured. A missing key must not invent a refusal.
-        print("This grid does not serve your account's email domain, so no provider will claim "
-              "your tasks. Ask whoever runs this grid to add your domain.")
-        return
-    if online == 0:
-        # The state a queue depth alone cannot express, and the one that needs a different action
-        # from every other: the work is not slow, there is nobody to do it.
-        print("No provider is online, so nothing in this queue can start. "
-              "Someone needs to run `grid join`.")
-        return
-    if not paused:
-        return
-    print(f"{paused} of {online} providers have withdrawn — their Claude subscription is out of "
-          f"headroom, so they are not claiming tasks.")
-    resumes_at = providers.get("resumes_at")
-    if resumes_at:
-        # The actionable half. "Paused" alone tells a team to keep watching; a time tells them
-        # whether to wait or to add a provider.
-        print(f"The first of them starts claiming again at {resumes_at}.")
 
 
 # What the relay says integrating WOULD do, and how to say that to a person. A dict rather than a
