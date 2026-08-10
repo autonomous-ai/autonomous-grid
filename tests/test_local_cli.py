@@ -29282,6 +29282,65 @@ def test_project_import_refuses_a_path_that_is_not_a_repository_before_touching_
     assert called == [], "the relay was asked to open an import for a directory with no git in it"
 
 
+def test_project_import_accepts_every_shape_of_repository_git_itself_accepts(
+        monkeypatch, tmp_path):
+    """"Has a `.git` DIRECTORY" is not "is a git repository", and the difference refused real work.
+
+    MEASURED on git 2.51, the four shapes this predicate meets:
+
+    | path            | `isdir(.git)` (the old check) | `git rev-parse --git-dir` |
+    |-----------------|-------------------------------|---------------------------|
+    | ordinary clone  | True                          | 0                         |
+    | **worktree**    | **False** — a `.git` FILE     | 0                         |
+    | **bare repo**   | **False** — no `.git` at all  | 0                         |
+    | plain directory | False                         | 128                       |
+
+    Both middle rows were refused with "there is nothing to import" while pointing at real history.
+    Worktrees are not exotic here — this product's own tri-repo development runs in them, so the
+    first import attempted from a feature checkout hit it.
+
+    The early check itself is kept: git's own message arrives only AFTER the relay has opened an
+    import and deleted whatever was staged. What changed is that git is now asked the question git
+    owns.
+    """
+    import subprocess
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def _git(cwd, *args):
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
+                              env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                                   "GIT_CONFIG_NOSYSTEM": "1"})
+
+    normal = tmp_path / "normal"
+    normal.mkdir()
+    _git(normal, "init", "-q", "-b", "main", ".")
+    _git(normal, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty",
+         "-m", "seed")
+    _git(normal, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    _git(tmp_path, "clone", "-q", "--bare", str(normal), str(tmp_path / "bare.git"))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    # The relay is asked to open an import for each accepted shape and for none of the refused one,
+    # which is what "before touching the relay" means in practice.
+    for shape in ("normal", "wt", "bare.git"):
+        opened = []
+        _mock_relay(monkeypatch,
+                    lambda r, seen=opened: seen.append(1) or httpx.Response(500, json={}))
+        with pytest.raises(SystemExit):
+            cli.main(["project", "import", str(tmp_path / shape), "P1"])
+        assert opened, f"{shape} was refused as 'not a git repository' before the relay was asked"
+
+    opened = []
+    _mock_relay(monkeypatch, lambda r: opened.append(1) or httpx.Response(200, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(plain), "P1"])
+    assert "not a git repository" in str(exit_info.value)
+    assert opened == [], "the relay was asked to open an import for a directory with no git in it"
+
+
 def test_project_import_help_says_it_is_the_only_way_a_project_gets_a_trunk(monkeypatch, tmp_path):
     """The help text of a consequential verb is asserted in this suite, as promote's and
     integrate's are: since this slice a member cannot push `main`, so somebody reading `--help`

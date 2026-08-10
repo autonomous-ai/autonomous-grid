@@ -304,13 +304,27 @@ def _project_import(args: argparse.Namespace) -> int:
     Half a trunk would be far worse, because `main` is the one ref nothing in this design rewrites.
     """
     import os
+    import subprocess
 
     from remote import relay, task_repo
 
     source = os.path.abspath(args.path)
-    if not os.path.isdir(os.path.join(source, ".git")):
-        # Checked here rather than left to git, whose own message for this ("not a git repository")
-        # arrives AFTER the relay has already opened an import and deleted whatever was staged.
+    # Checked here rather than left to git, whose own message for this ("not a git repository")
+    # arrives AFTER the relay has already opened an import and deleted whatever was staged. That
+    # reason is why the check exists; it is not a licence to answer the question a different way.
+    #
+    # ⚠️ It used to be `isdir(source/".git")`, and "has a `.git` DIRECTORY" is not "is a git
+    # repository". A **worktree** keeps a `.git` FILE holding a gitdir pointer, and a **bare** repo
+    # has no `.git` at all — both are ordinary repositories, and both were refused. Worktrees are
+    # not an exotic case here: this product's own tri-repo development runs in them, so the first
+    # import anyone tried from a feature checkout failed with "there is nothing to import" while
+    # pointing at 459 commits.
+    #
+    # So git is asked the question git owns. Local, network-free, and no more expensive than the
+    # `stat` it replaces.
+    probe = subprocess.run(["git", "-C", source, "rev-parse", "--git-dir"],
+                           capture_output=True, text=True)
+    if probe.returncode != 0:
         raise SystemExit(f"{source} is not a git repository, so there is nothing to import.")
 
     base, token, _label = _resolve(args)
