@@ -21348,6 +21348,107 @@ def test_gpu_load_snapshot_empty_without_gpu(monkeypatch):
     assert gpu.load_snapshot() == {}   # no GPU anywhere → provider sends no VRAM
 
 
+# One accelerator's `PerformanceStatistics`, in `ioreg`'s real single-line shape. Trimmed to the keys
+# that matter plus a couple of neighbours, and duplicated below the way ioreg genuinely repeats a
+# device: the same physical GPU appears once per accelerator subclass.
+_IOREG_DEVICE = (
+    '    "PerformanceStatistics" = {"Device Utilization %"=8,"inUseVidMemoryBytes"=864329728,'
+    '"vramFreeBytes"=124051392,"Temperature(C)"=66,"Total Power(W)"=22,"Fan Speed(%)"=0}\n'
+)
+# A second, integrated GPU: publishes utilisation and nothing else, as the real one does.
+_IOREG_IGPU = '    "PerformanceStatistics" = {"Device Utilization %"=6,"inUseVidMemoryBytes"=0}\n'
+
+
+def test_mac_gpu_counters_are_read_without_privileges(monkeypatch):
+    """The IORegistry publishes VRAM occupancy, load, temperature and power to any user. `powermetrics`
+    (which does need root) is the obvious macOS answer and the wrong one — this test pins the readings
+    that make a Mac node's card as complete as an NVIDIA one."""
+    from shared.system import apple
+
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE + _IOREG_IGPU)
+
+    assert apple.accelerator_stats() == {
+        "vram_used_bytes": 864329728.0,
+        "gpu_util": 8.0,
+        "gpu_temp_c": 66.0,
+        "gpu_power_w": 22.0,
+    }
+
+
+def test_a_gpu_listed_twice_is_not_counted_twice(monkeypatch):
+    """ioreg repeats one physical GPU per accelerator subclass, so summing would report a 22W card as
+    drawing 44W and double its VRAM. Max is duplicate-safe and still picks the discrete card over the
+    integrated one."""
+    from shared.system import apple
+
+    monkeypatch.setattr(
+        apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE + _IOREG_DEVICE + _IOREG_IGPU
+    )
+    stats = apple.accelerator_stats()
+
+    assert stats["gpu_power_w"] == 22.0
+    assert stats["vram_used_bytes"] == 864329728.0
+
+
+def test_mac_counters_absent_when_the_registry_says_nothing(monkeypatch):
+    from shared.system import apple
+
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: "")
+    assert apple.accelerator_stats() == {}
+
+
+def test_an_intel_mac_measures_occupancy_against_its_own_card(monkeypatch):
+    """`used` and `total` must describe the SAME pool — they are divided and drawn as one bar. On an
+    Intel Mac the total is the card's own VRAM, so the occupancy is the card's, never system RAM."""
+    from shared.system import apple, arch, gpu, host
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 4096.0)
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch, "native_machine", lambda: "x86_64")
+    monkeypatch.setattr(host, "memory_used_mb", lambda: 24_000.0)  # system RAM — must NOT be used
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE)
+
+    snapshot = gpu.load_snapshot()
+
+    assert snapshot["memory_total_mb"] == 4096.0
+    assert snapshot["memory_used_mb"] == 824.3   # 864329728 bytes, not the 24 GB of system RAM
+    assert snapshot["gpu_temp_c"] == 66.0 and snapshot["gpu_power_w"] == 22.0
+
+
+def test_an_apple_silicon_mac_measures_occupancy_against_its_unified_pool(monkeypatch):
+    """The mirror case: there the advertised total IS `hw.memsize`, so system memory in use is the
+    figure that pairs with it, and the registry's per-driver allocation is not."""
+    from shared.system import apple, arch, gpu, host
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 131072.0)
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch, "native_machine", lambda: "arm64")
+    monkeypatch.setattr(host, "memory_used_mb", lambda: 41_000.0)
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE)
+
+    snapshot = gpu.load_snapshot()
+
+    assert snapshot["memory_used_mb"] == 41_000.0
+    assert snapshot["gpu_util"] == 8.0   # utilisation still comes from the registry
+
+
+def test_a_mac_that_cannot_measure_reports_no_zeros(monkeypatch):
+    """The regression this whole path exists for: a fabricated `memory_used_mb: 0.0` / `gpu_util: 0.0`
+    renders as a dead node holding all its memory unused."""
+    from shared.system import apple, arch, gpu, host
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 131072.0)
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch, "native_machine", lambda: "arm64")
+    monkeypatch.setattr(host, "memory_used_mb", lambda: None)
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: "")
+
+    assert gpu.load_snapshot() == {"gpu_count": 1.0, "memory_total_mb": 131072.0}
+
+
 def test_serve_load_merges_vram_with_active_tasks(monkeypatch, tmp_path):
     from shared.system import gpu
 

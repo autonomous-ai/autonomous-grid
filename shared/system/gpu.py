@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.system import arch
+from shared.system import apple, arch
 
 
 @dataclass
@@ -303,12 +303,11 @@ def load_snapshot(timeout: float = 3.0) -> dict[str, float]:
     — Apple Silicon unified memory (``hw.memsize``) or an Intel Mac's discrete VRAM (``system_profiler``)
     — so Mac providers still surface VRAM. Returns ``{}`` on a box with no detectable GPU.
 
-    **Every key is emitted only when it was measured.** The Mac branch reports VRAM *total* alone: macOS
-    exposes neither GPU utilisation nor per-process VRAM without a root ``powermetrics``, so the
-    ``memory_used_mb: 0.0`` / ``gpu_util: 0.0`` this branch used to send were invented, not observed.
-    They were harmless while the grid page only read the total, but the moment anything renders a gauge
-    they make every Mac look like a dead node holding 128 GB it never uses. Absent is the honest wire
-    value for "this platform cannot tell you", and it is what the page needs to show nothing."""
+    **Every key is emitted only when it was measured.** This branch used to send a hardcoded
+    ``memory_used_mb: 0.0`` / ``gpu_util: 0.0`` on macOS — invented, not observed. Harmless while the
+    grid page read only the total, but the moment anything renders a gauge they make every Mac look
+    like a dead node holding 128 GB it never uses. A Mac now reports what it can genuinely measure
+    (`_mac_telemetry`, which reads the IORegistry and needs no privileges) and omits the rest."""
     gpus = enumerate_gpus(timeout=timeout)
     if gpus:
         return {
@@ -320,33 +319,49 @@ def load_snapshot(timeout: float = 3.0) -> dict[str, float]:
         }
     mac_mb = _macos_vram_mb(timeout=timeout)
     if mac_mb:
-        snapshot = {"gpu_count": 1.0, "memory_total_mb": mac_mb}
-        used_mb = _mac_memory_used_mb()
-        if used_mb is not None:
-            snapshot["memory_used_mb"] = min(used_mb, mac_mb)
-        return snapshot
+        return {"gpu_count": 1.0, "memory_total_mb": mac_mb, **_mac_telemetry(mac_mb, timeout)}
     return {}
 
 
-def _mac_memory_used_mb() -> float | None:
-    """How much of a Mac's advertised VRAM is in use, or None when that is unknowable.
+def _mac_telemetry(total_mb: float, timeout: float) -> dict[str, float]:
+    """A Mac's live GPU counters, in the same key names the NVIDIA branch uses.
 
-    **Apple Silicon only, and that asymmetry is the point.** There, the advertised VRAM IS
-    ``hw.memsize`` — the GPU shares one unified pool with the CPU (the premise `_macos_vram_mb`
-    already rests on), so system memory in use is exactly the figure that decides whether another
-    model fits. Reporting it gives a Mac node a real memory gauge instead of a total with nothing
-    to compare it against.
+    Utilisation, temperature and power come from the IORegistry (`apple.accelerator_stats`) and need
+    no privileges — see that function, which corrects the assumption that ``powermetrics`` and root
+    are the only way to read them on macOS.
 
-    On an **Intel Mac** the same reasoning inverts: the advertised figure is a discrete/integrated
-    card's own VRAM from ``system_profiler``, a separate pool from system RAM. Filling that bar with
-    RAM usage would show a number measured on the wrong memory, which is worse than showing none —
-    so this returns None and the gauge stays absent.
+    **Memory occupancy is read from a different place per architecture, so that `used` and `total`
+    always describe the same pool.** Getting this wrong is the failure mode worth spelling out: the
+    two are divided and drawn as one bar, so a mismatched pair renders a confident percentage of
+    nothing.
 
-    Neither path can read *GPU* allocation specifically; macOS keeps that behind a root
-    ``powermetrics``, and no amount of probing here changes that."""
-    if platform.system() != "Darwin" or arch.native_machine() != "arm64":
-        return None
-    from shared.system import host
+    - **Apple Silicon** — the advertised total is ``hw.memsize``, because the GPU shares one unified
+      pool with the CPU (the premise `_macos_vram_mb` already rests on). The matching occupancy is
+      therefore system memory in use. The IORegistry's ``inUseVidMemoryBytes`` is NOT it: on a
+      unified-memory part it tracks a driver allocation, not the pool the total names.
+    - **Intel Mac** — the advertised total is a discrete or integrated card's own VRAM from
+      ``system_profiler``, a pool entirely separate from system RAM. Here ``inUseVidMemoryBytes`` is
+      exactly right and system RAM would be measuring the wrong memory.
 
-    return host.memory_used_mb()
+    Clamped to ``total_mb``: the pair comes from two independent sources, and a bar past its own
+    track is a worse answer than a pinned one.
+    """
+    if platform.system() != "Darwin":
+        return {}
+    stats = apple.accelerator_stats(timeout=timeout)
+    out: dict[str, float] = {}
+    for key in ("gpu_util", "gpu_temp_c", "gpu_power_w"):
+        if key in stats:
+            out[key] = round(stats[key], 1)
+
+    if arch.native_machine() == "arm64":
+        from shared.system import host
+
+        used_mb = host.memory_used_mb()
+    else:
+        used_bytes = stats.get("vram_used_bytes")
+        used_mb = used_bytes / (1024 * 1024) if used_bytes else None
+    if used_mb is not None:
+        out["memory_used_mb"] = round(min(used_mb, total_mb), 1)
+    return out
 
