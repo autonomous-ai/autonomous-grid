@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -211,6 +212,95 @@ def preflight() -> None:
     a message about the task runner. Called from `task_agent.preflight()`.
     """
     home_directory()
+    _prove_the_sandbox_can_bind_its_sockets()
+
+
+# `sizeof(struct sockaddr_un.sun_path)`: the hard ceiling on the FULL path of a Unix domain socket,
+# enforced by the kernel and named in no error message the agent will ever show you.
+#
+# **Not one number — it differs by platform, and it was measured on both** (2026-08-10) by binding
+# at increasing lengths until the kernel refused: Linux (Ubuntu 24.04) took 107 and refused 108;
+# macOS 26.6 took 103 and refused 104. Writing 108 everywhere — which this constant did at first —
+# under-reserves by four bytes on every macOS provider, and the reserve below is what would have
+# quietly absorbed the error instead of anyone noticing.
+_SOCKET_PATH_MAX = 104 if sys.platform == "darwin" else 108
+# What the vendor puts BELOW the temp base before the socket itself. Observed on the dev VM: a
+# `claude-<n>/` directory (9 characters at n < 10), and inside it a socket whose name was never
+# read — the failure is reported as "bridge sockets", plural, with no path. So this is a RESERVE,
+# not a model, and it is deliberately larger than what was seen: a reserve that is too small lets a
+# provider through and then fails every task on it, while one that is too large costs a message an
+# operator can act on in one command. Fail-closed is the cheap side.
+_SOCKET_HEADROOM = 30
+
+
+def temp_base() -> Path:
+    """The directory Claude Code will put its sandbox sockets under, as the CHILD will see it.
+
+    `task_agent.child_env` deliberately does not set `TMPDIR` (see `_cache_env` — redirecting it
+    into the per-member cache tree is what broke every task on the dev VM), so the child inherits
+    the provider's value through the passthrough allowlist, and falls back to `/tmp` when there is
+    none. Reading `os.environ` here is therefore reading exactly what the child gets.
+
+    ⚠️ If `TMPDIR` is ever redirected again, this must read the redirected value or the check will
+    certify a directory the child never uses.
+    """
+    return Path(os.getenv("TMPDIR") or "/tmp")
+
+
+def _prove_the_sandbox_can_bind_its_sockets() -> None:
+    """Refuse the task if the sandbox will not be able to start, BEFORE anything is fetched.
+
+    This exists because the vendor's own `failIfUnavailable` does not cover this case. Missing
+    packages exit 1 before any model call — loud, and already handled. A sandbox that fails to
+    INITIALIZE at runtime does not: MEASURED on the dev VM, every Bash call returned
+    `Sandbox is required but failed to initialize: Failed to create bridge sockets after 5
+    attempts`, the agent ran its turn, reported honestly in prose, exited **0** — and the task
+    was recorded `completed` with `error: null`, having done nothing. An application polling
+    `state` sees a success. That is the failure this function converts into a refusal.
+
+    Two checks, because they catch different things and either alone would pass the other's bug:
+
+      * **room** — `sun_path` is 108 bytes and nothing says so when it is exceeded. The instance
+        that cost a deploy: a `TMPDIR` of 107 characters, one under the limit, so the directory
+        itself was fine and every socket inside it was not.
+      * **bindable** — the base may be missing, unwritable, or on a filesystem that has no sockets.
+        Proven by binding one, because a `stat` answers a different question than `bind` does.
+
+    Not checked here, deliberately: whether the AGENT later reports a sandbox failure in its text.
+    That would mean comparing vendor prose, which this repo treats as display-only everywhere else
+    (the `task.retry` rule), and it would go stale the first time the wording changed.
+    """
+    base = temp_base()
+
+    room = _SOCKET_PATH_MAX - len(str(base))
+    if room < _SOCKET_HEADROOM:
+        raise OSError(
+            f"the sandbox puts its sockets under {base}, which leaves {room} of the {_SOCKET_PATH_MAX} "
+            f"bytes a Unix socket path may use — under the {_SOCKET_HEADROOM} it needs. Every command "
+            f"in every task would fail with 'failed to create bridge sockets' while the task still "
+            f"reported success. Point TMPDIR at a shorter directory.")
+
+    # No `mkdir` here, and its absence is load-bearing twice over. A check that creates what it is
+    # checking for cannot fail on "it is not there" — and a base that does not exist is precisely an
+    # operator error worth reporting, not one to paper over. It also made both of this function's
+    # first tests pass for the wrong reason: each was really failing on `mkdir`, so removing the
+    # check they claimed to cover left them green (mutation-checked, twice).
+    probe = base / f"grid-sandbox-{os.getpid()}.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.bind(str(probe))
+    except OSError as exc:
+        raise OSError(
+            f"the sandbox needs to create Unix sockets under {base} and this provider cannot: "
+            f"{exc}. Every command in every task would fail while the task still reported success. "
+            f"Point TMPDIR at a writable directory that exists.") from exc
+    finally:
+        # Best effort: a socket left behind is litter, not a fault, and raising from the cleanup
+        # would replace a diagnosis with an unrelated error.
+        try:
+            probe.unlink()
+        except OSError:
+            pass
 
 
 def _resolved(path: Path) -> str:

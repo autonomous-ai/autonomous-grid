@@ -400,3 +400,181 @@ def test_the_SHARED_home_caches_stay_read_only(tmp_path, config_dir):
         assert resolved in filesystem["allowRead"]
         assert resolved not in filesystem["allowWrite"], (
             f"{cache} is shared between members; writable makes it a contamination channel")
+
+
+# --- preflight proves the sandbox can actually start (F-04) ---------------------------------------
+#
+# The vendor's `failIfUnavailable` covers MISSING PACKAGES — that exits 1 before any model call and
+# the provider already reports it. What it does not cover is a sandbox that fails to INITIALIZE at
+# runtime. MEASURED on the dev VM: every Bash call returned `Sandbox is required but failed to
+# initialize: Failed to create bridge sockets after 5 attempts`, the agent ran its turn, reported
+# honestly in prose, exited 0 — and the task was recorded `completed` with `error: null` having done
+# nothing at all. An application polling `state` reads that as success.
+
+
+def test_preflight_refuses_a_temp_base_with_no_room_for_a_socket(monkeypatch):
+    """The RESERVE alone — and the window it has to be tested in is the whole subtlety.
+
+    The base here exists, and a socket with THIS function's own short probe name would bind in it
+    fine. What it has no room for is the vendor's longer path. That window is exactly why the
+    reserve is a separate check from the bind: a bind that succeeds proves nothing about a path 20
+    characters longer.
+
+    Getting this wrong is not hypothetical. The first version padded "until at least the reserve is
+    exceeded", which could overshoot far enough that the probe socket ALSO failed to bind — and then
+    deleting the reserve check left the test green, because the bind was catching it. Mutation
+    checked: with `if room < _SOCKET_HEADROOM` disabled, this test fails.
+
+    The length being reproduced is real: `/var/grid-provider/projects/<uuid-36>/<member_key-32>/
+    cache/tmp` is 107 characters, ONE under `sun_path`'s 108, so the directory was fine and every
+    socket inside it was not.
+    """
+    import tempfile
+
+    from remote import task_sandbox
+
+    # Three characters INSIDE the reserve. The window is narrow and both edges are real: below it
+    # the reserve does not fire, above it the PROBE socket stops binding and the bind check catches
+    # the case instead — which is how the first version of this test let the reserve be deleted.
+    target = task_sandbox._SOCKET_PATH_MAX - task_sandbox._SOCKET_HEADROOM + 3
+
+    base = Path(tempfile.mkdtemp())
+    assert len(str(base)) < target, "the system temp base is too long to build this case on"
+    base = base / ("x" * (target - len(str(base)) - 1))
+    base.mkdir()
+    try:
+        assert task_sandbox._SOCKET_PATH_MAX - len(str(base)) < task_sandbox._SOCKET_HEADROOM
+        # ...and the probe socket WOULD have bound here, which is what isolates the reserve.
+        assert len(str(base / f"grid-sandbox-{os.getpid()}.sock")) < task_sandbox._SOCKET_PATH_MAX
+
+        monkeypatch.setenv("TMPDIR", str(base))
+
+        with pytest.raises(OSError) as raised:
+            task_sandbox.preflight()
+
+        message = str(raised.value)
+        assert "sockets" in message
+        # Names the fix, not just the fault — the operator's next command is in the sentence.
+        assert "TMPDIR" in message
+    finally:
+        base.rmdir()
+        base.parent.rmdir()
+
+
+def test_preflight_refuses_a_temp_base_it_cannot_bind_in(monkeypatch, tmp_path):
+    """The bind check ALONE — a short path that simply is not there.
+
+    A `stat` answers a different question than `bind` does, and this is the case a length check
+    cannot see. Chosen over an unwritable directory deliberately: a suite running as root would walk
+    straight through a permission bit and the test would certify nothing.
+    """
+    from remote import task_sandbox
+
+    monkeypatch.setenv("TMPDIR", "/nonexistent-grid-sandbox-probe")
+
+    with pytest.raises(OSError) as raised:
+        task_sandbox.preflight()
+
+    assert "sockets" in str(raised.value)
+
+
+def test_preflight_passes_on_an_ordinary_provider_and_leaves_nothing_behind(monkeypatch):
+    """The positive control, and the litter check beside it.
+
+    Without a case that MUST pass, a preflight that refused everything would look like a working
+    guard. The probe socket is unlinked because a provider claiming all day would otherwise fill its
+    temp directory with them.
+
+    Uses a directory under the SYSTEM temp base rather than pytest's `tmp_path`, and that is not a
+    detail: pytest's is ~121 characters, which this check correctly refuses — the first version of
+    this test failed for exactly that reason and was right to. A provider's real base is short (see
+    the test below).
+    """
+    import tempfile
+
+    from remote import task_sandbox
+
+    base = Path(tempfile.mkdtemp())
+    try:
+        monkeypatch.setenv("TMPDIR", str(base))
+
+        task_sandbox.preflight()
+
+        assert list(base.iterdir()) == [], "the probe socket must not be left behind"
+    finally:
+        for leftover in base.iterdir():
+            leftover.unlink()
+        base.rmdir()
+
+
+def test_the_headroom_leaves_a_real_provider_alone(monkeypatch):
+    """The constant is a reserve, so it has to be checked against what providers actually have.
+
+    MEASURED 2026-08-10: the dev VM (Ubuntu 24.04) reports `TMPDIR` unset and falls back to `/tmp`
+    — 4 characters, 104 of headroom. A macOS provider gets `/var/folders/<2>/<30>/T/` — 49
+    characters, 59 of headroom. Both clear the reserve several times over, which is what makes
+    fail-closed affordable here: raising it costs nobody anything until a path is genuinely absurd.
+
+    Pinned so that raising `_SOCKET_HEADROOM` on a hunch fails a test instead of a fleet.
+    """
+    from remote import task_sandbox
+
+    for base, measured in (("/tmp", 4), ("/var/folders/92/v3xrh9kd62lglrnl9rmvsrg00000gn/T/", 49)):
+        assert len(base) == measured
+        monkeypatch.setenv("TMPDIR", base)
+        assert task_sandbox._SOCKET_PATH_MAX - len(str(task_sandbox.temp_base())) >= (
+            task_sandbox._SOCKET_HEADROOM), f"{base} is a real provider default and must not be refused"
+
+
+def test_the_socket_ceiling_is_the_one_this_platform_actually_enforces():
+    """`sun_path` is not one number, and assuming it was under-reserved on every macOS provider.
+
+    MEASURED 2026-08-10 by binding at increasing lengths until the kernel refused: Linux
+    (Ubuntu 24.04) bound 107 and refused 108; macOS 26.6 bound 103 and refused 104. This asserts the
+    module agrees with the platform it is running on — and it does it by BINDING, so a future
+    platform simply tells the truth rather than matching a table.
+    """
+    import socket
+    import tempfile
+
+    from remote import task_sandbox
+
+    directory = Path(tempfile.mkdtemp())
+    try:
+        longest = None
+        for length in range(1, 200):
+            candidate = directory / ("s" * length)
+            if len(str(candidate)) >= 200:
+                break
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.bind(str(candidate))
+                candidate.unlink()
+                longest = len(str(candidate))
+            except OSError:
+                break
+
+        assert longest is not None, "could not bind any socket here; the measurement means nothing"
+        # The kernel refuses at exactly the ceiling, so the longest that binds is one less.
+        assert longest + 1 == task_sandbox._SOCKET_PATH_MAX, (
+            f"this platform refuses at {longest + 1}, the module reserves against "
+            f"{task_sandbox._SOCKET_PATH_MAX}")
+    finally:
+        for leftover in directory.iterdir():
+            leftover.unlink()
+        directory.rmdir()
+
+
+def test_temp_base_reads_what_the_child_will_actually_get(monkeypatch):
+    """`child_env` does not set `TMPDIR`, so the child inherits the provider's — or falls back.
+
+    Pinned in both directions: a check that read a different variable than the child uses would
+    certify a directory nobody writes to.
+    """
+    from remote import task_sandbox
+
+    monkeypatch.setenv("TMPDIR", "/somewhere")
+    assert task_sandbox.temp_base() == Path("/somewhere")
+
+    monkeypatch.delenv("TMPDIR", raising=False)
+    assert task_sandbox.temp_base() == Path("/tmp")
