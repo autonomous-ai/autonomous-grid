@@ -275,6 +275,13 @@ setting the variable — even to the default path — makes Claude Code look for
 is not there. The symptom is every task failing with `the agent exited 1:` and an empty message;
 `grid task follow` shows `Not logged in`.
 
+On macOS the sandbox also blocks the system trust-evaluation service, so a package manager
+that uses the system trust store cannot verify a certificate inside a task — `pip install` fails with
+`SSLError(... 'OSStatus -26276')` even with the index host allowed, while `curl` is unaffected, which
+makes it look like a network fault. Measured on the same machine under the same policy, `uv pip
+install` succeeds: it carries its own roots. Prefer `uv` in a task's prompt, or run providers on
+Linux for work that installs dependencies.
+
 The agent runs with the operator's **user-scope** settings and never the repository's, so a
 `.claude/settings.json` arriving in a task's branch cannot run anything. One consequence worth
 knowing: a repository's `CLAUDE.md` is **not** loaded into the agent's context either, though it
