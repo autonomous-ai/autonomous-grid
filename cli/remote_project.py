@@ -254,7 +254,7 @@ def _project_clone(args: argparse.Namespace) -> int:
     # refusal on its own would read as a permissions bug (ADR 0033 D-h).
     print("\n`git push` is refused. Your branch is written by the grid alone, so that a task "
           "running right now cannot have the ground moved under it. To land work from this clone:")
-    print(f"  grid project commit {args.project_id} --file <path>   # files, no agent")
+    print(f"  grid project commit {args.project_id} -m '<message>' --file <path>   # no agent")
     print(f"  grid project integrate {args.project_id}              # bring {cloned.trunk} in")
     print(f"  grid task create --project {args.project_id} --prompt '…'")
     return 0
@@ -383,7 +383,7 @@ def _project_import(args: argparse.Namespace) -> int:
         # the only one today (Git LFS) is a fact about what an agent will find rather than an error.
         print(f"warning: {warning}")
     print()
-    print(f"Next: grid task create --project {args.project_id} \"<prompt>\"")
+    print(f"Next: grid task create --project {args.project_id} --prompt '<what to do>'")
     return 0
 
 
@@ -568,7 +568,8 @@ def _project_status(args: argparse.Namespace) -> int:
     if ahead is None or behind is None:
         # Absent, not zero. `0/0` would read as "up to date with main", and the next thing somebody
         # does on that belief is promote a branch that does not exist.
-        print(f"\nNothing to compare yet — run a task, or `grid project commit {args.project_id}`.")
+        print(f"\nNothing to compare yet — run a task, or "
+              f"`grid project commit {args.project_id} -m '<message>' --file <path>`.")
     else:
         can_promote = answer.get("can_promote")
         if can_promote is not True and can_promote is not False:

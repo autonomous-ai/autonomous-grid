@@ -568,9 +568,17 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         # copy of the reason that reaches the person who submitted the task — the provider's own
         # warning goes to the provider's log, which they cannot read. So when their NEXT task sits
         # queued, this is what explains it.
-        print(f"[{seq}] rate limit: the provider's "
-              f"{event.get('limit_type') or 'subscription'} window is "
-              f"{event.get('status') or 'in an unknown state'}"
+        #
+        # "provider capacity", not "rate limit", and `status=` rather than a verb. The provider now
+        # drops the boring reading (`task_capacity.QUIET_STATUS`), so anything arriving here is worth
+        # a line — but the OLD phrasing made even a healthy one read as a fault: "the provider's
+        # five_hour window is allowed" opens with the words `rate limit`, puts `allowed` where a
+        # reader expects a verdict, and prints on stderr beside real diagnostics. The status stays
+        # VERBATIM (the `task.retry` rule): the decision about what a status means belongs to
+        # `task_capacity`, on the provider, and a second reading here is a second thing to disagree.
+        print(f"[{seq}] provider capacity: "
+              f"{event.get('limit_type') or 'subscription'} window, "
+              f"status={event.get('status') or 'unknown'}"
               + _resets_note(event.get("resets_at")), file=sys.stderr)
     elif kind == "task.attempt_started":
         provider = event.get("provider_id")
@@ -784,7 +792,7 @@ def _task_list(args: argparse.Namespace) -> int:
     if not tasks:
         # Said rather than printed as an empty table, which reads as a display bug.
         print(f"No tasks in project {args.project}.")
-        print(f"\nCreate one with: grid task create --project {args.project} \"<prompt>\"")
+        print(f"\nCreate one with: grid task create --project {args.project} --prompt '<what to do>'")
         return 0
 
     print(f"{'TASK':38}  {'STATE':10}  {'MEMBER':34}  PROMPT")

@@ -26,6 +26,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
+from .task_capacity import worth_reporting
 from .task_events import MAX_EVENT_BYTES
 
 Event = tuple[str, dict[str, Any]]
@@ -162,6 +163,16 @@ class StreamTranslator:
         self._tell_the_gate(info)
         fields = info if isinstance(info, dict) else {}
         status = fields.get("status")
+        if not worth_reporting(status):
+            # `allowed` — the window is open and this task is running, so there is nothing here the
+            # requesting user could act on. Publishing it anyway put a line reading
+            # "rate limit: the provider's five_hour window is allowed" into very nearly every
+            # `grid task follow`, on stderr among the diagnostics, where it reads as the OPPOSITE of
+            # what it says. Measured on a healthy provider: one such line per task, every task.
+            #
+            # Dropped AFTER `_tell_the_gate`, never before: the gate is the half that acts on a
+            # reading, and it must see every one of them. This filters narration only.
+            return []
         limit_type = fields.get("rateLimitType")
         resets_at = fields.get("resetsAt")
         return [("task.rate_limit", {

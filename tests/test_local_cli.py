@@ -22156,7 +22156,10 @@ def test_task_follow_says_when_the_provider_hit_its_subscriptions_wall(monkeypat
     captured = capsys.readouterr()
 
     assert rc == 0
-    assert "rate limit" in captured.err.lower(), captured.err
+    # "provider capacity", not "rate limit": the old wording opened with the words a reader takes as
+    # the verdict, which made even a HEALTHY reading look like a fault. The status is still verbatim.
+    assert "provider capacity" in captured.err.lower(), captured.err
+    assert "status=rejected" in captured.err, captured.err
     assert "five_hour" in captured.err
     assert "1785832800" not in captured.err, "a raw epoch is not a time anyone can read"
     assert "working" in captured.out            # the task's own output is untouched
@@ -22179,7 +22182,10 @@ def test_task_follow_renders_a_rate_limit_it_cannot_fully_read(monkeypatch, tmp_
     rc = cli.main(["task", "follow", "T1"])
 
     assert rc == 0
-    assert "rate limit" in capsys.readouterr().err.lower()
+    # Still RENDERED, and that is the point of the null case: the provider drops only the reading it
+    # can positively identify as boring (`task_capacity.QUIET_STATUS`). A missing status is not that
+    # — it is news — so it reaches the follower and must not raise.
+    assert "provider capacity" in capsys.readouterr().err.lower()
 
 
 def test_task_follow_survives_a_reset_stamp_no_calendar_can_hold(monkeypatch, tmp_path, capsys):

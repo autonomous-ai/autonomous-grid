@@ -756,7 +756,8 @@ def _add_task(sub) -> None:
     create.add_argument(
         "--project", default=None, metavar="ID",
         help="Project ID to run in, from `grid project list` (default: your own project named "
-             "'default', created on first use). One task runs per project at a time.")
+             "'default', created on first use). You may have one task in flight per project at a "
+             "time; a colleague's task in the same project does not block yours.")
     create.add_argument(
         "--file", action="append", default=None, metavar="LOCAL[:DEST]",
         help="File to upload with the task; repeatable. Committed with the task before any "

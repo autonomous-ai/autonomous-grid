@@ -327,6 +327,13 @@ def test_a_404_that_says_the_task_was_cancelled_does_stop_the_agent(monkeypatch)
     # was stopped, and reporting a takeover would send somebody looking for a provider that does not
     # exist.
     assert renewer.lost is False
+    # ...and `cancelled` is what carries THIS case to `_supervise_one_task` instead. Leaving both
+    # False was a real defect: the supervisor branched only on `lost`, so every cancel fell through
+    # to the generic no-report message, which promises a reclaim, a retry cap and finally
+    # `retries_exhausted`. Measured against a live cancel, NONE of that happens — the row is already
+    # terminal, and a terminal row is inert. The operator was being told to wait for a retry the
+    # relay would never schedule.
+    assert renewer.cancelled is True
 
 
 def test_a_404_carrying_some_other_code_still_leaves_the_agent_running(monkeypatch):
@@ -1204,3 +1211,144 @@ def _numeric(node, name):
     raise AssertionError(
         f"{name} in grid-src's tasks.py is no longer a numeric constant expression "
         f"({ast.dump(node)[:120]}) — the lockstep check cannot read it, so it is not checking it")
+
+
+def test_a_takeover_and_a_cancel_are_never_the_same_flag(monkeypatch):
+    """The negative control for `cancelled`, and it is the half that keeps the fix honest.
+
+    Two flags exist only because the two cases need opposite sentences: after a takeover another
+    provider is still producing the result, and after a cancel nobody is and nobody will. A fix that
+    set `cancelled` on every give-up would restore the original bug wearing a new name — the
+    supervisor would announce "nothing will be retried" for a task that is, at that moment, being
+    retried by somebody else.
+    """
+    from remote import task_lease
+
+    def _taken_over(signaling_url, token, task_id):
+        raise task_lease.relay.RelayError("someone else holds it", status=403)
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", _taken_over)
+
+    proc = _FakeProc(alive=True)
+    renewer = task_lease.LeaseRenewer(_FakeState(), "t-1", interval=0.01)
+    renewer.attach(proc)
+    renewer.start()
+    try:
+        assert _wait_for(lambda: proc.killed)
+    finally:
+        renewer.close()
+
+    assert renewer.lost is True
+    assert renewer.cancelled is False, "a takeover would be announced as 'nothing will be retried'"
+
+
+def test_an_ambiguous_404_claims_neither_thing(monkeypatch):
+    """A relay with no lease route answers a bare framework 404. We know nothing, so we claim nothing.
+
+    Both flags stay False here for the same reason the agent stays alive: this answer is
+    indistinguishable from an old relay's, and either flag would put a confident sentence in the
+    provider's log about a state nobody has established.
+    """
+    from remote import task_lease
+
+    def _bare_404(signaling_url, token, task_id):
+        raise task_lease.relay.RelayError("Not Found", status=404)
+
+    monkeypatch.setattr(task_lease.relay, "renew_task_lease", _bare_404)
+
+    proc = _FakeProc(alive=True)
+    renewer = task_lease.LeaseRenewer(_FakeState(), "t-1", interval=0.01)
+    renewer.attach(proc)
+    renewer.start()
+    try:
+        assert _wait_for(lambda: renewer._thread is None or not renewer._thread.is_alive())
+    finally:
+        renewer.close()
+
+    assert proc.killed is False, "the ambiguous 404 must never kill the agent"
+    assert (renewer.lost, renewer.cancelled) == (False, False)
+
+
+def test_every_command_this_cli_tells_you_to_run_actually_parses():
+    """The hints are commands, so they are checked by RUNNING them through the parser.
+
+    Three of them did not. `grid project import` and an empty `grid task list` both printed
+    `grid task create --project <id> "<prompt>"`, and `--prompt` is `required=True` with no
+    positional to catch the text; `grid project clone` printed a `grid project commit` line with no
+    `-m`, which is required too. Each is the first thing a reader copies at that exact moment.
+
+    Asserting the STRINGS would have passed the day they were written and rotted the moment the
+    parser changed; asserting that `build_parser()` accepts them cannot.
+
+    Read through the AST rather than line by line, and that is not tidiness. These hints are written
+    as implicit string concatenation across two source lines, so a line scan sees `grid task create
+    --project <id>` with the `--prompt` on the next line and reports a defect that is not there — a
+    FALSE alarm on the one hint that was always correct. `ast` joins the parts the way Python does.
+    """
+    import ast
+    import inspect
+    import re
+
+    from cli import parser as cli_parser
+    from cli import remote_project, remote_task
+
+    def printed_strings(module) -> list[str]:
+        """Every literal a `print(...)` in this module emits, with each `{...}` as one token."""
+        out = []
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "print"):
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    out.append(arg.value)
+                elif isinstance(arg, ast.JoinedStr):
+                    out.append("".join(
+                        part.value if isinstance(part, ast.Constant) else "PLACEHOLDER"
+                        for part in arg.values))
+        return out
+
+    hints = []
+    for module in (remote_project, remote_task):
+        for text in printed_strings(module):
+            found = re.search(r"grid (?:task|project) [a-z][^\n]*", text)
+            if found:
+                hints.append(found.group(0))
+
+    assert len(hints) >= 4, f"the scan stopped recognising printed hints (found {len(hints)})"
+
+    built = cli_parser.build_parser()
+    for hint in hints:
+        # As a reader would retype it: drop a trailing `# comment`, then make every placeholder and
+        # every quoted free-text argument exactly one token.
+        argv = hint.split("#")[0]
+        argv = re.sub(r"<[^>]+>", "PLACEHOLDER", argv)
+        argv = argv.replace("\u2026", "PLACEHOLDER").replace("'", " ").replace('"', " ")
+        argv = argv.replace("grid ", "", 1).strip().rstrip("`.,")
+        try:
+            built.parse_args(argv.split())
+        except SystemExit as exc:  # argparse exits 2 on a usage error
+            raise AssertionError(
+                f"this CLI prints `grid {argv}` as the next thing to run, and the parser "
+                f"refuses it (exit {exc.code})") from exc
+
+
+def test_the_help_for_a_task_slot_does_not_claim_it_is_per_project():
+    """The slot moved from per-project to per-member at ADR 0033 issue 12, and the help did not.
+
+    grid-src serialises on `tasks_one_active_per_member`, so two members run tasks in one project at
+    the same time — measured live. A user who believes the old sentence reads a colleague's
+    concurrent task as a bug in the grid, and reads their OWN refusal as the grid being busy rather
+    than as their own task still running.
+    """
+    from cli import parser as cli_parser
+
+    text = cli_parser.build_parser().format_help()
+    # Cheap and specific: the claim, not the wording around it.
+    assert "per project at a time" not in text
+    for action in cli_parser.build_parser()._subparsers._group_actions[0].choices["task"] \
+            ._subparsers._group_actions[0].choices["create"]._actions:
+        if action.dest == "project":
+            assert "one task in flight per project" in (action.help or "")
+            break
+    else:
+        raise AssertionError("`grid task create --project` no longer exists to describe")

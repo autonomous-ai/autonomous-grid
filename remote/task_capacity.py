@@ -50,6 +50,28 @@ from typing import Any
 _SERVING_STATUSES = frozenset({"allowed", "allowed_warning"})
 _SPENT_STATUSES = frozenset({"rejected"})
 
+# The one status with nothing in it for the person who submitted the task: the window is open and
+# their task is running. `task_stream` drops the CLIENT event for it — the reading still reaches the
+# gate above, which is the half that acts on one.
+#
+# Only this exact string, and deliberately NOT `_SERVING_STATUSES`. `allowed_warning` is precisely
+# when the next task's wait needs explaining, and an unrecognised status is news rather than silence
+# — the same asymmetry `_SERVING_STATUSES`' own comment argues for, applied to narration instead of
+# to routing. Lives here rather than in `task_stream` so `"allowed"` has ONE owner; a second copy
+# would let the gate and the narration disagree about which reading is boring.
+QUIET_STATUS = "allowed"
+
+
+def worth_reporting(status: Any) -> bool:
+    """Whether a rate-limit reading says anything the requesting user could act on.
+
+    Not the same question as `serving`. That one decides whether this provider claims more work;
+    this one decides whether a line appears in somebody's `grid task follow`. A reading can be
+    serving and still worth saying (`allowed_warning`), which is why neither answer is derived from
+    the other.
+    """
+    return status != QUIET_STATUS
+
 # The furthest ahead a `resetsAt` may point and still be taken as a window. The vendor's widest is
 # weekly, so two weeks clears every real one with room to spare — and rejects by many orders of
 # magnitude the stamp that is actually a units mistake (milliseconds where seconds were meant), which

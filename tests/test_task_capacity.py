@@ -335,3 +335,70 @@ def test_a_window_that_has_run_out_publishes_nothing_again():
         assert capacity.paused_until() is None
     finally:
         time.monotonic = real
+
+
+def test_the_only_reading_worth_no_words_is_plain_allowed():
+    """`worth_reporting` decides NARRATION, and it is deliberately not `serving`'s complement.
+
+    `allowed_warning` is serving — the provider keeps claiming — and is also exactly when the next
+    task's wait needs explaining, so it must still reach the follower. An unrecognised status is news
+    for the same reason `_SERVING_STATUSES` refuses to guess at one: silence about a string nobody
+    has seen is the failure mode with no recovery.
+    """
+    from remote import task_capacity
+
+    assert task_capacity.worth_reporting("allowed") is False
+    assert task_capacity.worth_reporting("allowed_warning") is True
+    assert task_capacity.worth_reporting("rejected") is True
+    assert task_capacity.worth_reporting("some_status_from_2027") is True
+    # Missing / unreadable, which is what a payload built from a subprocess's stdout hands over.
+    assert task_capacity.worth_reporting(None) is True
+    assert task_capacity.worth_reporting(123) is True
+
+
+def test_a_healthy_reading_reaches_the_gate_but_not_the_follower():
+    """The filter is on narration ONLY, and the ordering is the whole property.
+
+    Dropping the event before `_tell_the_gate` would blind the capacity gate to every healthy
+    reading, and the gate is what decides whether this provider keeps claiming work — so it must see
+    every one. What the follower loses is a line reading "the provider's five_hour window is allowed"
+    on stderr, once per task, on a provider with nothing wrong with it.
+    """
+    import json
+
+    from remote import task_stream
+
+    seen = []
+    translator = task_stream.StreamTranslator(on_rate_limit=seen.append)
+
+    healthy = {"type": "rate_limit_event",
+               "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour",
+                                   "resetsAt": 1785832800}}
+    events = translator.feed(json.dumps(healthy))
+
+    assert events == [], "a healthy window is not news for the person who submitted the task"
+    assert seen == [healthy["rate_limit_info"]], "the gate must still see every reading"
+
+
+def test_a_spent_reading_still_reaches_the_follower():
+    """The positive control. A filter with no case that survives it is just a deletion.
+
+    This is the reading the event exists for: the user whose next task sits queued is owed the
+    reason, and the provider's own log is not somewhere they can read.
+    """
+    import json
+
+    from remote import task_stream
+
+    seen = []
+    translator = task_stream.StreamTranslator(on_rate_limit=seen.append)
+
+    spent = {"type": "rate_limit_event",
+             "rate_limit_info": {"status": "rejected", "rateLimitType": "weekly",
+                                 "resetsAt": 1785832800}}
+    events = translator.feed(json.dumps(spent))
+
+    assert [kind for kind, _ in events] == ["task.rate_limit"]
+    assert events[0][1] == {"status": "rejected", "limit_type": "weekly",
+                            "resets_at": 1785832800}
+    assert seen == [spent["rate_limit_info"]]

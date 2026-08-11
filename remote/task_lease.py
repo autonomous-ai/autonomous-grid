@@ -149,6 +149,13 @@ class LeaseRenewer:
         # Set when the relay told us the lease is not ours. Readable by the caller, which is how
         # `_run_and_report` can say what happened rather than reporting a bare push failure.
         self.lost = False
+        # Set when the relay told us a project member CANCELLED this task (issue 19b). A second flag
+        # rather than a second meaning for `lost`, because the two drive opposite explanations: a
+        # takeover means another provider is still producing the result, and a cancel means nobody is
+        # and nobody ever will — the row is already terminal, so no lease lapse, no reclaim, no
+        # `retries_exhausted`. Without this flag the cancel fell through to the generic no-report
+        # message, which promises exactly that cascade.
+        self.cancelled = False
 
     def attach(self, proc: Any) -> None:
         """Take the agent's process handle. Called from `run_task`'s `on_spawn`."""
@@ -314,7 +321,10 @@ class LeaseRenewer:
                 # `lost` stays False, deliberately: it means "another provider took this task over",
                 # which drives a different sentence in `_supervise_one_task`. Nobody took a
                 # cancelled task, and reporting a takeover would send somebody looking for a
-                # provider that does not exist.
+                # provider that does not exist. `cancelled` is the flag that carries THIS case there
+                # — leaving both False was the bug, because the fall-through message describes a
+                # reclaim that a terminal row never gets.
+                self.cancelled = True
                 self._give_up(
                     f"task {self._task_id} was cancelled by a project member",
                     stop_the_agent=True)

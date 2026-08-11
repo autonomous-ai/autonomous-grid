@@ -1038,6 +1038,23 @@ def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity:
               f"it, so this attempt's work was never going to land. The other provider's attempt is "
               f"the live one; `grid task get {task_id}` follows it.")
 
+    if getattr(renewer, "cancelled", False):
+        # A member stopped this task, and this is the ONE no-report path that is not waiting for
+        # anything. The relay recorded the terminal state when the cancel landed, and a terminal row
+        # is inert: no lease lapse, no reclaim, no second provider, no `retries_exhausted`. Measured
+        # on a live cancel — the task ends `failed` / `cancelled` with a single `attempt 1`.
+        #
+        # Said here rather than left to the message below, which promises that whole cascade. An
+        # operator reading it after a cancel waits for a retry the relay will never schedule, and
+        # every cancel produced it. The push failure logged just above is expected for the same
+        # reason the report is skipped: a cancelled task's lease is gone, so the git fence refuses
+        # the result push.
+        _warn(f"task {task_id} was cancelled by a project member, so nothing was reported and "
+              f"nothing will be retried — the relay recorded the terminal state when the cancel "
+              f"landed, and a cancelled task is never reclaimed. Any push failure logged above is "
+              f"the same cancel seen from the git fence. `grid task get {task_id}` shows it.")
+        return
+
     if not landed:
         # DELIBERATELY no terminal report. Nothing this attempt produced is in the repository, so
         # reporting one would mark the task terminal with nothing to fetch — and terminal is
