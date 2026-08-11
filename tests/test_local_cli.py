@@ -12453,6 +12453,10 @@ def _serve_state(monkeypatch, tmp_path, **overrides):
     monkeypatch.setenv("GRID_HOME", str(tmp_path))
     # Pin the heartbeat's platform tag so load-shape assertions are deterministic across runner OSes.
     monkeypatch.setattr(host, "platform_kind", lambda: "linux")
+    # Same reason, for the disk gauge: its figures are whatever volume the runner happens to have, so
+    # the shared fixture reports "unmeasurable" and the load-shape assertions below stay exact. The
+    # disk contract itself is covered by `test_serve_load_reports_disk*`, which opt back in.
+    monkeypatch.setattr(host, "disk_gb", lambda path: None)
     kwargs = dict(
         signaling_url="https://relay.example", node_id="node-1", network_id="n1",
         llm_url="http://127.0.0.1:8081/v1", access_token="AT", refresh_token="RT",
@@ -24303,6 +24307,107 @@ def test_gpu_load_snapshot_empty_without_gpu(monkeypatch):
     assert gpu.load_snapshot() == {}   # no GPU anywhere → provider sends no VRAM
 
 
+# One accelerator's `PerformanceStatistics`, in `ioreg`'s real single-line shape. Trimmed to the keys
+# that matter plus a couple of neighbours, and duplicated below the way ioreg genuinely repeats a
+# device: the same physical GPU appears once per accelerator subclass.
+_IOREG_DEVICE = (
+    '    "PerformanceStatistics" = {"Device Utilization %"=8,"inUseVidMemoryBytes"=864329728,'
+    '"vramFreeBytes"=124051392,"Temperature(C)"=66,"Total Power(W)"=22,"Fan Speed(%)"=0}\n'
+)
+# A second, integrated GPU: publishes utilisation and nothing else, as the real one does.
+_IOREG_IGPU = '    "PerformanceStatistics" = {"Device Utilization %"=6,"inUseVidMemoryBytes"=0}\n'
+
+
+def test_mac_gpu_counters_are_read_without_privileges(monkeypatch):
+    """The IORegistry publishes VRAM occupancy, load, temperature and power to any user. `powermetrics`
+    (which does need root) is the obvious macOS answer and the wrong one — this test pins the readings
+    that make a Mac node's card as complete as an NVIDIA one."""
+    from shared.system import apple
+
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE + _IOREG_IGPU)
+
+    assert apple.accelerator_stats() == {
+        "vram_used_bytes": 864329728.0,
+        "gpu_util": 8.0,
+        "gpu_temp_c": 66.0,
+        "gpu_power_w": 22.0,
+    }
+
+
+def test_a_gpu_listed_twice_is_not_counted_twice(monkeypatch):
+    """ioreg repeats one physical GPU per accelerator subclass, so summing would report a 22W card as
+    drawing 44W and double its VRAM. Max is duplicate-safe and still picks the discrete card over the
+    integrated one."""
+    from shared.system import apple
+
+    monkeypatch.setattr(
+        apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE + _IOREG_DEVICE + _IOREG_IGPU
+    )
+    stats = apple.accelerator_stats()
+
+    assert stats["gpu_power_w"] == 22.0
+    assert stats["vram_used_bytes"] == 864329728.0
+
+
+def test_mac_counters_absent_when_the_registry_says_nothing(monkeypatch):
+    from shared.system import apple
+
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: "")
+    assert apple.accelerator_stats() == {}
+
+
+def test_an_intel_mac_measures_occupancy_against_its_own_card(monkeypatch):
+    """`used` and `total` must describe the SAME pool — they are divided and drawn as one bar. On an
+    Intel Mac the total is the card's own VRAM, so the occupancy is the card's, never system RAM."""
+    from shared.system import apple, arch, gpu, host
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 4096.0)
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch, "native_machine", lambda: "x86_64")
+    monkeypatch.setattr(host, "memory_used_mb", lambda: 24_000.0)  # system RAM — must NOT be used
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE)
+
+    snapshot = gpu.load_snapshot()
+
+    assert snapshot["memory_total_mb"] == 4096.0
+    assert snapshot["memory_used_mb"] == 824.3   # 864329728 bytes, not the 24 GB of system RAM
+    assert snapshot["gpu_temp_c"] == 66.0 and snapshot["gpu_power_w"] == 22.0
+
+
+def test_an_apple_silicon_mac_measures_occupancy_against_its_unified_pool(monkeypatch):
+    """The mirror case: there the advertised total IS `hw.memsize`, so system memory in use is the
+    figure that pairs with it, and the registry's per-driver allocation is not."""
+    from shared.system import apple, arch, gpu, host
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 131072.0)
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch, "native_machine", lambda: "arm64")
+    monkeypatch.setattr(host, "memory_used_mb", lambda: 41_000.0)
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: _IOREG_DEVICE)
+
+    snapshot = gpu.load_snapshot()
+
+    assert snapshot["memory_used_mb"] == 41_000.0
+    assert snapshot["gpu_util"] == 8.0   # utilisation still comes from the registry
+
+
+def test_a_mac_that_cannot_measure_reports_no_zeros(monkeypatch):
+    """The regression this whole path exists for: a fabricated `memory_used_mb: 0.0` / `gpu_util: 0.0`
+    renders as a dead node holding all its memory unused."""
+    from shared.system import apple, arch, gpu, host
+
+    monkeypatch.setattr(gpu, "enumerate_gpus", lambda timeout=3.0: [])
+    monkeypatch.setattr(gpu, "_macos_vram_mb", lambda timeout=5.0: 131072.0)
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(arch, "native_machine", lambda: "arm64")
+    monkeypatch.setattr(host, "memory_used_mb", lambda: None)
+    monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: "")
+
+    assert gpu.load_snapshot() == {"gpu_count": 1.0, "memory_total_mb": 131072.0}
+
+
 def test_serve_load_merges_vram_with_active_tasks(monkeypatch, tmp_path):
     from shared.system import gpu
 
@@ -24321,6 +24426,66 @@ def test_serve_load_omits_vram_without_gpu(monkeypatch, tmp_path):
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
     load = _serve_state(monkeypatch, tmp_path).load()
     assert load == {"active_tasks": 0, "platform": "linux"}   # no VRAM keys when no GPU; platform always present
+
+
+def test_serve_load_reports_disk_of_the_model_volume(monkeypatch, tmp_path):
+    """The grid page's storage gauge: whatever volume holds the model store, not the home directory —
+    a node with its models on a separate drive must report the drive a pull actually fills."""
+    from shared import paths
+    from shared.system import gpu, host
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+    measured: dict[str, str] = {}
+    monkeypatch.setattr(
+        host, "disk_gb", lambda path: measured.update(path=path) or (3755.0, 541.4)
+    )
+
+    load = state.load()
+
+    assert load["disk_total_gb"] == 3755.0
+    assert load["disk_used_gb"] == 541.4
+    assert measured["path"].startswith(str(paths.models_dir().parent))
+
+
+def test_serve_load_omits_disk_when_the_volume_cannot_be_read(monkeypatch, tmp_path):
+    """A box that cannot stat its volume reports NOTHING, never zeros: the page renders an absent
+    figure as blank but a zeroed one as a full drive, which would read as an alarm nobody raised."""
+    from shared.system import gpu, host
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    monkeypatch.setattr(host, "disk_gb", lambda path: None)
+    load = _serve_state(monkeypatch, tmp_path).load()
+
+    assert "disk_total_gb" not in load and "disk_used_gb" not in load
+
+
+def test_serve_load_omits_throughput_until_a_request_has_been_served(monkeypatch, tmp_path):
+    """`tok_s` is measured, never benchmarked — so a node that has answered nothing reports nothing
+    rather than a synthetic warm-up figure describing a machine that was idle at start-up."""
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+    assert "tok_s" not in state.load()
+
+    state.set_throughput(248.72)
+    assert state.load()["tok_s"] == 248.7
+
+
+def test_serve_state_keeps_the_last_measurable_throughput(monkeypatch, tmp_path):
+    """An un-timeable job (media, a reply too short to time) leaves the gauge alone instead of
+    blanking it — the node did not get slower, that one request simply carried no measurement."""
+    from shared.system import gpu
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    state = _serve_state(monkeypatch, tmp_path)
+
+    state.set_throughput(100.0)
+    state.set_throughput(None)
+    state.set_throughput(0)
+
+    assert state.throughput() == 100.0
 
 
 def _poll_loop_state_and_poll(job_then_none):
