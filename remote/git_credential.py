@@ -189,7 +189,12 @@ def respond(operation: str, raw: bytes, *, networks: list[dict[str, Any]],
         # any value depending on it.
         f"capability[]={AUTHTYPE_CAPABILITY}",
         f"authtype={AUTH_SCHEME}",
-        f"credential={network.get('access_token')}",
+        # `token`, never a second `network.get(...)`. The value that goes on the wire has to be the
+        # one the guard above ran on: that guard is what keeps a line break out of a line-oriented
+        # reply, and re-reading the mapping puts an unchecked value one refactor away from the
+        # `quit=0` injection the comment above it describes. They agree today only because nothing
+        # mutates `network` in between — a property of this function's body, enforced by nothing.
+        f"credential={token}",
         # No other helper may be consulted, and no prompt may appear. Without it git keeps going —
         # `gitcredentials(7)` stops only "once both username and password have been provided", and
         # this answer provides neither.

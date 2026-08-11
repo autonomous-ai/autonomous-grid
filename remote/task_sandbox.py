@@ -382,10 +382,17 @@ def policy(workspace: Path, config_dir: Path) -> dict:
     cache = _resolved(cache_dir(Path(workspace_path)))
     allowed.append(cache)
     writable.append(cache)
-    tmp = os.getenv("TMPDIR")
-    if tmp:
-        allowed.append(_resolved(Path(tmp)))
-        writable.append(_resolved(Path(tmp)))
+    # `temp_base()`, NOT `os.getenv("TMPDIR")`. The child's temp directory is the variable *or*
+    # `/tmp` when it is unset — that is what `temp_base` answers, what `child_env` lets through, and
+    # what `_prove_the_sandbox_can_bind_its_sockets` certifies. Unset is the ORDINARY case, not the
+    # exotic one: a provider under systemd exports no TMPDIR at all. Reading the variable here
+    # granted the directory only on the boxes that happened to set it, and left `/tmp` outside
+    # `allowWrite` on the rest — the same build-fails-with-EROFS class `CACHE_DIR_NAME` exists to
+    # remove, arriving through a second door and with the policy still looking complete. Two
+    # spellings of "the temp directory" in one module was the bug; there is now one.
+    tmp = _resolved(temp_base())
+    allowed.append(tmp)
+    writable.append(tmp)
     allowed += [_resolved(home / cache) for cache in _BUILD_CACHE_DIRS]
 
     credentials = [{"path": _resolved(paths.grid_home()), "mode": "deny"},
