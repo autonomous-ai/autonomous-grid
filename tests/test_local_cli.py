@@ -21449,6 +21449,70 @@ def test_a_mac_that_cannot_measure_reports_no_zeros(monkeypatch):
     assert gpu.load_snapshot() == {"gpu_count": 1.0, "memory_total_mb": 131072.0}
 
 
+# A Mac Studio's `vm_stat`, cut down to the lines the parser reads plus several it must step over.
+# The header's 16384 is the load-bearing detail — Apple Silicon pages are four times an Intel Mac's.
+_VM_STAT_ARM64 = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                              100000.
+Pages active:                            900000.
+Pages inactive:                          180000.
+Pages speculative:                        20000.
+Pages throttled:                              0.
+Pages wired down:                        400000.
+Pages occupied by compressor:            120000.
+"Translation faults":                 987654321.
+"""
+
+
+def test_apple_silicon_reads_memory_in_use_without_psutil(monkeypatch):
+    """psutil is optional and undeclared — nothing in the CLI's dependency tree installs it — so a
+    stock Mac has to reach this figure through `vm_stat`, which ships with every macOS and needs no
+    privileges. On unified memory the reading IS the VRAM bar, so losing it blanks the gauge."""
+    import sys
+
+    from shared.system import host
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # `import psutil` now raises ImportError
+    monkeypatch.setattr(host.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(host.subprocess, "check_output", lambda *a, **k: _VM_STAT_ARM64.encode())
+    monkeypatch.setattr(host, "_sysctl", lambda name: "137438953472")  # hw.memsize, 128 GiB
+
+    # 300_000 reclaimable pages of 16384 bytes out of a 128 GiB pool. Reading the page size as an
+    # Intel Mac's 4096 would answer 129900.1 — plausible on sight, and wrong by 3.5 GB.
+    assert host.memory_used_mb() == 126384.5
+
+
+def test_memory_in_use_is_absent_rather_than_guessed_when_vm_stat_cannot_be_read(monkeypatch):
+    """Every degraded shape must decline instead of publishing a number. Each of these would
+    otherwise read some count as zero and render as a confident occupancy on the dashboard."""
+    import sys
+
+    from shared.system import host
+
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(host, "_sysctl", lambda name: "137438953472")
+
+    def vm_stat_says(text: str) -> None:
+        monkeypatch.setattr(host.subprocess, "check_output", lambda *a, **k: text.encode())
+
+    monkeypatch.setattr(host.platform, "system", lambda: "Darwin")
+    vm_stat_says("Mach Virtual Memory Statistics:\nPages free: 100000.\n")
+    assert host.memory_used_mb() is None  # header carried no page size to scale by
+
+    vm_stat_says("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 100000.\n")
+    assert host.memory_used_mb() is None  # inactive and speculative never arrived
+
+    def explode(*a, **k):
+        raise OSError("vm_stat is not here")
+
+    monkeypatch.setattr(host.subprocess, "check_output", explode)
+    assert host.memory_used_mb() is None
+
+    # And a Linux node without psutil never shells out to a macOS tool in the first place.
+    monkeypatch.setattr(host.platform, "system", lambda: "Linux")
+    vm_stat_says(_VM_STAT_ARM64)
+    assert host.memory_used_mb() is None
+
+
 def test_serve_load_merges_vram_with_active_tasks(monkeypatch, tmp_path):
     from shared.system import gpu
 
