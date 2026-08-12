@@ -910,7 +910,11 @@ project on somebody's behalf, because D-f's import refuses any project that alre
 init nobody asked for **permanently closes the import path** for that project, with no operation
 that undoes it. A user handed an empty trunk today could not bring their real repository in
 tomorrow, and every other signal would read as healthy. A one-way door is walked through only by the
-person whose door it is; the convenience form is an explicit opt-in flag on `task create`.
+person whose door it is; the convenience form is an explicit opt-in flag on `task create`,
+`--init-project` (issue 26), which inits and then runs in one call. Passing it at a project that
+already has a trunk is **not** an error: the 409 says the state the caller asked for is the state
+that holds, and refusing there would make the very command a trunkless refusal suggests single-use —
+the same reading this decision already applies to an init that loses the swap to an identical commit.
 
 The root commit is authored by the member who ran init, committer `grid`, per D-m — the first commit
 of a project's history is the one commit that cannot be re-authored without rewriting everything

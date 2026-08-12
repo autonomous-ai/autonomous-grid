@@ -1205,7 +1205,8 @@ result for a reason nobody caused.
 ## Task
 
 ```
-grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <id>] [--grid <grid>] [--json]
+grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <id>] [--init-project]
+                 [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task list   --project <id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
@@ -1243,8 +1244,21 @@ The log is **one sequence for the task's whole life**, including across a retry:
 never finds that its cursor has come to mean something else.
 
 `--project` takes a project **id** from `grid project list`. With no `--project`, the task runs in
-your own project called `default`, created on first use — the name is resolved here, by the CLI,
-against projects you own, and only an id ever reaches the relay.
+your own project called `default` **if you already have one** — the name is resolved here, by the
+CLI, against projects you own, and only an id ever reaches the relay. If you do not have one,
+nothing is created and the command says which project it needs; a project you never asked for,
+discoverable only through the error line that followed it, was worse than being asked.
+
+`--init-project` gives the project an empty trunk first, then runs the task — the one-call form of
+`grid project init` followed by `grid task create`, for work that starts from nothing. It is
+**one-way**: a project that has a trunk can never import an existing repository, so reach for
+`grid project import` instead if you have one. Your uploaded files go on your own branch and reach
+`main` by promote, exactly as on any other task — the trunk it creates is empty and stays that way.
+Passing it at a project that already has a trunk is not an error; there is simply nothing to
+initialize and the task runs.
+
+A project with no trunk refuses tasks, and the refusal names both ways forward with your own prompt
+and `--file` arguments already in them, so the fix is one paste rather than a retype.
 
 **One task runs per person per project at a time** — creating a second one while your first is still
 `preparing`, `queued` or `running` is refused, so *your* tasks in a project are strictly sequential

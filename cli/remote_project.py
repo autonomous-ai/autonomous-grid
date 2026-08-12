@@ -78,8 +78,11 @@ def _emit(args: argparse.Namespace, payload) -> bool:
 def _project_create(args: argparse.Namespace) -> int:
     """Create-or-get the caller's project by name, and print the **id**.
 
-    Create-or-get rather than refuse-if-exists: the same call resolves `grid task create`'s default
-    project, so being punished for running it twice would make that flow impossible.
+    Create-or-get rather than refuse-if-exists, so running it twice with one name answers with the
+    project already there instead of failing. The reason used to be stronger — this same call
+    resolved `grid task create`'s default project — and since ADR 0033 D-o / issue 26 it no longer
+    does: a projectless task create looks its `default` UP and creates nothing. This is now the only
+    thing that creates a project, which is the point of the slice.
     """
     from remote import relay
 

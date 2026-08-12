@@ -463,6 +463,50 @@ def test_the_cancel_code_this_provider_kills_on_is_the_one_the_relay_sends():
         "CANCELLED_CODE", module="task_errors.py")
 
 
+def test_the_two_refusal_codes_this_cli_branches_on_are_the_ones_the_relay_sends():
+    """The CLI's half of the parsed-`detail` register (ADR 0033 D-o, issue 26).
+
+    `grid task create` reads exactly two codes, and each one changes what the user is told to do:
+
+      * **`project_has_no_trunk`** decides whether they get the two commands that fix a trunkless
+        project or the relay's own sentence, which names import as the only way forward and has been
+        wrong since D-o added a second;
+      * **`project_already_has_trunk`** decides whether `--init-project` runs their task or refuses
+        it, on a project whose trunk somebody else created five minutes earlier.
+
+    Neither is a named constant in grid-src — both are literals at their point of use, and giving
+    them names over there is a cross-repo change this slice deliberately does not make — so the
+    FUNCTION is parsed instead. Both degrade safely if they drift (the branch simply never fires),
+    which is exactly why nothing else would ever notice: no test fails in either repository, and the
+    only symptom is advice quietly reverting to the version that could not work.
+    """
+    from cli import remote_task
+
+    assert remote_task._NO_TRUNK in _relay_function_strings("_wip_base_ref", module="tasks.py"), (
+        "grid-src's `_wip_base_ref` no longer refuses a trunkless project with the code "
+        "`grid task create` offers `--init-project` for")
+    assert remote_task._TRUNK_EXISTS in _relay_function_strings(
+        "refuse_if_trunk_exists", module="project_trunk.py"), (
+        "grid-src's shared trunk guard no longer sends the code `--init-project` treats as "
+        "'the trunk you asked for is already there'")
+
+
+def test_the_owner_role_this_cli_filters_on_is_the_one_the_relay_writes():
+    """`grid task create` with no `--project` resolves the caller's OWN project called `default`,
+    and `owner` is the whole of what makes it theirs (ADR 0033 D-a / D-o).
+
+    `GET /relay/v1/projects` lists every project the caller is a member of, so if this role string
+    ever stopped matching, the lookup would find nothing and every projectless `task create` would
+    refuse — annoying, loud, and harmless. The dangerous direction is the one this pins from the
+    other end: the filter is the only thing standing between "my default project" and a colleague's,
+    and a project name is unique per OWNER rather than per grid.
+    """
+    from cli import remote_task
+
+    assert remote_task._OWNER_ROLE == _relay_string_constant(
+        "OWNER_ROLE", module="project_members.py")
+
+
 def test_the_capacity_load_key_this_provider_publishes_is_the_one_the_relay_reads():
     """The other lockstep value this slice adds (ADR 0033 D-l, issue 19b).
 
@@ -529,6 +573,16 @@ def _relay_function_strings(name, module):
     module-level assignment, and this one reads the body of a function, because not every value in
     the cross-repo register is spelled as a named constant on both sides. Kept separate so
     "I could not find the constant" and "I could not find the function" stay different failures.
+
+    The docstring is collected too, and is deliberately NOT filtered out. Two of the three functions
+    read through here name their own wire value in their prose — `refuse_if_trunk_exists` opens with
+    "a **409 `project_already_has_trunk`**", and `_bearer_or_api_key` describes the `"Bearer "`
+    prefix it strips — which looks at first like a way for these checks to pass on English after the
+    real literal has drifted. It is not: every caller asserts `value in <this set>`, which is an
+    EXACT element match, and the docstring arrives as one 1,367-character element. Measured by
+    renaming the code literal in a copy of grid-src's source: the assertion goes red with the
+    docstring counted exactly as it does without it. Filtering it would be inert code justified by a
+    hazard that does not exist.
     """
     import ast
 

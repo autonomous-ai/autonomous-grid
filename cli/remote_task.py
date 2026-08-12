@@ -225,6 +225,28 @@ def _split_spec(spec: str) -> tuple[str, str]:
 # personal project, not a broken one.
 DEFAULT_PROJECT_NAME = "default"
 
+# The `role` a project listing gives the person who owns it, mirroring grid-src's
+# `project_members.OWNER_ROLE`. Required rather than cosmetic: `GET /relay/v1/projects` lists every
+# project the caller is a MEMBER of, so without this filter a `default` belonging to a COLLEAGUE
+# would be substituted for the one the caller meant — which is precisely the ADR 0033 D-a bug this
+# feature exists to remove, reintroduced on the path that has no `--project` to check against.
+#
+# *A role this build does not recognise simply does not match*, so the fail direction is the
+# "which project?" refusal, which creates nothing and names the two commands that fix it.
+# `tests/test_task_lease.py` parses grid-src for the spelling rather than restating it.
+_OWNER_ROLE = "owner"
+
+# Case A (ADR 0033 D-o, issue 26). Framed on the actionable fact — a task needs a project and none
+# was named — rather than on `default`, which is an internal convention the user never chose and
+# cannot act on.
+_NO_PROJECT = (
+    "No project given. A task runs on a project's code, so it needs to know which one.\n"
+    "\n"
+    "  grid project list                                  # your projects\n"
+    "  grid task create --project <id> --prompt '...'\n"
+    "\n"
+    "No projects yet?  grid project create --name my-app")
+
 
 def _resolve_project(base: str, token: str, project: str | None) -> str:
     """The project id to post a task to.
@@ -234,12 +256,11 @@ def _resolve_project(base: str, token: str, project: str | None) -> str:
     back the bug ADR 0033 D-a closes — posting a name someone else owns used to hand you a new,
     empty project of your own, silently.
 
-    With no `--project`, the caller's own project called `default` is created-or-got and its id is
-    what travels. The name is resolved on THIS side on purpose: `POST /relay/v1/projects` creates
-    under the caller's own ownership, so a name here can only ever name something of theirs.
+    With no `--project`, the caller's own project called `default` is looked UP and used if it is
+    there. It is never created: minting one as a side effect of a forgotten flag left people owning
+    projects they had not asked for, named after a convention, discoverable only through the error
+    line that followed (ADR 0033 D-o, issue 26).
     """
-    from remote import relay
-
     if project is not None:
         # `is not None`, then reject blank — NOT a bare truthiness test. `--project ""` naming the
         # default project is the same substitution this whole slice removes: the caller named
@@ -250,16 +271,164 @@ def _resolve_project(base: str, token: str, project: str | None) -> str:
                 "--project needs a project id. Find yours with `grid project list`, "
                 "or leave --project off to use your own 'default' project.")
         return project
-    created = relay.create_project(base, token, name=DEFAULT_PROJECT_NAME)
-    project_id = created.get("id")
-    if not project_id:
-        # A relay that answered 2xx with no id. Nothing downstream can recover — `create_task`
+    return _own_default_project(base, token)
+
+
+def _own_default_project(base: str, token: str) -> str:
+    """The id of the caller's OWN project called `default`, or the "which project?" refusal.
+
+    One round trip, exactly as the create-or-get it replaces — the convention is kept so that
+    anybody who already has a `default` project keeps their one-liner working, and only the minting
+    goes away.
+    """
+    from remote import relay
+
+    answer = relay.list_projects(base, token)
+    # `isinstance` before `.get`: `_task_oneshot` returns `resp.json()` verbatim, so a 200 carrying a
+    # JSON array, string or number — a proxy, a captive portal — reaches this line and an
+    # `AttributeError` escapes `main()` as a traceback, breaking this plane's "any failure is a clean
+    # SystemExit" contract. The hole is `_task_oneshot`'s and is older than this command; it is
+    # guarded HERE because a projectless `grid task create` is the most-run path in the CLI.
+    projects = answer.get("projects") if isinstance(answer, dict) else None
+    if not isinstance(projects, list):
+        # A reply this command cannot read is NOT an empty account — the rule `grid task list`,
+        # `project status`, `promote`, `integrate` and `init` all follow. Reporting one as "you have
+        # no projects" sends somebody who has used their `default` for months to create a second
+        # one, leaving their work in the project the message did not mention.
+        raise SystemExit(
+            "The relay's answer did not contain a project list, so this cannot tell whether you "
+            "have a project called 'default'. `grid project list --json` shows what it sent; "
+            "`grid task create --project <id>` names one explicitly.")
+    mine = [project for project in projects
+            if isinstance(project, dict)
+            and project.get("role") == _OWNER_ROLE
+            and project.get("name") == DEFAULT_PROJECT_NAME]
+    if not mine:
+        raise SystemExit(_NO_PROJECT)
+    project_id = mine[0].get("id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        # Listed, but with nothing to address it by. Nothing downstream can recover — `create_task`
         # would post `project_id: None` and be refused with a message about a key the user never
         # typed — so say what actually happened.
         raise SystemExit(
-            f"The relay accepted the project {DEFAULT_PROJECT_NAME!r} but returned no id. "
+            f"The relay listed your {DEFAULT_PROJECT_NAME!r} project but gave it no id. "
             "Pass --project <id> explicitly, or list your projects with `grid project list`.")
     return project_id
+
+
+def _ensure_trunk(base: str, token: str, project_id: str, *, quiet: bool) -> None:
+    """`--init-project`: give the project a trunk if it has none, then let the task go ahead.
+
+    Init-then-create rather than a pre-check, for `create_task`'s reason: issue 25's route already
+    decides this, and asking first would add a round trip to learn something the call itself
+    reports.
+
+    **A project that ALREADY has a trunk is not an error here.** The relay's 409 says the state the
+    caller asked for is the state that holds, and refusing on it would make the very command Case B
+    suggests single-use — a task create that then failed for any other reason (a busy slot, a
+    rejected path) would leave the user re-running a line that now complains about a trunk instead of
+    running their task. It is the same reading `project_init` itself applies to the swap it loses to
+    an identical commit: *an error for a state that is already correct sends somebody to fix a thing
+    that is not broken*.
+
+    Every OTHER refusal stops the command, including a relay too old to have the route — that one
+    arrives as `_OLD_RELAY`'s sentence from `init_project`, so no task is created against a relay
+    that could not have initialized anything.
+
+    `quiet` moves the line to **stderr** rather than suppressing it, and the distinction matters
+    because this is the one IRREVERSIBLE thing `task create` can do: a project given an empty trunk
+    can never `grid project import`, and nothing undoes it. `--json`'s contract is that stdout is a
+    single parseable document — that is satisfied by writing elsewhere, not by saying nothing. It
+    used to say nothing, which left the caller most likely to run this unattended with no record
+    that the door had been opened at all: `create_task` can still fail AFTER the init lands (a busy
+    slot, a path the relay rejects), and the JSON consumer would see only that error.
+    """
+    from remote import relay
+
+    # `--json` sends it to stderr; a human sees it on stdout with the rest of the command's progress.
+    where = sys.stderr if quiet else sys.stdout
+
+    try:
+        answer = relay.init_project(base, token, project_id)
+    except relay.TaskRefusal as exc:
+        if exc.refusal_code != _TRUNK_EXISTS:
+            raise
+        print(f"{project_id} already has a trunk — nothing to initialize.", file=where)
+        return
+    # `.get()` and a fallback: the reply is the relay's, and the task is going ahead either way.
+    # `grid project init` is the command that REPORTS an initialization and it guards its reply
+    # properly; here the trunk is a precondition being met, not the thing being reported — and if it
+    # was not really met, `create_task` refuses `project_has_no_trunk` one round trip later.
+    print(f"{answer.get('trunk') or 'main'} initialized at "
+          f"{answer.get('commit') or '(no commit reported)'} in project {project_id}", file=where)
+
+
+def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
+    """Case B: the two ways forward, as commands, carrying what the user already typed.
+
+    The suggestion reproduces the prompt and every `--file` spec **verbatim**, because the
+    alternative — "fix it and run the task again" — is a retype of a command that may hold a long
+    prompt and several uploads. `--grid` rides along when it was given: without it the suggested
+    line would target a different grid from the one that just refused, which is a worse failure than
+    the one being explained.
+
+    `shlex.quote` on every value, so a prompt carrying a space or an apostrophe pastes back as ONE
+    argument. `--project` always names the resolved id even when the caller did not type one — the
+    id is the thing they need and the only unambiguous way to say it.
+
+    Deliberately NOT the relay's own sentence with a line appended: the relay's ends by naming
+    import as the only fix, and since ADR 0033 D-o there are two.
+    """
+    import shlex
+
+    head = (f"Project {project_id} has no main yet, so there is nothing to cut a task from.")
+    if getattr(args, "init_project", False):
+        # The caller ALREADY asked for a trunk and the relay still says there is none, so offering
+        # `--init-project` would hand back the command that just failed — the "advice that is
+        # guaranteed not to work" this whole issue exists to remove, reintroduced at the one place
+        # left that could still print it.
+        #
+        # Reachable through the conflation named in `_task_create`: grid-src's `resolve_branch`
+        # answers `None` both for "no trunk" and for "this repository could not be read", so a
+        # transient relay-side read failure looks exactly like a missing trunk. That points at the
+        # relay, not at the user, and re-running would change nothing.
+        return (
+            f"{head} The --init-project you passed reported success, so either the relay could not "
+            f"read this project's repository or its trunk went missing between the two calls — "
+            f"neither is something re-running fixes.\n"
+            f"\n"
+            f"  Check what the relay thinks it has:\n"
+            f"    grid project status {project_id}")
+
+    grid = getattr(args, "grid", None)
+    argv = ["grid", "task", "create", "--project", project_id, "--init-project"]
+    if grid:
+        argv += ["--grid", grid]
+    argv += ["--prompt", args.prompt]
+    for spec in getattr(args, "file", None) or []:
+        argv += ["--file", spec]
+    suggestion = " ".join(shlex.quote(part) for part in argv)
+    return (
+        f"{head} Two ways forward:\n"
+        f"\n"
+        f"  Start empty (no existing code):\n"
+        f"    {suggestion}\n"
+        f"\n"
+        f"  Or bring an existing repository in:\n"
+        f"    grid project import . {project_id}")
+
+
+# The relay's refusal code for "this project has no `main`" — grid-src `tasks._wip_base_ref`, a 422.
+# One of the TWO parsed `detail` codes this CLI reads (the other is `_TRUNK_EXISTS` below); the
+# provider still reads exactly one, `remote/task_lease.CANCELLED_CODE`.
+#
+# *Absent ⇒ the branch does not fire and the relay's own sentence is shown*, which is the behaviour
+# every release before this one had. `tests/test_task_lease.py` parses grid-src for the spelling.
+_NO_TRUNK = "project_has_no_trunk"
+
+# The relay's refusal code for "this project already has a `main`" — grid-src
+# `project_trunk.refuse_if_trunk_exists`, a 409 shared by both bootstraps.
+_TRUNK_EXISTS = "project_already_has_trunk"
 
 
 def _task_create(args: argparse.Namespace) -> int:
@@ -271,10 +440,23 @@ def _task_create(args: argparse.Namespace) -> int:
 
     base, token, label = _resolve(args)
     project_id = _resolve_project(base, token, getattr(args, "project", None))
+    if getattr(args, "init_project", False):
+        _ensure_trunk(base, token, project_id, quiet=bool(getattr(args, "json", False)))
     # `files` and not `files or None`: `create_task` already decides whether the key goes on the
     # wire, and a second guard here reads as though it mattered while doing nothing.
-    task = relay.create_task(
-        base, token, prompt=args.prompt, project_id=project_id, files=files)
+    try:
+        task = relay.create_task(
+            base, token, prompt=args.prompt, project_id=project_id, files=files)
+    except relay.TaskRefusal as exc:
+        # Deliberately NOT pre-checked with a `project_status` call. That would add a round trip to
+        # every task creation to serve the first one, and it cannot even answer the question
+        # reliably: `main_commit` is `None` both for "no trunk" and for "the relay cannot read this
+        # repository", so a pre-flight would tell a user to initialize a project when the fault is
+        # the relay's disk. Nothing is wasted by letting the post happen — grid-src refuses before
+        # the task row exists and before `commit_input`, so no state is written and no slot spent.
+        if exc.refusal_code != _NO_TRUNK:
+            raise
+        raise SystemExit(_no_trunk_message(args, project_id)) from None
 
     if getattr(args, "json", False):
         print(json.dumps(task, indent=2))

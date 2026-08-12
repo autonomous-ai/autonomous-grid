@@ -496,3 +496,73 @@ def test_12_an_empty_project_gets_a_trunk_and_a_task_runs_in_it(
         relay, owner_token, prompt="SAY hello from an empty trunk", project_id=project_id)
     ended = H.await_state(relay, owner_token, created["id"], {"completed", "failed"}, timeout=120)
     assert ended["state"] == "completed", ended
+
+
+def test_13_a_trunkless_project_refuses_a_task_with_a_code_and_init_project_fixes_it(
+        relay, owner_token, spawn_provider):
+    """ADR 0033 D-o / issue 26, at the one place the WIRE can be checked.
+
+    `grid task create` now BRANCHES on a parsed refusal code — the second thing in this repository
+    to do so, after the lease renewer — and every unit test on this side asserts against a
+    `httpx.MockTransport` reply authored in this repository. A relay that nested its refusal
+    differently, sent the code under another key, or stopped sending one, leaves both suites green
+    and silently returns every trunkless project to the old message: the one that names import as
+    the only way forward, which has been wrong since init existed.
+
+    The second half is the flag's own claim, and it is a claim about GIT rather than about a reply:
+    the files a member uploads with `--init-project` go on their WIP branch, and the trunk it
+    created stays empty. `main` moving here would mean a third way to put work on `main` without a
+    promote, which is what D-b forbids.
+    """
+    import httpx
+
+    from cli import remote_task
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(relay, owner_token, name="p-init-task")["id"]
+
+    # 1. The wire fact the client's branch is keyed on, read off a real relay's real refusal.
+    with httpx.Client(base_url=relay, timeout=30.0) as client:
+        refused = client.post("/relay/v1/tasks",
+                              json={"prompt": "x", "project_id": project_id},
+                              headers={"Authorization": f"Bearer {owner_token}"})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["code"] == remote_task._NO_TRUNK, refused.text
+
+    # 2. ...and that this client really parses THAT body into the code it branches on. `refusal_code`
+    #    answers `None` for anything it does not recognise, so a shape change would show up here as a
+    #    silent degrade rather than an error — which is precisely how it would reach a user.
+    try:
+        relay_client.create_task(relay, owner_token, prompt="x", project_id=project_id)
+    except relay_client.TaskRefusal as exc:
+        assert exc.refusal_code == remote_task._NO_TRUNK, (
+            f"the relay's code did not survive the parse: {exc.refusal_code!r}")
+    else:
+        raise AssertionError("a task was created in a project with no trunk")
+
+    # 3. `--init-project`'s own step, through the function the CLI calls.
+    remote_task._ensure_trunk(relay, owner_token, project_id, quiet=True)
+    root = relay_client.project_status(relay, owner_token, project_id)["main_commit"]
+    assert len(root or "") == 40, root
+
+    # 4. Running it again is the case the flag has to tolerate, against the relay's REAL 409 — the
+    #    reading that keeps Case B's suggested command re-runnable.
+    remote_task._ensure_trunk(relay, owner_token, project_id, quiet=True)
+
+    # 5. The task runs, and the uploaded file reaches the agent.
+    spawn_provider()
+    created = relay_client.create_task(
+        relay, owner_token, prompt="READ input.txt; WRITE answer.txt PONG-2626",
+        project_id=project_id,
+        files=[{"path": "input.txt", "content_b64": H.b64_file("PING-2626")}])
+    done = H.await_state(relay, owner_token, created["id"], {"completed", "failed"}, timeout=120)
+    assert done["state"] == "completed", done
+    assert "PING-2626" in (done.get("result_text") or ""), (
+        f"the file uploaded alongside --init-project never reached the agent: {done!r}")
+
+    # 6. And it landed on the member's branch, not on the trunk the flag just made.
+    status = relay_client.project_status(relay, owner_token, project_id)
+    assert status["main_commit"] == root, (
+        f"the trunk moved without a promote: {status['main_commit']} != {root}")
+    assert status["ahead"] >= 1, status
+    assert status["behind"] == 0, status

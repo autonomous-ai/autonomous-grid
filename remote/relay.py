@@ -637,6 +637,43 @@ def _price_oneshot(signaling_url: str, access_token: str, method: str, path: str
 _BARE_FRAMEWORK_404 = "not found"
 
 
+class TaskRefusal(SystemExit):
+    """The relay refused, with its machine-readable code beside the sentence (ADR 0033 D-l).
+
+    The code is carried as **`refusal_code`**, never as `code` — see the warning at the end, which is
+    the reason this class is worth reading before changing.
+
+    A **`SystemExit` subclass** rather than a new keyword on `_task_oneshot`, and that choice is the
+    whole design: this plane's contract is "any failure is a clean `SystemExit`", and every one of
+    the twelve `except SystemExit` sites across `cli/` and `remote/` — plus every test asserting
+    `pytest.raises(SystemExit)` — keeps behaving byte-for-byte, because `str(exc)` is still the
+    relay's own words. What it adds is that the two callers who must BRANCH on a refusal can, without
+    a second transport path and without any other caller learning a new failure shape.
+
+    `refusal_code` is `None` for every relay that predates ADR 0033 D-l, for a body a proxy mangled,
+    and for the bare framework 404 an old relay gives an unmatched route. That is the ordinary answer
+    and never an error: a branch keyed on a code simply does not fire, and the caller falls through
+    to showing the relay's sentence — which is exactly today's behaviour.
+
+    ⚠️ **The attribute is `refusal_code` and NOT `code`, and that is load-bearing rather than a
+    naming preference.** `SystemExit.code` already exists and is the **process exit status** the
+    interpreter reads when the exception reaches the top — which it does, because `cli.main` does not
+    catch `SystemExit` and the console script is `sys.exit(main())`. `super().__init__(message)` sets
+    `code` to the message, so the interpreter prints it and exits 1. Assigning the relay's refusal
+    code over it makes the common case — `None`, i.e. every relay sending a plain-string `detail` —
+    **exit 0 with nothing printed**: `grid task create` reporting success for a task that was never
+    created, which is the exact failure this plane exists to remove. Measured, and pinned by
+    `test_a_relay_refusal_still_exits_like_a_systemexit`, which asserts the interpreter's own
+    behaviour in a subprocess because no `pytest.raises(SystemExit)` can see it.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 status: int | None = None) -> None:
+        super().__init__(message)
+        self.refusal_code = code
+        self.status = status
+
+
 def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str, *,
                   missing_route_hint: str | None = None, timeout: float = _REGISTER_TIMEOUT,
                   **kwargs: Any) -> Any:
@@ -668,7 +705,10 @@ def _task_oneshot(signaling_url: str, access_token: str, method: str, path: str,
                 and resp.status_code == 404
                 and message.strip().lower() == _BARE_FRAMEWORK_404):
             raise SystemExit(missing_route_hint)
-        raise SystemExit(message)
+        # The code rides along on the exception rather than being pulled out by a keyword the caller
+        # has to remember to pass. A caller that does not look at it sees an ordinary `SystemExit`
+        # carrying the same sentence as before — see `TaskRefusal`.
+        raise TaskRefusal(message, code=refusal_code(resp), status=resp.status_code)
     return resp.json() if resp.content else {}
 
 
@@ -857,8 +897,15 @@ def finish_project_import(signaling_url: str, access_token: str,
 def create_project(signaling_url: str, access_token: str, *, name: str) -> dict[str, Any]:
     """Create-or-get the caller's project called ``name`` (``POST /relay/v1/projects``).
 
-    Idempotent by design, so `grid task create` with no `--project` can call it every time to turn
-    the default name into an id without accumulating empty projects.
+    Idempotent, so running `grid project create` twice with one name is not punished — it answers
+    with the project that is already there.
+
+    ⚠️ That idempotence used to carry a second, load-bearing job: `grid task create` with no
+    `--project` called this on every run to turn the default NAME into an id. Since ADR 0033 D-o /
+    issue 26 it does not — a projectless task create READS `list_projects` and refuses if the caller
+    has no `default`, because minting one as a side effect of a forgotten flag left people owning
+    projects they never asked for. `cli/remote_project._project_create` is now the only caller, and
+    creating a project is an explicit act.
     """
     return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/projects",
                          json={"name": name}, missing_route_hint=_OLD_RELAY)

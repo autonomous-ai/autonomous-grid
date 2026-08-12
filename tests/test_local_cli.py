@@ -11273,6 +11273,20 @@ def _mock_relay(monkeypatch, handler, _real=httpx.Client):
     )
 
 
+def _default_project_listing(project_id="P1"):
+    """What `GET /relay/v1/projects` answers a `grid task create` that was given no `--project`.
+
+    Since ADR 0033 D-o / issue 26 that path LOOKS UP the caller's own project called `default`
+    instead of creating one, so a handler standing in for a projectless create has to answer this
+    shape — a canned task-shaped reply would be read as an unreadable listing and refused.
+
+    `role: "owner"` is not decoration: the lookup filters on it, because the listing also carries
+    projects belonging to other people.
+    """
+    return httpx.Response(200, json={"projects": [
+        {"id": project_id, "name": "default", "role": "owner"}]})
+
+
 def test_relay_register_node_puts_envelope_with_bearer(monkeypatch, tmp_path):
     from remote import relay
 
@@ -22877,18 +22891,23 @@ def test_task_create_with_no_project_resolves_the_callers_own_default(monkeypatc
 
     The relay never resolves a name into a project for a task any more — that is what let member B
     post `{"project": "acme"}` and silently get an empty project of their own. Here the name can
-    only ever name something of the caller's, because `POST /relay/v1/projects` creates it under
-    their own ownership.
+    only ever name something of the caller's, because the lookup filters on the `owner` role.
+
+    Since ADR 0033 D-o / issue 26 the lookup READS rather than creates: the same one round trip,
+    against `GET /relay/v1/projects` instead of a create-or-get POST. Anyone who already has a
+    `default` project keeps their one-liner, which is the whole reason the convention was kept
+    rather than dropped.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
     calls = []
 
     def handler(request):
-        body = json.loads(request.content)
-        calls.append((request.url.path, body))
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, body))
         if request.url.path == "/relay/v1/projects":
-            return httpx.Response(201, json={"id": "P-default", "name": "default"})
+            return httpx.Response(200, json={"projects": [
+                {"id": "P-default", "name": "default", "role": "owner"}]})
         return httpx.Response(201, json={"id": "T1", "state": "queued",
                                          "project_id": "P-default"})
 
@@ -22896,9 +22915,458 @@ def test_task_create_with_no_project_resolves_the_callers_own_default(monkeypatc
     cli.main(["task", "create", "--prompt", "x"])
 
     assert calls == [
-        ("/relay/v1/projects", {"name": "default"}),
-        ("/relay/v1/tasks", {"prompt": "x", "project_id": "P-default"}),
+        ("GET", "/relay/v1/projects", None),
+        ("POST", "/relay/v1/tasks", {"prompt": "x", "project_id": "P-default"}),
     ]
+
+
+def test_task_create_with_no_project_creates_nothing_and_asks_which_one(monkeypatch, tmp_path):
+    """The first command a new user runs, and it used to MINT a project as a side effect.
+
+    `_resolve_project` called `create_project(name="default")` unconditionally, so somebody who had
+    simply forgotten `--project` — or had never heard of projects — ended up owning one they did not
+    ask for, whose id appeared only in the error line that followed, with nothing saying it had just
+    been created or that `grid project list` would now show it. That is the main source of the junk
+    projects issue 33 otherwise has to clean up.
+
+    The refusal is framed on the ACTIONABLE fact. "You have no project named `default`" describes an
+    internal convention the user never chose; "a task needs a project and none was named" is the
+    thing they can do something about, so the message names the two commands that do it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"projects": []})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "add a retry to the upload path"])
+
+    message = str(caught.value)
+    assert "grid project list" in message, message
+    assert "grid project create" in message, message
+    assert calls == [("GET", "/relay/v1/projects")], (
+        f"a project was minted, or a task was posted, on the path that must do neither: {calls}")
+
+
+def test_task_create_never_borrows_a_default_project_somebody_else_owns(monkeypatch, tmp_path):
+    """The ADR 0033 D-a substitution bug, on the one path that has no `--project` to check against.
+
+    `GET /relay/v1/projects` lists every project the caller is a MEMBER of, and a colleague's is
+    just as likely to be called `default` as anyone's — the name is unique per OWNER, not per grid.
+    Taking it would silently run somebody's work in another person's project, which is the exact
+    class of failure this feature was built to remove.
+
+    So the lookup filters on the `owner` role, and a listing with no owned `default` in it is the
+    same "which project?" refusal as an empty one.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"projects": [
+            {"id": "P-theirs", "name": "default", "role": "member"}]})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    assert "grid project list" in str(caught.value), str(caught.value)
+    assert calls == [("GET", "/relay/v1/projects")], (
+        f"a task was posted into a project the caller does not own: {calls}")
+
+
+def test_task_create_does_not_read_an_unreadable_listing_as_an_empty_account(monkeypatch, tmp_path):
+    """A reply this command cannot read is NOT "you have no projects" — the house rule every sibling
+    in this plane already follows (`task list`, `project init`, `task cancel`, `promote`).
+
+    The two collapse in exactly the way that misleads: a body a proxy had stripped comes back as
+    `{}`, and somebody who has used their `default` project for months is told to create one — so
+    they do, and now they own two, with their work in the one the message did not mention.
+
+    Keyed on the PRESENCE of `projects`, never its truthiness: an empty list is a real answer and
+    gets the ordinary "which project?" refusal above.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    message = str(caught.value)
+    assert "--json" in message, message
+    assert "grid project create" not in message, (
+        f"an unreadable reply was reported as an empty account: {message}")
+    assert calls == [("GET", "/relay/v1/projects")], calls
+
+
+def _suggested_argv(message, marker="--init-project"):
+    """The one line of a refusal that is a COMMAND, split the way a shell would split it.
+
+    Asserting on the argv rather than on the sentence is the point: a suggestion the user is meant
+    to paste has to survive `shlex`, so a prompt carrying a space or an apostrophe must come back
+    out as ONE argument. Comparing substrings would pass for a line that pastes as four.
+    """
+    import shlex
+
+    lines = [line for line in message.splitlines() if marker in line]
+    assert len(lines) == 1, f"expected exactly one line carrying {marker!r}: {message}"
+    return shlex.split(lines[0])
+
+
+def test_task_create_on_a_trunkless_project_hands_back_the_command_that_fixes_it(
+        monkeypatch, tmp_path):
+    """Case B (ADR 0033 D-o, issue 26). The relay's own message is accurate and unusable.
+
+        > Project 9f3c1d84-… has no main yet … Import a repository into it and create the task
+        > again.
+
+    It is a DESCRIPTION, not a command — and it cannot be anything else, because the relay does not
+    know CLI syntax and should not. So the client says what it alone knows: the two ways forward,
+    spelled as commands, with the prompt and every `--file` the user already typed carried into the
+    suggestion. The alternative — "fix it and run the task again" — is a retype of a command that
+    may carry a long prompt and several uploads.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    first = tmp_path / "a.txt"
+    first.write_bytes(b"x")
+    second = tmp_path / "b.txt"
+    second.write_bytes(b"y")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "project_has_no_trunk",
+        "message": "Project abc123 has no main yet, so there is nothing to branch a task from. "
+                   "Import a repository into it and create the task again."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "add retry",
+                  "--file", str(first), "--file", f"{second}:x/b.txt"])
+
+    message = str(caught.value)
+    assert _suggested_argv(message) == [
+        "grid", "task", "create", "--project", "abc123", "--init-project",
+        "--prompt", "add retry",
+        "--file", str(first), "--file", f"{second}:x/b.txt"], message
+    # The other way forward, for somebody who has a repository rather than a blank page.
+    assert "grid project import . abc123" in message, message
+
+
+def test_a_trunkless_refusal_never_suggests_the_command_that_just_failed(monkeypatch, tmp_path):
+    """The refusal must not hand back `--init-project` to somebody who already passed it.
+
+    Reachable through the conflation `_task_create` names: grid-src's `resolve_branch` answers
+    `None` both for "no trunk" and for "this repository could not be read", so a relay-side read
+    failure is indistinguishable from a missing trunk. The init then reports success, the task is
+    still refused, and the old message told the user to re-run the identical command — which
+    `_ensure_trunk` now tolerates the 409 for, so it would fail the same way forever.
+
+    That is the "advice that is guaranteed not to work" this whole issue removes, and this was the
+    one place left that could still print it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        if request.url.path.endswith("/init"):
+            return _initialized()
+        return httpx.Response(422, json={"detail": {
+            "code": "project_has_no_trunk", "message": "Project P1 has no main yet."}})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"])
+
+    message = str(caught.value)
+    # Naming the flag in PROSE is fine and useful — what must not come back is a runnable line
+    # telling them to do it again.
+    assert not [line for line in message.splitlines()
+                if "grid task create" in line and "--init-project" in line], (
+        f"the refusal suggested the command that had just failed: {message}")
+    assert "grid project status P1" in message, message
+
+
+def test_task_create_survives_a_project_listing_that_is_not_an_object(monkeypatch, tmp_path):
+    """A 200 whose body is a JSON array or string — a proxy, a captive portal — must be a clean
+    refusal, not an `AttributeError` traceback out of `main()`.
+
+    `_task_oneshot` returns `resp.json()` verbatim, so the shape is whatever arrived. The hole is
+    older than this command and shared by every call site in the plane; it is guarded here because a
+    projectless `grid task create` is the most-run path in the CLI.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=["not", "an", "object"]))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    assert "--json" in str(caught.value), str(caught.value)
+
+
+def test_a_relay_refusal_still_exits_like_a_systemexit():
+    """`TaskRefusal` subclasses `SystemExit`, and `SystemExit.code` is ALREADY a thing: it is the
+    process exit status the interpreter reads when the exception reaches the top.
+
+    `cli.main` does not catch `SystemExit` — the console script is `sys.exit(main())`, so a refusal
+    is delivered to the interpreter, which prints `.code` and exits 1 when it is a string. An
+    attribute named `code` holding the relay's REFUSAL code silently overwrites that: the common
+    case is `None` (every relay that sends a plain-string `detail`), and `None` means **exit 0 with
+    nothing printed** — `grid task create` reporting success for a task that was never created,
+    which is the exact class of failure this whole slice exists to remove.
+
+    Measured, not reasoned about: the assertion below is on the interpreter's own behaviour.
+    """
+    import pathlib
+    import subprocess
+    import sys as _sys
+
+    from remote import relay
+
+    _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+    # The attribute the exception carries for the interpreter is untouched...
+    refusal = relay.TaskRefusal("Project 'default' already has an active task", status=409)
+    assert refusal.code == "Project 'default' already has an active task"
+    assert refusal.refusal_code is None
+
+    # ...and this is what a user actually gets.
+    done = subprocess.run(
+        [_sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r)\n"
+         "from remote import relay\n"
+         "raise relay.TaskRefusal('the relay refused', status=409)" % str(_REPO_ROOT)],
+        capture_output=True, text=True)
+    assert done.returncode == 1, f"a refusal exited {done.returncode}: {done.stderr!r}"
+    assert "the relay refused" in done.stderr, done.stderr
+
+
+def test_a_trunkless_refusal_without_a_code_degrades_to_the_relays_own_sentence(
+        monkeypatch, tmp_path):
+    """The rollout half. A relay predating ADR 0033 D-l sends a plain-STRING `detail`, so
+    `refusal_code` answers `None`, the branch does not fire, and the user sees exactly what they saw
+    before this slice — never a crash and never the wrong advice.
+
+    That is why the branch keys on the code and not on the sentence: a client that regex-matched
+    English is one relay rewording away from offering `--init-project` for something else entirely.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={
+        "detail": "Project abc123 has no main yet, so there is nothing to branch a task from."}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "p"])
+
+    message = str(caught.value)
+    assert message == (
+        "Project abc123 has no main yet, so there is nothing to branch a task from."), message
+    assert "--init-project" not in message
+
+
+def test_another_relay_refusal_with_the_same_status_is_not_read_as_a_missing_trunk(
+        monkeypatch, tmp_path):
+    """The other side of keying on the code: 422 is what the whole task plane answers for anything
+    a caller can fix, so a branch on the STATUS would hand somebody `--init-project` for a prompt
+    that was too long."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "invalid_request", "field": "prompt",
+        "message": "prompt exceeds 102400 bytes"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "p"])
+
+    message = str(caught.value)
+    assert message == "prompt exceeds 102400 bytes", message
+    assert "--init-project" not in message
+
+
+def test_the_suggested_command_keeps_the_grid_and_the_shell_quoting(monkeypatch, tmp_path):
+    """Two properties of a line meant to be pasted, both of which are wrong by omission.
+
+    **`--grid`** — dropped, the suggestion targets the ACTIVE grid rather than the one that just
+    refused, so somebody with a personal grid selected would initialize a trunk on the wrong grid and
+    then be told their project does not exist.
+
+    **The quoting** — a prompt is free-form English and routinely carries an apostrophe. Pasted
+    unquoted it becomes several arguments, or an unterminated string the shell sits waiting on.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)  # the seeded grid is called `team`
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "project_has_no_trunk", "message": "no main"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--grid", "team",
+                  "--prompt", "fix Bob's retry, then re-run"])
+
+    assert _suggested_argv(str(caught.value)) == [
+        "grid", "task", "create", "--project", "abc123", "--init-project",
+        "--grid", "team", "--prompt", "fix Bob's retry, then re-run"], str(caught.value)
+
+
+def _initialized(commit="a" * 40, created=True):
+    """What `POST /relay/v1/projects/{id}/init` answers (ADR 0033 D-o, issue 25)."""
+    return httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "status": "initialized",
+        "commit": commit, "created": created, "trunk": "main"})
+
+
+def test_init_project_creates_the_trunk_before_the_task(monkeypatch, tmp_path):
+    """`--init-project` is the one-call form ADR 0033 D-o promised: init the trunk, then run.
+
+    The ORDER is the whole contract — a task posted first is refused for the trunk that the second
+    call was about to create. And the init request carries **no body**: the relay refuses one with a
+    422 rather than dropping it, because `files` means something real on `POST …/{id}/commit` one
+    route along.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path, request.content))
+        if request.url.path.endswith("/init"):
+            return _initialized()
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"]) == 0
+
+    assert [(method, path) for method, path, _ in calls] == [
+        ("POST", "/relay/v1/projects/P1/init"),
+        ("POST", "/relay/v1/tasks"),
+    ], calls
+    assert calls[0][2] == b"", f"init takes no request body: {calls[0][2]!r}"
+
+
+def test_init_project_against_a_relay_without_the_route_creates_no_task(monkeypatch, tmp_path):
+    """A relay predating issue 25 answers the **bare framework 404** for `…/init`, which
+    `_task_oneshot`'s `missing_route_hint` turns into a sentence naming the relay.
+
+    The task must not then be posted anyway. It would be refused for the missing trunk a moment
+    later — but as the relay's own description, with the `--init-project` the user just typed
+    reported as though it had worked.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"])
+
+    assert "relay" in str(caught.value).lower(), str(caught.value)
+    assert calls == ["/relay/v1/projects/P1/init"], (
+        f"a task was posted against a relay that could not have initialized anything: {calls}")
+
+
+def test_init_project_runs_the_task_when_the_trunk_is_already_there(monkeypatch, tmp_path, capsys):
+    """The postcondition the flag asks for already holds, so the task goes ahead.
+
+    Refusing here would make Case B's own suggested command single-use: run it, have the task create
+    fail for any unrelated reason (a busy slot, a path the relay rejects), and the identical line now
+    complains about a trunk instead of running the task. `project_init` applies the same reading to
+    the swap it loses to an identical commit — an error for a state that is already correct sends
+    somebody to fix a thing that is not broken.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/init"):
+            return httpx.Response(409, json={"detail": {
+                "code": "project_already_has_trunk",
+                "message": "Project P1 already has a main (at 4f2a91c)."}})
+        return httpx.Response(201, json={"id": "T7", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"]) == 0
+
+    assert calls == ["/relay/v1/projects/P1/init", "/relay/v1/tasks"], calls
+    out = capsys.readouterr().out
+    assert "T7" in out
+    assert "already has a trunk" in out, f"the skipped init was not reported: {out!r}"
+
+
+def test_any_other_init_refusal_stops_before_the_task(monkeypatch, tmp_path):
+    """The tolerance is keyed on the CODE, not on the 409. `project_status` and the membership fence
+    answer their own refusals from this route, and a task posted past one of those would run in a
+    project the caller was just told they cannot touch."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(404, json={"detail": {
+            "code": "no_such_project", "message": "No such project, or you are not a member of it."}})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"])
+
+    assert str(caught.value) == "No such project, or you are not a member of it."
+    assert calls == ["/relay/v1/projects/P1/init"], calls
+
+
+def test_init_project_reports_the_trunk_on_stderr_under_json(monkeypatch, tmp_path, capsys):
+    """`--json` keeps stdout a single parseable document — by writing the init line ELSEWHERE, not
+    by saying nothing.
+
+    This is the one irreversible thing `task create` can do: a project given an empty trunk can
+    never `grid project import`. Suppressing the line entirely left the caller most likely to run it
+    unattended with no record that the door had been opened — and `create_task` can still fail after
+    the init lands (a busy slot, a rejected path), so the JSON consumer would see only that error and
+    nothing about the trunk that now exists.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        if request.url.path.endswith("/init"):
+            return _initialized()
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x", "--json"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"id": "T1", "state": "queued", "project_id": "P1"}
+    assert "a" * 40 in captured.err, (
+        f"the trunk this command created was reported nowhere: {captured.err!r}")
+
+
+def test_task_create_takes_no_init_project_by_default():
+    """A one-way door is never opened by omission: a project given an empty trunk can never import a
+    repository afterwards, and nothing undoes it."""
+    parser = cli.build_parser()
+    assert parser.parse_args(["task", "create", "--prompt", "x"]).init_project is False
+    assert parser.parse_args(
+        ["task", "create", "--prompt", "x", "--init-project"]).init_project is True
 
 
 def test_project_is_classified_and_remote_only(monkeypatch, tmp_path):
@@ -23745,7 +24213,7 @@ def test_task_create_does_not_send_the_executable_key(monkeypatch, tmp_path):
 
     def handler(request):
         if request.url.path.endswith("/projects"):
-            return httpx.Response(201, json={"id": "P1", "name": "default"})
+            return _default_project_listing()
         seen["body"] = json.loads(request.content)
         return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
 
@@ -24279,9 +24747,16 @@ def test_task_create_surfaces_a_busy_project_as_a_clean_error(monkeypatch, tmp_p
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
 
-    _mock_relay(monkeypatch, lambda r: httpx.Response(
-        409, json={"detail": "Project 'default' already has an active task"}))
+    # Path-aware for the reason `test_task_create_shows_the_relays_rejection_of_a_path` is: a single
+    # canned 409 would be answered to the project lookup that runs first, and this would go green
+    # without a task ever having been posted.
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        return httpx.Response(
+            409, json={"detail": "Project 'default' already has an active task"})
 
+    _mock_relay(monkeypatch, handler)
     with pytest.raises(SystemExit) as exc:
         cli.main(["task", "create", "--prompt", "hello"])
     assert "already has an active task" in str(exc.value)
@@ -29398,7 +29873,7 @@ def test_task_create_uploads_a_file_at_its_basename(monkeypatch, tmp_path, capsy
     # then correctly reports as a project mismatch.
     def handler(request):
         if request.url.path == "/relay/v1/projects":
-            return httpx.Response(201, json={"id": "P1", "name": "default"})
+            return _default_project_listing()
         seen.update(body=json.loads(request.content))
         return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
 
@@ -29424,9 +29899,13 @@ def test_task_create_places_a_file_at_an_explicit_destination(monkeypatch, tmp_p
     source.write_bytes(b"k = 1\n")
     seen = {}
 
-    _mock_relay(monkeypatch, lambda r: (
-        seen.update(body=json.loads(r.content)),
-        httpx.Response(201, json={"id": "T1", "state": "queued"}))[1])
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
     cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:config/conf.toml"])
 
     assert [f["path"] for f in seen["body"]["files"]] == ["config/conf.toml"]
@@ -29510,9 +29989,13 @@ def test_task_create_without_files_sends_no_files_key(monkeypatch, tmp_path):
     state.set_mode("remote")
     seen = {}
 
-    _mock_relay(monkeypatch, lambda r: (
-        seen.update(body=json.loads(r.content)),
-        httpx.Response(201, json={"id": "T1", "state": "queued"}))[1])
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
     cli.main(["task", "create", "--prompt", "p"])
 
     assert "files" not in seen["body"]
@@ -29527,8 +30010,16 @@ def test_task_create_shows_the_relays_rejection_of_a_path(monkeypatch, tmp_path,
     source = tmp_path / "a.txt"
     source.write_bytes(b"x")
 
-    _mock_relay(monkeypatch, lambda r: httpx.Response(
-        422, json={"detail": "path is inside a reserved directory ('.git')"}))
+    # Path-aware, so the 422 comes from the TASK post. A single canned refusal would be answered to
+    # the project lookup that now runs first, and this test would pass without the task request ever
+    # being made — green for a path it no longer exercises.
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        return httpx.Response(
+            422, json={"detail": "path is inside a reserved directory ('.git')"})
+
+    _mock_relay(monkeypatch, handler)
     with pytest.raises(SystemExit) as exit_info:
         cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:.git/hooks/x"])
 

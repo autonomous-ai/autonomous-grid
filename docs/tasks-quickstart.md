@@ -82,6 +82,21 @@ grid task create --project <project-id> --prompt 'use this config' --file ./conf
 `--file LOCAL[:DEST]` uploads a file with the task, repeatable. It is committed **before** any
 provider can claim the task, so the agent always finds it.
 
+**Starting from nothing, in one call:**
+
+```bash
+grid task create --project <project-id> --init-project --prompt 'scaffold a FastAPI service'
+```
+
+`--init-project` gives the project its empty trunk first, then runs the task — `grid project init`
+and `grid task create` in one. Same one-way door as `init` itself: a project that has a trunk can
+never import an existing repository, so use `grid project import` if you have one. Your uploaded
+files go on **your branch**, never on the trunk. Passing it at a project that already has a trunk
+does nothing and the task simply runs.
+
+With no `--project` at all, the task goes to your own project called `default` **if you already have
+one**. If you do not, nothing is created and the command tells you which project it needs.
+
 ```bash
 grid task follow <task-id>          # live: tool calls, output, terminal state
 grid task get    <task-id>          # one shot: state, provider, result

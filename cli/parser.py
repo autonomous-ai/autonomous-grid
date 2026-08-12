@@ -824,6 +824,15 @@ def _add_task(sub) -> None:
         help="File to upload with the task; repeatable. Committed with the task before any "
              "provider can claim it, so the agent always finds it. Placed at the file's own name "
              "unless you give a destination (e.g. ./conf.toml:config/conf.toml).")
+    # ADR 0033 D-o / issue 26 — the opt-in convenience form D-o promised. Opt-IN because it is a
+    # one-way door: `grid project import` refuses a project that already has a trunk, so a project
+    # given an empty one can never bring an existing repository in, and nothing undoes it.
+    create.add_argument(
+        "--init-project", dest="init_project", action="store_true",
+        help="Give the project an empty trunk first, if it has none, then run the task. For work "
+             "that starts from nothing. ONE-WAY: a project with a trunk can never import an "
+             "existing repository, so use `grid project import` instead if you have one. Your "
+             "uploaded files go on your own branch, never on the trunk.")
     create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_task)
