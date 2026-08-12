@@ -215,6 +215,27 @@ Both spend your one task slot while they work.
 repo and you get nested repos that `git status` shows as untracked — and a mistaken `cd` then makes
 `git log` answer from the enclosing repo, which looks completely valid. **Fetch outside any repo.**
 
+### `grid project refresh` vs `grid project status`
+
+Both print a "behind", and they mean different things.
+
+| | Compares | Asks | Needs |
+|---|---|---|---|
+| `refresh <pid>` | your **clone** against the grid's copy of the branch you are on | nothing — git only | to be run in a clone |
+| `status <pid>` | your **branch** against `main` | the relay | nothing local |
+
+So `refresh` answers "has anything landed since I last looked", and `status` answers "am I far enough
+along to promote". `refresh` never moves your files; `status` never looks at them.
+
+### `grid project refresh` vs re-running `grid project clone`
+
+Both update a clone. Only one can lose work.
+
+- `refresh` — fetches and reports. Never touches your working tree, so it works with local commits, a
+  dirty tree, or a task in flight.
+- `clone` over the same directory — **resets** your branch to the fetched tip, and therefore refuses
+  outright when you have commits the grid has not seen.
+
 ### `--project` vs `--grid`
 
 - `--project <id>` — which project, a uuid from `grid project list`.

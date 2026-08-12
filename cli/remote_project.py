@@ -43,6 +43,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_import(args)
     if args.subcommand == "clone":
         return _project_clone(args)
+    if args.subcommand == "refresh":
+        return _project_refresh(args)
     # argparse (required=True + choices) guarantees the rest is `member`; guard explicitly anyway,
     # so direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "member":
@@ -257,6 +259,42 @@ def _project_clone(args: argparse.Namespace) -> int:
     print(f"  grid project commit {args.project_id} -m '<message>' --file <path>   # no agent")
     print(f"  grid project integrate {args.project_id}              # bring {cloned.trunk} in")
     print(f"  grid task create --project {args.project_id} --prompt '…'")
+    return 0
+
+
+def _project_refresh(args: argparse.Namespace) -> int:
+    """Bring a clone's view of the grid up to date and report the difference. Touches nothing else.
+
+    The read-only counterpart to `clone`. Re-cloning in place is the other way to update, but it
+    updates by RESETTING the branch to the fetched tip, so it must refuse whenever the member has a
+    local commit — which is how anybody checkpoints work between `grid project commit` calls. This
+    has no such refusal because it has nothing to lose: no checkout, no merge, no reset.
+
+    **No relay API call**, which is the reason it takes no `--grid`: the grid is already pinned
+    inside the clone's own credential helper, so a flag naming a different one could not change
+    anything. It is not "no network" — the fetch is an HTTP round trip to the relay's git front, and
+    that front has to be reachable. What it does not need is the CONTROL PLANE, because the
+    credential helper reads only the local store.
+
+    It reports the clone against the grid's copy of the branch the member is standing on; how far
+    that branch is from `main` is a different axis and belongs to `grid project status`, which asks
+    the relay for it. Rendering lives in `cli/project_refresh.py`.
+    """
+    from pathlib import Path
+
+    from remote import project_clone
+
+    from . import project_refresh
+
+    dest = Path(args.directory) if getattr(args, "directory", None) else Path.cwd()
+    try:
+        found = project_clone.refresh_clone(dest, project_id=args.project_id)
+    except project_clone.CloneError as exc:
+        raise SystemExit(f"Cannot refresh project {args.project_id}: {exc}")
+
+    if _emit(args, project_refresh.payload(found)):
+        return 0
+    project_refresh.render(found)
     return 0
 
 

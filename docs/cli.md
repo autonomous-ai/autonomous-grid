@@ -892,6 +892,7 @@ grid project commit        <project-id> -m <message> [--file <local[:dest]>]… 
                                         [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
 grid project clone         <project-id> [<directory>] [--grid <grid>] [--json]
+grid project refresh       <project-id> [<directory>] [--json]
 ```
 
 **Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
@@ -961,6 +962,53 @@ directory that fails on every fetch. `grid task fetch` works meanwhile.
 
 `grid credential` itself is not a command to type — the clone writes it into `.git/config` and git
 runs it.
+
+### Keeping a clone current
+
+```
+grid project refresh <project-id> [<directory>]
+```
+
+`grid project refresh` fetches what the grid has and tells you how far your clone is behind it. The
+directory defaults to the one you are standing in, which is the usual way to run it.
+
+**It never touches your working tree or your branch.** That is the whole difference from re-running
+`grid project clone`, which updates by *resetting* the branch to the fetched tip and therefore has to
+refuse whenever you have a local commit. Refresh has nothing to refuse: it works with local commits,
+with a dirty tree, and while a task of yours is running. What it prints instead is the one command
+that would move your files, when moving them is possible at all.
+
+It reports on **the branch you are standing on**, whichever that is. Inside a clone that is usually
+your own WIP branch, but `grid task fetch`'s own advice puts you on `task/<id>`, and those move and
+are collected too. Seven answers, and the command says which: up to date; the grid has commits you do
+not; you have commits the grid does not; the two have diverged; the grid does not have this branch;
+the branch tracks nothing; HEAD is detached.
+
+"The grid does not have this branch" has two opposite histories, and the command does not guess
+between them: a WIP branch is not there until work lands on it, and a `task/<id>` branch is collected
+again once its task is over. From inside a clone the two look identical.
+
+Diverging deserves a note, because it is the only one where the obvious next step is wrong. `git
+pull` there "works" by making a merge commit you can never push — members do not push — so refresh
+does not offer one. Only one thing on the grid's side can put your branch and its copy on different
+histories: somebody ran `grid project wip reset`. Every other write produces a descendant.
+
+It only ever fetches `origin`, which is the remote the clone was made with. A clone is an ordinary
+git repository, so you can add others — and if you point a branch's upstream at one of them, refresh
+still reports the comparison but labels the second row with that remote's name instead of "on grid",
+and says that only `origin` was updated. The figures are then only as fresh as your last `git fetch`
+of that remote. It will not fetch it for you: reaching a host the grid did not give you is the thing
+the directory check exists to prevent.
+
+Stale `origin/task/<id>` refs are pruned as it goes, because the grid collects finished task branches
+on its side and a clone would otherwise keep listing tasks that no longer exist. The report counts
+what changed and what went; it does not interpret which refs they were.
+
+**This is not `grid project status`, and the two "behind"s are different.** Refresh compares your
+clone with the grid, on your machine. `grid project status` compares your branch with `main`, on the
+relay. Refresh asks the relay nothing at all — which is why it has no `--grid` flag, why it keeps
+working when the control plane is unreachable, and why it cannot tell you anything about the trunk.
+It does need the relay itself reachable: it is a fetch.
 
 ### Importing an existing repository
 

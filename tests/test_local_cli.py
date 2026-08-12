@@ -31382,3 +31382,540 @@ def test_task_fetch_into_a_project_clone_names_the_two_git_commands_instead(
     assert "task/T1" in message, "the member has to be told WHICH branch, not just the verbs"
     assert "was not created by" not in message, "that is the message for a directory that is nobody's"
     assert (clone / "in-progress.py").read_text() == "half-finished work\n"
+
+
+# --- `grid project refresh` ----------------------------------------------------------------------
+
+_GRID_SIDE_ENV = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+                  "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+                  "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+                  "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"}
+
+
+def _grid_side_git(tmp_path):
+    """Run git in the worktree `_relay_bare_repo` seeded, so a test can move the GRID's refs.
+
+    Refresh is the one command whose whole subject is "what changed on the grid since you cloned",
+    so every test here has to move a ref on the far side after the clone exists. Same env as the
+    fixture that built it.
+    """
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=str(tmp_path / "relay-seed"), check=True,
+                              capture_output=True, text=True, env=_GRID_SIDE_ENV).stdout
+    return git
+
+
+def _a_clone(monkeypatch, tmp_path, *, with_wip=True):
+    """A real `grid project clone` of P1 against a local bare repo. Returns (dest, bare)."""
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path, with_wip=with_wip)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0
+    return dest, bare
+
+
+def test_project_refresh_reports_the_commits_the_grid_has_and_the_clone_does_not(
+        monkeypatch, tmp_path, capsys):
+    """The whole point: a task landed, and the clone is told — in oids it can act on.
+
+    `grid project integrate` and `grid task get` both print commit ids, so a member comparing "what
+    the grid said happened" with "what my clone holds" is comparing ids. A bare `behind 2` cannot be
+    checked against anything.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    before = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", f"wip/{_MEMBER_KEY}")
+    (tmp_path / "relay-seed" / "landed.py").write_text("what the agent wrote\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "a task landed")
+    after = git("rev-parse", "HEAD").strip()
+    git("push", "--quiet", str(bare), f"wip/{_MEMBER_KEY}")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert before[:12] in out, f"the commit the clone is on is missing:\n{out}"
+    assert after[:12] in out, f"the commit the grid is on is missing:\n{out}"
+    assert "1 commit" in out, out
+    # The working tree was NOT touched — that is the difference from re-cloning.
+    assert not (dest / "landed.py").exists(), "refresh moved the working tree"
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip() == before
+    # And it names the one command that lands it, which `git status` alone does not.
+    assert f"git merge --ff-only origin/wip/{_MEMBER_KEY}" in out, out
+    # The ORDINARY labelling, asserted here because the only other test of it is the rare
+    # second-remote case. Without this, inverting that comparison would put a false "tracks a remote
+    # this command does not fetch" caveat on every refresh anyone ever runs, and nothing would fail.
+    assert "on grid" in out, out
+    assert "does not\nfetch" not in out and "does not fetch" not in out, \
+        f"an ordinary clone was reported as tracking a remote refresh did not fetch:\n{out}"
+
+
+def test_project_refresh_on_a_current_clone_suggests_nothing(monkeypatch, tmp_path, capsys):
+    """Nothing changed is an ANSWER, and it must not come with a command to run.
+
+    A next-command line printed unconditionally trains people to run it unconditionally, and
+    `git merge --ff-only` against an upstream you already have is a no-op that still looks like
+    work. The states are told apart so the advice can be.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "git merge" not in out, f"advice was printed with nothing to advise:\n{out}"
+    assert "up to date" in out.lower(), out
+
+
+def _commit_locally(dest, name="mine.py", text="work the grid has never seen\n"):
+    """A local commit in the member's clone — the only git-native way they checkpoint."""
+    (dest / name).write_text(text)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "m", "GIT_AUTHOR_EMAIL": "m@invalid",
+           "GIT_COMMITTER_NAME": "m", "GIT_COMMITTER_EMAIL": "m@invalid"}
+    for args in (["add", "-A"], ["commit", "--quiet", "-m", "local checkpoint"]):
+        subprocess.run(["git", "-C", str(dest), *args], check=True, capture_output=True, env=env)
+    return subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+
+
+def test_project_refresh_with_local_commits_says_so_and_never_suggests_re_cloning(
+        monkeypatch, tmp_path, capsys):
+    """Having commits the grid has not seen is ORDINARY, not an error — and re-cloning destroys them.
+
+    A member cannot push, so a local commit is how they checkpoint between `grid project commit`
+    calls. `grid project clone` over the same directory is the documented way to update, and it
+    would reset this branch — so it is the one command that must never appear here. The way to land
+    the work is what appears instead.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    tip = _commit_locally(dest)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert tip[:12] in out, out
+    assert "up to date" not in out.lower(), f"a local commit was reported as being in step:\n{out}"
+    assert "grid project commit P1" in out, out
+    assert "grid project clone" not in out, f"re-cloning would discard exactly this work:\n{out}"
+
+
+def test_project_refresh_on_a_diverged_branch_offers_no_fast_forward_and_names_the_cause(
+        monkeypatch, tmp_path, capsys):
+    """The one state where the wrong advice actively hurts.
+
+    `git merge --ff-only` FAILS here, and `git pull` "works" by making a merge commit the member can
+    never push — a member cannot push at all. So this state must not print the ff line.
+
+    It can name the cause, because there is only one on the grid's side: every other relay write to
+    a WIP branch produces a descendant — a task settling fast-forwards it, all three integration
+    tiers move it forward, `grid project commit` adds to it. `grid project wip reset` is the only
+    one that can move it anywhere else.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    # What a `grid project wip reset` looks like from the clone's side: the branch it was cut from
+    # is gone, and the grid has grown a different history in its place.
+    git("checkout", "--quiet", "main")
+    git("branch", "--quiet", "-f", f"wip/{_MEMBER_KEY}", "main")
+    git("checkout", "--quiet", f"wip/{_MEMBER_KEY}")
+    (tmp_path / "relay-seed" / "elsewhere.py").write_text("a different history\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "after the reset")
+    git("push", "--quiet", "--force", str(bare), f"wip/{_MEMBER_KEY}")
+    _commit_locally(dest)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, f"a diverged clone is a state to report, not a failure of the command:\n{out}"
+    assert "git merge --ff-only" not in out, f"that command fails in this state:\n{out}"
+    assert "git pull" not in out, f"a pull here makes a merge commit that can never be pushed:\n{out}"
+    assert "wip reset" in out, out
+    # Look at it, and keep it safe — the same two ways out `grid project clone`'s refusal offers.
+    assert f"log --left-right --oneline wip/{_MEMBER_KEY}...origin/wip/{_MEMBER_KEY}" in out, out
+    assert "branch my-work" in out, out
+
+
+def test_project_refresh_before_the_members_first_task_has_landed(monkeypatch, tmp_path, capsys):
+    """The DEFAULT state of everybody on day one, not an edge case.
+
+    The relay makes a member's WIP branch when one of their tasks settles or they commit — never
+    when the project is created or joined. So the clone has the branch locally, cut from the trunk,
+    with an upstream configured by hand that points at a ref which does not exist yet. Every count
+    here is a comparison against nothing, and reporting `0/0` would say "in step with the grid",
+    which is the one thing that is not true.
+
+    What this deliberately does NOT assert is a stated CAUSE. The identical state is reached by a
+    member standing on a `task/<id>` the relay has collected, where "not made yet" would be false —
+    see `test_project_refresh_on_a_collected_task_branch_does_not_claim_it_is_yet_to_appear`. An
+    earlier version of this test pinned that wording, which is how the false sentence survived.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path, with_wip=False)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "up to date" not in out.lower(), f"compared against a branch that is not there:\n{out}"
+    assert "git merge" not in out, out
+    assert f"does not have wip/{_MEMBER_KEY}" in out, out
+
+
+def test_project_refresh_on_a_collected_task_branch_does_not_claim_it_is_yet_to_appear(
+        monkeypatch, tmp_path, capsys):
+    """"Not on the grid" has two causes, and only one of them is "not made yet".
+
+    Reachable straight through advice this CLI gives: `grid task fetch` refuses inside a clone and
+    tells the member to check `task/<id>` out, and the relay's retention sweep later collects that
+    branch. The member is then standing on a branch whose upstream is configured and whose ref is
+    gone — the same shape as a WIP branch the relay has not created yet, and the opposite history.
+
+    Telling somebody their finished task's branch "appears when your first task lands" is not a
+    clumsy sentence, it is a false one. The fix is not to guess which cause it is from the ref's
+    NAME — that would put the relay's naming rule on this side of the wire — but to stop claiming
+    a cause the command cannot see.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", "-b", "task/T1", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "an agent worked here")
+    git("push", "--quiet", str(bare), "task/T1")
+    assert cli.main(["project", "refresh", "P1", str(dest)]) == 0
+    # Exactly what `grid task fetch`'s own refusal tells the member to run.
+    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "task/T1"], check=True)
+    git("push", "--quiet", str(bare), "--delete", "task/T1")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "task/T1" in out, out
+    assert "first task" not in out.lower(), f"this branch is not one that has yet to appear:\n{out}"
+    assert "up to date" not in out.lower(), out
+
+
+def test_project_refresh_says_so_when_the_branch_tracks_a_remote_it_did_not_fetch(
+        monkeypatch, tmp_path, capsys):
+    """Numbers measured against a ref this command did not update must not look freshly measured.
+
+    A clone is an ordinary git repository and members are invited to work in it, so a second remote
+    — a personal backup, a fork — is a thing that happens. Refresh only ever fetches `origin`, on
+    purpose: fetching whatever else a repository points at would reach a host nobody here chose,
+    which is the very thing the directory guard exists to prevent.
+
+    So the comparison is still made and still true of what is on disk; what would be false is
+    presenting it as news from the grid. It is fetching that is refused here, not reporting.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    branch = f"wip/{_MEMBER_KEY}"
+    for args in (["remote", "add", "backup", str(tmp_path / "relay.git")],
+                 ["fetch", "--quiet", "backup"],
+                 ["config", "branch." + branch + ".remote", "backup"]):
+        subprocess.run(["git", "-C", str(dest), *args], check=True, capture_output=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "backup" in out, f"the report never says which remote it measured against:\n{out}"
+    assert "origin" in out, out
+
+
+def test_project_refresh_on_a_detached_head_reports_instead_of_crashing(
+        monkeypatch, tmp_path, capsys):
+    """A detached HEAD is reachable from advice this CLI gives, so it cannot be an unhandled case.
+
+    `grid task fetch` inside a clone refuses and tells the member to check a task branch out; one
+    slip of that (checking out the remote-tracking ref, or an oid from `grid task get`) leaves HEAD
+    detached. There is no branch, so there is no upstream and nothing to compare — which is an
+    answer, not a crash and not a zero.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", "HEAD"], check=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "detached" in out.lower(), out
+    assert "up to date" not in out.lower(), out
+    assert "git merge" not in out, out
+
+
+def test_project_refresh_on_a_branch_that_tracks_nothing_says_which_branch(
+        monkeypatch, tmp_path, capsys):
+    """A local branch of one's own is ordinary in a clone, and it has no counterpart on the grid.
+
+    Distinct from `no_remote_branch`, which is an upstream that is configured and not yet created.
+    Here nothing is configured, so there is nothing the grid could be asked about — and the member
+    has to be told WHICH branch that is, because the reason they see no news is that they are
+    standing somewhere the grid was never going to answer for.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "-b", "my-experiment"],
+                   check=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "my-experiment" in out, out
+    assert "up to date" not in out.lower(), out
+    assert "git merge" not in out, out
+
+
+def test_project_refresh_refuses_a_directory_holding_another_project(monkeypatch, tmp_path, capsys):
+    """The project id is not decoration: it is what makes standing in the wrong clone detectable.
+
+    Nothing here would be destroyed by getting it wrong — refresh writes no working tree — but the
+    member would read a report about a project they did not name and believe it was the one they
+    did. The marker already records which project a directory holds, so the mistake is answerable
+    rather than merely survivable.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "refresh", "P2", str(dest)])
+
+    message = str(caught.value)
+    assert "P1" in message, f"the refusal has to name the project the directory really holds: {message}"
+    assert "P2" in message, message
+
+
+def test_project_refresh_refuses_a_task_fetch_directory_and_a_directory_that_is_nobodys(
+        monkeypatch, tmp_path, capsys):
+    """Two different mistakes, two different sentences — the split `grid task fetch` already makes.
+
+    A `grid task fetch` result looks like a repository and is not a clone: it has no origin to
+    refresh from and no branch of the member's. Saying only "not a clone" there leaves somebody
+    holding a real directory of real work with no idea what to do; naming what it IS points at
+    `grid project clone`, which is the thing they actually want.
+    """
+    from remote import project_clone, task_repo
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    fetched = tmp_path / "a-result"
+    (fetched / ".git").mkdir(parents=True)
+    (fetched / ".git" / task_repo.FETCH_MARKER).write_text("P1\n")
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "refresh", "P1", str(fetched)])
+    message = str(caught.value)
+    assert "grid task fetch" in message, message
+    assert "grid project clone" in message, f"name the command that gives them a clone: {message}"
+
+    stranger = tmp_path / "somebody-elses-repo"
+    (stranger / ".git").mkdir(parents=True)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "refresh", "P1", str(stranger)])
+    message = str(caught.value)
+    assert "grid task fetch" not in message, f"that is the OTHER directory's sentence: {message}"
+    assert project_clone.CLONE_MARKER not in message, "a marker filename is not an explanation"
+    assert "clone" in message.lower(), message
+
+
+@pytest.mark.parametrize("cause", ["unreadable", "empty"])
+def test_project_refresh_does_not_report_an_unusable_marker_as_not_a_clone(
+        monkeypatch, tmp_path, capsys, cause):
+    """"I cannot make sense of this" and "this is not ours" are different facts with different fixes.
+
+    `cloned_project` answers `None` for both, which is right for what it is — a reporter. What is
+    wrong is the refusal built on top of it telling somebody to run `grid project clone`, because
+    re-cloning lands on the same file and fails the same way. The advice has to be about the file.
+
+    ⚠️ And the refusal must not name a CAUSE it cannot verify — the same rule as
+    `no_remote_branch`'s message, broken once already by the first version of this very fix. A
+    marker can be unusable because it cannot be read OR because it is readable and says nothing,
+    and "check its permissions" is a dead end for the second: `os.access(R_OK)` is True there.
+    """
+    if cause == "unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file, so there is no refusal to make")
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    marker = dest / ".git" / "grid-project-clone"
+    if cause == "unreadable":
+        marker.chmod(0o000)
+    else:
+        marker.write_bytes(b"")
+        assert os.access(marker, os.R_OK), "the point of this case is that nothing is wrong with it"
+    try:
+        with pytest.raises(SystemExit) as caught:
+            cli.main(["project", "refresh", "P1", str(dest)])
+    finally:
+        marker.chmod(0o644)
+
+    message = str(caught.value)
+    assert "grid project clone" not in message, f"re-cloning cannot fix this:\n{message}"
+    assert str(marker) in message, f"the member is not told which file to look at:\n{message}"
+    # Both causes, neither asserted as THE cause.
+    assert "contents" in message, f"the refusal blames one cause it cannot verify:\n{message}"
+
+
+def test_project_refresh_counts_the_other_refs_that_moved_and_the_ones_collected(
+        monkeypatch, tmp_path, capsys):
+    """The grid's refs churn under a clone, and silence about it is the wrong report.
+
+    Task branches accumulate in a clone with every task, and the relay's retention sweep collects
+    them on its side — so without `--prune` a clone keeps `origin/task/<id>` refs for tasks that no
+    longer exist, and every later listing is wrong. They are COUNTED and never interpreted: reading
+    `task/…` as "a finished task" would put the relay's ref-naming rule on this side of the wire,
+    where it would be free to disagree with it.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", "-b", "task/T1", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "an agent worked here")
+    git("push", "--quiet", str(bare), "task/T1")
+    assert cli.main(["project", "refresh", "P1", str(dest)]) == 0
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "--verify", "--quiet",
+                           "refs/remotes/origin/task/T1"], capture_output=True).returncode == 0
+
+    # The relay collected the finished task's branch, and somebody promoted, so the trunk moved.
+    git("push", "--quiet", str(bare), "--delete", "task/T1")
+    git("checkout", "--quiet", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "a promote")
+    git("push", "--quiet", str(bare), "main")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "1 other ref updated, 1 pruned" in out, out
+    assert "task" not in out.lower(), f"the refs were interpreted, not counted:\n{out}"
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "--verify", "--quiet",
+                           "refs/remotes/origin/task/T1"], capture_output=True).returncode != 0, \
+        "the collected branch is still in the clone"
+
+
+def test_project_refresh_json_names_the_state_and_carries_full_oids(monkeypatch, tmp_path, capsys):
+    """`state` is a field, not something a reader recomputes from the counts.
+
+    Three of the seven states cannot be expressed as a pair of counts at all, so a caller deriving
+    "am I in step" from `ahead == behind == 0` would read `no_upstream` and `detached` as up to
+    date. The relay makes the same choice with `can_promote` rather than letting a client derive it
+    from `behind`.
+
+    The oids are FULL here even though the printed ones are shortened: this is the half something
+    compares against `grid task get`'s `base_commit` or integrate's `commit`, and those are full.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", f"wip/{_MEMBER_KEY}")
+    git("commit", "--quiet", "--allow-empty", "-m", "a task landed")
+    landed = git("rev-parse", "HEAD").strip()
+    git("push", "--quiet", str(bare), f"wip/{_MEMBER_KEY}")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest), "--json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "behind", payload
+    assert payload["remote_commit"] == landed, "the oid is abbreviated, so it cannot be compared"
+    assert len(payload["local_commit"]) == 40, payload["local_commit"]
+    assert payload["behind"] == 1 and payload["ahead"] == 0, payload
+    assert payload["branch"] == f"wip/{_MEMBER_KEY}", payload
+    assert payload["upstream"] == f"origin/wip/{_MEMBER_KEY}", payload
+    assert payload["project_id"] == "P1", payload
+    # Everything the printed report can say has to be here too, or `--json` is a lossy version of
+    # the same command and an application has to scrape stdout for the rest.
+    assert payload["refs_updated"] == 0 and payload["refs_pruned"] == 0, payload
+    assert payload["upstream_remote"] == "origin", payload
+
+
+@pytest.mark.parametrize("state,arrange", [
+    ("no_remote_branch", None),
+    ("no_upstream", ["checkout", "--quiet", "-b", "an-experiment"]),
+    ("detached", ["checkout", "--quiet", "--detach", "HEAD"]),
+])
+def test_project_refresh_json_reports_no_comparison_as_absent_never_as_zero(
+        monkeypatch, tmp_path, capsys, state, arrange):
+    """`ahead: 0, behind: 0` means "in step with the grid" and must never be invented.
+
+    The three states here made no comparison at all — there is no second tip to compare against —
+    and a consumer reading the two fields whose entire purpose is "how far apart am I" would take a
+    fabricated pair of zeroes as "nothing outstanding". `no_remote_branch` is not an edge case
+    either: it is the state of every member of every project on day one.
+
+    `grid project status` already gets this right against the relay's numbers ("Absent, not zero.
+    `0/0` would read as 'up to date with main', and the next thing somebody does on that belief is
+    promote"). This is the same fact measured locally, so it answers the same way.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path, with_wip=(state != "no_remote_branch"))
+    if arrange:
+        subprocess.run(["git", "-C", str(dest), *arrange], check=True, capture_output=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest), "--json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == state, payload
+    assert payload["ahead"] is None, f"invented a count for a comparison never made: {payload}"
+    assert payload["behind"] is None, payload
+
+
+def test_project_refresh_asks_the_relay_nothing_and_needs_no_stored_credential(
+        monkeypatch, tmp_path, capsys):
+    """The reason this command has no `--grid`, stated as a test rather than as a comment.
+
+    Refresh answers from the clone and the git plane alone. Two consequences worth pinning: an
+    outage of the control plane cannot stop a member reading where their work is, and a `--grid`
+    flag would be a lie — the grid is already pinned inside the clone's own credential helper, so
+    naming a different one could not change what happens.
+
+    Proven twice over: the relay transport fails the test if it is touched at all, and GRID_HOME is
+    swapped for an empty one, so there is no stored credential and no grid record left to read.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    calls = []
+    # Recorded rather than `pytest.fail`-ed inside the handler: an exception raised in there travels
+    # back through httpx and could be caught by something on the way, which would turn a real
+    # regression into a passing test.
+    _mock_relay(monkeypatch, lambda r: calls.append(str(r.url)) or httpx.Response(200, json={}))
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "a-machine-with-no-grid-state"))
+    state.set_mode("remote")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert calls == [], f"refresh called the relay: {calls}"
+
+
+def test_project_refresh_defaults_to_the_directory_you_are_standing_in(
+        monkeypatch, tmp_path, capsys):
+    """The commonest call of all is from inside the clone, with no directory given.
+
+    `grid project clone` defaults its directory to a NEW one named after the project id. Copying
+    that default here would break exactly this call: standing in the clone, `grid project refresh
+    <id>` would look for `./<id>` and refuse, having been given everything it needed.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    monkeypatch.chdir(dest)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1"])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert f"wip/{_MEMBER_KEY}" in out, out

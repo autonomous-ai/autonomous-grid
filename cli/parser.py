@@ -739,6 +739,40 @@ def _add_project(sub) -> None:
     cloner.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     cloner.set_defaults(handler=cmd_remote_project)
 
+    # `refresh` — what a clone does after somebody else's work lands. The counterpart to `clone`,
+    # and deliberately the READ-ONLY half of it: re-cloning updates by resetting the branch, which
+    # is refused outright the moment you have a local commit, and that is the ordinary state of
+    # anyone checkpointing work.
+    #
+    # NO `--grid`. Every other project subcommand has one because it calls the relay; this one calls
+    # nothing — the grid is already pinned inside the clone's own credential helper, so a flag
+    # naming a different one could not change anything and would only look as though it did.
+    refresher = project_sub.add_parser(
+        "refresh",
+        help="Fetch what the grid has for a clone, and report how far behind it is",
+        description=(
+            "Bring a clone's view of the grid up to date, and say what changed.\n\n"
+            "This NEVER touches your working tree or your branch — it updates what your clone knows\n"
+            "about the grid and reports the difference. So it works with local commits, with a\n"
+            "dirty tree, and while a task of yours is running. Re-running `grid project clone` over\n"
+            "the same directory also updates it, but by RESETTING your branch to the fetched tip,\n"
+            "which it refuses to do when you have commits the grid has not seen.\n\n"
+            "It reports on the branch you are standing on, whichever that is. Inside a clone that\n"
+            "is usually your own WIP branch, but `grid task fetch`'s own advice puts you on\n"
+            "`task/<id>`, and those move and are collected too.\n\n"
+            "Nothing here reaches `main`, and nothing here is compared against it: how far your\n"
+            "branch is from the trunk is `grid project status`, which asks the relay. This asks\n"
+            "only your clone and the git plane.\n\n"
+            "It needs the relay reachable. It does not need the control plane — the credential\n"
+            "helper reads your local store, never the network."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    refresher.add_argument("project_id", help="Project id from `grid project list`.")
+    refresher.add_argument(
+        "directory", nargs="?", default=None,
+        help="The clone to refresh (default: the current directory).")
+    refresher.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    refresher.set_defaults(handler=cmd_remote_project)
+
 
 def _add_task(sub) -> None:
     """Remote-only `grid task` — hand the grid a coding task, watch it, read the result back, stop it.

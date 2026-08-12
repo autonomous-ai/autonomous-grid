@@ -34,6 +34,9 @@ from shared import jsonio
 # "this directory is safe to check a result out over", and a clone is precisely not.
 CLONE_MARKER = "grid-project-clone"
 
+# The one remote a clone gets from `clone_project`, and the only one `refresh_clone` ever fetches.
+GRID_REMOTE = "origin"
+
 # Wall-clock ceiling for one git invocation here. Generous: the fetch is a whole repository over the
 # relay's transport, which grid-src is allowed 600s to pack (`task_repo.GIT_RPC_TIMEOUT_SECONDS`),
 # and this side must not give up while the relay is still working — the same direction, and for the
@@ -341,6 +344,218 @@ def clone_project(dest: Path, *, url: str, project_id: str, branch: str, trunk: 
         _run(dest, "config", "--local", "branch." + branch + ".remote", "origin")
         _run(dest, "config", "--local", "branch." + branch + ".merge", f"refs/heads/{branch}")
     return Cloned(path=dest, branch=branch, trunk=trunk, started_from_trunk=not has_wip)
+
+
+@dataclass(frozen=True)
+class Refreshed:
+    """What a refresh found: where the clone is, where the grid is, and how they differ.
+
+    `state` is carried EXPLICITLY rather than left to be derived from `ahead`/`behind` by whoever
+    reads this. The relay makes the same choice with `can_promote` (`cli/remote_project.py`), and
+    for the same reason: a rule computed in two places is free to disagree with itself, and three of
+    the states here (`no_upstream`, `no_remote_branch`, `detached`) are not expressible as a pair of
+    counts at all.
+    """
+
+    path: Path
+    project_id: str
+    state: str
+    branch: str | None
+    upstream: str | None
+    local_commit: str | None
+    remote_commit: str | None
+    # `None` when no comparison was possible, never `0` — see `refresh_clone`. Optional in the TYPE
+    # so a reader cannot take the pair at face value without meeting the case.
+    ahead: int | None
+    behind: int | None
+    # Every OTHER ref the grid moved or collected — the branch being reported on is excluded, since
+    # its own movement is the two tips above. Counted, never interpreted: deciding that
+    # `refs/remotes/origin/task/…` means "a finished task" would put the relay's ref-naming rule on
+    # this side of the wire, free to disagree with it.
+    refs_updated: int = 0
+    refs_pruned: int = 0
+    # Which remote the upstream belongs to. Almost always `GRID_REMOTE`, but a clone is an ordinary
+    # repository and a member may add a second one — and then the counts above are measured against
+    # a ref this command did not fetch, so the report must not present them as news from the grid.
+    upstream_remote: str | None = None
+
+
+def refresh_clone(dest: Path, *, project_id: str) -> Refreshed:
+    """Update what a clone knows about the grid, and measure the difference. Writes nothing else.
+
+    The whole value of this is what it does NOT do: no checkout, no merge, no reset. `clone_project`
+    updates in place with `git checkout -B`, which is a reset, and so has to refuse the moment the
+    member has a local commit — the ordinary state of anybody checkpointing work between
+    `grid project commit` calls. This answers the same question with no such refusal, and no way to
+    lose anything.
+    """
+    _require_clone_of(dest, project_id)
+    before = _remote_refs(dest)
+    # Only ever `GRID_REMOTE`, never "whatever remotes this repository has". A clone is an ordinary
+    # git repository that a member may add remotes to, and fetching those would reach a host nobody
+    # here chose — the same thing `_require_clone_of` refuses a directory over.
+    _run(dest, "fetch", "--prune", "--quiet", GRID_REMOTE)
+    after = _remote_refs(dest)
+
+    branch = _run(dest, "symbolic-ref", "--quiet", "--short", "HEAD", ok=(0, 1)).strip() or None
+    upstream = _upstream(dest, branch) if branch else None
+    local = _rev(dest, "HEAD")
+    remote = _rev(dest, upstream) if upstream else None
+    # ⚠️ **`None`, not `(0, 0)`, when there is no second tip to compare against.** A member whose
+    # first task has not landed has an upstream configured and no ref behind it — the state of
+    # everybody on day one — and `0/0` is not "no answer", it is the answer "in step with the grid".
+    # `_project_status` already refuses to fabricate that pair from the relay's numbers; this is the
+    # same fact measured locally, so it is absent the same way.
+    ahead, behind = _ahead_behind(dest, branch, upstream) if remote else (None, None)
+    mine = f"refs/remotes/{upstream}" if upstream else None
+    return Refreshed(
+        path=dest, project_id=project_id, state=_state(branch, upstream, remote, ahead, behind),
+        branch=branch, upstream=upstream, local_commit=local, remote_commit=remote,
+        ahead=ahead, behind=behind,
+        refs_updated=sum(1 for ref, oid in after.items()
+                         if ref != mine and before.get(ref) != oid),
+        refs_pruned=sum(1 for ref in before if ref != mine and ref not in after),
+        upstream_remote=upstream.split("/", 1)[0] if upstream else None)
+
+
+def _remote_refs(dest: Path) -> dict[str, str]:
+    """Every remote-tracking ref this clone holds for origin, and what each points at.
+
+    Snapshotted either side of the fetch, because that DIFF is the only honest way to say what
+    changed: git's fetch output is progress text on stderr, shaped for a human, and parsing it would
+    be reading a message nobody promised to keep stable.
+
+    ⚠️ **Symbolic refs are excluded, and the reason is measured on git 2.54.0.** `git fetch` creates
+    `refs/remotes/origin/HEAD` — not only `git clone`, as is widely assumed — and it is a symref
+    onto the trunk. So a single promote moves `origin/main` AND `origin/HEAD`, and a count that
+    included both would tell the member two refs changed when one did. `%(symref)` is non-empty for
+    exactly these, so they are dropped by what they ARE rather than by matching the name `HEAD`.
+    """
+    refs: dict[str, str] = {}
+    for line in _run(dest, "for-each-ref", "--format=%(refname) %(objectname) %(symref)",
+                     "refs/remotes/origin").splitlines():
+        name, _, rest = line.partition(" ")
+        oid, _, symref = rest.partition(" ")
+        if name and oid and not symref.strip():
+            refs[name] = oid
+    return refs
+
+
+def _require_clone_of(dest: Path, project_id: str) -> None:
+    """A directory this command may refresh, or a refusal saying which mistake was made.
+
+    Strict, and not because a refresh could damage anything — it writes no working tree. It is that
+    a command called `grid project refresh` must never quietly `git fetch` from a remote nobody here
+    chose: a plain repository's `origin` can be any host on the internet, reached with whatever
+    credentials that repository is configured for. The marker is the only proof this directory is
+    one the grid made.
+
+    A hand-made `git clone` of the relay's URL is deliberately not accommodated. Without the
+    credential helper `clone_project` writes, such a clone cannot authenticate at all, so the case
+    is empty rather than merely unsupported.
+    """
+    held = cloned_project(dest)
+    if held == project_id:
+        return
+    if held is None:
+        # ⚠️ `cloned_project` answers `None` for "no marker" AND for "a marker that told me
+        # nothing", which is right for a reporter and wrong for a refusal built on it: telling
+        # somebody whose marker is there but unusable to run `grid project clone` sends them at the
+        # same file, which fails the same way. Asked here rather than fixed in `cloned_project`,
+        # whose other two callers want exactly the answer it gives.
+        #
+        # ⚠️ It names NO cause, and that is not caution — the first version of this fix said "check
+        # its permissions", which is a dead end for the other way a marker is unusable: one that is
+        # readable and empty, where `os.access(R_OK)` is True and nothing is wrong with the file's
+        # mode at all. Same rule as `no_remote_branch`'s message, and it was broken here first.
+        marker = dest / ".git" / CLONE_MARKER
+        if marker.exists():
+            raise CloneError(
+                f"{marker} does not name a project, so there is no telling which one this "
+                f"directory holds. Check its permissions and its contents; cloning again would "
+                f"land on the same file.")
+    if held is not None:
+        raise CloneError(
+            f"this directory holds project {held}, not {project_id}. Refresh the clone you meant, "
+            f"or run this from the directory holding {project_id}.")
+
+    # Imported here rather than at module scope: this is the only thing in a member-facing clone
+    # that needs the provider-side module, and only to tell two refusals apart.
+    from . import task_repo
+
+    if task_repo.fetched_project(dest) is not None:
+        raise CloneError(
+            f"this directory is a `grid task fetch` result, not a clone — it holds one task's "
+            f"output and has no branch of yours to compare.\n"
+            f"  Work in a clone instead: grid project clone {project_id} <directory>")
+    raise CloneError(
+        f"this is not a clone of a grid project, so there is nothing here to refresh.\n"
+        f"  Make one with: grid project clone {project_id} <directory>")
+
+
+def _state(branch: str | None, upstream: str | None, remote_commit: str | None,
+           ahead: int | None, behind: int | None) -> str:
+    """Which of the seven states this clone is in.
+
+    The first three are not expressible as a pair of counts, which is why the state is a value in
+    its own right rather than something a reader derives from `ahead`/`behind`.
+    """
+    if not branch:
+        return "detached"
+    if not upstream:
+        return "no_upstream"
+    if not remote_commit:
+        return "no_remote_branch"
+    if ahead and behind:
+        return "diverged"
+    if behind:
+        return "behind"
+    if ahead:
+        return "ahead"
+    return "up_to_date"
+
+
+def _upstream(dest: Path, branch: str) -> str | None:
+    """The remote-tracking ref `branch` is configured to track, or `None` if it tracks nothing.
+
+    ⚠️ **Not `rev-parse @{u}`, and the difference is a real trap measured on git 2.54.0.** When the
+    upstream cannot be resolved, `rev-parse --abbrev-ref --symbolic-full-name @{u}` writes the
+    LITERAL STRING `@{u}` to **stdout** and exits 128 — so a caller reading stdout gets a truthy
+    answer for "there is no upstream", and the nonsense ref travels on into the next git call.
+
+    It also cannot answer the question this needs answered. A member whose first task has not landed
+    has `branch.<b>.merge` configured by `clone_project` against a ref the relay has not created, and
+    `@{u}` fails identically there and for a branch that tracks nothing at all — two states with
+    different sentences. `for-each-ref` reads the CONFIG, so it reports the configured name whether
+    or not the ref exists, and exits 0 in every case including a branch that does not exist.
+    """
+    return _run(dest, "for-each-ref", "--format=%(upstream:short)",
+                f"refs/heads/{branch}").strip() or None
+
+
+def _rev(dest: Path, ref: str) -> str | None:
+    """The full oid `ref` resolves to, or `None` when there is no such ref.
+
+    Full, never abbreviated: git's abbreviation length GROWS with a repository's object count, so
+    two members can see different widths for the same commit. The display side shortens to a fixed
+    width; anything a caller might compare against — `grid task get`'s `base_commit`, integrate's
+    `commit` — is a full oid.
+    """
+    return _run(dest, "rev-parse", "--verify", "--quiet", ref, ok=(0, 1)).strip() or None
+
+
+def _ahead_behind(dest: Path, branch: str, upstream: str) -> tuple[int, int]:
+    """(commits only here, commits only on the grid) between the checked-out branch and its upstream.
+
+    `--left-right --count` answers both halves in ONE walk, tab-separated. Measured on git 2.54.0:
+    `0\\t0\\n`.
+
+    Both refs must exist — the caller checks. There is deliberately no "cannot compare" guard here
+    returning `(0, 0)`: that pair means "in step with the grid", which is the one answer that must
+    never be invented for a comparison nobody was able to make.
+    """
+    counted = _run(dest, "rev-list", "--left-right", "--count", f"{branch}...{upstream}").split()
+    return int(counted[0]), int(counted[1])
 
 
 def _commits_only_here(dest: Path, branch: str, target: str) -> int:
