@@ -490,6 +490,31 @@ def _add_project(sub) -> None:
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_project)
 
+    # `init` — the OTHER way a project gets a trunk (ADR 0033 D-o, issue 25), and the one a new
+    # piece of work needs. Registered next to `create` rather than beside `import`, because
+    # `create`'s own next step names it and somebody who reads `grid project --help` on that advice
+    # should find it where they were just sent.
+    starter = project_sub.add_parser(
+        "init",
+        help="Give an empty project a trunk, so tasks can run in it",
+        description=(
+            "Create the project's `main` at a single empty root commit.\n\n"
+            "A project has no trunk when it is created, and a task cannot be cut from nothing. "
+            "This is one of the two ways to give it one — `grid project import` is the other, for "
+            "a repository that already exists. Every member's branch is then cut from this same "
+            "commit, which is what lets their work be integrated and promoted later.\n\n"
+            "The trunk it makes is EMPTY and holds nothing you send: files reach `main` by "
+            "promoting a branch, never by a bootstrap. Put them on yours with `grid project "
+            "commit` (or a task) and promote.\n\n"
+            "Refused if the project already has a trunk, and it is not undoable — a project that "
+            "has been initialized can no longer import a repository, because a second trunk would "
+            "move `main` out from under every member's branch."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    starter.add_argument("project_id", help="Project id from `grid project list`.")
+    starter.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    starter.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    starter.set_defaults(handler=cmd_remote_project)
+
     listing = project_sub.add_parser("list", help="List the projects you are a member of")
     listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -676,17 +701,19 @@ def _add_project(sub) -> None:
     committer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     committer.set_defaults(handler=cmd_remote_project)
 
-    # `import` — how a project that has no commits gets a trunk at all (ADR 0033 D-f, issue 16b).
-    # Since this slice a member cannot push `main` themselves, so this is the only way in.
+    # `import` — how a project that has no commits gets a trunk from a repository that already
+    # exists (ADR 0033 D-f, issue 16b). Since issue 16b a member cannot push `main` themselves, and
+    # since issue 25 (D-o) `init` is the other way in — for work that starts from nothing.
     importer = project_sub.add_parser(
         "import",
         help="Import an existing repository into an empty project",
         description=(
             "Import an existing repository, with its history, into a project that has no `main` "
             "yet.\n\n"
-            "This is the only way a project gets a trunk. The relay is `main`'s sole writer — "
-            "promote moves it afterwards, and nothing else does — so a first `git push` of `main` "
-            "is refused.\n\n"
+            "One of the two ways a project gets a trunk — `grid project init` is the other, and "
+            "makes an empty one for work that starts from nothing. The relay is `main`'s sole "
+            "writer — those two create it and promote moves it afterwards, and nothing else does — "
+            "so a first `git push` of `main` is refused.\n\n"
             "What happens: the repository is pushed to a staging ref only you can see, the relay "
             "reads EVERY tree its history reaches, and only then does it become `main`. The "
             "reading is the slow part and it is why this command waits — on a 29,000-commit "

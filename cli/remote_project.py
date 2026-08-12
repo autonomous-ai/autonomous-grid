@@ -23,6 +23,8 @@ from . import project_providers
 def cmd_remote_project(args: argparse.Namespace) -> int:
     if args.subcommand == "create":
         return _project_create(args)
+    if args.subcommand == "init":
+        return _project_init(args)
     if args.subcommand == "list":
         return _project_list(args)
     if args.subcommand == "wip":
@@ -89,8 +91,46 @@ def _project_create(args: argparse.Namespace) -> int:
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
     print(f"project {project.get('id') or '(no id)'} on {label}")
     print(f"name={project.get('name') or 'unknown'}")
-    print(f"\nRun a task in it with: grid task create --project {project.get('id') or '<id>'} "
-          "--prompt '…'")
+    # NOT `grid task create` (ADR 0033 D-o, issue 25). A project has no trunk when it is created, so
+    # that advice was guaranteed to fail — the first thing a new user was told to do was the one
+    # thing that could not work. The next step is a trunk, and there are two ways to get one.
+    project_id = project.get('id') or '<id>'
+    print("\nGive it a trunk — a task is cut from `main` and it has none yet:")
+    print(f"  grid project init {project_id}                 # start empty")
+    print(f"  grid project import <path> {project_id}        # bring an existing repository")
+    return 0
+
+
+def _project_init(args: argparse.Namespace) -> int:
+    """Give an empty project a trunk — one empty root commit, as `main` (ADR 0033 D-o).
+
+    The counterpart to `import`, and the one a new piece of work needs: before this, a project
+    created from nothing could never run a task, and the only fix offered required a git repository
+    the user did not have.
+
+    Deliberately its own command rather than something `task create` does on your behalf. Import
+    refuses a project that already has a trunk, so an init nobody asked for would permanently close
+    the import path for that project — and nothing undoes it.
+    """
+    from remote import relay
+
+    base, token, label = _resolve(args)
+    answer = relay.init_project(base, token, args.project_id)
+
+    if _emit(args, answer):
+        return 0
+    trunk, commit = answer.get("trunk"), answer.get("commit")
+    if answer.get("status") != "initialized" or not commit:
+        # The house guard: a reply this command cannot read is not an initialization it may report.
+        # A trunk is created once and cannot be created again, so "probably fine" is the one thing
+        # this must never print — the next command a member runs is a task create against it.
+        raise SystemExit(
+            f"The relay's answer for project {args.project_id} did not say the project was "
+            f"initialized, so this cannot be reported as one. "
+            f"`grid project init {args.project_id} --json` shows what it sent.")
+    print(f"{trunk or 'main'} is now at {commit} on {label}")
+    print()
+    print(f"Next: grid task create --project {args.project_id} --prompt '<what to do>'")
     return 0
 
 

@@ -438,3 +438,61 @@ def test_11_a_task_nobody_serves_waits_on_its_own_clock_and_says_so(
         f"the relay ended an unclaimed task with {ended['error']!r}, which is not the reason this "
         f"client explains as a capacity shortfall")
     assert ended["attempt"] == 0, ended
+
+
+def test_12_an_empty_project_gets_a_trunk_and_a_task_runs_in_it(
+        relay, owner_token, spawn_provider):
+    """ADR 0033 D-o / issue 25, at the one place the WIRE can be checked rather than the constants.
+
+    Both unit suites read a reply this repo or that one wrote down: the CLI test asserts against a
+    `httpx.MockTransport` answer authored here, and the relay test asserts against its own handler.
+    A relay that shaped the reply differently — a `status` of `"created"`, the oid under `oid`
+    instead of `commit`, no `trunk` key — leaves both of them green and breaks `grid project init`
+    for every user. That is the same class of gap this file was made for.
+
+    It also proves the claim the whole slice rests on: a project initialized this way is not a
+    special one. A real task, cut from that root by the ordinary `ensure_wip_branch`, runs and
+    settles — which is the failure ADR 0033 D-c records if init had produced anything other than one
+    real trunk.
+    """
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(relay, owner_token, name="p-init")["id"]
+    answer = relay_client.init_project(relay, owner_token, project_id)
+
+    # The reply keys `cli/remote_project._project_init` branches on, from the real relay.
+    assert answer.get("status") == "initialized", answer
+    assert answer.get("trunk") == "main", answer
+    assert len(answer.get("commit") or "") == 40, answer
+    # This request really wrote the ref. `False` here would mean it lost the swap to an identical
+    # commit — impossible with one caller, and the one reading that says which of the two happened.
+    assert answer.get("created") is True, answer
+
+    # `/status` is a second, independent reader of the same ref — so this is the relay agreeing with
+    # itself about what init did, not this test agreeing with the reply it was just handed.
+    status = relay_client.project_status(relay, owner_token, project_id)
+    assert status.get("main_commit") == answer["commit"], status
+
+    # Running it twice is refused, and by the code both bootstraps share.
+    import httpx
+    with httpx.Client(base_url=relay, timeout=30.0) as client:
+        again = client.post(f"/relay/v1/projects/{project_id}/init",
+                            headers={"Authorization": f"Bearer {owner_token}"})
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["code"] == "project_already_has_trunk", again.text
+
+    # A body is refused rather than dropped — asserted on the wire because the middleware, the
+    # framework and this route all get a say in what reaches `request.body()`.
+    with httpx.Client(base_url=relay, timeout=30.0) as client:
+        with_body = client.post(f"/relay/v1/projects/{project_id}/init",
+                                json={"files": []},
+                                headers={"Authorization": f"Bearer {owner_token}"})
+    assert with_body.status_code == 422, with_body.text
+    assert with_body.json()["detail"]["field"] == "body", with_body.text
+
+    # And the point of all of it: the project works.
+    spawn_provider()
+    created = relay_client.create_task(
+        relay, owner_token, prompt="SAY hello from an empty trunk", project_id=project_id)
+    ended = H.await_state(relay, owner_token, created["id"], {"completed", "failed"}, timeout=120)
+    assert ended["state"] == "completed", ended

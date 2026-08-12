@@ -807,6 +807,25 @@ _OLD_RELAY = (
 _IMPORT_FINISH_TIMEOUT = 900.0
 
 
+def init_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
+    """Give an empty project a trunk (``POST /relay/v1/projects/{id}/init``), ADR 0033 D-o.
+
+    The other bootstrap beside import, and the only one available to somebody starting a new piece
+    of work: it creates a single empty root commit and sets it as `main`.
+
+    **No request body**, and that is asserted on the relay's side rather than merely unread — the
+    trunk it makes holds nothing, so a `files` list (which means something real on
+    `POST …/{id}/commit`) is refused instead of silently dropped. Sending `{}` would be a wire
+    detail with nothing behind it.
+
+    The default timeout, not import's: this writes one empty commit, with no object graph to walk.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/init",
+        missing_route_hint=_OLD_RELAY)
+
+
 def open_project_import(signaling_url: str, access_token: str,
                         project_id: str) -> dict[str, Any]:
     """Open an import and learn where to push (``POST /relay/v1/projects/{id}/import``).

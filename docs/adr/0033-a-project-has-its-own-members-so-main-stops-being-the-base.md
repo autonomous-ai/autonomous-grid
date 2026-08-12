@@ -70,7 +70,7 @@ listed here because the same mistake is available to anyone implementing it:
 > explicit act which always creates a task row, so it is serialized against that member's other
 > work by the same index that limits them to one.**
 
-Thirteen decisions follow. The last four (D-j through D-m) exist because this design is driven by an
+Fourteen decisions follow. The last four (D-j through D-m) exist because this design is driven by an
 application on behalf of a five-to-seven person team working on a repository that already has a
 history — not by one person at a terminal starting from nothing. That changes which failures are rare
 and which are daily.
@@ -164,7 +164,19 @@ history unrelated to `main` — after which that member's promote is refused for
 integration can never fast-forward, and tier-2 sees every file as a conflict. The same outcome
 reaches a fresh project from the other side, if two members create tasks before anyone has promoted:
 two disjoint roots, permanently. So a project without `main` refuses task creation with a message
-naming import or a first commit as the fix, rather than silently producing an orphan.
+naming the ways to get one, rather than silently producing an orphan.
+
+> **Correction, 2026-08-12 (issue 25).** That sentence used to say the message names "import or a
+> first commit as the fix", and both halves went stale. Issue 16b removed a member's ability to push
+> `main` at all, leaving import as the only fix named — and D-o then added a second, `grid project
+> init`. The five `project_has_no_trunk` messages name both.
+>
+> **D-o does not reintroduce the failure this decision records, and the difference is structural
+> rather than careful.** The removed fallback made a root commit **per member**, implicitly, as a
+> side effect of `commit_input`; init makes **one** root commit, explicitly, as `main`, before any
+> member has a branch. After it, every WIP branch is pointed at that one trunk by the
+> `ensure_wip_branch` described above — the code below this line is unchanged and cannot tell how
+> the trunk arrived.
 
 A derived key and not the member's email: a ref name travels into every clone of the repository, and
 there is no reason for one person's address to be permanently recorded in another's working copy.
@@ -871,6 +883,45 @@ same: a ref name is a permanent structural feature of every clone, whereas a com
 field in git whose entire purpose is to carry a person's address, and stripping it is what causes the
 problem this decision exists to fix.
 
+### D-o — A project can start empty, and that is a third relay operation on `main`
+
+`POST /relay/v1/projects/{id}/init` creates a single empty root commit and sets it as `main`,
+refused if the project already has one. `main` is therefore written by **three** relay operations —
+promote, import, init — where D-b and D-f said two.
+
+**That is a change to a load-bearing rule, so the argument is explicit.** The property D-b protects
+is that *work reaches `main` only by promote*, and the property D-c protects is that *no member ever
+gets a history disjoint from everyone else's*. Neither is weakened:
+
+| | the removed `commit_input` fallback (D-c) | init |
+|---|---|---|
+| how many roots | one **per member**, implicitly | **one**, explicitly |
+| when | as a side effect of a first task | before any member has a branch |
+| as what | that member's task branch | `main` |
+| result | N unrelated histories, permanently | one history; every WIP branch cut from it by the existing `ensure_wip_branch` |
+
+And the trunk it creates is **empty**: the route accepts no upload, and a request carrying a body is
+refused rather than having it ignored. A content-carrying init would be a way to put work on `main`
+without a promote, which is precisely what D-b forbids. Files reach the trunk the way they already
+do — onto a WIP branch by a task or by D-j's commit, then promoted.
+
+**Init is explicit and is never a side effect.** `grid task create` must not initialize a trunkless
+project on somebody's behalf, because D-f's import refuses any project that already has a `main`: an
+init nobody asked for **permanently closes the import path** for that project, with no operation
+that undoes it. A user handed an empty trunk today could not bring their real repository in
+tomorrow, and every other signal would read as healthy. A one-way door is walked through only by the
+person whose door it is; the convenience form is an explicit opt-in flag on `task create`.
+
+The root commit is authored by the member who ran init, committer `grid`, per D-m — the first commit
+of a project's history is the one commit that cannot be re-authored without rewriting everything
+after it.
+
+The trunk guard is **one function shared with import** rather than a copy in each, because the two
+bootstraps disagreeing about a project that already has a trunk is the failure both exist to
+prevent. *Absent ⇒ a bare framework 404*, which the CLI already turns into a sentence naming the
+relay, so this route inherits the project routes' rollout note — **the relay goes out before the
+CLI** — and needs no order of its own.
+
 ## Consequences
 
 - **ADR 0032 D-e is split.** Its first half survives unchanged: the provider commits at terminal
@@ -909,6 +960,13 @@ problem this decision exists to fix.
   blocks undoing it by push. A revert is therefore the relay's own `update-ref`, the mechanism
   `reset_branch` already uses for reclaim. The project-role column exists to narrow this later
   without a migration; nothing consults it yet.
+- **A project now has two ways to get a trunk, and choosing one closes the other** (D-o). Init and
+  import both refuse a project that already has a `main`, so a project that started empty can never
+  import a repository afterwards and the reverse holds too. That is not a limitation to be lifted
+  later — it is the same rule that stops a second trunk moving `main` out from under every member's
+  branch. What it costs is a project id: recovering from the wrong choice means making a new project
+  and admitting the members again, which is why neither command may ever run as a side effect of
+  another.
 - **A project member cannot read another member's task, and nothing lists tasks.** `get_task` and
   `read_task_events` fence on `owner_id`, and there is no list endpoint. Under one slot per member
   the create-time 409 becomes a routine answer — and its message names the project, which is now the

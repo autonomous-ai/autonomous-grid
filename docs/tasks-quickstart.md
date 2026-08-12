@@ -15,7 +15,7 @@ Everything here is **remote mode only** (`grid mode remote`).
 | Thing | What it is |
 |---|---|
 | **project** | A git repository the grid hosts, with its own members. Addressed by **id**, never by name. |
-| **`main`** | The project's trunk. Only two things ever move it: an import, and a promote. |
+| **`main`** | The project's trunk. It is created once — by `init` or by `import` — and afterwards only a promote moves it. |
 | **your WIP branch** | `wip/<member_key>` — where your work lands. One per member. You never push to it; the grid writes it. |
 | **task** | One agent run. Cut from your WIP branch, settles back onto it. |
 | **member_key** | A 32-hex id for you *in this grid*. Printed by `grid project member list`. Not your email, and **different in every grid**. |
@@ -30,17 +30,30 @@ grid project create --name my-app             # prints the project id — keep i
 grid project list                             # id, your role, name
 ```
 
-A new project has **no `main`**, and a task cannot be created without one. Import a repository:
+A new project has **no `main`**, and a task cannot be created without one. There are **two** ways to
+give it one, and you cannot `git push main` yourself either way.
+
+**Starting from nothing:**
+
+```bash
+grid project init <project-id>                # one empty commit becomes `main`
+```
+
+**Bringing a repository you already have:**
 
 ```bash
 grid project import ./my-app <project-id>     # local repo → the project's trunk
 grid project import ./my-app <project-id> --branch release
 ```
 
-This is the **only** way a project gets a trunk — you cannot `git push main` yourself. It is slow on
-a big repository (the relay reads every tree the history reaches; ~20s on 29,000 commits) and it is
-refused if the repository has a submodule, a path under `.grid/`, or a symlink pointing outside the
-repo. `.claude/` is fine. Git LFS imports with a warning: an agent will see pointer files.
+Import is slow on a big repository (the relay reads every tree the history reaches; ~20s on 29,000
+commits) and it is refused if the repository has a submodule, a path under `.grid/`, or a symlink
+pointing outside the repo. `.claude/` is fine. Git LFS imports with a warning: an agent will see
+pointer files.
+
+⚠️ **Pick the right one — the choice cannot be taken back.** Both are refused on a project that
+already has a trunk, so a project you initialized empty can never import a repository afterwards.
+Recovering means a new project, and a new id. Nothing does either on your behalf.
 
 A refused import leaves the project with **no trunk on purpose** — fix what it names and import
 again, or import into a fresh project.
@@ -317,8 +330,10 @@ unreviewed code — so treat it as the agreement a team makes with itself.
 
 ### Once, when the project starts
 
-1. One person runs `grid project create` and `grid project import`. Import the repository you
-   actually want, with its history; you get one shot per project.
+1. One person runs `grid project create`, then gives the project a trunk — `grid project import` for
+   a repository that already exists, or `grid project init` to start empty. Import the repository you
+   actually want, with its history; you get one shot per project, and it is the same shot either
+   way.
 2. That person adds everyone: `grid members add` for the grid, then
    `grid project member add` for the project.
 3. Everyone runs `grid project clone` and keeps that working copy.
@@ -377,6 +392,6 @@ their branch once they are gone.
 ### What no one can do
 
 - Push to the project. Work lands through a task, `project commit`, or `integrate`.
-- Move `main` other than by promoting or importing.
+- Move `main` other than by promoting. It is created by `init` or `import`, once, and never again.
 - Take somebody else's task slot, or move a branch a running task was cut from.
 - Read another project's code, even knowing its id.

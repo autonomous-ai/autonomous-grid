@@ -23041,6 +23041,118 @@ def test_project_create_prints_the_id_a_task_needs(monkeypatch, tmp_path, capsys
     assert "P1" in capsys.readouterr().out
 
 
+def test_project_init_posts_to_the_init_route_and_sends_no_body(monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-o end to end through `cli.main`. The second way a project gets a trunk, and the
+    only one available to somebody starting a new piece of work with no repository to import.
+
+    **No body**, like integrate: the trunk init creates is empty by design, so there is nothing for
+    a caller to put in one — and the relay refuses a body rather than dropping it, because `files`
+    means something real one route along.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "status": "initialized",
+            "commit": "a" * 40, "trunk": "main"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "init", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/init")
+    assert seen["body"] == b"", seen["body"]
+    out = capsys.readouterr().out
+    assert "main" in out and "a" * 40 in out
+
+
+def test_project_init_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A brand-new route, so a relay that predates it answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_a_real_404_from_the_init_route_is_not_masked(monkeypatch, tmp_path):
+    """The paired negative every route here carries: a relay that HAS the route and answers 404
+    about the project must show its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert str(caught.value) == "No such project"
+
+
+def test_project_init_shows_the_relays_own_words_when_the_project_already_has_a_trunk(
+        monkeypatch, tmp_path):
+    """The 409 needs no client code at all — `_task_error_message` reads the object `detail` and
+    prints its sentence. What this pins is that nothing here swallows or rewrites it: a trunk is
+    created once, so the reason it was refused is the whole of what a member can act on."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={
+        "detail": {"code": "project_already_has_trunk",
+                   "message": "Project P1 already has a main (at abc123).",
+                   "trunk_commit": "abc123"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert str(caught.value) == "Project P1 already has a main (at abc123)."
+
+
+def test_project_init_refuses_to_call_an_unreadable_reply_an_initialization(
+        monkeypatch, tmp_path):
+    """A 200 that does not say a trunk was created is not one. Reporting it as success is worse
+    here than elsewhere: the next thing a member does on that belief is create a task, and the
+    thing they would then be told is the thing they just ran a command to fix."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+def test_project_create_points_at_the_two_ways_to_get_a_trunk_not_at_a_task(
+        monkeypatch, tmp_path, capsys):
+    """`create`'s next step used to be `grid task create`, which is **guaranteed to fail**: the
+    project it had just made has no trunk, so the first thing a new user was told to do was the one
+    thing that could not work. Since issue 25 there are two ways to fix that and it names both."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1"}))
+
+    rc = cli.main(["project", "create", "--name", "acme"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "project init" in out and "project import" in out, out
+    assert "task create" not in out, "the next step is still the one that cannot work"
+
+
 def test_project_list_shows_every_project_you_are_a_member_of(monkeypatch, tmp_path, capsys):
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -29699,19 +29811,41 @@ def test_project_import_accepts_every_shape_of_repository_git_itself_accepts(
     assert opened == [], "the relay was asked to open an import for a directory with no git in it"
 
 
-def test_project_import_help_says_it_is_the_only_way_a_project_gets_a_trunk(monkeypatch, tmp_path):
+def test_project_import_help_says_where_a_trunk_comes_from(monkeypatch, tmp_path):
     """The help text of a consequential verb is asserted in this suite, as promote's and
-    integrate's are: since this slice a member cannot push `main`, so somebody reading `--help`
-    has to be told where a trunk comes from instead."""
+    integrate's are: a member cannot push `main` (issue 16b), so somebody reading `--help` has to
+    be told where a trunk comes from instead.
+
+    It used to say import was the ONLY way, which stopped being true at issue 25 — and the person
+    that mattered to is exactly the one reading this help with no repository to import."""
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
     parser = cli.build_parser()
     project = parser._subparsers._group_actions[0].choices["project"]
     text = project._subparsers._group_actions[0].choices["import"].format_help()
 
-    assert "only way a project gets a trunk" in text
+    assert "two ways a project gets a trunk" in text
+    assert "grid project init" in text, "the other way is not named"
+    assert "only way a project gets a trunk" not in text, "the superseded claim is still here"
     assert "submodule" in text
     assert "Git LFS" in text
+
+
+def test_project_init_help_says_the_trunk_is_empty_and_the_choice_is_not_undoable(
+        monkeypatch, tmp_path):
+    """Two facts a reader cannot recover afterwards. The trunk holds nothing they send — so a body
+    is refused rather than dropped — and initializing CLOSES the import path for that project,
+    permanently, because a second trunk would move `main` out from under every member's branch."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    parser = cli.build_parser()
+    project = parser._subparsers._group_actions[0].choices["project"]
+    text = project._subparsers._group_actions[0].choices["init"].format_help().lower()
+
+    assert "empty" in text, "the help does not say the trunk holds nothing"
+    assert "import" in text, "the help does not name the other way"
+    assert "undoable" in text or "refused" in text, (
+        "the help does not say this cannot be taken back")
 
 
 def test_project_import_reports_a_failed_push_as_a_sentence_not_a_traceback(monkeypatch, tmp_path):

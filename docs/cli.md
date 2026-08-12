@@ -879,6 +879,7 @@ guidance to switch.
 
 ```
 grid project create --name <name> [--grid <grid>] [--json]
+grid project init          <project-id> [--grid <grid>] [--json]
 grid project list [--grid <grid>] [--json]
 grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
@@ -922,10 +923,11 @@ branch. `main` is not touched by a task at all. That is what lets several people
 without their results racing for one ref.
 
 A project's `main` therefore has to **exist before its first task**: a project that has just been
-created has no commits, and creating a task in one is refused with a message saying so. `grid
-project import` is how it gets one. **The relay is `main`'s only writer** — a `git push` of `main` is
-refused whatever state the project is in — so import and `promote` are the two things that move it,
-and nothing else does.
+created has no commits, and creating a task in one is refused with a message saying so. Two commands
+give it one — `grid project init` for an empty trunk, `grid project import` for a repository that
+already exists. **The relay is `main`'s only writer** — a `git push` of `main` is refused whatever
+state the project is in — so those two create it, `promote` moves it afterwards, and nothing else
+touches it.
 
 ### Cloning a project onto your own machine
 
@@ -1010,10 +1012,27 @@ relay. Refresh asks the relay nothing at all — which is why it has no `--grid`
 working when the control plane is unreachable, and why it cannot tell you anything about the trunk.
 It does need the relay itself reachable: it is a fetch.
 
+### Starting a project with an empty trunk
+
+`grid project init <project-id>` creates the project's `main` at a single empty root commit. That is
+all it does, and it is what a new piece of work needs: without it, starting from nothing meant
+making a throwaway repository locally, committing something, and importing it, purely to satisfy a
+bootstrap the grid can do itself.
+
+The trunk it makes holds **no files**, and the command takes none. Work reaches `main` by promoting
+a branch — a task, or `grid project commit` — and never by a bootstrap, so a request carrying files
+is refused rather than quietly ignored.
+
+⚠️ **It cannot be undone, and it closes the other door.** A project that has been initialized can no
+longer import a repository, because a second trunk would move `main` out from under every member's
+branch and nothing could integrate back. For the same reason nothing runs it for you: `grid task
+create` on a trunkless project tells you to run it, and does not decide on your behalf.
+
 ### Importing an existing repository
 
 `grid project import <path> <project-id>` brings a repository, with its history, into a project that
-has no `main` yet. It is the only way a project gets a trunk.
+has no `main` yet. It is the other of the two ways a project gets a trunk, and — like `init` — a
+one-shot: it is refused on a project that already has one.
 
 Three things happen. The repository is pushed to a staging ref only you can see; the relay reads
 **every tree its history reaches**; and only a clean one becomes `main`. The reading is the slow
