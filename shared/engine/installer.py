@@ -38,18 +38,18 @@ class MacosBuild:
     sha256: str
 
 
-LLAMA_RELEASE = "b9985"
+LLAMA_RELEASE = "b10369"
 
 MACOS_BUILDS: dict[str, MacosBuild] = {
     "arm64": MacosBuild(
         label="macos-arm64",
         url=f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}/llama-{LLAMA_RELEASE}-bin-macos-arm64.tar.gz",
-        sha256="7ac3076397fd7e7cb0d757ec3dc0eb2d876d37aa3021906baa4d197b31758038",
+        sha256="de2ac2c0a7cc245bce2411393658ff19c9c00d9d1fe37c5dfe94668c0d7bc01f",
     ),
     "x86_64": MacosBuild(
         label="macos-x64",
         url=f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_RELEASE}/llama-{LLAMA_RELEASE}-bin-macos-x64.tar.gz",
-        sha256="e601fb2ae9b1976fbe1cf32aa22382d2a69acc74af8d70c0e2e81a8f08aaeb10",
+        sha256="3cd137ae474fe4a55dcbcf319b94b36fe136571e6ca680d3eb8a175aa6ff1717",
     ),
 }
 
