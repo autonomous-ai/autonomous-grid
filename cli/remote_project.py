@@ -17,10 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 
-from . import project_providers
+from . import project_arg, project_providers
 
 
 def cmd_remote_project(args: argparse.Namespace) -> int:
+    # A project id has two spellings and one meaning (ADR 0033 D-a, issue 28). Settled once, here,
+    # so every handler below reads the `args.project_id` it always read.
+    args = project_arg.resolve(args)
     if args.subcommand == "create":
         return _project_create(args)
     if args.subcommand == "init":

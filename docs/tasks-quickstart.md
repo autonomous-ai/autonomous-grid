@@ -80,10 +80,14 @@ address, have them run `grid login` and then any relay command (`grid project li
 ## Running tasks
 
 ```bash
-grid task create --project <project-id> --prompt 'add a retry to the upload path'
-grid task create --project <project-id> --prompt 'use this config' --file ./conf.toml:config/conf.toml
-grid task create --project <project-id> --prompt 'make these pass' --dir ./fixtures:test/data
+grid task create <project-id> --prompt 'add a retry to the upload path'
+grid task create <project-id> --prompt 'use this config' --file ./conf.toml:config/conf.toml
+grid task create <project-id> --prompt 'make these pass' --dir ./fixtures:test/data
 ```
+
+Every command on this page that takes a project id also accepts it as `--project <project-id>`, and
+the two are the same thing — `grid task list <id>` and `grid task list --project <id>` do exactly
+the same. Both spellings work in both command groups, so it never depends on which one you are in.
 
 `--file LOCAL[:DEST]` uploads a file with the task, repeatable. It is committed **before** any
 provider can claim the task, so the agent always finds it.
@@ -97,7 +101,7 @@ fixtures or assets that is not one.
 **Starting from nothing, in one call:**
 
 ```bash
-grid task create --project <project-id> --init-project --prompt 'scaffold a FastAPI service'
+grid task create <project-id> --init-project --prompt 'scaffold a FastAPI service'
 ```
 
 `--init-project` gives the project its empty trunk first, then runs the task — `grid project init`
@@ -106,13 +110,14 @@ never import an existing repository, so use `grid project import` if you have on
 files go on **your branch**, never on the trunk. Passing it at a project that already has a trunk
 does nothing and the task simply runs.
 
-With no `--project` at all, the task goes to your own project called `default` **if you already have
+With no project id at all, the task goes to your own project called `default` **if you already have
 one**. If you do not, nothing is created and the command tells you which project it needs.
+`task create` is the only command that may leave it out — `task list` has nothing to default to.
 
 ```bash
 grid task follow <task-id>          # live: tool calls, output, terminal state
 grid task get    <task-id>          # one shot: state, provider, result
-grid task list   --project <project-id> [--all] [--state running] [--limit 50]
+grid task list   <project-id> [--all] [--state running] [--limit 50]
 grid task fetch  <task-id> --into /tmp/result
 grid task cancel <task-id>
 ```
@@ -294,14 +299,17 @@ Both update a clone. Only one can lose work.
 - `clone` over the same directory — **resets** your branch to the fetched tip, and therefore refuses
   outright when you have commits the grid has not seen.
 
-### `--project` vs `--grid`
+### the project id vs `--grid`
 
-- `--project <id>` — which project, a uuid from `grid project list`.
+- `<project-id>`, or `--project <id>` — which project, a uuid from `grid project list`. **A
+  positional id and `--project` are the same thing** on every command that takes one; giving both
+  with different values is refused rather than one being quietly preferred.
 - `--grid <name-or-id>` — which grid, when you have more than one. Defaults to the active grid.
+  Always a flag, never positional.
 
 ### `grid task list` vs `grid list`
 
-`grid task list --project <id>` lists tasks. `grid list` (alias of `grid ls`) lists **grids**.
+`grid task list <project-id>` lists tasks. `grid list` (alias of `grid ls`) lists **grids**.
 
 ### `grid task cancel` vs `grid leave`
 
@@ -395,7 +403,7 @@ morning     grid project status <pid>          # did main move overnight?
             grid project check  <pid>          # free — would integrating be clean?
             grid project integrate <pid>       # if it moved, take it now, not at release time
 
-work        grid task create --project <pid> --prompt '…'
+work        grid task create <pid> --prompt '…'
             grid task follow <task-id>
             grid task fetch  <task-id> --into /tmp/r   # read it
             grid project commit <pid> -m '…' --file …  # touch up without an agent
@@ -427,7 +435,7 @@ blocking you, `grid task cancel` gives your slot back immediately.
 
 ```bash
 grid project status <pid>                    # your branch, and who holds your slot
-grid task list --project <pid> --all         # what the whole team is running right now
+grid task list <pid> --all                   # what the whole team is running right now
 grid project member list <pid>               # keys, for promoting somebody else's branch
 ```
 

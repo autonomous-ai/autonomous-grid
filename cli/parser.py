@@ -38,6 +38,7 @@ from .credential import cmd_credential
 from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
+from . import project_arg
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
@@ -510,7 +511,7 @@ def _add_project(sub) -> None:
             "has been initialized can no longer import a repository, because a second trunk would "
             "move `main` out from under every member's branch."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    starter.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(starter)
     starter.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     starter.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     starter.set_defaults(handler=cmd_remote_project)
@@ -542,14 +543,14 @@ def _add_project(sub) -> None:
             "settles normally. Archiving stops new work starting; use `grid task cancel` to stop "
             "work that has already started."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    archiver.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(archiver)
     archiver.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     archiver.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     archiver.set_defaults(handler=cmd_remote_project)
 
     restorer = project_sub.add_parser(
         "unarchive", help="Put an archived project back, so it accepts work again")
-    restorer.add_argument("project_id", help="Project id from `grid project list --all`.")
+    project_arg.add_project(restorer, help="Project id from `grid project list --all`.")
     restorer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     restorer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     restorer.set_defaults(handler=cmd_remote_project)
@@ -565,7 +566,7 @@ def _add_project(sub) -> None:
             "For the project created by a typo, and for one you inited or imported into by "
             "mistake and want the id back for. Asks before it acts unless you pass --yes."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    remover.add_argument("project_id", help="Project id from `grid project list --all`.")
+    project_arg.add_project(remover, help="Project id from `grid project list --all`.")
     remover.add_argument(
         "--yes", action="store_true",
         help="Do not ask for confirmation. Required when stdin is not a terminal.")
@@ -577,13 +578,13 @@ def _add_project(sub) -> None:
     member_sub = member.add_subparsers(dest="member_action", required=True)
 
     member_list = member_sub.add_parser("list", help="Show a project's members and their keys")
-    member_list.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(member_list)
     member_list.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     member_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     member_list.set_defaults(handler=cmd_remote_project)
 
     member_add = member_sub.add_parser("add", help="Admit a grid member to this project")
-    member_add.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(member_add)
     member_add.add_argument(
         "--email", required=True,
         help="Their address on this grid. They must have signed in to it at least once.")
@@ -594,8 +595,8 @@ def _add_project(sub) -> None:
     # By member key and not by email: the key is a path segment by construction, and a member's
     # `user_id` (`grid:<network>:<sub>`) is not. `grid project member list` prints it.
     member_remove = member_sub.add_parser("remove", help="Remove someone from this project")
-    member_remove.add_argument("project_id", help="Project id from `grid project list`.")
-    member_remove.add_argument("member_key", help="Member key from `grid project member list`.")
+    project_arg.add_project(member_remove)
+    project_arg.add_member(member_remove)
     member_remove.add_argument("--grid", default=None,
                                help="Grid to act on (default: active grid).")
     member_remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -611,8 +612,8 @@ def _add_project(sub) -> None:
 
     wip_reset = wip_sub.add_parser(
         "reset", help="Move a member's WIP branch back to a commit (recovers a lost attempt)")
-    wip_reset.add_argument("project_id", help="Project id from `grid project list`.")
-    wip_reset.add_argument("member_key", help="Member key from `grid project member list`.")
+    project_arg.add_project(wip_reset)
+    project_arg.add_member(wip_reset)
     wip_reset.add_argument(
         "--commit", required=True,
         help="Where to put the branch. `grid task get <id>` prints the `base_commit` a task was "
@@ -639,9 +640,9 @@ def _add_project(sub) -> None:
             "A branch that is behind `main` is refused, saying how far behind: integrate `main` "
             "into it first, then promote."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    promote.add_argument("project_id", help="Project id from `grid project list`.")
-    promote.add_argument(
-        "member_key",
+    project_arg.add_project(promote)
+    project_arg.add_member(
+        promote,
         help="Whose WIP branch to promote. Member key from `grid project member list`.")
     promote.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     promote.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -672,7 +673,7 @@ def _add_project(sub) -> None:
             "What the grid checks is that the merge HAPPENED — the result really contains `main`. "
             "It cannot check that the resolution is right, so read it before you promote."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    integrate.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(integrate)
     integrate.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     integrate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     integrate.set_defaults(handler=cmd_remote_project)
@@ -693,7 +694,7 @@ def _add_project(sub) -> None:
             "settles, when an integration lands, or when they commit. An integration that "
             "conflicts moves nothing — it shows up as a held task slot instead."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    status.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(status)
     status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     status.set_defaults(handler=cmd_remote_project)
@@ -712,7 +713,7 @@ def _add_project(sub) -> None:
             "It reports one of four answers, the same four integrate itself reports: already up to "
             "date, a straight fast-forward, a clean merge, or a conflict that would need an agent."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    check.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(check)
     check.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     check.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     check.set_defaults(handler=cmd_remote_project)
@@ -739,7 +740,7 @@ def _add_project(sub) -> None:
             "not exist is to report success and do nothing.\n\n"
             "Nothing reaches `main`: promote is still what releases work."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    committer.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(committer)
     committer.add_argument(
         "-m", "--message", required=True, metavar="MSG",
         help="What this commit did. Required, like git's own.")
@@ -787,7 +788,7 @@ def _add_project(sub) -> None:
             "member's branch and nothing could integrate back."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     importer.add_argument("path", help="Path to the local git repository to import.")
-    importer.add_argument("project_id", help="Project id from `grid project list`.")
+    project_arg.add_project(importer)
     importer.add_argument(
         "--branch", default="HEAD",
         help="Which local ref to import (default: HEAD, i.e. whatever is checked out).")
@@ -816,10 +817,9 @@ def _add_project(sub) -> None:
             "Needs a git that reports `authtype` from `git credential capability`; the relay\n"
             "accepts no credential scheme an older git can send."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    cloner.add_argument("project_id", help="Project id from `grid project list`.")
-    cloner.add_argument(
-        "directory", nargs="?", default=None,
-        help="Where to put it (default: a directory named after the project id).")
+    project_arg.add_project(cloner)
+    project_arg.add_directory(
+        cloner, help="Where to put it (default: a directory named after the project id).")
     cloner.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     cloner.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     cloner.set_defaults(handler=cmd_remote_project)
@@ -851,10 +851,9 @@ def _add_project(sub) -> None:
             "It needs the relay reachable. It does not need the control plane — the credential\n"
             "helper reads your local store, never the network."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    refresher.add_argument("project_id", help="Project id from `grid project list`.")
-    refresher.add_argument(
-        "directory", nargs="?", default=None,
-        help="The clone to refresh (default: the current directory).")
+    project_arg.add_project(refresher)
+    project_arg.add_directory(
+        refresher, help="The clone to refresh (default: the current directory).")
     refresher.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     refresher.set_defaults(handler=cmd_remote_project)
 
@@ -865,16 +864,21 @@ def _add_task(sub) -> None:
     `create | get | list | follow | fetch | cancel` (ADR 0032; `list` and `cancel` are ADR 0033 D-l).
 
     Gated in local mode by dispatch (`task` is in `REMOTE_ONLY`). `--grid` is a FLAG, not a leading
-    positional: the prompt that follows is free-form, and an optional positional in front of it is
-    ambiguous — the same call `router set-advisors` made."""
+    positional — the same call `router set-advisors` made. The reason used to be given as "the
+    prompt that follows is free-form": it is not, `--prompt` is a flag, and since issue 28 there IS
+    a leading optional positional here, the project id. The reason that survives is that a SECOND
+    optional positional beside it could not be told from the first (measured — `cli/project_arg.py`
+    documents the same limitation for `promote`)."""
     task = sub.add_parser("task", help="Create and read distributed tasks (remote)")
     task_sub = task.add_subparsers(dest="subcommand", required=True)
 
     create = task_sub.add_parser("create", help="Hand the grid a task and queue it for a provider")
     create.add_argument("--prompt", required=True, help="What the agent should do.")
-    create.add_argument(
-        "--project", default=None, metavar="ID",
-        help="Project ID to run in, from `grid project list` (default: your own project named "
+    # The ONE project-taking command where omitting it is not a refusal: it resolves the caller's
+    # own `default` project (ADR 0033 D-o, issue 26), so `required=False`.
+    project_arg.add_project(
+        create, required=False,
+        help="Project id to run in, from `grid project list` (default: your own project named "
              "'default', created on first use). You may have one task in flight per project at a "
              "time; a colleague's task in the same project does not block yours.")
     create.add_argument(
@@ -935,9 +939,10 @@ def _add_task(sub) -> None:
     # at a time, and the id came from `grid task create`, so somebody who closed their terminal had
     # to clone the project and read `task/*` refs by hand.
     listing = task_sub.add_parser("list", help="List the tasks in a project")
-    listing.add_argument(
-        "--project", required=True, metavar="ID",
-        help="Project ID to list, from `grid project list`.")
+    # STILL REQUIRED (issue 28) — the slice makes the two spellings uniform, it does not invent a
+    # default. What changes is that the refusal is ours and names both spellings, where argparse's
+    # named only `--project`.
+    project_arg.add_project(listing, help="Project id to list, from `grid project list`.")
     listing.add_argument(
         "--all", action="store_true",
         help="Every member's tasks, not only your own. A project is shared, so this is how a team "

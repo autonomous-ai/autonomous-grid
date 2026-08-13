@@ -80,6 +80,11 @@ def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
 
 
 def cmd_remote_task(args: argparse.Namespace) -> int:
+    # See `cmd_remote_project` — the same merge, and the reason `args.project` still reads the way
+    # `_task_create` and `_task_list` always read it (ADR 0033 D-a, issue 28).
+    from . import project_arg
+
+    args = project_arg.resolve(args)
     if args.subcommand == "create":
         return _task_create(args)
     if args.subcommand == "follow":
@@ -347,6 +352,11 @@ def _resolve_project(base: str, token: str, project: str | None) -> str:
         # default project is the same substitution this whole slice removes: the caller named
         # something and something else was used. The relay would refuse an empty `project_id`, but
         # it never sees one, because an empty string never reaches the wire.
+        #
+        # `project_arg._refuse_a_blank_value` now catches this first, for every command rather than
+        # this one, and with a message that names both spellings. This stays as the boundary guard
+        # on a helper that takes `str | None` from its caller — do not delete it as "unreachable"
+        # without moving the rule, or `--project ""` silently means `default` again.
         if not project.strip():
             raise SystemExit(
                 "--project needs a project id. Find yours with `grid project list`, "

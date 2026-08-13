@@ -22824,8 +22824,14 @@ def test_task_follow_is_refused_in_local_mode(monkeypatch, tmp_path):
 
 
 def test_task_selects_its_grid_with_a_flag_not_a_positional():
-    """`--grid`, like `price`/`router`: a leading optional positional would be ambiguous with the
-    free-form prompt that follows it."""
+    """`--grid`, like `price`/`router`.
+
+    The reason used to be given as "a leading optional positional would be ambiguous with the
+    free-form prompt that follows it". There is no free-form prompt — `--prompt` is a flag — and
+    since issue 28 `task create` HAS a leading optional positional, the project id. What is still
+    true is narrower: which GRID to act on is not a project-shaped thing, and a second optional
+    positional beside `project_id` would be the ambiguity this file measures elsewhere.
+    """
     args = cli.build_parser().parse_args(
         ["task", "create", "--prompt", "hello", "--grid", "team"])
     assert args.grid == "team"
@@ -33683,3 +33689,416 @@ def test_project_status_says_nothing_about_archiving_when_the_relay_omits_the_ke
     assert cli.main(["project", "status", "P1"]) == 0
 
     assert "archived" not in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue 28 (ADR 0033 D-a) — one spelling for a project id. `--project <id>` is
+# accepted everywhere the positional is, and the positional everywhere the flag
+# is. Client-only: no wire change, so no rollout order.
+# ---------------------------------------------------------------------------
+
+
+def _settled(argv: list[str]) -> argparse.Namespace:
+    """Parse `argv` the way the CLI does — argparse, then the two-spelling merge."""
+    from cli import project_arg
+
+    return project_arg.resolve(cli.build_parser().parse_args(argv))
+
+
+def test_a_project_command_takes_the_id_as_a_flag():
+    assert _settled(["project", "status", "--project", "abc123"]).project_id == "abc123"
+
+
+def test_a_project_command_still_takes_the_id_positionally():
+    assert _settled(["project", "status", "abc123"]).project_id == "abc123"
+
+
+def test_two_different_project_ids_are_refused_naming_both():
+    """Never a silent preference: the two spellings are one value, so a disagreement is the
+    caller's to settle, and they can only settle it if they are told what they said."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "status", "abc123", "--project", "def456"])
+    message = str(caught.value)
+    assert "abc123" in message and "def456" in message, message
+
+
+def test_the_same_project_id_twice_is_accepted():
+    assert _settled(["project", "status", "abc", "--project", "abc"]).project_id == "abc"
+
+
+def test_a_missing_project_id_is_refused_in_our_words_not_argparses():
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "status"])
+    message = str(caught.value)
+    assert "--project" in message, message
+    assert "grid project list" in message, message
+    assert "the following arguments are required" not in message, message
+
+
+def test_promote_takes_the_project_and_the_member_as_flags():
+    """The three two-positional commands cannot make both optional and still tell
+    `promote <member-key>` from `promote <project-id>`, so they gain a full-flag form."""
+    settled = _settled(["project", "promote", "--project", "P1", "--member", "abc"])
+    assert (settled.project_id, settled.member_key) == ("P1", "abc")
+
+
+def test_promote_still_takes_both_positionally():
+    settled = _settled(["project", "promote", "P1", "abc"])
+    assert (settled.project_id, settled.member_key) == ("P1", "abc")
+
+
+def test_one_positional_beside_the_project_flag_is_never_read_as_the_project():
+    """The hazard this pins: measured, argparse hands a lone positional to `project_id` whatever the
+    caller meant, so `promote --project P1 abc` would promote a project called `abc` and silently
+    ignore `P1`.
+
+    It used to be pinned as a REFUSAL. Review pointed out that a named `--project` settles the
+    question rather than leaving it open — `abc` can only be the member key — so the positional is
+    now placed there. The hazard is closed either way; what changed is that the reading is taken
+    instead of thrown away. A bogus value still fails loudly downstream, where a member key is
+    checked for shape.
+    """
+    settled = _settled(["project", "promote", "--project", "P1", "abc"])
+    assert settled.project_id == "P1", "the named project must survive a stray positional"
+    assert settled.member_key == "abc"
+
+
+# (the lone-positional-with-no-flag refusal is pinned by
+# `test_a_lone_positional_with_NO_flag_is_still_ambiguous_and_still_refused` below, which asserts
+# both spellings are named and that the message only claims ambiguity when there is some)
+
+
+def test_clone_reads_a_lone_positional_beside_the_project_flag_as_the_DIRECTORY():
+    """`clone` and `refresh` are `<project-id> [<directory>]`, so with the id named there is exactly
+    one thing a remaining positional can be. Measured: argparse would otherwise put it in the
+    project slot and leave the directory unset."""
+    settled = _settled(["project", "clone", "--project", "abc123", "mydir"])
+    assert (settled.project_id, settled.directory) == ("abc123", "mydir")
+
+
+def test_clone_keeps_both_of_its_positional_forms():
+    bare = _settled(["project", "clone", "abc123"])
+    assert (bare.project_id, bare.directory) == ("abc123", None)
+    with_dir = _settled(["project", "clone", "abc123", "mydir"])
+    assert (with_dir.project_id, with_dir.directory) == ("abc123", "mydir")
+
+
+def test_clone_refuses_two_positionals_beside_the_project_flag():
+    """There is only one slot to shift into, so the second has no reading to give it."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "clone", "--project", "abc123", "one", "two"])
+    message = str(caught.value)
+    assert "one" in message and "two" in message, message
+
+
+def test_refresh_takes_the_project_flag_too():
+    settled = _settled(["project", "refresh", "--project", "abc123", "mydir"])
+    assert (settled.project_id, settled.directory) == ("abc123", "mydir")
+
+
+def test_task_list_takes_a_positional_project_id():
+    assert _settled(["task", "list", "abc123"]).project == "abc123"
+
+
+def test_task_list_still_requires_a_project_one_way_or_the_other():
+    """Issue 28 deliberately has no fallback to fall back to: there is nothing to default it to."""
+    assert _settled(["task", "list", "--project", "abc123"]).project == "abc123"
+    with pytest.raises(SystemExit) as caught:
+        _settled(["task", "list"])
+    assert "--project" in str(caught.value)
+
+
+def test_task_create_takes_the_project_either_way_and_neither_is_still_fine():
+    """The one command where omitting the project is not a refusal — it resolves the caller's own
+    `default` project (issue 26), and this slice must not turn that into an error."""
+    assert _settled(["task", "create", "abc123", "--prompt", "hi"]).project == "abc123"
+    assert _settled(["task", "create", "--project", "abc123", "--prompt", "hi"]).project == "abc123"
+    assert _settled(["task", "create", "--prompt", "hi"]).project is None
+
+
+# Every command that takes a project id, in both spellings. This is acceptance criterion 1 as a
+# table: the left column is what worked before this slice, the right is what it gains. A command
+# added later that takes a project belongs here — and the structural test below catches it if
+# whoever adds it forgets.
+_BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
+    (["project", "init", "P1"], ["project", "init", "--project", "P1"]),
+    (["project", "archive", "P1"], ["project", "archive", "--project", "P1"]),
+    (["project", "unarchive", "P1"], ["project", "unarchive", "--project", "P1"]),
+    (["project", "delete", "P1"], ["project", "delete", "--project", "P1"]),
+    (["project", "member", "list", "P1"], ["project", "member", "list", "--project", "P1"]),
+    (["project", "member", "add", "P1", "--email", "a@b.c"],
+     ["project", "member", "add", "--project", "P1", "--email", "a@b.c"]),
+    (["project", "member", "remove", "P1", "KEY"],
+     ["project", "member", "remove", "--project", "P1", "--member", "KEY"]),
+    (["project", "wip", "reset", "P1", "KEY", "--commit", "c" * 40],
+     ["project", "wip", "reset", "--project", "P1", "--member", "KEY", "--commit", "c" * 40]),
+    (["project", "promote", "P1", "KEY"],
+     ["project", "promote", "--project", "P1", "--member", "KEY"]),
+    (["project", "integrate", "P1"], ["project", "integrate", "--project", "P1"]),
+    (["project", "status", "P1"], ["project", "status", "--project", "P1"]),
+    (["project", "check", "P1"], ["project", "check", "--project", "P1"]),
+    (["project", "commit", "P1", "-m", "msg"], ["project", "commit", "--project", "P1", "-m", "msg"]),
+    (["project", "import", "./repo", "P1"], ["project", "import", "./repo", "--project", "P1"]),
+    (["project", "clone", "P1"], ["project", "clone", "--project", "P1"]),
+    (["project", "refresh", "P1"], ["project", "refresh", "--project", "P1"]),
+    (["task", "create", "P1", "--prompt", "hi"],
+     ["task", "create", "--project", "P1", "--prompt", "hi"]),
+    (["task", "list", "P1"], ["task", "list", "--project", "P1"]),
+]
+
+
+@pytest.mark.parametrize("positional, flag", _BOTH_SPELLINGS,
+                         ids=[" ".join(p[:3]) for p, _ in _BOTH_SPELLINGS])
+def test_every_command_taking_a_project_accepts_both_spellings(positional, flag):
+    assert _settled(positional).project_id == "P1"
+    assert _settled(flag).project_id == "P1"
+
+
+def test_the_flag_form_reaches_the_relay_end_to_end(monkeypatch, tmp_path, capsys):
+    """The parse is only half of it: the settled id has to be what the handler asks the relay for."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen: dict[str, str] = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
+            "branch": "wip/abc", "wip_commit": "b" * 40, "ahead": 0, "behind": 0,
+            "can_promote": True})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "status", "--project", "P1"]) == 0
+    assert seen["path"].endswith("/projects/P1/status"), seen
+
+
+def _every_parser(parser, prefix: str = ""):
+    """Walk the whole command tree, yielding (path, parser) for every node."""
+    yield prefix or parser.prog, parser
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, child in action.choices.items():
+                yield from _every_parser(child, f"{prefix} {name}".strip())
+
+
+def test_no_command_can_ship_with_only_one_spelling_of_the_project_id():
+    """The net under acceptance criterion 1: a command added later that takes a project id gets
+    both spellings or fails here.
+
+    A scan that stops recognising what it is looking for finds nothing and passes, so the count is
+    checked against the table above too — the reason grid-src's `test_task_errors` carries a
+    per-module floor. Mutation-checked three ways: dropping either spelling from one command, and
+    dropping the whole argument (which only the count can see).
+    """
+    positional_only, flag_only, both = [], [], []
+    for path, parser in _every_parser(cli.build_parser()):
+        actions = parser._actions
+        has_positional = any(a.dest == "project_id" and not a.option_strings for a in actions)
+        has_flag = any("--project" in a.option_strings for a in actions)
+        if has_positional and has_flag:
+            both.append(path)
+        elif has_positional:
+            positional_only.append(path)
+        elif has_flag:
+            flag_only.append(path)
+
+    assert positional_only == [], f"take a project id positionally but not as --project: {positional_only}"
+    assert flag_only == [], f"take --project but not a positional project id: {flag_only}"
+    assert len(both) == len(_BOTH_SPELLINGS), (
+        f"the walk found {len(both)} commands taking a project id, the table lists "
+        f"{len(_BOTH_SPELLINGS)}: {sorted(both)}")
+
+
+def test_import_keeps_its_path_when_the_project_is_named():
+    """`import <path> <project-id>` is the one shape with a REQUIRED positional in front. Measured:
+    argparse fills the required one first, so naming the project cannot steal the path."""
+    settled = _settled(["project", "import", "./repo", "--project", "P1"])
+    assert (settled.path, settled.project_id) == ("./repo", "P1")
+    positional = _settled(["project", "import", "./repo", "P1"])
+    assert (positional.path, positional.project_id) == ("./repo", "P1")
+
+
+def test_a_command_that_takes_no_project_is_untouched_by_the_merge():
+    """`project create` and `project list` name no project, so `resolve` must pass them through
+    rather than refuse them for a missing id."""
+    created = _settled(["project", "create", "--name", "thing"])
+    assert created.name == "thing"
+    assert not hasattr(created, "project_id")
+    assert _settled(["project", "list", "--all"]).all is True
+
+
+def test_a_missing_member_key_offers_a_form_that_exists_and_the_command_that_prints_keys():
+    """The project id and the member key are both two-spelling values, but they are not
+    interchangeable in a message: `grid project promote <member-key>` is not a form, and it is
+    `grid project member list` — not `grid project list` — that prints a key."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "promote", "--project", "P1"])
+    message = str(caught.value)
+    assert "grid project promote <member-key>" not in message, message
+    assert "grid project promote --project <project-id> --member <member-key>" in message, message
+    assert "grid project member list" in message, message
+
+
+def test_naming_one_of_the_two_values_places_the_other_positionally():
+    """The two flags have to COMPOSE with the positionals, or the slice has just moved the
+    hands-changing one command along. A lone positional is only ambiguous when NEITHER flag is
+    given — name either one and the remaining slot is the only place the positional can go.
+
+    Found in review. The refusal that used to fire here said `'P1' on its own could be either the
+    project id or the member key`, which was not true once `--member` had been given.
+    """
+    from_member = _settled(["project", "promote", "P1", "--member", "KEY"])
+    assert (from_member.project_id, from_member.member_key) == ("P1", "KEY")
+    from_project = _settled(["project", "promote", "--project", "P1", "KEY"])
+    assert (from_project.project_id, from_project.member_key) == ("P1", "KEY")
+    reset = _settled(["project", "wip", "reset", "P1", "--member", "KEY", "--commit", "c" * 40])
+    assert (reset.project_id, reset.member_key) == ("P1", "KEY")
+
+
+def test_a_lone_positional_with_NO_flag_is_still_ambiguous_and_still_refused():
+    """The half of the shape limitation that is real: with nothing named, argparse cannot tell
+    `promote <member-key>` from `promote <project-id>` and neither can we."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "promote", "P1"])
+    message = str(caught.value)
+    assert "could be either" in message, message
+    assert "--project" in message and "--member" in message, message
+
+
+def test_refresh_with_the_project_id_said_twice_leaves_the_directory_alone():
+    """`--project P1 P1` is one project id given both ways, which the docs promise is fine — not a
+    request to refresh `./P1`. Found in review: `clone` hid it, because a directory named after the
+    project id is also `clone`'s default, and `refresh`'s default is the current directory."""
+    settled = _settled(["project", "refresh", "--project", "P1", "P1"])
+    assert (settled.project_id, settled.directory) == ("P1", None)
+    still_explicit = _settled(["project", "refresh", "P1", "P1"])
+    assert (still_explicit.project_id, still_explicit.directory) == ("P1", "P1")
+
+
+def test_a_stray_positional_with_both_values_already_named_is_refused():
+    """The third arm of the two-positional shape, and the one no test reached before: with both
+    values named there is no free slot, so a positional is a stray. It goes to `project_id` (that is
+    what argparse does), and the conflict refusal names both values rather than promoting `STRAY`."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "promote", "--project", "P1", "--member", "KEY", "STRAY"])
+    message = str(caught.value)
+    assert "STRAY" in message and "P1" in message, message
+    # Restating a value that agrees is still fine, here as everywhere else.
+    settled = _settled(["project", "promote", "--project", "P1", "--member", "KEY", "P1"])
+    assert (settled.project_id, settled.member_key) == ("P1", "KEY")
+
+
+def test_clone_takes_a_directory_beside_a_project_id_said_twice():
+    """Falls out of the same-value carve-out, and is worth pinning because it used to be refused:
+    the id agreeing with itself leaves the second positional free to be the directory."""
+    settled = _settled(["project", "clone", "--project", "P1", "P1", "mydir"])
+    assert (settled.project_id, settled.directory) == ("P1", "mydir")
+
+
+def _suggested_forms(argv: list[str]) -> list[list[str]]:
+    """Run `argv`, expect our refusal, and turn each command form it offers back into argv."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(argv)
+    forms = [line.strip() for line in str(caught.value).splitlines() if line.startswith("    ")]
+    assert forms, f"no command forms offered:\n{caught.value}"
+    filled = []
+    for form in forms:
+        words = form.split()
+        assert words[0] == "grid", form
+        argv_form = []
+        for word in words[1:]:
+            argv_form.append({"<project-id>": "P1", "<member-key>": "KEY",
+                              "<path>": "./repo"}.get(word, word))
+        filled.append(argv_form)
+    return filled
+
+
+# The extra required flags each command needs before it can parse at all, so the check below is
+# about the FORM being complete and correctly ordered, not about unrelated missing flags.
+_FORM_CASES = [
+    (["project", "status"], []),
+    (["project", "clone"], []),
+    (["project", "import", "./repo"], []),
+    (["project", "promote", "--member", "KEY"], []),
+    (["project", "member", "remove", "--member", "KEY"], []),
+    (["project", "wip", "reset", "--member", "KEY"], ["--commit", "c" * 40]),
+    (["task", "list"], []),
+]
+
+
+@pytest.mark.parametrize("argv, extra", _FORM_CASES, ids=[" ".join(a[:3]) for a, _ in _FORM_CASES])
+def test_a_refusal_only_ever_offers_a_command_that_really_works(argv, extra):
+    """A refusal that names a form which does not parse — or parses into the wrong slot — sends the
+    reader round the loop again. Found in review for the member shape; `import` is worse, because
+    `grid project import <project-id>` DOES parse and puts the id in the `<path>` slot.
+
+    So the forms are checked by running them, not by reading them.
+    """
+    # `extra` goes in BOTH: argparse rejects its own missing required flags before `resolve` runs,
+    # so without it there would be no refusal of ours to read.
+    for form in _suggested_forms([*argv, *extra]):
+        settled = _settled([*form, *extra])
+        assert settled.project_id == "P1", f"{form} did not put the project id in the project slot"
+        if "path" in vars(settled):
+            assert settled.path == "./repo", f"{form} lost the path"
+
+
+@pytest.mark.parametrize("register", ["add_member", "add_directory"])
+def test_registering_a_second_positional_before_the_project_says_so(register):
+    """The order is load-bearing — argparse fills consecutive optional positionals left to right, so
+    registering the project id second would silently swap what a caller's first word means. Getting
+    it wrong is a developer error at parser-build time, so it must be loud AND legible."""
+    from cli import project_arg
+
+    bare = argparse.ArgumentParser(prog="grid thing")
+    with pytest.raises(ValueError) as caught:
+        getattr(project_arg, register)(bare, help="x")
+    assert "add_project" in str(caught.value), caught.value
+
+
+def test_an_empty_project_id_is_refused_here_not_misreported_as_an_old_relay():
+    """`grid project status ""` used to build `/relay/v1/projects//status`, which matches no route,
+    so the relay answered a bare framework 404 and `missing_route_hint` turned it into "this grid's
+    relay does not have projects yet — ask its operator to update it". The relay is fine; the id was
+    empty. Sending somebody to chase a working feature is the failure `_OLD_RELAY_NO_CANCEL` exists
+    to avoid, and an empty id never reaches the wire now.
+
+    Pre-existing — the old required positional accepted "" too, and argparse's `required=True` only
+    ever checked presence, never emptiness.
+    """
+    for blank in ("", "   "):
+        with pytest.raises(SystemExit) as caught:
+            _settled(["project", "status", blank])
+        message = str(caught.value)
+        assert "empty" in message, message
+        assert "--project" in message and "grid project list" in message, message
+        assert "relay" not in message.lower(), message
+
+        with pytest.raises(SystemExit) as by_flag:
+            _settled(["project", "status", "--project", blank])
+        assert "empty" in str(by_flag.value), by_flag.value
+
+
+def test_an_empty_project_on_task_create_still_says_it_may_be_left_off():
+    """The one command with a fallback, so the refusal has to name it — otherwise the advice is
+    "pass a real id" to somebody whose next move is to pass none at all."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["task", "create", "--project", "", "--prompt", "x"])
+    message = str(caught.value)
+    assert "empty" in message, message
+    assert "default" in message, message
+
+
+def test_an_empty_member_key_is_refused_as_a_member_key():
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "promote", "--project", "P1", "--member", "  "])
+    message = str(caught.value)
+    assert "member key" in message and "empty" in message, message
+    assert "grid project member list" in message, message
+
+
+def test_an_empty_project_flag_on_clone_is_refused_before_the_directory_shift():
+    """Otherwise the shift runs on a blank id and the refusal talks about directories."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "clone", "--project", "", "mydir"])
+    assert "empty" in str(caught.value), caught.value

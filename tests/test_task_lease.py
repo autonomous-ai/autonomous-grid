@@ -1426,13 +1426,19 @@ def test_the_help_for_a_task_slot_does_not_claim_it_is_per_project():
     text = cli_parser.build_parser().format_help()
     # Cheap and specific: the claim, not the wording around it.
     assert "per project at a time" not in text
-    for action in cli_parser.build_parser()._subparsers._group_actions[0].choices["task"] \
-            ._subparsers._group_actions[0].choices["create"]._actions:
-        if action.dest == "project":
+    # Since issue 28 the id has two spellings, and the sentence rides on the POSITIONAL — `--project`
+    # is the same value under another name and carries only a pointer to it. Both must still exist:
+    # this describes what a task slot is, and it has to be reachable from the command's own --help.
+    create = cli_parser.build_parser()._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["create"]
+    assert any("--project" in a.option_strings for a in create._actions), \
+        "`grid task create --project` no longer exists"
+    for action in create._actions:
+        if action.dest == "project_id":
             assert "one task in flight per project" in (action.help or "")
             break
     else:
-        raise AssertionError("`grid task create --project` no longer exists to describe")
+        raise AssertionError("`grid task create <project-id>` no longer exists to describe")
 
 
 def test_the_archived_keys_this_cli_reads_are_the_ones_the_relay_writes():

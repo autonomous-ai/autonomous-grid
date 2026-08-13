@@ -901,11 +901,34 @@ grid project refresh       <project-id> [<directory>] [--json]
 
 **Remote-only.** A project is the long-lived workspace a task runs in, and the git repository that
 holds it. It has **members**, and it is addressed by **id** — `create` prints the id, `list` shows
-every project you are a member of, and that id is what `grid task create --project` takes.
+every project you are a member of, and that id is what `grid task create` takes.
+
+### `<project-id>` and `--project <project-id>` are the same thing
+
+Every command that takes a project id accepts it **either way**, so the spelling never changes with
+the command group:
+
+```
+grid project status abc123              grid project status --project abc123
+grid task list      abc123              grid task list      --project abc123
+```
+
+This page shows the positional form throughout. Three commands take a member key as well, and with
+both given positionally there is no way to tell one from the other — so they also accept a full-flag
+form, and refuse a single positional beside `--project`:
+
+```
+grid project promote      <project-id> <member-key>
+grid project promote      --project <project-id> --member <member-key>
+grid project member remove … and grid project wip reset … take the same two forms
+```
+
+Giving both spellings with **different** values is refused, naming both — there is no silent
+preference. Giving both with the same value is fine.
 
 A name is unique **per owner**, so it is not an address someone else can use: two people can both
 have a project called `acme` and they are different projects. That is why the wire carries an id and
-`--project` takes one.
+the project id is what every command takes.
 
 `member add` takes an **email**, and the person must already be a member of the grid — someone who
 has never signed in to it cannot be admitted to a project on it. `member remove` takes a **member
@@ -1237,10 +1260,10 @@ member gets the same "no such project" a stranger always gets.
 ## Task
 
 ```
-grid task create --prompt <text> [--file <local>[:<dest>]]… [--dir <local>[:<dest>]]…
-                 [--project <id>] [--init-project] [--grid <grid>] [--json]
+grid task create [<project-id>] --prompt <text> [--file <local>[:<dest>]]… [--dir <local>[:<dest>]]…
+                 [--init-project] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
-grid task list   --project <id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
+grid task list   <project-id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
 grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
@@ -1275,11 +1298,14 @@ one.
 The log is **one sequence for the task's whole life**, including across a retry: a reattached client
 never finds that its cursor has come to mean something else.
 
-`--project` takes a project **id** from `grid project list`. With no `--project`, the task runs in
-your own project called `default` **if you already have one** — the name is resolved here, by the
-CLI, against projects you own, and only an id ever reaches the relay. If you do not have one,
-nothing is created and the command says which project it needs; a project you never asked for,
-discoverable only through the error line that followed it, was worse than being asked.
+Both commands take a project **id** from `grid project list`, positionally or as `--project <id>` —
+the two spellings are the same thing, exactly as in the `grid project` group above. `create` is the
+one command where leaving it out is not an error: the task then runs in your own project called
+`default` **if you already have one** — the name is resolved here, by the CLI, against projects you
+own, and only an id ever reaches the relay. If you do not have one, nothing is created and the
+command says which project it needs; a project you never asked for, discoverable only through the
+error line that followed it, was worse than being asked. `list` has nothing to default to, so it
+requires the id one way or the other.
 
 `--init-project` gives the project an empty trunk first, then runs the task — the one-call form of
 `grid project init` followed by `grid task create`, for work that starts from nothing. It is
