@@ -814,13 +814,15 @@ def _project_commit(args: argparse.Namespace) -> int:
 
     # Read the files BEFORE resolving the grid, for `_task_create`'s reason: a typo in a filename
     # should not first cost a credential lookup and a control-plane round trip to discover.
-    files = remote_task._collect_files(getattr(args, "file", None), mark_executable=True)
+    files = remote_task._collect_files(getattr(args, "file", None),
+                                       dirs=getattr(args, "dir", None), mark_executable=True)
     deletes = list(getattr(args, "delete", None) or ())
     if not files and not deletes:
         # Refused HERE as well as by the relay, because this one is answerable without a round trip
         # and the message can name the flags rather than the wire fields.
         raise SystemExit(
-            "Nothing to commit. Pass --file to write a file, --delete to remove one, or both.")
+            "Nothing to commit. Pass --file to write a file, --dir to write a folder, --delete to "
+            "remove one, or any combination.")
 
     base, token, _label = _resolve(args)
     answer = relay.commit_project(base, token, args.project_id,

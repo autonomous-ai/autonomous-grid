@@ -620,6 +620,30 @@ measured defect: re-uploading an existing `100755` file rewrites it to `100644`,
 of a shell script silently removes its executable bit. Dormant today, because the relay has only
 ever written one mode; live the moment D-f imports a repository that has another.
 
+**`--dir` is a client-side expansion of this same upload, and nothing more** (issue 27). It walks a
+local folder into exactly the `files` list `--file` produces, so the relay sees a byte-identical
+payload: no wire change, no lockstep value, no rollout order in either direction.
+
+What makes it work is its **selection rules**, and they must not be mistaken for a second copy of
+the relay's path validation. A *selection* rule decides which local files to offer; a *validation*
+rule decides which paths the relay accepts. The relay remains the sole authority on the second, and
+neither direction of drift is silent — a path wrongly skipped shows up as a file the user re-adds
+with `--file`, and a path wrongly offered produces the clean 422 that already exists.
+
+The rules are `.gitignore` via `git ls-files --exclude-standard` when the folder is in a work tree
+(a plain walk otherwise, and it *says* which happened), plus skipping `.git/`, `.grid/`, `.claude/`
+and `.mcp.json` at any depth, and symlinks. Those last are **skipped and reported, never fatal**:
+the purpose of D-f's rule is that an agent config must not reach the workspace, and skipping
+satisfies it exactly — while refusing an entire upload because a folder happens to contain one
+would not. A symlink is still never followed and its target never read, which is the security
+property `--file`'s outright refusal was protecting; the difference is only that in a walk the user
+named the folder, not the link. Every skip is printed, because a silent one is how somebody learns
+at runtime that the file they needed was never sent.
+
+The bounds are checked from `stat` **before any content is read** and are **one budget across
+`--file` and `--dir` together** — reading 1,847 files and only then refusing is the failure that
+ordering prevents, and two counters would let 150 of each through for a 300-file POST.
+
 ### D-k — The queue is not the run
 
 `deadline_at` is set at create and `reap_past_deadline` covers `queued`, so a task's whole wall-clock

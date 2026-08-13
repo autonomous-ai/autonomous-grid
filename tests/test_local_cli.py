@@ -23222,6 +23222,30 @@ def test_the_suggested_command_keeps_the_grid_and_the_shell_quoting(monkeypatch,
         "--grid", "team", "--prompt", "fix Bob's retry, then re-run"], str(caught.value)
 
 
+def test_the_suggested_command_keeps_the_dir_flags_too(monkeypatch, tmp_path):
+    """Wrong by omission, exactly like `--grid` above.
+
+    The line is meant to be pasted. A suggestion that silently drops `--dir` runs the retried task
+    against none of the files the user gathered — and it succeeds, so nothing ever says so.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fixtures"
+    folder.mkdir()
+    (folder / "a.json").write_bytes(b"{}\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "project_has_no_trunk", "message": "no main"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "p",
+                  "--dir", f"{folder}:test/data"])
+
+    assert _suggested_argv(str(caught.value)) == [
+        "grid", "task", "create", "--project", "abc123", "--init-project",
+        "--prompt", "p", "--dir", f"{folder}:test/data"], str(caught.value)
+
+
 def _initialized(commit="a" * 40, created=True):
     """What `POST /relay/v1/projects/{id}/init` answers (ADR 0033 D-o, issue 25)."""
     return httpx.Response(200, json={
@@ -24223,6 +24247,59 @@ def test_task_create_does_not_send_the_executable_key(monkeypatch, tmp_path):
     assert rc == 0
     assert seen["body"]["files"] == [
         {"path": "build.sh", "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], (
+        "task create's file entries gained a key an older relay would refuse")
+
+
+def test_project_commit_dir_preserves_executable_bits(monkeypatch, tmp_path):
+    """`--dir` reuses `_collect_files`' `mark_executable`, so a walked script keeps its bit exactly
+    as a `--file` one does — still SET-ONLY, so a plain file sends no key at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "scripts"
+    folder.mkdir()
+    script = folder / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    (folder / "notes.md").write_text("hi\n")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": ["scripts/build.sh", "scripts/notes.md"], "deletes": []})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "commit", "P1", "-m", "m", "--dir", str(folder)]) == 0
+
+    by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
+    assert by_path["scripts/build.sh"]["executable"] is True
+    assert "executable" not in by_path["scripts/notes.md"], by_path["scripts/notes.md"]
+
+
+def test_task_create_dir_sends_no_executable_key_either(monkeypatch, tmp_path):
+    """The byte-for-byte body-shape pin, carried onto the new flag.
+
+    `task_files.parse_files` refuses unknown keys, so a relay predating ADR 0033 D-j answers 422
+    rather than dropping the field — sending it from `task create` would break a command that works
+    today against every un-upgraded relay. `--dir` must not be the back door that reintroduces it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "scripts"
+    folder.mkdir()
+    script = folder / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert seen["body"]["files"] == [
+        {"path": "scripts/build.sh",
+         "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], (
         "task create's file entries gained a key an older relay would refuse")
 
 
@@ -30024,6 +30101,754 @@ def test_task_create_shows_the_relays_rejection_of_a_path(monkeypatch, tmp_path,
         cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:.git/hooks/x"])
 
     assert "reserved directory" in str(exit_info.value)
+
+
+# --- issue 27: `grid task create --dir` / `grid project commit --dir` ----------------------------
+
+def _dir_upload_handler(seen, project_id="P1"):
+    """The two requests a projectless `grid task create` makes, capturing the task body.
+
+    Path-aware for `test_task_create_uploads_a_file_at_its_basename`'s reason: since ADR 0033
+    issue 10 a create with no `--project` resolves the caller's own `default` project FIRST, and one
+    canned answer for both would hand the task-create a project id the reply then contradicts.
+    """
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing(project_id)
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": project_id})
+
+    return handler
+
+
+def _paths_sent(seen):
+    return [entry["path"] for entry in seen["body"]["files"]]
+
+
+def test_task_create_dir_uploads_every_file_under_the_folders_own_name(monkeypatch, tmp_path):
+    """The whole point of the flag: one argument where `--file` needed one per file.
+
+    DEST defaults to the FOLDER's basename, matching `--file ./conf.toml` → `conf.toml`. Placing a
+    folder's contents at the workspace root is deliberately not expressible.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fixtures"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "a.json").write_bytes(b'{"k": 1}\n')
+    (folder / "sub" / "b.txt").write_bytes(b"BEE\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    rc = cli.main(["task", "create", "--prompt", "read them", "--dir", str(folder)])
+
+    assert rc == 0
+    assert _paths_sent(seen) == ["fixtures/a.json", "fixtures/sub/b.txt"]
+    by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
+    assert by_path["fixtures/sub/b.txt"]["content_b64"] == base64.b64encode(b"BEE\n").decode()
+
+
+def test_task_create_dir_places_the_tree_at_an_explicit_destination(monkeypatch, tmp_path):
+    """`LOCAL:DEST` reproduces a layout the agent expects to navigate, and the tree under it is
+    preserved rather than flattened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fixtures"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "a.json").write_bytes(b"{}\n")
+    (folder / "sub" / "b.txt").write_bytes(b"b\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", f"{folder}:test/data"]) == 0
+
+    assert _paths_sent(seen) == ["test/data/a.json", "test/data/sub/b.txt"]
+
+
+def test_task_create_dir_dot_uses_the_resolved_folders_own_name(monkeypatch, tmp_path):
+    """`Path('.').name` is `''`, so the obvious default would upload to the workspace ROOT — which
+    `--dir` deliberately cannot express. The resolved directory's real name is used instead."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    folder.mkdir()
+    (folder / "a.txt").write_bytes(b"a\n")
+    monkeypatch.chdir(folder)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", "."]) == 0
+
+    assert _paths_sent(seen) == ["assets/a.txt"]
+
+
+def _git_work_tree(folder):
+    """A real git work tree, because `--dir`'s ignore rules are asked of real git."""
+    import subprocess
+
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent"}
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(folder)],
+                   check=True, capture_output=True, env=env)
+
+
+def test_task_create_dir_honours_gitignore_inside_a_git_work_tree(monkeypatch, tmp_path):
+    """The single highest-value selection rule, and the reason `--dir` is usable on its first try.
+
+    A naive walk of any real directory blows past MAX_FILES immediately on `__pycache__/`,
+    `node_modules/`, `venv/`. Asked of git rather than hand-rolled: `--exclude-standard` IS the
+    project's own ignore rules, and a second implementation of gitignore semantics would be worse
+    and would fail silently — a file wrongly hidden looks exactly like a file that was never there.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / ".gitignore").write_text("__pycache__/\n*.log\n")
+    (folder / "__pycache__").mkdir()
+    (folder / "__pycache__" / "m.pyc").write_bytes(b"junk")
+    (folder / "debug.log").write_bytes(b"noise")
+    (folder / "app.py").write_bytes(b"x = 1\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["proj/.gitignore", "proj/app.py"]
+
+
+def test_task_create_dir_skips_reserved_and_agent_config_paths_and_still_uploads(
+        monkeypatch, tmp_path):
+    """Skipped, never fatal — and that distinction is the whole rule.
+
+    The relay refuses `.git/` and `.grid/` (`task_files._RESERVED_COMPONENTS`) and `.claude/` /
+    `.mcp.json` (ADR 0033 D-f, because a project-scope agent config is code execution on the
+    provider). Refusing the WHOLE upload because a folder happens to contain one of them is hostile:
+    the rule's purpose is that the config must not reach the workspace, and skipping satisfies it
+    exactly.
+
+    Walked WITHOUT a git work tree deliberately. `git ls-files` never lists `.git/` in the first
+    place, so a git-backed folder would pass this test with no filter written at all.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "bundle"
+    for part in (".git", ".grid", ".claude", "deep/.claude", "deep"):
+        (folder / part).mkdir(parents=True, exist_ok=True)
+    (folder / "ok.txt").write_bytes(b"ok\n")
+    (folder / "deep" / "keep.py").write_bytes(b"keep\n")
+    (folder / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    (folder / ".grid" / "state.json").write_bytes(b"{}\n")
+    (folder / ".claude" / "settings.json").write_bytes(b'{"hooks": {}}\n')
+    (folder / "deep" / ".claude" / "settings.json").write_bytes(b"{}\n")
+    (folder / ".mcp.json").write_bytes(b"{}\n")
+    (folder / "deep" / ".mcp.json").write_bytes(b"{}\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["bundle/deep/keep.py", "bundle/ok.txt"]
+
+
+def test_task_create_dir_never_follows_a_symlink_and_never_uploads_its_target(
+        monkeypatch, tmp_path):
+    """`--file`'s planted-symlink rule, carried through the walk.
+
+    `--file` REFUSES a symlink, and that is right because the user named that file. In a walk the
+    user named the directory, not the link, so aborting over an incidental one is the wrong
+    response — but the security property is unchanged: the link is never followed and its target is
+    never read. The classic target of a planted link is a private key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY\n")
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "real.md").write_bytes(b"# real\n")
+    (folder / "link.md").symlink_to(secret)
+    # A symlinked DIRECTORY too: `os.walk(followlinks=False)` must not descend into it, or the
+    # target's whole tree is uploaded under a name the user never gave.
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "private.txt").write_bytes(b"PRIVATE\n")
+    (folder / "away").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["docs/real.md"]
+    body = json.dumps(seen["body"])
+    assert "PRIVATE KEY" not in base64.b64decode(
+        seen["body"]["files"][0]["content_b64"]).decode()
+    assert "private.txt" not in body and "id_rsa" not in body
+
+
+def test_task_create_dir_reports_what_it_skipped_rather_than_skipping_silently(
+        monkeypatch, tmp_path, capsys):
+    """A silent skip is how somebody discovers at runtime that the file they needed was never sent.
+
+    On **stderr**, not stdout: `--json` prints the payload on stdout and a skip line there would
+    corrupt it for the program reading it.
+
+    A symlink is reported WITH its target, because "a link was skipped" does not tell anyone whether
+    they were just protected from uploading a private key or lost a convenience alias.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY\n")
+    folder = tmp_path / "docs"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / "real.md").write_bytes(b"# real\n")
+    (folder / ".claude" / "settings.json").write_bytes(b"{}\n")
+    (folder / "link.md").symlink_to(secret)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    err = capsys.readouterr().err
+    assert "skipped 2 paths" in err, err
+    assert "docs/.claude/" in err, err
+    assert "docs/link.md" in err and "id_rsa" in err, err
+    assert _paths_sent(seen) == ["docs/real.md"]
+
+
+def test_task_create_dir_keeps_json_stdout_parseable_while_it_reports_skips(
+        monkeypatch, tmp_path, capsys):
+    """The reason the report goes to stderr. `--json` exists to be piped into something."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "docs"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / "real.md").write_bytes(b"# real\n")
+    (folder / ".claude" / "settings.json").write_bytes(b"{}\n")
+
+    _mock_relay(monkeypatch, _dir_upload_handler({}))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder), "--json"]) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["id"] == "T1"
+    assert "skipped" in captured.err
+
+
+def test_task_create_dir_outside_a_git_work_tree_says_gitignore_was_not_applied(
+        monkeypatch, tmp_path, capsys):
+    """The fallback works, and it is not silent.
+
+    "Your ignore rules were not applied" is the fact that explains a surprising file count, and a
+    user who BELIEVED they were in a work tree has just learned that they are not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    folder.mkdir()
+    (folder / "a.txt").write_bytes(b"a\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["assets/a.txt"]
+    assert "not in a git work tree" in capsys.readouterr().err
+
+
+def _forbid_reads(monkeypatch):
+    """Make reading ANY file explode, so "refused before any content was read" is proven and not
+    merely asserted about a message."""
+    def boom(self, *a, **kw):
+        raise AssertionError(f"content was read before the bounds were checked: {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+
+
+def test_task_create_dir_over_the_file_count_refuses_before_reading_anything(
+        monkeypatch, tmp_path):
+    """Reading 1,847 files into memory and *then* refusing is the failure this ordering prevents.
+
+    The refusal has to carry three things to be actionable: the count, which entries are the
+    problem, and the way out — `grid project import`, which is what a whole codebase actually wants.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    folder.mkdir()
+    for index in range(remote_task.MAX_FILES + 1):
+        (folder / f"f{index:04d}.bin").write_bytes(b"x" * (index + 1))
+    _forbid_reads(monkeypatch)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert str(remote_task.MAX_FILES + 1) in message and str(remote_task.MAX_FILES) in message
+    assert "assets/f0200.bin" in message, message
+    assert "grid project import" in message, message
+    assert called == [], "the relay was contacted despite a local refusal"
+
+
+def test_task_create_dir_over_the_total_bytes_refuses_before_reading_anything(
+        monkeypatch, tmp_path):
+    """The byte budget is checked from `stat`, for the same reason: a 20 MiB refusal must not cost
+    20 MiB of reads first."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "media"
+    folder.mkdir()
+    # Sparse, so the test costs no real bytes — `stat().st_size` is what the bound reads, and it is
+    # also what the relay would charge for.
+    for name, size in (("big.mp4", 4_500_000), ("mid.png", 4_400_000), ("s.bin", 4_300_000)):
+        with open(folder / name, "wb") as handle:
+            handle.truncate(size)
+    monkeypatch.setattr(remote_task, "MAX_TOTAL_BYTES", 10_000_000)
+    _forbid_reads(monkeypatch)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert "media/big.mp4" in message, message
+    assert "grid project import" in message, message
+    assert called == []
+
+
+def test_file_and_dir_share_one_upload_budget(monkeypatch, tmp_path):
+    """One budget for the UPLOAD, not one per flag.
+
+    Two counters would let `--file`×150 through alongside `--dir`×60 for a 210-file POST the relay
+    then refuses — after the client has read and base64'd every one of them.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    singles = []
+    for index in range(150):
+        path = loose / f"s{index:03d}.txt"
+        path.write_bytes(b"s\n")
+        singles += ["--file", str(path)]
+    folder = tmp_path / "extra"
+    folder.mkdir()
+    for index in range(60):
+        (folder / f"d{index:03d}.txt").write_bytes(b"d\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", *singles, "--dir", str(folder)])
+
+    assert "210" in str(caught.value) and str(remote_task.MAX_FILES) in str(caught.value)
+    assert called == []
+
+
+def test_task_create_dir_refuses_an_empty_folder_by_name(monkeypatch, tmp_path):
+    """Consistent with `--delete` refusing a path that is not there rather than succeeding silently.
+
+    An upload that quietly sends nothing is the worst outcome: the task runs, the agent finds no
+    input, and the answer is wrong for a reason nothing anywhere states.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "hollow"
+    (folder / "nested").mkdir(parents=True)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    assert str(folder) in str(caught.value)
+    assert "empty" in str(caught.value).lower(), caught.value
+    assert called == []
+
+
+def test_task_create_dir_refuses_a_fully_gitignored_folder_naming_gitignore(monkeypatch, tmp_path):
+    """A folder every file of which is ignored selects nothing — and calling that "empty" would name
+    a visibly-full directory as empty, which reads as a bug in this CLI.
+
+    git hit the same problem and answered it: `git add ./build` on an ignored path refuses and names
+    `.gitignore`. This mirrors that rather than inventing a force flag.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work = tmp_path / "proj"
+    work.mkdir()
+    _git_work_tree(work)
+    (work / ".gitignore").write_text("dist/\n")
+    (work / "dist").mkdir()
+    (work / "dist" / "bundle.js").write_bytes(b"console.log(1)\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(work / "dist")])
+
+    message = str(caught.value)
+    assert ".gitignore" in message, message
+    assert "empty" not in message.lower(), "an ignored folder was reported as an empty one"
+    assert "--file" in message, message
+    assert called == []
+
+
+def test_task_create_dir_an_empty_folder_inside_a_repo_is_still_empty_not_ignored(
+        monkeypatch, tmp_path):
+    """The two empty-result causes must not be told apart by "is there anything in here".
+
+    git lists FILES, so a folder holding nothing but empty subdirectories makes it answer nothing —
+    while `iterdir()` still sees the subdirectory. Deciding on that would tell the user every file
+    is ignored by a `.gitignore` that does not mention it, and send them to edit the wrong thing.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work = tmp_path / "proj"
+    work.mkdir()
+    _git_work_tree(work)
+    (work / "hollow" / "nested").mkdir(parents=True)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(work / "hollow")])
+
+    message = str(caught.value)
+    assert "empty" in message.lower(), message
+    assert ".gitignore" not in message, "an empty folder was blamed on .gitignore"
+    assert called == []
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_reports_a_directory_it_could_not_read(monkeypatch, tmp_path, capsys):
+    """`os.walk`'s default `onerror=None` SWALLOWS the error and walks on.
+
+    So an unreadable subdirectory silently contributes nothing: the upload succeeds, the agent runs,
+    and the files under it were never sent — with nothing anywhere saying so. That is exactly the
+    failure this flag's skip report exists to prevent, arriving through the one door that reports
+    nothing by default.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    (folder / "locked").mkdir(parents=True)
+    (folder / "locked" / "hidden.txt").write_bytes(b"hidden\n")
+    (folder / "open.txt").write_bytes(b"open\n")
+    (folder / "locked").chmod(0o000)
+    seen = {}
+
+    try:
+        _mock_relay(monkeypatch, _dir_upload_handler(seen))
+        assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+        assert _paths_sent(seen) == ["assets/open.txt"]
+        err = capsys.readouterr().err
+        assert "assets/locked" in err, err
+    finally:
+        (folder / "locked").chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_reports_a_git_listing_git_itself_called_incomplete(
+        monkeypatch, tmp_path, capsys):
+    """git can report a partial listing as a SUCCESS, and the return code does not say so.
+
+    Measured on git 2.54.0: `ls-files --others` over a directory it cannot open prints
+    `warning: could not open directory 'blocked/': Permission denied` and **exits 0**. A caller that
+    branches on the return code alone therefore treats a listing with files missing from it as
+    complete — and this is the path MOST `--dir` calls take, since the flag is at its best inside a
+    work tree. `os.walk`'s `onerror` does not cover it: that fires only on the fallback.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "visible").mkdir()
+    (folder / "visible" / "a.txt").write_bytes(b"a\n")
+    (folder / "blocked").mkdir()
+    (folder / "blocked" / "b.txt").write_bytes(b"b\n")
+    (folder / "blocked").chmod(0o000)
+    seen = {}
+
+    try:
+        _mock_relay(monkeypatch, _dir_upload_handler(seen))
+        assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+        assert _paths_sent(seen) == ["proj/visible/a.txt"]
+        err = capsys.readouterr().err
+        assert "blocked" in err, err
+        # The user must be told the upload may be INCOMPLETE, not merely that git grumbled — the
+        # whole cost of this bug is believing a partial upload was a whole one.
+        assert "missing" in err.lower(), err
+    finally:
+        (folder / "blocked").chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_does_not_traceback_on_a_tracked_file_it_cannot_stat(
+        monkeypatch, tmp_path, capsys):
+    """`Path.is_file()` and `is_symlink()` do NOT swallow EACCES.
+
+    Measured on CPython 3.12: pathlib's `_ignore_error` covers ENOENT / ENOTDIR / ELOOP and **not**
+    EACCES, so both RAISE on a path whose parent directory cannot be read.
+
+    That is reachable, and specifically on the git path: `ls-files --cached` lists a TRACKED file
+    out of the index without touching the disk, so a file inside a chmod-000 directory is offered
+    as a candidate and then cannot be examined. Unguarded it escapes as a raw traceback rather than
+    this CLI's clean `SystemExit` idiom — and the fallback walk never reaches it, because `os.walk`
+    has already declined to enter that directory.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "sub").mkdir()
+    (folder / "sub" / "hidden.txt").write_bytes(b"hidden\n")
+    (folder / "kept.txt").write_bytes(b"kept\n")
+    subprocess.run(["git", "add", "-A"], cwd=folder, check=True, capture_output=True)
+    (folder / "sub").chmod(0o000)
+    seen = {}
+
+    try:
+        _mock_relay(monkeypatch, _dir_upload_handler(seen))
+        assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+        assert _paths_sent(seen) == ["proj/kept.txt"]
+        assert "sub/hidden.txt" in capsys.readouterr().err
+    finally:
+        (folder / "sub").chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_calls_an_unreadable_folder_unreadable_not_empty(monkeypatch, tmp_path):
+    """A folder nobody can read is not an empty one, and the two call for opposite actions.
+
+    "Empty" sends someone to look at the folder — delete it, re-create it, wonder where their files
+    went. The truth is a permission on their own machine, and the listing already knew: git warned
+    about it and the fallback walk recorded it. Both were being discarded on the way to this
+    refusal, which is the "wrong bucket" failure — the refusal is loud, and still misdescribes.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "blocked").mkdir()
+    (folder / "blocked" / "b.txt").write_bytes(b"b\n")
+    (folder / "blocked").chmod(0o000)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    try:
+        with pytest.raises(SystemExit) as caught:
+            cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+        message = str(caught.value)
+        assert "empty" not in message.lower(), f"an unreadable folder was called empty: {message}"
+        assert "blocked" in message, message
+        assert called == []
+    finally:
+        (folder / "blocked").chmod(0o700)
+
+
+def test_task_create_dir_folds_skipped_names_the_way_the_relay_does(monkeypatch, tmp_path):
+    """`.CLAUDE/` must be skipped like `.claude/`, or the whole upload dies on the relay's 422.
+
+    grid-src `task_files._folded()` strips Unicode format characters, applies NFKC and casefolds
+    before comparing these same names. A client filter that compares raw strings lets `.CLAUDE/`
+    through — plausible on a case-insensitive dev machine, where `mkdir .CLAUDE` once is enough —
+    and the relay then refuses the ENTIRE request, taking every legitimately selected file with it.
+
+    Not a security hole: the relay's fold is a strict superset, so nothing gets through both layers.
+    It defeats the thing this filter exists for, which is `--dir` working on its first try. The
+    duplication is safe in the direction that matters — a client fold narrower than the relay's ends
+    in that loud 422, and a wider one shows up as a file the user re-adds with `--file`.
+
+    This exercises the WALK's prune site; the git listing's is the next test.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "bundle"
+    (folder / ".CLAUDE").mkdir(parents=True)
+    (folder / ".CLAUDE" / "settings.json").write_bytes(b"{}\n")
+    (folder / "﹤ｇit").mkdir()  # not `.git`; a fullwidth spelling NFKC folds toward
+    (folder / "ok.txt").write_bytes(b"ok\n")
+    (folder / ".MCP.json").write_bytes(b"{}\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    sent = _paths_sent(seen)
+    assert "bundle/.CLAUDE/settings.json" not in sent, sent
+    assert "bundle/.MCP.json" not in sent, sent
+    assert "bundle/ok.txt" in sent
+
+
+def test_task_create_dir_folds_skipped_names_on_the_git_listing_too(monkeypatch, tmp_path):
+    """The same fold, at the other comparison site.
+
+    `_walk`'s prune and `_skip_reason` are two places the rule is applied, and they must not
+    disagree — a name folded in one and compared raw in the other is a filter that works only when
+    the folder happens not to be a git repository.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / ".CLAUDE").mkdir()
+    (folder / ".CLAUDE" / "settings.json").write_bytes(b"{}\n")
+    (folder / "app.py").write_bytes(b"x\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["proj/app.py"]
+
+
+def test_task_create_dir_listing_ignores_an_inherited_git_dir(monkeypatch, tmp_path, capsys):
+    """`GIT_DIR`/`GIT_WORK_TREE` in the environment make git ignore `-C` entirely.
+
+    Measured: with both exported at another repository, `git -C <dir> ls-files` returns the OTHER
+    repo's tracked paths and none of `<dir>`'s. Those variables are a different class from
+    `GIT_CONFIG_GLOBAL`, which this code deliberately leaves alone because it carries
+    `core.excludesFile` — they do not affect ignore rules, they redirect which repository `-C` even
+    resolves to, and no listing of a named folder has any reason to honour them.
+
+    Plausible from a git hook or a CI wrapper that forgot to unset them. The failure is wrong
+    selection, not leakage — content is always read from `source / relative` — but a folder with
+    real content gets refused as fully skipped, which is a confusing way to lose an upload.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    other = tmp_path / "other"
+    other.mkdir()
+    _git_work_tree(other)
+    (other / "theirs.txt").write_bytes(b"theirs\n")
+    subprocess.run(["git", "add", "-A"], cwd=other, check=True, capture_output=True)
+    folder = tmp_path / "mine"
+    folder.mkdir()
+    (folder / "mine.txt").write_bytes(b"mine\n")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["mine/mine.txt"]
+    assert "theirs" not in json.dumps(seen["body"])
+
+
+def test_task_create_dir_refusal_keeps_every_note_the_listing_produced(monkeypatch, tmp_path):
+    """A refusal raised mid-selection is the one place a note can be DESTROYED rather than unused.
+
+    `_refuse_empty_selection` raises before `select()` ever collects that root's notes, so anything
+    the listing worked out and did not put in the message is simply gone. The rule has to be
+    unconditional — every note reaches the user — rather than "the important one does", because
+    which note is important is exactly the judgement that has been wrong twice here.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "bundle"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / ".claude" / "settings.json").write_bytes(b"{}\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert "bundle/.claude/" in message, message
+    assert "not in a git work tree" in message, message
+    assert called == []
+
+
+def test_task_create_dir_does_not_blame_gitignore_for_its_own_reserved_rule(monkeypatch, tmp_path):
+    """A freshly `git init`-ed folder holds exactly one thing — `.git/` — and no `.gitignore` at all.
+
+    `ls-files` cannot see `.git/`, so it lists nothing; the explanatory re-walk then DOES find it,
+    because the prune records a reserved directory as a candidate on purpose. Judging that re-walk
+    without classifying it read "a plain walk finds files that git hid" and blamed a `.gitignore`
+    that does not exist, sending the user to look for a rule nobody wrote. The real cause is this
+    tool's own reserved-directory rule, which branch one already states correctly.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fresh"
+    folder.mkdir()
+    _git_work_tree(folder)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert ".gitignore" not in message, f"blamed a .gitignore that does not exist: {message}"
+    assert "fresh/.git/" in message, message
+    assert called == []
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_refusal_prefixes_re_walk_paths_like_every_other_skip(
+        monkeypatch, tmp_path):
+    """Every other line in a skip report is a destination path. The explanatory re-walk's own
+    findings were the one exception, which makes them read as a different kind of thing."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "blocked").mkdir()
+    (folder / "blocked" / "b.txt").write_bytes(b"b\n")
+    (folder / "blocked").chmod(0o000)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(201, json={}))
+    try:
+        with pytest.raises(SystemExit) as caught:
+            cli.main(["task", "create", "--prompt", "p", "--dir", f"{folder}:up"])
+        assert "up/blocked" in str(caught.value), caught.value
+    finally:
+        (folder / "blocked").chmod(0o700)
+
+
+def test_file_refusing_a_directory_now_names_dir(monkeypatch, tmp_path):
+    """The dead end this issue closes. The old message was honest and named no alternative, because
+    until now there was none."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "a.py").write_bytes(b"a\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(folder)])
+
+    assert "--dir" in str(caught.value), caught.value
+    assert called == []
 
 
 # --- ADR 0033 issue 16b: `grid project import` ---------------------------------------------------

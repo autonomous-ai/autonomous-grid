@@ -97,7 +97,8 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
     return _task_get(args)
 
 
-def _collect_files(specs: list[str] | None, *, mark_executable: bool = False) -> list[dict]:
+def _collect_files(specs: list[str] | None, *, dirs: list[str] | None = None,
+                   mark_executable: bool = False) -> list[dict]:
     """Read each `--file LOCAL[:DEST]` into the wire shape, or exit with a sentence naming the file.
 
     Every refusal here is local and happens BEFORE the relay is contacted. Two of them cannot be
@@ -129,17 +130,40 @@ def _collect_files(specs: list[str] | None, *, mark_executable: bool = False) ->
     today. Task uploads still stop stripping executable bits, because that half is the relay reading
     the base tree and needs nothing from here.
     """
-    if not specs:
+    from . import upload_dir
+
+    if not specs and not dirs:
         # No key at all rather than an empty list: a relay predating the git plane must not receive
         # a field it does not understand for a task that has no files.
         return []
-    if len(specs) > MAX_FILES:
-        raise SystemExit(f"Too many files: {len(specs)} (the limit is {MAX_FILES}).")
+
+    # `--file` first, then whatever `--dir` walked. ONE list from here on, which is the reason this
+    # stayed a single function rather than gaining a second collector beside it: the bounds are a
+    # budget for the UPLOAD, not for a flag, and two counters would let `--file`×150 through
+    # alongside `--dir`×150 for a 300-file POST that the relay then refuses.
+    pairs = [_split_spec(spec) for spec in specs or ()]
+    selected = upload_dir.select([_split_spec(spec) for spec in dirs or ()])
+    _report_selection(selected)
+    pairs += [(str(entry.local), entry.dest) for entry in selected.entries]
+
+    # Both bounds are checked from `stat` HERE, before the read loop below opens anything. Reading
+    # 1,847 files into memory and only THEN refusing is the failure this ordering exists to prevent,
+    # and it is reachable only through `--dir` — nobody types 1,847 `--file` flags.
+    if len(pairs) > MAX_FILES:
+        raise SystemExit(_budget_refusal(
+            selected, f"That is {len(pairs)} files to upload; the limit is {MAX_FILES}."))
+    walked_bytes = sum(entry.size for entry in selected.entries)
+    if walked_bytes > MAX_TOTAL_BYTES:
+        # Only the WALKED bytes: `--file` entries are sized by the read loop, which stays the
+        # authority on the true total. This check exists to stop a folder being read, not to
+        # duplicate that one.
+        raise SystemExit(_budget_refusal(
+            selected, f"--dir selected {walked_bytes} bytes; the upload limit is "
+                      f"{MAX_TOTAL_BYTES} bytes."))
 
     files: list[dict] = []
     total = 0
-    for spec in specs:
-        local, dest = _split_spec(spec)
+    for local, dest in pairs:
         source = Path(local)
 
         # `is_symlink` BEFORE any other probe: `exists()` and `is_file()` both follow the link, so
@@ -151,8 +175,11 @@ def _collect_files(specs: list[str] | None, *, mark_executable: bool = False) ->
         if not source.exists():
             raise SystemExit(f"Cannot upload {local}: no such file.")
         if source.is_dir():
+            # Names `--dir` (issue 27). Until that flag existed this message was a dead end: honest,
+            # and naming no alternative because there was none.
             raise SystemExit(
-                f"Cannot upload {local}: it is a directory, and --file takes one file at a time.")
+                f"Cannot upload {local}: it is a directory, and --file takes one file at a time. "
+                f"Use --dir {local} to upload the folder.")
         if not source.is_file():
             raise SystemExit(f"Cannot upload {local}: it is not a regular file.")
 
@@ -175,6 +202,60 @@ def _collect_files(specs: list[str] | None, *, mark_executable: bool = False) ->
             entry["executable"] = True
         files.append(entry)
     return files
+
+
+# How many skipped paths the report names before it summarizes the rest. Enough to read at a glance;
+# the COUNT is always exact, so a truncated list never understates what was left out.
+_SKIP_REPORT_LIMIT = 8
+
+# How many of the biggest entries an over-budget refusal names. The point is to identify the
+# offender — a video, a checkpoint, a tarball — not to enumerate the folder.
+_LARGEST_NAMED = 3
+
+
+def _budget_refusal(selected, headline: str) -> str:
+    """An over-budget upload, refused with the three things that make it actionable.
+
+    The count alone is not: a user told "1,847 files (the limit is 200)" has no idea whether they
+    pointed at the wrong folder or hit one stray `node_modules`. Naming the biggest entries answers
+    that in one line, and naming `grid project import` answers the case where the folder really is a
+    whole codebase — which is what this flag is deliberately not for.
+    """
+    largest = sorted(selected.entries, key=lambda entry: entry.size, reverse=True)[:_LARGEST_NAMED]
+    lines = [headline]
+    if largest:
+        lines.append("Largest: " + ", ".join(
+            f"{entry.dest} ({_human_bytes(entry.size)})" for entry in largest))
+    lines += ["", "For a whole codebase, use:  grid project import <path> <project-id>"]
+    return "\n".join(lines)
+
+
+def _human_bytes(size: int) -> str:
+    """A size a person can compare against a limit at a glance. `34 MB`, not `35651584`."""
+    for unit, scale in (("MB", 1024 * 1024), ("KB", 1024)):
+        if size >= scale:
+            return f"{size / scale:.1f} {unit}"
+    return f"{size} B"
+
+
+def _report_selection(selected) -> None:
+    """Say what `--dir` passed over, and how it looked.
+
+    **Never silent.** A silent skip is how somebody discovers at runtime that the file they needed
+    was never sent — and, unlike a refusal, nothing else in the system will ever mention it.
+
+    **stderr, always.** `--json` prints the payload on stdout for a program to read, and a skip line
+    there would corrupt it. That also means the report survives `| jq` rather than being swallowed
+    by it, which is the case where a human most needs to see it.
+    """
+    for note in selected.notes:
+        print(note, file=sys.stderr)
+    if not selected.skipped:
+        return
+    shown = list(selected.skipped[:_SKIP_REPORT_LIMIT])
+    if len(selected.skipped) > _SKIP_REPORT_LIMIT:
+        shown.append(f"…and {len(selected.skipped) - _SKIP_REPORT_LIMIT} more")
+    print(f"skipped {len(selected.skipped)} paths ({', '.join(shown)})", file=sys.stderr)
 
 
 def _is_executable(source: Path) -> bool:
@@ -407,6 +488,11 @@ def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
     argv += ["--prompt", args.prompt]
     for spec in getattr(args, "file", None) or []:
         argv += ["--file", spec]
+    # `--dir` rides along for `--file`'s reason: this line is meant to be PASTED, and one that
+    # silently drops the folder the user gathered runs the retried task against none of it — and
+    # succeeds, so nothing ever says so.
+    for spec in getattr(args, "dir", None) or []:
+        argv += ["--dir", spec]
     suggestion = " ".join(shlex.quote(part) for part in argv)
     return (
         f"{head} Two ways forward:\n"
@@ -436,7 +522,7 @@ def _task_create(args: argparse.Namespace) -> int:
 
     # Read the files BEFORE resolving the grid: a typo in a filename should not first cost a
     # credential lookup and a control-plane round trip to discover.
-    files = _collect_files(getattr(args, "file", None))
+    files = _collect_files(getattr(args, "file", None), dirs=getattr(args, "dir", None))
 
     base, token, label = _resolve(args)
     project_id = _resolve_project(base, token, getattr(args, "project", None))

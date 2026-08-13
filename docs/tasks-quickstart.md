@@ -82,10 +82,17 @@ address, have them run `grid login` and then any relay command (`grid project li
 ```bash
 grid task create --project <project-id> --prompt 'add a retry to the upload path'
 grid task create --project <project-id> --prompt 'use this config' --file ./conf.toml:config/conf.toml
+grid task create --project <project-id> --prompt 'make these pass' --dir ./fixtures:test/data
 ```
 
 `--file LOCAL[:DEST]` uploads a file with the task, repeatable. It is committed **before** any
 provider can claim the task, so the agent always finds it.
+
+`--dir LOCAL[:DEST]` uploads a folder the same way. Inside a git work tree your `.gitignore` is
+honoured, and `.git/`, `.grid/`, `.claude/`, `.mcp.json` and symlinks are skipped — every skipped
+path is printed, so nothing goes missing quietly. The two flags share one budget of 200 files and
+20 MB. For a whole repository use `grid project import` instead; `--dir` is for the folder of
+fixtures or assets that is not one.
 
 **Starting from nothing, in one call:**
 
@@ -140,6 +147,7 @@ To land a change without an agent:
 
 ```bash
 grid project commit <project-id> -m 'fix the last line' --file ./patch.py:src/app.py
+grid project commit <project-id> -m 'add the fixtures' --dir ./fixtures:test/data
 grid project commit <project-id> -m 'drop the old shim' --delete src/shim.py
 ```
 

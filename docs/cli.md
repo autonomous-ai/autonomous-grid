@@ -892,8 +892,8 @@ grid project promote       <project-id> <member-key> [--grid <grid>] [--json]
 grid project integrate     <project-id> [--grid <grid>] [--json]
 grid project status        <project-id> [--grid <grid>] [--json]
 grid project check         <project-id> [--grid <grid>] [--json]
-grid project commit        <project-id> -m <message> [--file <local[:dest]>]… [--delete <path>]…
-                                        [--grid <grid>] [--json]
+grid project commit        <project-id> -m <message> [--file <local[:dest]>]… [--dir <local[:dest]>]…
+                                        [--delete <path>]… [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
 grid project clone         <project-id> [<directory>] [--grid <grid>] [--json]
 grid project refresh       <project-id> [<directory>] [--json]
@@ -1237,8 +1237,8 @@ member gets the same "no such project" a stranger always gets.
 ## Task
 
 ```
-grid task create --prompt <text> [--file <local>[:<dest>]]… [--project <id>] [--init-project]
-                 [--grid <grid>] [--json]
+grid task create --prompt <text> [--file <local>[:<dest>]]… [--dir <local>[:<dest>]]…
+                 [--project <id>] [--init-project] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task list   --project <id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
@@ -1315,6 +1315,38 @@ with nothing waiting on it — harmless, and the reason this needs no particular
 
 `--file` uploads a file with the task; repeat it for more. `--file ./bug.py` lands as `bug.py`;
 `--file ./local/conf.toml:config/conf.toml` places it at a path you choose.
+
+`--dir` uploads a whole folder, with the same `LOCAL[:DEST]` form. `--dir ./fixtures` lands its
+contents under `fixtures/`; `--dir ./fixtures:test/data` places them under `test/data/`. Placing a
+folder's contents at the workspace root is deliberately not expressible, the same way `--file`
+always places at a named path. Both flags share **one** upload budget — 200 files and 20 MB in
+total, whichever they came from.
+
+**What `--dir` leaves out, and it always says so.** Inside a git work tree the folder's own
+`.gitignore` is honoured, which is what makes `--dir ./src` skip `__pycache__` with nothing
+configured; outside one, everything under the folder is considered and a line on stderr says the
+ignore rules were not applied. On top of that, `.git/`, `.grid/`, `.claude/` and `.mcp.json` at any
+depth, and symlinks, are **skipped rather than refused** — the relay rejects those paths outright
+(see below), and failing a whole upload because a folder happens to contain one would be hostile
+when skipping satisfies the rule exactly. A symlink is never followed and its target never read.
+Every skipped path is printed:
+
+```
+skipped 3 paths (fixtures/.claude/, fixtures/link.md → /home/me/.ssh/id_rsa, fixtures/.git/)
+```
+
+A folder over the limits is refused **before anything is read**, naming the count, the biggest
+entries, and the command for the case where the folder really is a whole codebase:
+
+```
+That is 1847 files to upload; the limit is 200.
+Largest: assets/video/demo.mp4 (34.2 MB), assets/img/hero.png (8.1 MB)
+
+For a whole codebase, use:  grid project import <path> <project-id>
+```
+
+An empty folder is refused by name, and so is one every file of which is ignored — that one names
+`.gitignore`, because reporting a visibly-full directory as empty reads as a bug.
 
 The files travel in the **same request** as the prompt, and that ordering is the guarantee, not a
 convenience: each project is a git repository the relay owns, and creating a task cuts `task/<id>`

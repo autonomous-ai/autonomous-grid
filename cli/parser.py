@@ -748,6 +748,11 @@ def _add_project(sub) -> None:
         help="A file to write, repeatable. DEST defaults to the file's name. Same form as "
              "`grid task create --file`.")
     committer.add_argument(
+        "--dir", action="append", metavar="LOCAL[:DEST]", default=None,
+        help="A folder to write, repeatable. DEST defaults to the folder's name. Inside a git work "
+             "tree your .gitignore is honoured; `.git/`, `.grid/`, `.claude/`, `.mcp.json` and "
+             "symlinks are skipped and reported. Executable bits are kept, like --file.")
+    committer.add_argument(
         "--delete", action="append", metavar="PATH", default=None,
         help="A path in your branch to remove, repeatable. Refused if it is not there.")
     committer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
@@ -877,6 +882,14 @@ def _add_task(sub) -> None:
         help="File to upload with the task; repeatable. Committed with the task before any "
              "provider can claim it, so the agent always finds it. Placed at the file's own name "
              "unless you give a destination (e.g. ./conf.toml:config/conf.toml).")
+    # ADR 0033 D-j / issue 27. Client-only: it expands into the same `files` list `--file` produces,
+    # so the relay sees the payload it saw before and there is no rollout order.
+    create.add_argument(
+        "--dir", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="Folder to upload with the task; repeatable. Placed under the folder's own name "
+             "unless you give a destination. Inside a git work tree your .gitignore is honoured; "
+             "`.git/`, `.grid/`, `.claude/`, `.mcp.json` and symlinks are skipped and reported. "
+             "For a whole codebase use `grid project import` instead.")
     # ADR 0033 D-o / issue 26 — the opt-in convenience form D-o promised. Opt-IN because it is a
     # one-way door: `grid project import` refuses a project that already has a trunk, so a project
     # given an empty one can never bring an existing repository in, and nothing undoes it.
