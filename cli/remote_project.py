@@ -27,6 +27,16 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _project_init(args)
     if args.subcommand == "list":
         return _project_list(args)
+    if args.subcommand in ("archive", "unarchive", "delete"):
+        # ADR 0033 D-p (issue 33). Their handlers live in `cli/project_archive.py` — this file is
+        # already past the 800-line ceiling, the same reason `project_providers.py` was split out.
+        from . import project_archive
+
+        return {
+            "archive": project_archive.project_archive,
+            "unarchive": project_archive.project_unarchive,
+            "delete": project_archive.project_delete,
+        }[args.subcommand](args)
     if args.subcommand == "wip":
         if args.wip_action != "reset":
             raise SystemExit(f"Unknown project wip action: {args.wip_action!r}")
@@ -138,23 +148,37 @@ def _project_init(args: argparse.Namespace) -> int:
 
 
 def _project_list(args: argparse.Namespace) -> int:
-    """Every project the caller is a MEMBER of — not only the ones they own."""
+    """Every project the caller is a MEMBER of — not only the ones they own.
+
+    Archived projects are hidden unless `--all` (ADR 0033 D-p, issue 33), because this is the
+    listing somebody reads to find an id and one they archived is one they have said they are not
+    working in.
+    """
     from remote import relay
 
     base, token, label = _resolve(args)
-    answer = relay.list_projects(base, token)
+    answer = relay.list_projects(base, token, include_archived=bool(getattr(args, "all", False)))
     projects = answer.get("projects") or []
 
     if _emit(args, answer):
         return 0
     if not projects:
         print(f"No projects on {label}.")
+        if not getattr(args, "all", False):
+            # It may not be empty — it may be entirely archived, and saying "create one" to
+            # somebody who has five would be advice that makes a sixth.
+            print("Archived ones are hidden; see them with: grid project list --all")
         print("\nCreate one with: grid project create --name <name>")
         return 0
     print(f"{'ID':38}  {'ROLE':8}  NAME")
     for project in projects:
+        # ⚠️ `is True`, never a truthiness test. *Absent ⇒ not archived* is what a relay predating
+        # this slice says, and that reading has to stay available — the same rule `serves_you`
+        # follows in `project_providers.print_unserved`. A truthy test would also mark a row whose
+        # `archived` a proxy had stringified to `"false"`.
+        marker = "  (archived)" if project.get("archived") is True else ""
         print(f"{str(project.get('id') or '?'):38}  "
-              f"{str(project.get('role') or '?'):8}  {project.get('name') or '?'}")
+              f"{str(project.get('role') or '?'):8}  {project.get('name') or '?'}{marker}")
     return 0
 
 
@@ -642,6 +666,16 @@ def _project_status(args: argparse.Namespace) -> int:
 
     trunk = answer.get("trunk") or "main"
     print(f"project {args.project_id}")
+    # ⚠️ `is True`, never truthiness (ADR 0033 D-p, issue 33). *Absent ⇒ not archived*, which is
+    # every relay predating this slice — the rule `serves_you` follows. Printed FIRST because it
+    # changes what every line below is worth: a member reading a healthy-looking status has no other
+    # way to learn why their next `task create` will be refused.
+    if answer.get("archived") is True:
+        print("ARCHIVED — accepts no new work.")
+        # The command goes at the END of its line, and that is a house rule rather than a style
+        # choice: `test_task_lease.py` retypes every printed `grid …` hint through the real parser,
+        # and it reads to end of line.
+        print(f"Put it back with: grid project unarchive {args.project_id}")
     print(f"{trunk}={answer.get('main_commit') or '(none yet)'}")
     print(f"{branch}={answer.get('wip_commit') or '(nothing yet)'}")
 

@@ -880,7 +880,10 @@ guidance to switch.
 ```
 grid project create --name <name> [--grid <grid>] [--json]
 grid project init          <project-id> [--grid <grid>] [--json]
-grid project list [--grid <grid>] [--json]
+grid project list [--all] [--grid <grid>] [--json]
+grid project archive       <project-id> [--grid <grid>] [--json]
+grid project unarchive     <project-id> [--grid <grid>] [--json]
+grid project delete        <project-id> [--yes] [--grid <grid>] [--json]
 grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
@@ -1201,6 +1204,35 @@ Any member may reset any member's branch — someone who leaves the team otherwi
 they never merged, since nothing can adopt or transfer their branch. It is refused while that member
 has a task running, because moving the base out from under an attempt in flight would fail its
 result for a reason nobody caused.
+
+### Archiving and deleting a project
+
+Two operations, and they are deliberately not symmetrical.
+
+`grid project archive <id>` puts a project out of the way. It stops accepting new work — no task,
+commit, integrate, promote, import, init or WIP-branch reset — and leaves `grid project list` unless you pass `--all`,
+which shows it marked `(archived)`. **Nothing is destroyed**: the repository is kept exactly as it
+is, and every read still works — `grid project status`, `grid project clone`, `grid task list`,
+`grid task get`, `grid task fetch`. `grid project unarchive <id>` reverses it completely, and the
+next `grid task create` succeeds.
+
+A task that is **already queued or running is not cancelled**. It is claimed, runs and settles
+normally; archiving stops new work starting, never work already asked for. To stop something that
+has already started, use `grid task cancel`.
+
+`grid project delete <id>` removes the project, its members and its repository, and **cannot be
+undone**. It is refused unless the project has never had a trunk and has never had a task — in that
+state there is provably nothing in it to lose, because WIP branches are only created by pointing at
+`main` and task branches only exist for tasks. Anything else is refused, naming `archive`. It asks
+before it acts; `--yes` skips the prompt, and is required from a script because a non-terminal stdin
+counts as declining.
+
+This is what to reach for after a typo, and it is also the only recourse for a project you inited or
+imported into by mistake — but note that a project with a trunk is precisely what delete refuses, so
+in that case the recovery is a new project, not this command.
+
+Both are the project **owner's**. Another member is refused with a reason; someone who is not a
+member gets the same "no such project" a stranger always gets.
 
 ## Task
 

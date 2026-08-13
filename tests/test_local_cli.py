@@ -32544,3 +32544,317 @@ def test_project_refresh_defaults_to_the_directory_you_are_standing_in(
     out = capsys.readouterr().out
     assert rc == 0, out
     assert f"wip/{_MEMBER_KEY}" in out, out
+
+
+# --- ADR 0033 D-p / issue 33: `grid project archive | unarchive | delete` ---
+#
+# Three commands and one flag, and the pair they form is the point: archive is reversible and can
+# destroy nothing, delete is irreversible and is refused for anything that holds work. Every test
+# below that touches `archived` keys on an EXPLICIT `True`/`False` and never on truthiness — *absent
+# ⇒ not archived* is what a relay predating this slice says, and it must stay readable as that.
+
+
+def test_project_archive_posts_to_the_archive_route_and_sends_no_body(monkeypatch, tmp_path,
+                                                                      capsys):
+    """The soft half, end to end through `cli.main`.
+
+    **No body**, like init and integrate: the project is named in the path and there is nothing
+    else to say.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "project_id": "P1", "archived": True,
+            "archived_at": "2026-08-12T10:00:00+00:00", "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "archive", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/archive")
+    assert seen["body"] == b"", seen["body"]
+    out = capsys.readouterr().out
+    assert "P1" in out
+    assert "unarchive" in out, f"the way back is not named: {out!r}"
+
+
+def test_project_archive_says_when_it_was_already_archived(monkeypatch, tmp_path, capsys):
+    """`changed: false` is a 200, not a failure — the state the caller asked for is the state that
+    holds. Saying so is what stops somebody re-running it wondering whether it worked."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "archived": True, "archived_at": "2026-08-01T10:00:00+00:00",
+        "changed": False}))
+    rc = cli.main(["project", "archive", "P1"])
+
+    assert rc == 0
+    assert "already" in capsys.readouterr().out.lower()
+
+
+def test_project_archive_refuses_to_call_an_unreadable_reply_an_archive(monkeypatch, tmp_path):
+    """The house guard. A reply this command cannot read is not an archive it may report — the next
+    thing the member does is walk away believing their project takes no new work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "archive", "P1"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+def test_project_unarchive_posts_to_its_own_route(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "archived": False, "archived_at": None, "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "unarchive", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/unarchive")
+    assert "P1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("verb", ["archive", "unarchive", "delete"])
+def test_the_new_project_routes_on_an_old_relay_say_the_relay_is_old(monkeypatch, tmp_path, verb):
+    """Brand-new routes, so a relay that predates them answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1", *(["--yes"] if verb == "delete" else [])])
+
+    message = str(caught.value).lower()
+    assert "relay" in message, caught.value
+    # ⚠️ NOT `_OLD_RELAY`'s sentence. This relay HAS projects — it is missing these three routes —
+    # and telling somebody their relay "does not have projects yet" sends them to check a feature
+    # that is working perfectly. The same reason `_OLD_RELAY_NO_CANCEL` exists.
+    assert "does not have projects yet" not in message, caught.value
+
+
+@pytest.mark.parametrize("verb", ["archive", "unarchive", "delete"])
+def test_a_real_404_from_the_new_project_routes_is_not_masked(monkeypatch, tmp_path, verb):
+    """The paired negative every route here carries: a relay that HAS the route and answers 404
+    about the project must show its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1", *(["--yes"] if verb == "delete" else [])])
+
+    assert str(caught.value) == "No such project"
+
+
+def test_project_list_hides_archived_projects_until_all_is_passed(monkeypatch, tmp_path, capsys):
+    """The flag rides on a query parameter, and it is OMITTED when not asked for.
+
+    Omitted rather than sent as `include_archived=false`, the `list_tasks(mine=…)` precedent: a
+    relay that has never heard of the key is never handed one it would have to ignore.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"projects": [
+            {"id": "P1", "name": "acme", "role": "owner", "archived": False},
+        ]})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "list"]) == 0
+    assert cli.main(["project", "list", "--all"]) == 0
+
+    assert seen[0] == {}, f"the bare listing sent a parameter an old relay does not know: {seen[0]}"
+    assert seen[1] == {"include_archived": "true"}, seen[1]
+
+
+def test_project_list_marks_an_archived_row_and_never_guesses(monkeypatch, tmp_path, capsys):
+    """`archived` is read as an EXPLICIT `True`, never as truthiness (ADR 0033 D-p).
+
+    *Absent ⇒ not archived* is what a relay predating this slice says, and that reading has to stay
+    available — so a row with no key must render exactly like a live one. A truthiness test would
+    also fire on `"false"`, which is what a proxy that stringifies booleans produces.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"projects": [
+        {"id": "P1", "name": "live", "role": "owner", "archived": False},
+        {"id": "P2", "name": "old", "role": "owner", "archived": True},
+        {"id": "P3", "name": "ancient", "role": "member"},          # a relay predating the slice
+    ]}))
+    assert cli.main(["project", "list", "--all"]) == 0
+
+    lines = {line.split()[0]: line for line in capsys.readouterr().out.splitlines()
+             if line.startswith("P")}
+    assert "archived" not in lines["P1"].lower(), lines["P1"]
+    assert "archived" in lines["P2"].lower(), lines["P2"]
+    assert "archived" not in lines["P3"].lower(), (
+        "a project from a relay that does not send the key was rendered as archived: "
+        f"{lines['P3']!r}")
+
+
+def test_project_delete_asks_before_it_acts_and_calls_nothing_when_declined(monkeypatch, tmp_path,
+                                                                            capsys):
+    """The whole point of the prompt: a declined delete must not reach the relay at all.
+
+    Asserted on the CALLS rather than on the exit code, because a command that asks, is refused, and
+    deletes anyway would still exit 0.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    _mock_relay(monkeypatch, lambda r: calls.append(r.url.path) or httpx.Response(200, json={}))
+    monkeypatch.setattr("shared.launch.system.confirm", lambda question: False)
+
+    rc = cli.main(["project", "delete", "P1"])
+
+    assert rc == 0
+    assert calls == [], f"a declined delete still called the relay: {calls}"
+    assert "Nothing was deleted" in capsys.readouterr().out
+
+
+def test_project_delete_with_yes_never_prompts(monkeypatch, tmp_path, capsys):
+    """`--yes` is what makes this usable from a script — and a script's stdin is not a terminal, so
+    `system.confirm` would read EOF and decline every time."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "deleted": True, "repository_removed": True})
+
+    _mock_relay(monkeypatch, handler)
+
+    def refuse(question):
+        raise AssertionError("--yes still prompted")
+    monkeypatch.setattr("shared.launch.system.confirm", refuse)
+
+    rc = cli.main(["project", "delete", "P1", "--yes"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("DELETE", "/relay/v1/projects/P1")
+    assert "deleted" in capsys.readouterr().out
+
+
+def test_project_delete_reports_a_repository_that_was_left_behind(monkeypatch, tmp_path, capsys):
+    """`repository_removed: false` means the rows went and the directory did not.
+
+    Not a failure for the caller — what they asked for happened, and they could not retry anyway
+    because the id no longer resolves — but staying silent would leave an orphaned repository on a
+    disk nobody is watching. Read as an EXPLICIT `False`: *absent ⇒ nothing to report*, which is a
+    relay that does not send the key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "deleted": True, "repository_removed": False}))
+
+    rc = cli.main(["project", "delete", "P1", "--yes"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "repository" in out.lower(), out
+    assert "still on the relay" in out.lower(), out
+
+
+def test_project_delete_says_nothing_extra_when_the_relay_omits_the_key(monkeypatch, tmp_path,
+                                                                        capsys):
+    """The paired negative for the rule above: a relay that does not send `repository_removed` must
+    not be reported as having left a repository behind."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "deleted": True}))
+
+    assert cli.main(["project", "delete", "P1", "--yes"]) == 0
+    assert "still on the relay" not in capsys.readouterr().out.lower()
+
+
+def test_project_delete_help_says_it_cannot_be_undone_and_names_archive():
+    """A consequential verb discloses its cost in `--help`, the rule `project init` follows.
+
+    Somebody reaching for `delete` when they wanted `archive` is the mistake this slice exists to
+    make hard, and the help is where they find out before running it.
+    """
+    parser = cli.build_parser()
+    remover = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["delete"]
+    text = remover.format_help().lower()
+
+    assert "cannot be undone" in text or "irreversible" in text, text
+    assert "archive" in text, "the help does not name the reversible alternative"
+
+
+def test_project_archive_help_says_a_running_task_is_not_cancelled():
+    """The one thing about archiving that would otherwise be discovered by surprise (ADR 0033 D-p).
+
+    Somebody archiving a project while a colleague's agent is running needs to know that the agent
+    keeps going — and somebody who WANTED it stopped needs to be sent to `grid task cancel`.
+    """
+    parser = cli.build_parser()
+    archiver = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["archive"]
+    text = archiver.format_help().lower()
+
+    assert "cancel" in text, text
+    assert "repository is kept" in text or "nothing is destroyed" in text, text
+
+
+def test_project_status_says_when_the_project_is_archived(monkeypatch, tmp_path, capsys):
+    """A member reading a healthy-looking status has no other way to learn why their next `task
+    create` will be refused, so it is said first and in the member's own words."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
+        "branch": "wip/abc", "wip_commit": "b" * 40, "ahead": 1, "behind": 0,
+        "can_promote": True, "archived": True}))
+    assert cli.main(["project", "status", "P1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "archived" in out.lower(), out
+    assert "unarchive" in out, out
+
+
+def test_project_status_says_nothing_about_archiving_when_the_relay_omits_the_key(
+        monkeypatch, tmp_path, capsys):
+    """The paired negative: *absent ⇒ not archived*, which is every relay predating this slice."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
+        "branch": "wip/abc", "wip_commit": "b" * 40, "ahead": 1, "behind": 0,
+        "can_promote": True}))
+    assert cli.main(["project", "status", "P1"]) == 0
+
+    assert "archived" not in capsys.readouterr().out.lower()

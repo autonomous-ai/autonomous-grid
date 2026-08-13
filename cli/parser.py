@@ -518,7 +518,60 @@ def _add_project(sub) -> None:
     listing = project_sub.add_parser("list", help="List the projects you are a member of")
     listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # ADR 0033 D-p / issue 33. Archived projects are hidden by default because this listing is what
+    # a member reads to find an id, and one they archived is one they have said they are not working
+    # in. Nothing becomes unreachable — the id still resolves on every other route.
+    listing.add_argument(
+        "--all", action="store_true",
+        help="Include archived projects, marked as archived. They are hidden by default.")
     listing.set_defaults(handler=cmd_remote_project)
+
+    # ADR 0033 D-p / issue 33 — the two ways to stop looking at a project, and they are deliberately
+    # not symmetrical. Registered next to `list`, because that is the command whose output somebody
+    # is looking at when they decide they want one of these.
+    archiver = project_sub.add_parser(
+        "archive",
+        help="Stop a project accepting new work and hide it from `grid project list`",
+        description=(
+            "Archive a project. It accepts no new work — no tasks, commits, integrates, promotes, "
+            "imports or inits — and leaves `grid project list` unless you pass --all.\n\n"
+            "NOTHING IS DESTROYED. The repository is kept exactly as it is, and every read still "
+            "works: `grid project status`, `grid project clone`, `grid task list`, `grid task "
+            "fetch`. Reverse it at any time with `grid project unarchive`.\n\n"
+            "A task that is already queued or running is NOT cancelled — it is claimed, runs and "
+            "settles normally. Archiving stops new work starting; use `grid task cancel` to stop "
+            "work that has already started."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    archiver.add_argument("project_id", help="Project id from `grid project list`.")
+    archiver.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    archiver.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    archiver.set_defaults(handler=cmd_remote_project)
+
+    restorer = project_sub.add_parser(
+        "unarchive", help="Put an archived project back, so it accepts work again")
+    restorer.add_argument("project_id", help="Project id from `grid project list --all`.")
+    restorer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    restorer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    restorer.set_defaults(handler=cmd_remote_project)
+
+    remover = project_sub.add_parser(
+        "delete",
+        help="Permanently remove a project that has nothing in it",
+        description=(
+            "Delete a project, its members and its repository. THIS CANNOT BE UNDONE.\n\n"
+            "Refused unless the project has never had a trunk and has never had a task — in that "
+            "state there is provably nothing in it to lose. Anything else is refused, naming "
+            "`grid project archive`, which takes a project out of the way and keeps every byte.\n\n"
+            "For the project created by a typo, and for one you inited or imported into by "
+            "mistake and want the id back for. Asks before it acts unless you pass --yes."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    remover.add_argument("project_id", help="Project id from `grid project list --all`.")
+    remover.add_argument(
+        "--yes", action="store_true",
+        help="Do not ask for confirmation. Required when stdin is not a terminal.")
+    remover.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    remover.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    remover.set_defaults(handler=cmd_remote_project)
 
     member = project_sub.add_parser("member", help="List, add and remove project members")
     member_sub = member.add_subparsers(dest="member_action", required=True)

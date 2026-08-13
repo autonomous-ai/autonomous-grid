@@ -847,6 +847,53 @@ _OLD_RELAY = (
 _IMPORT_FINISH_TIMEOUT = 900.0
 
 
+# A relay that predates ADR 0033 D-p (issue 33) has none of the three lifecycle routes, and answers
+# the same bare framework 404 an unknown project id would produce on a relay that does.
+#
+# ⚠️ **Its own sentence rather than `_OLD_RELAY`.** That one says the relay has no projects at all,
+# which is false here — this relay has the whole project plane and is missing three routes — and it
+# would send somebody to check a feature that is working perfectly. The same distinction
+# `_OLD_RELAY_NO_CANCEL` draws, for the same reason.
+_OLD_RELAY_NO_ARCHIVE = (
+    "This grid's relay cannot archive or delete a project — it predates those routes. Ask its "
+    "operator to update it. Nothing was changed."
+)
+
+
+def archive_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
+    """Archive a project (``POST /relay/v1/projects/{id}/archive``), ADR 0033 D-p.
+
+    Soft and reversible: the project stops accepting new work and leaves the default listing, and
+    its repository is kept untouched. **No request body** — the project is named in the path and
+    there is nothing else to say.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/archive",
+        missing_route_hint=_OLD_RELAY_NO_ARCHIVE)
+
+
+def unarchive_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
+    """Put an archived project back (``POST /relay/v1/projects/{id}/unarchive``), ADR 0033 D-p."""
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/unarchive",
+        missing_route_hint=_OLD_RELAY_NO_ARCHIVE)
+
+
+def delete_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
+    """Delete a project that has nothing in it (``DELETE /relay/v1/projects/{id}``), ADR 0033 D-p.
+
+    Irreversible, and refused by the relay for any project that has a trunk or has ever had a task
+    — so the guarantee that nothing is destroyed is the RELAY's, not this function's. The confirming
+    prompt in `cli/project_archive.py` is about the caller's intent, never about safety.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "DELETE",
+        f"/relay/v1/projects/{quote(project_id, safe='')}",
+        missing_route_hint=_OLD_RELAY_NO_ARCHIVE)
+
+
 def init_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
     """Give an empty project a trunk (``POST /relay/v1/projects/{id}/init``), ADR 0033 D-o.
 
@@ -911,14 +958,21 @@ def create_project(signaling_url: str, access_token: str, *, name: str) -> dict[
                          json={"name": name}, missing_route_hint=_OLD_RELAY)
 
 
-def list_projects(signaling_url: str, access_token: str) -> dict[str, Any]:
+def list_projects(signaling_url: str, access_token: str, *,
+                  include_archived: bool = False) -> dict[str, Any]:
     """Every project the caller is a MEMBER of (``GET /relay/v1/projects``).
 
     Membership, not ownership: since a project has members, being told an id out of band is no
     longer the only way someone admitted to one could find it.
+
+    `include_archived` shows the ones taken out of the way by ADR 0033 D-p (issue 33). The
+    parameter is **omitted entirely when false** and sent as the string `"true"` when set — the
+    `list_tasks(mine=…)` precedent, so a relay that has never heard of it is never handed a key it
+    would have to ignore.
     """
+    params = {"include_archived": "true"} if include_archived else None
     return _task_oneshot(signaling_url, access_token, "GET", "/relay/v1/projects",
-                         missing_route_hint=_OLD_RELAY)
+                         params=params, missing_route_hint=_OLD_RELAY)
 
 
 def list_project_members(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:

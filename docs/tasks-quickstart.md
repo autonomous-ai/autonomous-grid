@@ -28,6 +28,7 @@ Everything here is **remote mode only** (`grid mode remote`).
 ```bash
 grid project create --name my-app             # prints the project id — keep it
 grid project list                             # id, your role, name
+grid project list --all                       # ...including archived ones, marked
 ```
 
 A new project has **no `main`**, and a task cannot be created without one. There are **two** ways to
@@ -54,6 +55,10 @@ pointer files.
 ⚠️ **Pick the right one — the choice cannot be taken back.** Both are refused on a project that
 already has a trunk, so a project you initialized empty can never import a repository afterwards.
 Recovering means a new project, and a new id. Nothing does either on your behalf.
+
+`grid project delete` does **not** get the id back, and never will: a project with a trunk is
+exactly what it refuses. What it is for is the project you created by a typo and never used. Once
+this one has a trunk, `grid project archive` is what gets it out of your list.
 
 A refused import leaves the project with **no trunk on purpose** — fix what it names and import
 again, or import into a fresh project.
@@ -187,6 +192,23 @@ grid project wip reset <project-id> <member_key> --commit <sha>
 ---
 
 ## Commands that are easy to confuse
+
+### `grid project archive` vs `grid project delete`
+
+| | What happens | Reversible | Allowed when |
+|---|---|---|---|
+| `grid project archive <id>` | stops new work, hides it from `list` | **yes**, `unarchive` | always |
+| `grid project delete <id>` | removes the project **and its repository** | **no** | it has no trunk and has never had a task |
+
+Archive is the one you want almost every time. It destroys nothing — the repository is kept and
+every read still works, so `clone`, `status`, `task list` and `task fetch` all carry on — and
+`grid project unarchive <id>` puts it back completely.
+
+Delete exists for the project created by a typo. It is refused for anything that holds work, naming
+archive, so it cannot take a colleague's unpromoted branch with it.
+
+Neither cancels a task that is already running. Archiving stops new work **starting**; to stop work
+that has already started, use `grid task cancel <task-id>`.
 
 ### `grid members` vs `grid project member`
 

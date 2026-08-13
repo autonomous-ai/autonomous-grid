@@ -70,7 +70,7 @@ listed here because the same mistake is available to anyone implementing it:
 > explicit act which always creates a task row, so it is serialized against that member's other
 > work by the same index that limits them to one.**
 
-Fourteen decisions follow. The last four (D-j through D-m) exist because this design is driven by an
+Fifteen decisions follow. The last four (D-j through D-m) exist because this design is driven by an
 application on behalf of a five-to-seven person team working on a repository that already has a
 history — not by one person at a terminal starting from nothing. That changes which failures are rare
 and which are daily.
@@ -926,6 +926,64 @@ prevent. *Absent ⇒ a bare framework 404*, which the CLI already turns into a s
 relay, so this route inherits the project routes' rollout note — **the relay goes out before the
 CLI** — and needs no order of its own.
 
+### D-p — A project can be put away, and only an empty one can be destroyed
+
+`POST /relay/v1/projects/{id}/archive` stops a project accepting new work and hides it from
+`GET /projects`; `…/unarchive` reverses it; `DELETE /relay/v1/projects/{id}` removes the project,
+its memberships and its bare repository, and is **refused for any project that has a `main` or has
+ever had a task**. All three are the owner's, matching membership.
+
+**Two operations rather than one, because a project's repository holds the whole team's work** —
+every member's WIP branch, and every task branch inside 16a's retention window. D-b already records
+that even a promote has no revert in this release, so a hard delete offered as the only way to
+remove a project would put an irreversible act in front of the ordinary mistake:
+
+| | archive | delete |
+|---|---|---|
+| what it is for | "this is finished, or was a typo — get it out of my list" | "this was never anything" |
+| repository | kept, untouched | removed |
+| reversible | yes, `unarchive` | no |
+| allowed when | any project | **no `main`, and no task row ever** |
+
+**The delete precondition is a fact, not a policy.** With no trunk there are no WIP branches — they
+are created by pointing at `main` (`task_repo.ensure_wip_branch`) — and with no task row there are no
+task branches and no events. Such a repository holds nothing but its own `git init`, so removing it
+can destroy nothing. A project WITH a trunk is refused **even when it has no tasks**, because an
+imported or init'd trunk is content somebody put there; archive is the answer for it. Every task
+state counts, terminal included: a finished task still has a branch and an event log, and "it is
+over" is not "it was never there".
+
+**Hiding it from a listing is the cosmetic half.** The load-bearing half is that an archived project
+refuses **writes** — `create_task`, `commit`, `integrate`, `promote`, `import`, `init` and
+`wip reset` — through one shared guard, for the reason D-o's trunk guard is one function: six routes disagreeing about
+what "archived" means is the failure the guard exists to prevent. Reads stay open, because the point
+of keeping the repository is that its history is still reachable, and a history nobody can read is a
+deletion with extra steps.
+
+⚠️ **Work already in flight is NOT stopped, and this is the part most likely to be "fixed" into a
+bug later.** A task that is `queued` or `running` when the project is archived is claimed, runs and
+settles exactly as it would have; the claim SELECT, the reaper and the leased-branch push fence are
+untouched. Killing a colleague's agent as a side effect of an administrative act on the project is
+the same class of surprise `POST /tasks/{id}/cancel` exists to make explicit, and it is the
+fail-safe direction — nothing anybody already asked for is silently dropped. Archiving means only
+that nothing NEW starts.
+
+The one place the fence does narrow is a member's own `refs/import/<member_key>`: both import routes
+already refuse an archived project, but `git push` reaches `receive-pack` directly without either
+route's say-so, and "an unopened staging ref costs disk and nothing else" stops being an acceptable
+trade for a project nobody is watching.
+
+**`archived` is a boolean on the wire and a timestamp in the row**, the split `branch_pruned_at`
+already uses: a client asks "may I write to this", which is a yes or a no. It is always present and
+never omitted when false, and every client keys on an explicit `True` — *absent ⇒ not archived* has
+to stay readable as "a relay that predates this slice", which is the rule `serves_you` follows.
+
+*Absent ⇒ a bare framework 404*, which the CLI turns into a sentence naming the relay — its own
+sentence, not the project plane's, because a relay missing these three routes still has projects and
+being told otherwise sends a member to check a feature that works. So these inherit the project
+routes' rollout note — **the relay goes out before the CLI** — and need no order of their own. No
+provider-fleet order at all.
+
 ## Consequences
 
 - **ADR 0032 D-e is split.** Its first half survives unchanged: the provider commits at terminal
@@ -971,6 +1029,13 @@ CLI** — and needs no order of its own.
   branch. What it costs is a project id: recovering from the wrong choice means making a new project
   and admitting the members again, which is why neither command may ever run as a side effect of
   another.
+
+  > **Correction, 2026-08-12 (issue 33).** "Making a new project" used to be the whole of the
+  > recovery, and it left the wrong one in `grid project list` forever. D-p adds the other half: an
+  > **archive** takes it out of the way and keeps every byte, and a **delete** removes it outright
+  > when — and only when — it has no trunk and has never had a task. It does **not** recover the id,
+  > and it never will: a project that has been inited or imported into has a trunk, which is exactly
+  > the state delete refuses.
 - **A project member cannot read another member's task, and nothing lists tasks.** `get_task` and
   `read_task_events` fence on `owner_id`, and there is no list endpoint. Under one slot per member
   the create-time 409 becomes a routine answer — and its message names the project, which is now the

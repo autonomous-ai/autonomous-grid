@@ -597,6 +597,30 @@ def _relay_function_strings(name, module):
     raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
 
 
+def _relay_function_params(name, module):
+    """Every parameter NAME of one of grid-src's functions (ADR 0033 D-p, issue 33).
+
+    The third sibling beside `_relay_string_constant` and `_relay_function_strings`, and it exists
+    because a FastAPI query parameter's wire name is its **argument name** — there is no string
+    literal on the relay side to read. A body scan of `list_projects` finds `"false"`, the `Query`
+    default, and would happily pass while `include_archived` had been renamed on the wire.
+
+    Keyword-only, positional and ordinary arguments all counted, because which of the three a route
+    declares is FastAPI's business and not a thing this check should have an opinion about.
+    """
+    import ast
+
+    source = _relay_module(module)
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    for node in ast.walk(ast.parse(source.read_text())):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            spec = node.args
+            return {arg.arg for arg in
+                    (*spec.posonlyargs, *spec.args, *spec.kwonlyargs)}
+    raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
+
+
 def test_the_queue_budget_stays_longer_than_the_run_budget():
     """The inequality, not just the two names (ADR 0033 D-k, issue 18).
 
@@ -1344,7 +1368,10 @@ def test_every_command_this_cli_tells_you_to_run_actually_parses():
     import re
 
     from cli import parser as cli_parser
-    from cli import remote_project, remote_task
+    # `project_archive` (ADR 0033 D-p, issue 33) joins the scan because it prints advice of its own
+    # — "Undo with: grid project unarchive <id>" is the one sentence a member reads after archiving
+    # something they did not mean to.
+    from cli import project_archive, remote_project, remote_task
 
     def printed_strings(module) -> list[str]:
         """Every literal a `print(...)` in this module emits, with each `{...}` as one token."""
@@ -1362,7 +1389,7 @@ def test_every_command_this_cli_tells_you_to_run_actually_parses():
         return out
 
     hints = []
-    for module in (remote_project, remote_task):
+    for module in (project_archive, remote_project, remote_task):
         for text in printed_strings(module):
             found = re.search(r"grid (?:task|project) [a-z][^\n]*", text)
             if found:
@@ -1406,3 +1433,67 @@ def test_the_help_for_a_task_slot_does_not_claim_it_is_per_project():
             break
     else:
         raise AssertionError("`grid task create --project` no longer exists to describe")
+
+
+def test_the_archived_keys_this_cli_reads_are_the_ones_the_relay_writes():
+    """The wire values ADR 0033 D-p (issue 33) hand-duplicates across the two repos.
+
+    Three of them, and each fails in a different, silent direction:
+
+      * **`archived`** on the project view and on `/status` — the CLI keys on an explicit `True`,
+        so a relay that renamed it would simply stop marking archived projects. `grid project list`
+        would then show a project that takes no work as though it were live, and the member would
+        find out from a refused `task create`.
+      * **`include_archived`** — the query parameter `--all` sends. A rename makes the flag a silent
+        no-op: the command exits 0, prints the unarchived listing, and the archived project the
+        member was looking for is simply not there.
+      * **`archived_at`** — the row the boolean is derived FROM. Parsed as the column name rather
+        than the wire key, so the two halves of the derivation cannot drift apart.
+
+    None of them raises anywhere. That is exactly why they are pinned here: every unit test on this
+    side reads a reply this repository wrote down, so a relay that renamed one leaves both suites
+    green and the feature quietly half-working.
+    """
+    view = _relay_function_strings("_project_view", module="projects.py")
+    assert "archived" in view, (
+        "grid-src's `_project_view` no longer carries `archived`, so `grid project list` would "
+        "show an archived project as though it were live")
+
+    # The PARAMETER names, not the body's string literals: a query parameter's wire name is its
+    # argument name in FastAPI, so a scan of the body would pass while the name on the wire changed.
+    # (`_relay_function_strings` would find "false", the Query default, and prove nothing.)
+    assert "include_archived" in _relay_function_params("list_projects", module="projects.py"), (
+        "grid-src's `list_projects` no longer reads `include_archived`, so `grid project list "
+        "--all` is a silent no-op that hides the projects it was asked to show")
+
+    status = _relay_function_strings("project_status", module="project_status.py")
+    assert "archived" in status, (
+        "grid-src's `/projects/{id}/status` no longer carries `archived`, so `grid project status` "
+        "cannot say why a member's next task will be refused")
+
+
+def test_the_archive_refusal_codes_are_the_ones_the_relay_sends():
+    """Two codes this CLI does NOT branch on, pinned anyway — and the reason is worth stating.
+
+    `project_archived` and `project_not_empty` are **displayed verbatim** (the `task.retry` rule),
+    because each relay message already names the command that fixes it. So a rename is a display
+    change, not a behaviour change, and nothing here would break.
+
+    What this catches instead is the messages losing their REMEDY. `grid project archive` is the
+    only way out of `project_archived`, and `grid project archive` is the only answer to
+    `project_not_empty` — if either sentence stopped naming it, a member would be refused with no
+    way forward and no test in either repository would notice, because the CLI is only passing the
+    words through.
+    """
+    guard = _relay_function_strings("refuse_if_archived", module="project_writable.py")
+    assert "project_archived" in guard, "grid-src's write guard no longer sends `project_archived`"
+    assert any("unarchive" in value for value in guard), (
+        "grid-src's archived refusal no longer names `grid project unarchive`, so a member is "
+        "refused with no way forward")
+
+    empty = _relay_function_strings("_refuse_if_not_empty", module="project_archive.py")
+    assert "project_not_empty" in empty, (
+        "grid-src's delete guard no longer sends `project_not_empty`")
+    assert any("archive" in value for value in empty), (
+        "grid-src's delete refusal no longer names `grid project archive`, which is the only thing "
+        "a member refused for a non-empty project can do instead")

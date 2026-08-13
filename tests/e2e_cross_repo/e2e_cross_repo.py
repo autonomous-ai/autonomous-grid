@@ -566,3 +566,92 @@ def test_13_a_trunkless_project_refuses_a_task_with_a_code_and_init_project_fixe
         f"the trunk moved without a promote: {status['main_commit']} != {root}")
     assert status["ahead"] >= 1, status
     assert status["behind"] == 0, status
+
+
+def test_14_a_project_is_archived_and_unarchived_and_an_empty_one_is_deleted(
+        relay, owner_token, spawn_provider):
+    """ADR 0033 D-p / issue 33, at the one place the WIRE can be checked rather than the constants.
+
+    Both unit suites read a reply the repository they live in wrote down: the CLI's asserts against
+    an `httpx.MockTransport` answer authored here, and the relay's against its own handler. A relay
+    that named the listing parameter differently, dropped `archived` from the view, or answered
+    `changed` under another key would leave both of them green while `grid project list --all`
+    silently showed nothing and `grid project archive` reported an archive that had not happened.
+
+    It also proves the decision this slice is most likely to be "fixed" into a bug later: a task
+    that is already running when the project is archived **runs to completion and settles**. That
+    is a claim about the claim SELECT, the lease fence and the git front all at once, and no unit
+    test on either side can make it — the CLI's has no provider and the relay's has no real agent.
+    """
+    import httpx
+
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(relay, owner_token, name="p-archive")["id"]
+    relay_client.init_project(relay, owner_token, project_id)
+
+    # 1. A task is started and CLAIMED before the archive, so what follows is about work in flight.
+    spawn_provider()
+    running = relay_client.create_task(
+        relay, owner_token, prompt="WRITE kept.txt SURVIVED-3333", project_id=project_id)
+
+    # 2. Archive it out from under that task. The reply keys `cli/project_archive` branches on, from
+    #    the real relay.
+    archived = relay_client.archive_project(relay, owner_token, project_id)
+    assert archived.get("archived") is True, archived
+    assert archived.get("changed") is True, archived
+    # A double-submit is a 200 saying it changed nothing, never a 409.
+    assert relay_client.archive_project(relay, owner_token, project_id).get("changed") is False
+
+    # 3. The listing hides it, and `--all` brings it back MARKED. Two calls rather than one, because
+    #    a relay that ignored the parameter entirely would pass a test that only ever asked for all.
+    hidden = relay_client.list_projects(relay, owner_token)["projects"]
+    assert project_id not in [p["id"] for p in hidden], hidden
+    shown = relay_client.list_projects(relay, owner_token, include_archived=True)["projects"]
+    mine = [p for p in shown if p["id"] == project_id]
+    assert mine and mine[0].get("archived") is True, shown
+
+    # 4. A NEW task is refused, with the code and a message naming the way back.
+    try:
+        relay_client.create_task(relay, owner_token, prompt="nope", project_id=project_id)
+    except relay_client.TaskRefusal as exc:
+        assert exc.refusal_code == "project_archived", exc.refusal_code
+        assert "unarchive" in str(exc), exc
+    else:
+        raise AssertionError("a task was created in an archived project")
+
+    # 5. ⚠️ THE DECISION. The task claimed in step 1 finishes and settles anyway — the claim query,
+    #    the lease and the leased-branch push are all untouched by archiving.
+    done = H.await_state(relay, owner_token, running["id"], {"completed", "failed"}, timeout=120)
+    assert done["state"] == "completed", (
+        f"archiving killed a task that was already running: {done!r}")
+
+    # 6. Unarchiving restores it fully — a task create succeeds, which is the only proof that means
+    #    anything here.
+    back = relay_client.unarchive_project(relay, owner_token, project_id)
+    assert back.get("archived") is False, back
+    after = relay_client.create_task(relay, owner_token, prompt="WRITE again.txt OK",
+                                     project_id=project_id)
+    assert after["id"], after
+
+    # 7. Delete is REFUSED for this project, because it has both a trunk and tasks.
+    with httpx.Client(base_url=relay, timeout=30.0) as client:
+        refused = client.delete(f"/relay/v1/projects/{project_id}",
+                                headers={"Authorization": f"Bearer {owner_token}"})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "project_not_empty", refused.text
+    assert "archive" in refused.json()["detail"]["message"], refused.text
+
+    # 8. And an empty one really goes — row, membership and repository — so the id stops resolving.
+    junk = relay_client.create_project(relay, owner_token, name="p-typo")["id"]
+    removed = relay_client.delete_project(relay, owner_token, junk)
+    assert removed.get("deleted") is True, removed
+    assert removed.get("repository_removed") is True, removed
+    assert junk not in [
+        p["id"] for p in relay_client.list_projects(
+            relay, owner_token, include_archived=True)["projects"]]
+    with httpx.Client(base_url=relay, timeout=30.0) as client:
+        gone = client.get(f"/relay/v1/projects/{junk}/status",
+                          headers={"Authorization": f"Bearer {owner_token}"})
+    assert gone.status_code == 404, gone.text
+    assert gone.json()["detail"]["code"] == "no_such_project", gone.text
