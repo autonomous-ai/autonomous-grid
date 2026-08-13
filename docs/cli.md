@@ -1261,7 +1261,7 @@ member gets the same "no such project" a stranger always gets.
 
 ```
 grid task create [<project-id>] --prompt <text> [--file <local>[:<dest>]]… [--dir <local>[:<dest>]]…
-                 [--init-project] [--grid <grid>] [--json]
+                 [--init-project] [--follow] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task list   <project-id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
@@ -1292,8 +1292,65 @@ can `get`, `list` and `follow` any task in it. That is deliberate — a member c
 project and read any task branch — and it is what makes reviewing a colleague's run possible without
 one.
 
-`follow` exits with the task's own outcome — `0` for `completed`, non-zero for `failed` /
-`timed_out`, or if the stream ended without ever saying how the task finished.
+### Acting on the outcome from a script
+
+Both `get` and `follow` exit with the task's own outcome, so a shell can branch on it without
+parsing anything.
+
+`follow` has two codes: `0` for `completed`, non-zero for `failed` / `timed_out`, or if the stream
+ended without ever saying how the task finished.
+
+`get` has three, because it can also answer "not yet":
+
+| state | exit |
+|---|---|
+| `completed` | `0` |
+| `failed`, `timed_out` | `1` |
+| `preparing`, `queued`, `running` | `2` |
+
+`2` is what makes waiting expressible. `0` there would say "fine" about an outcome nobody has
+reached — the thing `follow` has always refused to do — and `1` would say it went wrong. It is also
+the **only** code a poller may read as "ask again": `1` covers both a failed task and a command that
+could not answer at all, since every refusal in this plane exits `1`.
+
+```bash
+grid task get "$id" && deploy.sh          # deploys only if the task completed
+
+until grid task get "$id"; do             # wait for it to finish, either way
+  rc=$?
+  [ "$rc" -eq 2 ] || exit "$rc"           # it finished, and not well
+  sleep 30
+done
+```
+
+Read the code in that loop. `until grid task get "$id"; do sleep 30; done` on its own ends only on
+success, so it waits forever on a task that failed.
+
+Call the variable `rc`, not `status`: in **zsh** — the default shell on macOS — `status` is a
+read-only alias for `$?`, so the assignment fails and the loop exits on its first poll claiming a
+running task went wrong. bash and `sh` accept `status` without complaint, which is what makes that
+one hard to notice.
+
+A state this build cannot place — one a newer relay invented, or a reply that carried no state at
+all — is reported as **unfinished**, with a line on stderr saying so. Never as a success, and never
+as a failure a healthy task has not earned. `--json` prints exactly what it always did; only the
+exit status is new.
+
+⚠️ **`grid task get` used to exit `0` unconditionally.** A script that treated it as "did the
+command run" now sees `1` or `2` where it used to see `0`.
+
+`create --follow` closes the loop: it creates the task, prints the id, then watches it with the same
+resumable stream `follow` uses, and exits with `follow`'s codes.
+
+```bash
+grid task create <project-id> --prompt 'add a retry' --follow && deploy.sh
+```
+
+The id prints **before** the watching starts, so Ctrl-C — which stops the watching, never the task —
+still leaves you able to `grid task follow <id>` again. If the stream is lost, the non-zero exit is
+accompanied by a line saying the task is still running and naming the way back. With `--json` the
+create payload is one compact line and each event follows on its own line, so a consumer reads both
+with the same line-by-line loop; `create --json` on its own is unchanged.
 
 The log is **one sequence for the task's whole life**, including across a retry: a reattached client
 never finds that its cursor has come to mean something else.

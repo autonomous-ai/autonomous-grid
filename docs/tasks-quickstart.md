@@ -122,6 +122,38 @@ grid task fetch  <task-id> --into /tmp/result
 grid task cancel <task-id>
 ```
 
+**Create and watch in one command**, and act on how it went:
+
+```bash
+grid task create <project-id> --prompt 'add a retry' --follow && ./deploy.sh
+```
+
+`--follow` prints the id, then watches the task with the same resumable stream `grid task follow`
+uses. Ctrl-C stops the watching, never the task — the id is on screen first so you can reattach.
+
+Both `follow` and `get` exit with the task's own outcome. `get` has a third code, for a task that has
+not finished:
+
+| state | `grid task get` exit |
+|---|---|
+| `completed` | `0` |
+| `failed`, `timed_out` | `1` |
+| `preparing`, `queued`, `running` | `2` |
+
+```bash
+until grid task get "$id"; do
+  rc=$?
+  [ "$rc" -eq 2 ] || exit "$rc"   # it finished, and not well
+  sleep 30
+done
+```
+
+Read the code in that loop: `until grid task get "$id"; do sleep 30; done` alone ends only on
+success, so it waits forever on a task that failed. `2` is the only code meaning "ask again" — `1`
+covers a failed task *and* a command that could not reach the relay. Name the variable `rc`, not
+`status`: in zsh `status` is a read-only alias for `$?`, so that loop would bail on its first poll
+and blame a running task.
+
 `--all` on `task list` shows every member's tasks, not only yours.
 
 **You may have one task in flight per project at a time.** A colleague's task in the same project

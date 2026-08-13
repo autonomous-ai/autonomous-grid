@@ -554,16 +554,94 @@ def _task_create(args: argparse.Namespace) -> int:
             raise
         raise SystemExit(_no_trunk_message(args, project_id)) from None
 
-    if getattr(args, "json", False):
-        print(json.dumps(task, indent=2))
+    as_json = bool(getattr(args, "json", False))
+    following = bool(getattr(args, "follow", False))
+    task_id = task.get("id")
+    _report_created(task, label, following=following, as_json=as_json)
+
+    if not following:
         return 0
 
-    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    print(f"task {task.get('id') or '(no id)'} created on {label}")
+    if not task_id:
+        # Created, but with nothing to address it by, so there is nothing to attach to. Not a silent
+        # 0: the caller asked to watch this task, and reporting success for a create-and-watch that
+        # only created would be the same class of lie the exit codes above exist to remove.
+        raise SystemExit(
+            f"The relay created a task but did not say what its id is, so --follow has nothing to "
+            f"attach to. See what landed with `grid task list --project {project_id}`")
+
+    return _follow_created(base, token, task_id, as_json=as_json)
+
+
+def _report_created(task: dict, label: str, *, following: bool, as_json: bool) -> None:
+    """What `task create` says about the task it just made, in the caller's chosen shape.
+
+    `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+
+    The `--json` document is **compact when following**, so the whole of stdout is one JSON document
+    per line and a consumer reads the create payload and the events with the same `while read`.
+    `indent=2` is kept byte-for-byte when not following, because that output has consumers today.
+
+    The watch advice lives strictly inside the human branch, never beside the JSON: `--json`'s stdout
+    is one document for a program to parse, and this is prose. Pinned by
+    `test_task_create_dir_keeps_json_stdout_parseable_while_it_reports_skips`, which caught exactly
+    that while this was being written.
+    """
+    task_id = task.get("id")
+    if as_json:
+        print(json.dumps(task, indent=None if following else 2))
+        return
+
+    print(f"task {task_id or '(no id)'} created on {label}")
     print(f"state={task.get('state') or 'unknown'}")
     print(f"project={task.get('project_id') or 'unknown'}")
-    print(f"\nWatch it with: grid task get {task.get('id') or '<id>'}")
-    return 0
+    if following:
+        return
+    # `follow` and not `get` (issue 32). The verb said "watch" and the command named the one-shot —
+    # `get` answers once and returns, so somebody following that advice saw `state=queued` and nothing
+    # else. Both are offered, each labelled with what it does.
+    print(f"\nWatch it with:   grid task follow {task_id or '<id>'}"
+          f"\nOr ask once:     grid task get {task_id or '<id>'}"
+          f"\n(or pass --follow to create and watch in one command)")
+
+
+def _follow_created(base: str, token: str, task_id: str, *, as_json: bool) -> int:
+    """Hand `create --follow` to the same watcher `grid task follow` uses.
+
+    Called with the base and token `_task_create` ALREADY holds rather than re-resolving them: a
+    second `_resolve` is a second credential lookup and control-plane round trip in the window
+    between the task becoming claimable and anybody watching it, and one that failed would leave a
+    running task reported as an error.
+
+    `after_seq=-1` — from the very first event, so the gap between the POST returning and the stream
+    opening holds nothing. That is what the sequenced log is for.
+    """
+    if not as_json:
+        # Said before the stream starts, because the answer to "can I stop this?" is needed while it
+        # is running, not afterwards. Ctrl-C ends the watching only; the task is the grid's now.
+        print(f"\nfollowing task {task_id} — Ctrl-C stops watching, not the task.\n"
+              f"To stop the task itself:  grid task cancel {task_id}\n")
+    # ⚠️ **The flush is the guarantee, not the print.** CPython block-buffers stdout whenever it is
+    # not a tty, and the next call blocks for as long as the task waits for a provider — so
+    # `grid task create … --follow > out.log &` with a `tail -f` showed ZERO bytes until the task
+    # ended, id included. Measured, and the reason `test_task_create_follow_flushes_the_id_before_it
+    # _blocks_on_the_stream` is a real subprocess: `capsys` replaces `sys.stdout` with a memory
+    # buffer, so it can only ever see the ORDER of the prints and never whether the fd was flushed.
+    # One flush here covers all three shapes of preamble — the human report, this banner, and
+    # `--json`'s compact create line.
+    sys.stdout.flush()
+    terminal = _follow_stream(base, token, task_id, after_seq=-1, as_json=as_json)
+    if terminal is None:
+        # `_follow_stream` has already said what went wrong with the STREAM. What it cannot say is
+        # that the task is still out there running — it does not know one was just created — and
+        # without this the non-zero exit reads as "the task failed" with no way forward.
+        # One command per line, each at the END of its line — `test_every_command_this_cli_tells_you
+        # _to_run_actually_parses` retypes the first `grid …` match on a line as argv, so a second
+        # clause after it becomes unrecognised arguments.
+        print(f"The task is still running; nothing here cancelled it.\n"
+              f"Reattach with:    grid task follow {task_id}\n"
+              f"Or read it once:  grid task get {task_id}", file=sys.stderr)
+    return _follow_exit_code(terminal)
 
 
 def _task_follow(args: argparse.Namespace) -> int:
@@ -581,14 +659,54 @@ def _task_follow(args: argparse.Namespace) -> int:
     Exit code is the task's own outcome: 0 for `completed`, 1 for `failed`/`timed_out`, so a script
     can branch on it. A stream that ends without a terminal event exits non-zero too — the task's
     fate is unknown, and reporting unknown as success is the failure this guards.
+
+    Unchanged by issue 32: `get` gained a third code (2, not finished) and this did NOT. A follower
+    has watched a stream to its end, so "not started yet" is not one of the answers available to it.
+    """
+    base, token, _label = _resolve(args)
+    terminal = _follow_stream(
+        base, token, args.task_id,
+        after_seq=int(getattr(args, "after_seq", -1) or -1),
+        as_json=bool(getattr(args, "json", False)))
+    return _follow_exit_code(terminal)
+
+
+def _follow_exit_code(terminal: dict | None) -> int:
+    """`follow`'s two-way rule, in one place because `create --follow` reports it too.
+
+    Deliberately NOT `_outcome_exit_code`: that one answers 2 for a state it cannot place as
+    finished, which is right for a one-shot read and wrong here — a stream that ended is not a task
+    that has not started. `None` (no terminal event ever arrived) is non-zero for the reason in
+    `_task_follow`'s docstring: the fate is unknown, and unknown must never read as success.
+    """
+    return 0 if terminal is not None and terminal.get("state") == "completed" else 1
+
+
+def _follow_stream(base: str, token: str, task_id: str, *,
+                   after_seq: int, as_json: bool) -> dict | None:
+    """Render a task's events until it ends, reattaching at the cursor. The terminal event, or None.
+
+    The ONE implementation of the cursor and the reconnect budget — `grid task follow` and
+    `grid task create --follow` are the same watching, differing only in who resolved the grid and
+    what is printed before it starts.
+
+    `None` means no terminal event was ever seen, and it covers FOUR different endings, each of which
+    has already said which on stderr: a refused credential, an answered refusal, an outage that
+    outlasted the budget, and a stream that kept ending empty. The caller cannot tell them apart and
+    does not need to — all four mean "the task's fate is unknown from here".
+
+    ⚠️ The first of the four is caught **separately and by name**: `RelayUnauthorized` is a plain
+    `Exception`, not a `RelayError` (`remote/relay.py`), so `except relay.RelayError` never saw a 401
+    and a token revoked mid-task came out of this loop as a raw traceback. Every one-shot call in this
+    plane folds a 401 into a worded `SystemExit`; this is the follower's version of that. It is
+    reported rather than retried for the same reason a 4xx is: a refused credential does not become
+    valid on reconnect, and the wait would spend the budget confirming it.
     """
     import time
 
     from remote import relay
 
-    base, token, _label = _resolve(args)
-    as_json = bool(getattr(args, "json", False))
-    cursor = int(getattr(args, "after_seq", -1) or -1)
+    cursor = after_seq
     terminal: dict | None = None
     attempts_left = _RECONNECT_ATTEMPTS
     # Outlives the reconnect loop deliberately: a reattach resumes at the cursor, so the tree the
@@ -599,7 +717,7 @@ def _task_follow(args: argparse.Namespace) -> int:
         made_progress = False
         try:
             for seq, event in relay.stream_task_events(
-                    base, token, args.task_id, after_seq=cursor):
+                    base, token, task_id, after_seq=cursor):
                 cursor = seq
                 made_progress = True
                 _render(seq, event, as_json=as_json, tree=tree)
@@ -608,16 +726,23 @@ def _task_follow(args: argparse.Namespace) -> int:
                     break
         except SystemExit:
             raise
+        except relay.RelayUnauthorized:
+            # Named explicitly because it is NOT a `RelayError` — see the docstring. Nothing here can
+            # refresh a grid access token, so this says which credential and which command renews it
+            # rather than reconnecting into the same 401 five times.
+            print(f"Cannot follow task {task_id}: the relay refused this grid's access token. "
+                  f"Refresh it with `grid login`", file=sys.stderr)
+            return None
         except relay.RelayError as exc:
             if _is_answer_not_blip(getattr(exc, "status", None)):
-                print(f"Cannot follow task {args.task_id}: {exc}", file=sys.stderr)
-                return 1
+                print(f"Cannot follow task {task_id}: {exc}", file=sys.stderr)
+                return None
             if made_progress:
                 attempts_left = _RECONNECT_ATTEMPTS
             elif attempts_left <= 0:
-                print(f"Lost the connection following task {args.task_id} and could not "
+                print(f"Lost the connection following task {task_id} and could not "
                       f"reattach: {exc}", file=sys.stderr)
-                return 1
+                return None
             else:
                 attempts_left -= 1
             print(f"connection lost ({exc}); reattaching at seq {cursor}", file=sys.stderr)
@@ -636,14 +761,14 @@ def _task_follow(args: argparse.Namespace) -> int:
         if made_progress:
             attempts_left = _RECONNECT_ATTEMPTS
         elif attempts_left <= 0:
-            print(f"The stream for task {args.task_id} ended without a terminal event.",
+            print(f"The stream for task {task_id} ended without a terminal event.",
                   file=sys.stderr)
-            return 1
+            return None
         else:
             attempts_left -= 1
         time.sleep(_RECONNECT_BACKOFF_SECONDS)
 
-    return 0 if terminal.get("state") == "completed" else 1
+    return terminal
 
 
 def _is_answer_not_blip(status: int | None) -> bool:
@@ -1131,15 +1256,118 @@ def _task_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+# The three exit codes `grid task get` reports a task's outcome with (issue 32). Named because the
+# third one is a contract a shell script branches on, and `2` reads as an argparse usage error
+# everywhere else in this CLI.
+_EXIT_COMPLETED = 0
+_EXIT_ENDED_BADLY = 1
+_EXIT_UNFINISHED = 2
+
+
+def _outcome_exit_code(state: Any) -> int:
+    """The exit status a task's own state earns — 0 completed, 1 ended badly, 2 not finished.
+
+    Keyed on `_TERMINAL_STATES`, so `get` and `fetch` cannot come to disagree about what "finished"
+    means: a state this build has never heard of is NOT FINISHED here for the same reason it refuses
+    a fetch there. That direction is the repo's standing rule — an unknown thing degrades to the old
+    behaviour, never to a new failure — and the alternative is worse in a way that is easy to miss:
+    if a newer relay adds an *active* state, reading it as 1 would report a perfectly healthy
+    running task as failed.
+
+    ⚠️ **The `isinstance` is load-bearing, not defensive habit.** `state in _TERMINAL_STATES` HASHES
+    its left operand, so a `state` the relay sent as a JSON object or array raised
+    `TypeError: unhashable type: 'dict'` — uncaught, out through `_task_get`, `dispatch` and `main()`.
+    Python exits **1** on an unhandled exception, which is numerically "the task ended badly": a
+    client-side parsing crash delivered to a script as a verdict about the task, indistinguishable
+    from a real failure. That is the exact class of wrong answer this whole function exists to remove,
+    arriving through a traceback instead of a bad return value. A state is a string or it is not a
+    state.
+    """
+    if not isinstance(state, str):
+        return _EXIT_UNFINISHED
+    if state == "completed":
+        return _EXIT_COMPLETED
+    if state in _TERMINAL_STATES:
+        return _EXIT_ENDED_BADLY
+    return _EXIT_UNFINISHED
+
+
+# The states in which a task is on its way and its outcome is genuinely not decided yet. LOCKSTEP in
+# spirit with grid-src's `TASK_ACTIVE_STATES`, and deliberately **display-only**: it decides whether
+# the note below is printed, never the exit code, which `_outcome_exit_code` derives from
+# `_TERMINAL_STATES` alone. So drift costs an extra line on stderr, never a wrong verdict, and this
+# is not a lockstep value.
+_ACTIVE_STATES = frozenset({"preparing", "queued", "running"})
+
+
+def _note_an_unreadable_state(task_id: str, state: Any) -> None:
+    """Say on stderr that `2` here means "this build cannot place that state", not "still working".
+
+    `2` is the right code either way — it never claims success and never invents a failure — but the
+    two readings call for different actions, and the difference is invisible from the status alone. A
+    poller waiting on a state a newer relay considers TERMINAL would otherwise wait forever with
+    nothing ever mentioning it: the one failure mode this conservative direction buys, so it is
+    disclosed rather than left to be discovered.
+
+    stderr, so `--json`'s stdout stays exactly the document the relay sent.
+    """
+    # `isinstance` FIRST for `_outcome_exit_code`'s reason, and this is the same trap one line later:
+    # this is reached for every code-2 state, dicts and lists included, and `state in _ACTIVE_STATES`
+    # hashes its left operand exactly as the terminal test does. Guarding one and not the other would
+    # have moved the crash into the code that exists to report it.
+    if isinstance(state, str) and state in _ACTIVE_STATES:
+        return
+    # `is None` and not falsiness: `""`, `0` and `False` are all states the relay DID send, and
+    # reporting them as "no state at all" hides which of the two shapes of wrong this is — a body
+    # with the key missing, or a body carrying something that is not a state name.
+    described = "no state at all" if state is None else f"state {state!r}"
+    # The command LAST on its line, and that is a constraint rather than a preference:
+    # `tests/test_task_lease.py::test_every_command_this_cli_tells_you_to_run_actually_parses` walks
+    # every printed hint in this module through `build_parser()`, taking each `grid …` match to the
+    # end of its line. Prose after the closing backtick becomes argv and the hint fails to parse —
+    # which is what happened while this was being written.
+    print(f"Task {task_id}: the relay reported {described}, which this build cannot place as "
+          f"finished or unfinished — reporting it as unfinished (exit 2).\n"
+          f"See what it sent with `grid task get {task_id} --json`", file=sys.stderr)
+
+
 def _task_get(args: argparse.Namespace) -> int:
     from remote import relay
 
     base, token, _label = _resolve(args)
     task = relay.get_task(base, token, args.task_id)
+    as_json = bool(getattr(args, "json", False))
 
-    if getattr(args, "json", False):
+    # A body that is not even an object, checked BEFORE the first `.get`. `relay.get_task` hands back
+    # `resp.json()` verbatim, so a 200 carrying an array, a string or a number — a proxy, a captive
+    # portal — reaches this line; until this slice the `--json` path never touched the body at all, so
+    # it printed and returned 0, and reading `state` unguarded turned that into an `AttributeError`
+    # with NOTHING printed. An unhandled exception exits 1, which now means "the task ended badly", so
+    # a client-side parse failure was being delivered to a script as a verdict about the task.
+    #
+    # The two shapes diverge because their contracts do: `--json` owes the caller the document the
+    # relay sent, disclosure on stderr, exit 2 (nothing here can say whether the task finished); the
+    # human path has no document to hand over and every line below assumes an object, so it refuses
+    # with a sentence — the rule `task list`, `project status`, `cancel` and `_own_default_project`
+    # all already follow. Each message is therefore true about the code it exits with, which one
+    # shared path could not manage.
+    if not isinstance(task, dict):
+        if as_json:
+            _note_an_unreadable_state(args.task_id, None)
+            print(json.dumps(task, indent=2))
+            return _EXIT_UNFINISHED
+        raise SystemExit(
+            f"The relay's answer for task {args.task_id} was not a task, so there is nothing to "
+            f"report about it. See what it sent with `grid task get {args.task_id} --json`")
+
+    state = task.get("state")
+    code = _outcome_exit_code(state)
+    if code == _EXIT_UNFINISHED:
+        _note_an_unreadable_state(args.task_id, state)
+
+    if as_json:
         print(json.dumps(task, indent=2))
-        return 0
+        return code
 
     print(f"task {task.get('id') or args.task_id}")
     print(f"state={task.get('state') or 'unknown'}")
@@ -1155,4 +1383,4 @@ def _task_get(args: argparse.Namespace) -> int:
     if result:
         print("\n--- result ---")
         print(result.rstrip("\n"))
-    return 0
+    return code

@@ -24446,6 +24446,214 @@ def test_task_get_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
     assert "completed" in out and "say hello" in out
 
 
+# --- issue 32: `grid task get` exits with the task's outcome --------------------------------------
+
+def test_task_get_exits_non_zero_when_the_task_failed(monkeypatch, tmp_path, capsys):
+    """`grid task get <id> && deploy.sh` must not deploy a failed task (issue 32).
+
+    `grid task follow` has ended with the task's own outcome since ADR 0032, and its docstring says
+    why — "so a script can branch on it… reporting unknown as success is the failure this guards".
+    `get` returned 0 whatever the state, and `get` is the one people reach for in a script: it is
+    the non-blocking one, the one you poll with. So the trap sat on the likelier path, and it failed
+    SILENTLY — a green script over a red task.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "error": "the agent reported an error"}))
+    rc = cli.main(["task", "get", "T1"])
+
+    assert rc == 1, "a failed task reported as success is what this slice exists to remove"
+    assert "failed" in capsys.readouterr().out, "the state is still reported in words"
+
+
+@pytest.mark.parametrize("active", ["preparing", "queued", "running"])
+def test_task_get_has_its_own_code_for_a_task_that_has_not_finished(
+        monkeypatch, tmp_path, capsys, active):
+    """A third code, and it is the row worth spelling out (issue 32).
+
+    Returning 0 for a task that has not finished says "fine" about an unknown outcome — the exact
+    thing `follow`'s docstring refuses to do — and returning 1 says it went wrong, which is a
+    verdict nobody has reached yet. So `2` means "ask again", and it is what makes a polling loop
+    expressible at all.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "T1", "state": active}))
+
+    assert cli.main(["task", "get", "T1"]) == 2, (
+        f"{active} is neither a success nor a failure; both readings are a confident wrong answer")
+    # The positive control for the disclosure below: an ordinary unfinished task is the common case
+    # and gets no warning. Without this row, a note that fired on every poll would pass that test.
+    assert capsys.readouterr().err == "", f"{active} is an ordinary state, not a surprise"
+
+
+@pytest.mark.parametrize("reply", [
+    {"id": "T1", "state": "teleported"},   # a state a newer relay invented
+    {"id": "T1"},                          # no state at all — a proxy that stripped the body
+    {"id": "T1", "state": None},
+    # NOT strings, and every one of them is `state` as some other JSON type. A frozenset membership
+    # test HASHES its left operand, so an object or an array raised `TypeError: unhashable type` —
+    # uncaught, all the way out of `main()`. Python exits 1 on an unhandled exception, which is
+    # numerically "the task failed": a CLI-side parsing crash reported to the script as a verdict on
+    # the task, which is the precise failure this whole slice exists to remove.
+    {"id": "T1", "state": {"weird": "object"}},
+    {"id": "T1", "state": ["queued"]},
+    {"id": "T1", "state": 7},
+    {"id": "T1", "state": True},
+    {"id": "T1", "state": ""},
+])
+def test_task_get_says_out_loud_when_it_cannot_read_the_state(monkeypatch, tmp_path, capsys, reply):
+    """`2` for a state this build cannot place, and a line on stderr naming it (issue 32).
+
+    2 is the conservative half: `_TERMINAL_STATES` already treats an unheard-of state as
+    not-finished, and reading it as 1 instead would report a healthy task as failed the day a relay
+    adds a new ACTIVE state. But 2 means "ask again", and a poller against a relay that added a new
+    TERMINAL state would then ask forever — so the one thing this must not be is quiet.
+
+    stderr, not stdout: `--json`'s contract is that stdout carries the relay's document and nothing
+    else, and this must not corrupt a `| jq`.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+    rc = cli.main(["task", "get", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "T1" in captured.err, f"nothing on stderr names the task:\n{captured.err}"
+    if reply.get("state") is not None:
+        # `str(...)`, because half these states are not strings — which is the point of the rows.
+        assert str(reply["state"]) in captured.err, (
+            f"the note does not name the state it could not place:\n{captured.err}")
+
+
+@pytest.mark.parametrize("state_name,expected", [
+    ("completed", 0),
+    ("failed", 1),
+    ("timed_out", 1),
+    ("preparing", 2),
+    ("queued", 2),
+    ("running", 2),
+])
+def test_task_get_returns_two_exactly_while_the_task_can_still_change(
+        monkeypatch, tmp_path, state_name, expected):
+    """The whole table in one place, because `2` is what makes a polling loop terminate.
+
+    Measured on bash, zsh and sh: the body of an `until` sees the condition's real status, so
+
+        until grid task get "$id"; do
+          rc=$?
+          [ "$rc" -eq 2 ] || exit "$rc"
+          sleep 30
+        done
+
+    waits while the task is running and stops the moment it is over, either way. If a terminal state
+    ever answered 2 that loop would never end; if an active one answered 0 or 1 it would act on a
+    verdict nobody has reached. The issue's own one-liner (`until grid task get $id; do sleep 30;
+    done`) does NOT do this — it exits only on 0, so it spins forever on a `failed` task, which is
+    why the documented loop reads the status.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "T1", "state": state_name}))
+
+    assert cli.main(["task", "get", "T1"]) == expected
+
+
+def test_task_get_json_is_byte_for_byte_what_it_was_and_only_the_status_moved(
+        monkeypatch, tmp_path, capsys):
+    """The breaking change is the exit status ALONE (issue 32).
+
+    An application reading `--json` must see the document it has always seen; only a shell branching
+    on `$?` sees anything new.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reply = {"id": "T1", "state": "failed", "error": "boom", "result_text": None}
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+    rc = cli.main(["task", "get", "T1", "--json"])
+
+    out = capsys.readouterr().out
+    assert json.loads(out) == reply
+    assert out == json.dumps(reply, indent=2) + "\n", "the rendering itself must not have moved"
+    assert rc == 1, "the failure has to reach the shell, or the whole slice buys nothing"
+
+
+def test_task_get_json_still_prints_a_body_that_is_not_even_an_object(monkeypatch, tmp_path, capsys):
+    """`--json` prints what the relay sent, whatever shape it is — the acceptance criterion.
+
+    `relay.get_task` returns `resp.json()` verbatim, so a 200 carrying an array or a string (a proxy,
+    a captive portal) reaches this command. Before issue 32 the `--json` path never touched the body
+    at all — it printed and returned 0 — and reading `state` ahead of that gate turned it into an
+    `AttributeError` traceback with NOTHING printed, which is both a regression and, at exit 1,
+    indistinguishable from a failed task.
+
+    The status is allowed to move (that is the whole slice); the document is not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = ["captive", "portal"]
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    rc = cli.main(["task", "get", "T1", "--json"])
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out) == body, "the relay's own document must still reach stdout"
+    assert rc == 2, "an answer this cannot read is not a finished task, and never a success"
+    assert "T1" in captured.err, "and it says so, rather than exiting 2 with no explanation"
+
+
+def test_task_get_says_a_body_it_cannot_read_is_not_a_task(monkeypatch, tmp_path, capsys):
+    """The human half of the same reply: a sentence, not a traceback.
+
+    Every sibling in this plane follows the rule already — `task list`, `project status`, `cancel` —
+    and it matters more here than it did before the exit codes: a traceback exits 1, which now MEANS
+    "the task ended badly", so the one thing a reader must not be told is being told to them.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=["captive", "portal"]))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "get", "T1"])
+
+    assert "T1" in str(caught.value)
+    assert "--json" in str(caught.value), "the way to see what arrived is not named"
+
+
+def test_task_get_help_documents_the_exit_codes():
+    """An exit status nobody can look up is not a contract (issue 32).
+
+    It is also the one part of this command's behaviour that leaves no trace on the screen, so
+    `--help` is where somebody writing a script has to be able to find it.
+    """
+    parser = cli.build_parser()
+    getter = parser._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["get"]
+    help_text = getter.format_help()
+
+    for code, state_name in (("0", "completed"), ("1", "failed"), ("2", "running")):
+        assert code in help_text and state_name in help_text, (
+            f"the help does not document exit {code} for {state_name}:\n{help_text}")
+    assert "timed_out" in help_text, "the second failing state is missing"
+    # The loop is the reason `2` exists at all; a table with no worked example leaves the reader to
+    # rediscover that `until <cmd>` alone spins forever on a failed task.
+    assert "until" in help_text, f"the polling idiom is not shown:\n{help_text}"
+    # `status=` is the trap, measured: in zsh — the default macOS shell — `status` is a READ-ONLY
+    # alias for `$?`, so the assignment fails, the comparison reads the assignment's own 1, and the
+    # loop exits on its FIRST poll blaming a task that is running perfectly. bash and sh accept it,
+    # so whoever "tidies" `rc` into the more descriptive name will see nothing wrong.
+    assert "status=$?" not in help_text, (
+        "the documented loop assigns to `status`, which zsh refuses — it would report a failure for "
+        "a running task on the default macOS shell")
+
+
 def test_task_fetch_refuses_a_task_that_has_not_finished(monkeypatch, tmp_path, capsys):
     """Until the provider pushes, the branch still holds only the INPUT. Serving that would hand
     the user their own uploaded files back as though they were the agent's result — a wrong answer
@@ -24822,6 +25030,310 @@ def test_task_get_percent_encodes_the_id_in_the_path(monkeypatch, tmp_path):
     cli.main(["task", "get", "../nodes/evil"])
 
     assert seen["raw"] == b"/relay/v1/tasks/..%2Fnodes%2Fevil"
+
+
+# --- issue 32: `grid task create --follow` --------------------------------------------------------
+
+def _created_then_streamed(*blocks, task_id="T1", requests=None):
+    """A relay that answers `POST /tasks` with a created task and then streams its events.
+
+    Path-aware, and it records the ORDER of the requests: "no gap between creating and attaching" is
+    a claim about what happens between the two calls, so a handler that could not tell them apart
+    would leave it unmeasured.
+    """
+    def handler(request):
+        if requests is not None:
+            requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, text=_sse(*blocks),
+                                  headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(201, json={
+            "id": task_id, "state": "queued", "project_id": "p1"})
+    return handler
+
+
+def test_task_create_follow_watches_the_task_it_just_created(monkeypatch, tmp_path, capsys):
+    """create → watch in one command (issue 32).
+
+    Every use of `create` was create → copy the id → `grid task follow <id>`, and the id is the only
+    thing joining them. `--follow` attaches from `after_seq=-1`, so nothing that happened between
+    the POST returning and the stream opening is missed — the point of a sequenced log.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    requests: list[tuple[str, str]] = []
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.output", "text": "working on it"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+        requests=requests))
+    rc = cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "working on it" in out, f"the task was created but never watched:\n{out}"
+    assert requests == [("POST", "/relay/v1/tasks"), ("GET", "/relay/v1/tasks/T1/events")], (
+        f"something happened between creating the task and attaching to it: {requests}")
+
+
+def test_task_create_follow_attaches_from_the_very_first_event(monkeypatch, tmp_path, capsys):
+    """`after_seq=-1`, so the window between the POST returning and the stream opening holds nothing.
+
+    A provider can claim a task the instant it is queued, so attaching at "now" would lose whatever
+    it published first — which on a short task can be most of it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        if request.url.path.endswith("/events"):
+            seen["after_seq"] = request.url.params.get("after_seq")
+            return httpx.Response(
+                200, text=_sse(_block(0, {"type": "task.terminal", "state": "completed"})),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "p1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+
+    assert seen["after_seq"] == "-1", f"the stream did not start from the beginning: {seen}"
+
+
+@pytest.mark.parametrize("final,expected", [("completed", 0), ("failed", 1), ("timed_out", 1)])
+def test_task_create_follow_exits_with_the_tasks_outcome(
+        monkeypatch, tmp_path, capsys, final, expected):
+    """`grid task create … --follow && deploy.sh` is the whole point of the slice (issue 32).
+
+    Matching `grid task follow` exactly, including its TWO codes: a followed task has been watched to
+    the end of its stream, so `2` (not finished) is not one of the answers available here.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.terminal", "state": final, "error": None})))
+
+    assert cli.main(
+        ["task", "create", "--project", "p1", "--prompt", "go", "--follow"]) == expected
+
+
+def test_task_create_follow_prints_the_id_before_it_starts_watching(monkeypatch, tmp_path, capsys):
+    """The id first, then the stream — the order is what makes Ctrl-C survivable.
+
+    Somebody who stops watching a task they started needs the id to reattach, and the only place it
+    is ever shown is this command's own output. Printing it after the stream would mean the one case
+    where you need it is the one case where it never arrives.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.output", "text": "MARKER-EVENT"}),
+        _block(1, {"type": "task.terminal", "state": "completed"})))
+    cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+    out = capsys.readouterr().out
+
+    # The created-task REPORT, not merely the string "T1" — the follow banner names the id too, so
+    # asserting on the id alone went green with this line deleted (found by mutation).
+    created = next((i for i, line in enumerate(out.splitlines()) if "created on" in line), None)
+    event = next(i for i, line in enumerate(out.splitlines()) if "MARKER-EVENT" in line)
+    assert created is not None, f"the task was never reported as created:\n{out}"
+    assert created < event, f"the id has to be readable before the watching begins:\n{out}"
+    assert "Ctrl-C" in out and "cancel" in out, (
+        f"nothing says that stopping the watching does not stop the task:\n{out}")
+
+
+def test_task_create_follow_flushes_the_id_before_it_blocks_on_the_stream(tmp_path):
+    """The id has to be VISIBLE before the wait, not merely printed before it.
+
+    A real subprocess with stdout redirected to a file, because `capsys` cannot answer this question
+    at all: it swaps `sys.stdout` for an in-memory buffer, so it can prove the ORDER of the print
+    calls and is structurally blind to whether the file descriptor was flushed. Measured: CPython
+    block-buffers stdout whenever it is not a tty, so without an explicit flush the redirected file
+    held **zero bytes** for as long as the stream blocked — and a followed task is normally `queued`,
+    waiting for a provider, for exactly that long.
+
+    That defeats the guarantee in `_follow_created`'s own comment. `grid task create … --follow >
+    out.log &` with a `tail -f` — the CI shape this flag is for — showed nothing at all, including the
+    id needed to cancel or reattach.
+
+    The child is blocked on a file THIS test creates, so there is no sleep and no race: it cannot
+    proceed until the assertion below has been made.
+    """
+    import pathlib
+    import subprocess
+    import sys as _sys
+    import time
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    release = tmp_path / "go"
+    out_path = tmp_path / "out.log"
+    child = f"""
+import sys, os, time
+sys.path.insert(0, {str(repo_root)!r})
+import httpx
+from cli import _main, remote_task
+from remote import relay
+remote_task._resolve = lambda args: ("https://relay.example", "AT", "team")
+
+def handler(request):
+    if request.url.path.endswith("/events"):
+        while not os.path.exists({str(release)!r}):
+            time.sleep(0.05)
+        return httpx.Response(
+            200, text='id: 0\\ndata: {{"type": "task.terminal", "state": "completed"}}\\n\\n',
+            headers={{"Content-Type": "text/event-stream"}})
+    return httpx.Response(201, json={{"id": "T-42", "state": "queued", "project_id": "p1"}})
+
+_real = httpx.Client
+relay.httpx.Client = lambda *a, **k: _real(*a, **{{**k, "transport": httpx.MockTransport(handler)}})
+raise SystemExit(_main.main(
+    ["task", "create", "--project", "p1", "--prompt", "x", "--follow", "--remote"]))
+"""
+    env = {**os.environ, "GRID_HOME": str(tmp_path / "home")}
+    with open(out_path, "wb") as sink:
+        running = subprocess.Popen([_sys.executable, "-c", child], stdout=sink,
+                                   stderr=subprocess.DEVNULL, env=env)
+        try:
+            deadline = time.monotonic() + 25
+            seen = ""
+            while time.monotonic() < deadline:
+                seen = out_path.read_text(errors="replace")
+                if "T-42" in seen:
+                    break
+                if running.poll() is not None:
+                    break
+                time.sleep(0.1)
+            assert "T-42" in seen, (
+                "the task id was not on redirected stdout while the stream blocked, so a script "
+                f"watching the log has no id to cancel or reattach with. Saw: {seen!r}")
+        finally:
+            release.write_bytes(b"go")
+            assert running.wait(timeout=30) == 0, "the followed task did not complete"
+
+
+def test_task_create_follow_json_is_one_json_document_per_line(monkeypatch, tmp_path, capsys):
+    """A consumer reads the create payload and the events with the same `while read` (issue 32).
+
+    `create --json` alone stays `indent=2` — it has consumers today — but a pretty-printed object
+    followed by one-event-per-line is not line-parseable by anything, which would defeat the reason
+    for emitting both.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.output", "text": "hi"}),
+        _block(1, {"type": "task.terminal", "state": "completed"})))
+    rc = cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow", "--json"])
+
+    lines = capsys.readouterr().out.splitlines()
+    documents = [json.loads(line) for line in lines]   # raises if any line is not one document
+    assert rc == 0
+    assert documents[0]["id"] == "T1", f"the create payload is not the first line: {documents[0]}"
+    assert [d["event"]["type"] for d in documents[1:]] == ["task.output", "task.terminal"]
+
+
+def test_task_create_follow_says_the_task_is_still_running_when_it_loses_the_stream(
+        monkeypatch, tmp_path, capsys):
+    """A lost stream is not a failed task, and the difference is the whole of what to do next.
+
+    `_follow_stream` says what went wrong with the connection; it cannot say that a task was just
+    created and is still out there, because it does not know one was. Without that, a non-zero exit
+    from create-and-watch reads as "your task failed" and names nothing to try.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr("cli.remote_task._RECONNECT_BACKOFF_SECONDS", 0)
+
+    # A stream that opens, says nothing, and closes — every reattach the same, so the budget runs out.
+    _mock_relay(monkeypatch, _created_then_streamed())
+    rc = cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+    err = capsys.readouterr().err
+
+    assert rc != 0, "an unknown outcome must never read as success"
+    assert "still running" in err, f"nothing says the task outlived the watching:\n{err}"
+    assert "grid task follow T1" in err, f"nothing names the way back:\n{err}"
+
+
+def test_task_create_without_follow_names_the_command_that_watches(monkeypatch, tmp_path, capsys):
+    """The hint used to name `grid task get`, which answers once and returns (issue 32).
+
+    So somebody told to "watch it with" that command saw `state=queued`, once, and had to work out on
+    their own that a different verb existed. Both are named now, each with what it does.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed())
+    assert cli.main(["task", "create", "--project", "p1", "--prompt", "go"]) == 0
+    out = capsys.readouterr().out
+
+    assert "grid task follow T1" in out, f"the watcher is not named:\n{out}"
+    assert "grid task get T1" in out, f"the one-shot is no longer offered:\n{out}"
+    watch_line = next(line for line in out.splitlines() if "Watch it with" in line)
+    assert "follow" in watch_line, f"'watch' still names the one-shot: {watch_line!r}"
+    assert "--follow" in out, f"the flag that does this in one command is not mentioned:\n{out}"
+
+
+def test_task_create_follow_refuses_a_reply_it_cannot_attach_to(monkeypatch, tmp_path, capsys):
+    """A created task with no id is not a create-and-watch that succeeded.
+
+    The same rule every sibling in this plane follows: a reply this command cannot read is not the
+    outcome it was asked for. Exiting 0 here would report a watched task to a caller who watched
+    nothing — and `--follow` exists precisely so that `&& deploy.sh` can be trusted.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"state": "queued", "project_id": "p1"}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+
+    assert "id" in str(caught.value) and "--follow" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("argv", [
+    ["task", "follow", "T1"],
+    ["task", "create", "--project", "p1", "--prompt", "go", "--follow"],
+])
+def test_a_revoked_token_mid_stream_is_a_sentence_not_a_traceback(monkeypatch, tmp_path, capsys, argv):
+    """A 401 while following is the one stream ending nothing used to say anything about.
+
+    `RelayUnauthorized` is a plain `Exception`, NOT a `RelayError` (`remote/relay.py:77` vs `:81`), so
+    the follower's `except relay.RelayError` never saw it and a revoked session — the grid token
+    pulled while a task runs — came out as a raw traceback. Every one-shot call in this plane folds a
+    401 into a worded `SystemExit` instead.
+
+    It matters more since the exit codes landed: an unhandled exception exits 1, and 1 now means "the
+    task ended badly". So the failure was reported as a verdict about somebody's task when the task
+    was fine and the credential was not. Pre-existing for `follow`; `create --follow` shares the same
+    loop, which is why both spellings are checked here.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        if request.url.path.endswith("/events"):
+            return httpx.Response(401, json={"detail": "token revoked"})
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "p1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(argv)
+    err = capsys.readouterr().err
+
+    assert rc == 1, "an unknown outcome is never a success"
+    assert "T1" in err and ("sign" in err.lower() or "token" in err.lower()), (
+        f"nothing on stderr explains that the credential was refused:\n{err}")
+
+
+def test_task_create_follow_is_wired_and_off_by_default():
+    args = cli.build_parser().parse_args(["task", "create", "--prompt", "p"])
+    assert args.follow is False, "watching must be something the caller asked for"
+    assert cli.build_parser().parse_args(
+        ["task", "create", "--prompt", "p", "--follow"]).follow is True
 
 
 def test_task_create_surfaces_a_busy_project_as_a_clean_error(monkeypatch, tmp_path):

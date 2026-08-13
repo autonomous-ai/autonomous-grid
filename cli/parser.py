@@ -903,11 +903,53 @@ def _add_task(sub) -> None:
              "that starts from nothing. ONE-WAY: a project with a trunk can never import an "
              "existing repository, so use `grid project import` instead if you have one. Your "
              "uploaded files go on your own branch, never on the trunk.")
+    # ADR 0032 / issue 32. `create` printed an id and stopped, so every use was create → copy the id
+    # → `grid task follow <id>`. This is that, with the id it already has and no window in between:
+    # the stream is attached from `after_seq=-1`, so nothing is missed.
+    create.add_argument(
+        "--follow", action="store_true",
+        help="Watch the task after creating it, and exit with its outcome — 0 completed, non-zero "
+             "otherwise, exactly as `grid task follow` does. Ctrl-C stops the watching, not the "
+             "task. With --json the create payload is one compact line and each event follows on "
+             "its own line, so both are readable by a program.")
     create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_task)
 
-    get = task_sub.add_parser("get", help="Show a task's state and result")
+    # `get` exits with the task's OUTCOME (ADR 0032, issue 32) — the same contract `follow` has
+    # always had, on the command a script is far more likely to reach for, because it is the
+    # non-blocking one. It returned 0 whatever the state until this slice, so `grid task get $id &&
+    # deploy.sh` deployed a failed task and nothing anywhere said so.
+    get = task_sub.add_parser(
+        "get",
+        help="Show a task's state and result; exit with its outcome",
+        description=(
+            "Show where a task got to, once. Exits with the task's own outcome, so a script can "
+            "branch on it:\n\n"
+            "  0   completed\n"
+            "  1   failed or timed_out — and, as everywhere in this CLI, any refusal\n"
+            "  2   not finished yet (preparing, queued, running)\n\n"
+            "`2` is the code that makes waiting expressible: 0 would say \"fine\" about an outcome "
+            "nobody has reached, and 1 would say it went wrong. It is also the ONLY code a poller "
+            "may read as \"ask again\" — 1 covers both a failed task and a relay that could not be "
+            "reached.\n\n"
+            # `rc`, never `status`: in zsh — the default macOS shell — `status` is a READ-ONLY
+            # special parameter aliased to `$?`, so the assignment fails, the comparison then reads
+            # the assignment's own 1, and the loop exits reporting a FAILURE on the first poll of a
+            # perfectly healthy running task. Measured in zsh, bash and sh; bash and sh accept
+            # `status` happily, which is what makes the trap invisible to whoever writes it.
+            "  until grid task get \"$id\"; do\n"
+            "    rc=$?\n"
+            "    [ \"$rc\" -eq 2 ] || exit \"$rc\"   # it finished, and not well\n"
+            "    sleep 30\n"
+            "  done\n\n"
+            "Read the status: `until grid task get \"$id\"; do sleep 30; done` on its own ends only "
+            "on success, so it waits forever on a task that failed.\n\n"
+            "A state this build cannot place — one a newer relay invented — is reported as "
+            "unfinished with a line on stderr saying so, never as a success or a failure.\n\n"
+            "`--json` prints exactly what it always did; only the exit status is new. To watch a "
+            "task instead of asking once, use `grid task follow`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     get.add_argument("task_id", help="Task id returned by `grid task create`.")
     get.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     get.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
