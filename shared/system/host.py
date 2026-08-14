@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -132,24 +133,87 @@ def _memory_snapshot() -> tuple[int, int, float]:
     return 0, 0, 0.0
 
 
+# `vm_stat` prints the page size in its own header, and it must be READ rather than assumed: Apple
+# Silicon pages are 16384 bytes where Intel's are 4096. Hardcoding 4096 would under-report every
+# Apple Silicon node by a factor of four — and to a plausible-looking figure, which is worse than an
+# obviously broken one because nobody goes looking.
+_VM_STAT_PAGE = re.compile(r"page size of (\d+) bytes")
+
+# The page classes macOS can hand back on demand. This is psutil's own definition of ``available``,
+# matched deliberately: the same machine must report the same occupancy whether or not psutil
+# happens to be installed, or the dashboard's memory bar would shift the day somebody pip-installs
+# it and the change would look like real movement. Verified against `psutil.virtual_memory()` on a
+# live Mac — the two agree to within the drift of reading them a moment apart.
+_VM_STAT_AVAILABLE = ("Pages free", "Pages speculative", "Pages inactive")
+
+
+def _vm_stat_used_bytes() -> int | None:
+    """System memory in use, from ``vm_stat``, or None when it cannot be read. macOS only.
+
+    Exists so an Apple Silicon node can draw its memory bar on a stock install. psutil is an
+    OPTIONAL dependency here — ``pyproject.toml`` never declares it and nothing in the CLI's
+    dependency tree pulls it in — so trusting psutil alone left this reading absent on any Mac that
+    happened not to have it, which on unified-memory hardware is the VRAM figure itself.
+
+    ``vm_stat`` ships with every macOS and needs no privileges. All three page counts must be
+    present: a missing one would read as zero and silently inflate "used", and a format change is
+    better answered with "unknown" than with a confident wrong number.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        out = subprocess.check_output(["vm_stat"], timeout=3.0, stderr=subprocess.DEVNULL)
+        raw = out.decode("utf-8", "replace")
+    except (subprocess.SubprocessError, OSError):
+        return None
+    header = _VM_STAT_PAGE.search(raw)
+    if not header:
+        return None
+    page = int(header.group(1))
+
+    pages: dict[str, int] = {}
+    for line in raw.splitlines():
+        name, sep, value = line.partition(":")
+        if not sep:
+            continue
+        try:  # counts are printed with a trailing period ("Pages free:  177973.")
+            pages[name.strip()] = int(value.strip().rstrip("."))
+        except ValueError:
+            continue
+    if not all(key in pages for key in _VM_STAT_AVAILABLE):
+        return None
+
+    try:
+        total = int(_sysctl("hw.memsize"))
+    except ValueError:
+        return None
+    used = total - sum(pages[key] for key in _VM_STAT_AVAILABLE) * page
+    # A total and a page census read a few milliseconds apart can disagree; anything outside the
+    # pool is that disagreement, not a measurement.
+    return used if 0 < used <= total else None
+
+
 def memory_used_mb() -> float | None:
     """System memory in use, in MB — or None when this box cannot truly measure it.
 
-    None, not 0, and the distinction is the whole point: `_memory_snapshot`'s ``sysconf`` fallback
-    reports available == total because it has no way to ask, and a caller subtracting those would
-    publish a confident "0 MB in use" for a machine it never measured. Only psutil answers this
-    honestly, so only psutil is trusted here.
+    psutil when present, else ``vm_stat`` on macOS (`_vm_stat_used_bytes`), else nothing. What is
+    never used is `_memory_snapshot`'s ``sysconf`` fallback: it reports available == total because
+    it has no way to ask, and a caller subtracting those would publish a confident "0 MB in use"
+    for a machine it never measured. None, not 0 — the distinction is the whole point.
 
     Used by the Apple Silicon VRAM path, where the GPU shares this pool — see `gpu.load_snapshot`.
     """
+    used: int | None
     try:
         import psutil
 
         mem = psutil.virtual_memory()
         used = int(mem.total) - int(mem.available)
     except Exception:  # noqa: BLE001 — a probe, never a failure path
+        used = _vm_stat_used_bytes()
+    if used is None or used <= 0:
         return None
-    return used / (1024 * 1024) if used > 0 else None
+    return used / (1024 * 1024)
 
 
 def disk_gb(path: str) -> tuple[float, float] | None:

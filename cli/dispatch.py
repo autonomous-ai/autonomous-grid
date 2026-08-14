@@ -48,6 +48,9 @@ AGNOSTIC = frozenset({
     # directory that has nothing to do with the member's current mode. It reads `credentials.toml`
     # and nothing else, which is not a mode-specific file.
     "credential",
+    # `stt` hits the account-level control plane — there's no "this grid" for it to route
+    # through, so it is mode-blind too.
+    "stt",
 })
 
 # Mode-gated commands: real local behaviour today; a clear stub in remote mode until later slices

@@ -7982,6 +7982,136 @@ def test_chat_refuses_codex_models_client_side_in_both_modes(monkeypatch, tmp_pa
     assert "responses" not in str(exc.value)
 
 
+def _seed_stt_session(monkeypatch, tmp_path, *, api_url="https://api.example"):
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "session-test", "api_url": api_url})
+
+
+def test_stt_transcribe_prints_transcript_and_posts_multipart(monkeypatch, tmp_path, capsys):
+    """Success path: the file is posted as multipart/form-data with the stored session bearer
+    and ?lang= query, and the default output is just the transcript — the one thing
+    grid-app's GridCliSttClient reads from stdout."""
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"RIFF....")  # contents are irrelevant; the CLI never inspects them
+
+    calls = []
+
+    def fake_post(url, *, params, headers, files, timeout):
+        calls.append({
+            "url": url, "params": params, "headers": headers, "timeout": timeout,
+            "filename": files["file"][0], "content_type": files["file"][2],
+        })
+        return httpx.Response(200, json={
+            "success": True, "data": {"transcript": "turn on the lights", "lang": "en"},
+        })
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert cli.main(["stt", "transcribe", str(clip)]) == 0
+    assert capsys.readouterr().out.strip() == "turn on the lights"
+    assert calls == [{
+        "url": "https://api.example/v1/audio/transcriptions",
+        "params": {"lang": "en"},
+        "headers": {"Authorization": "Bearer session-test"}, "timeout": 30.0,
+        "filename": "clip.wav", "content_type": "audio/wav",
+    }]
+
+
+def test_stt_transcribe_requires_a_saved_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("no session, no network call"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stt", "transcribe", str(clip)])
+    assert "not signed in" in str(exc.value).lower()
+    assert "grid login" in str(exc.value)
+
+
+def test_stt_transcribe_missing_file_errors_before_network(monkeypatch, tmp_path):
+    _seed_stt_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("no file, no network call"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stt", "transcribe", str(tmp_path / "missing.wav")])
+    assert "not found" in str(exc.value).lower()
+
+
+def test_stt_transcribe_http_error_prints_status_and_body(monkeypatch, tmp_path, capsys):
+    """A non-2xx is reported as `HTTP <code>: <body>` so GridCliSttClient can map it to a
+    friendly sentence without re-parsing JSON."""
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(
+        401, json={"detail": "Invalid or expired Grid session"}))
+
+    assert cli.main(["stt", "transcribe", str(clip)]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("HTTP 401:")
+    assert "Invalid or expired Grid session" in out
+
+
+def test_stt_transcribe_json_prints_raw_response(monkeypatch, tmp_path, capsys):
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(
+        200, json={"success": True, "data": {"transcript": "hi", "lang": "en"}}))
+
+    assert cli.main(["stt", "transcribe", str(clip), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "success": True, "data": {"transcript": "hi", "lang": "en"},
+    }
+
+
+def test_stt_transcribe_lang_defaults_to_en_and_is_forwarded(monkeypatch, tmp_path):
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen.update(kwargs)
+        return httpx.Response(200, json={"success": True, "data": {"transcript": "", "lang": "vi"}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert cli.main(["stt", "transcribe", str(clip), "--lang", "vi"]) == 0
+    assert seen["params"] == {"lang": "vi"}
+
+
+def test_stt_transcribe_network_error_goes_to_stderr(monkeypatch, tmp_path, capsys):
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+
+    def raise_connect_error(*args, **kwargs):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "post", raise_connect_error)
+
+    assert cli.main(["stt", "transcribe", str(clip)]) == 1
+    assert "Couldn't reach the transcription service" in capsys.readouterr().err
+
+
+def test_stt_is_agnostic_and_runs_the_same_in_remote_mode(monkeypatch, tmp_path, capsys):
+    """`stt` hits the account control plane, not "this grid" — like `catalog`/`train`, it runs
+    identically whichever mode is active."""
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(
+        200, json={"success": True, "data": {"transcript": "ok", "lang": "en"}}))
+
+    assert cli.main(["--remote", "stt", "transcribe", str(clip)]) == 0
+    assert capsys.readouterr().out.strip() == "ok"
+
+
 def test_remote_join_api_codex_probe_failure_spawns_and_stores_nothing(monkeypatch, tmp_path):
     """Acceptance: every probe-failure class ends with no record written and nothing spawned. The
     OAuth bundle itself deliberately SURVIVES — it is the operator's credential, not this join's
@@ -25588,6 +25718,70 @@ def test_a_mac_that_cannot_measure_reports_no_zeros(monkeypatch):
     monkeypatch.setattr(apple, "_run", lambda cmd, timeout=10.0: "")
 
     assert gpu.load_snapshot() == {"gpu_count": 1.0, "memory_total_mb": 131072.0}
+
+
+# A Mac Studio's `vm_stat`, cut down to the lines the parser reads plus several it must step over.
+# The header's 16384 is the load-bearing detail — Apple Silicon pages are four times an Intel Mac's.
+_VM_STAT_ARM64 = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                              100000.
+Pages active:                            900000.
+Pages inactive:                          180000.
+Pages speculative:                        20000.
+Pages throttled:                              0.
+Pages wired down:                        400000.
+Pages occupied by compressor:            120000.
+"Translation faults":                 987654321.
+"""
+
+
+def test_apple_silicon_reads_memory_in_use_without_psutil(monkeypatch):
+    """psutil is optional and undeclared — nothing in the CLI's dependency tree installs it — so a
+    stock Mac has to reach this figure through `vm_stat`, which ships with every macOS and needs no
+    privileges. On unified memory the reading IS the VRAM bar, so losing it blanks the gauge."""
+    import sys
+
+    from shared.system import host
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # `import psutil` now raises ImportError
+    monkeypatch.setattr(host.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(host.subprocess, "check_output", lambda *a, **k: _VM_STAT_ARM64.encode())
+    monkeypatch.setattr(host, "_sysctl", lambda name: "137438953472")  # hw.memsize, 128 GiB
+
+    # 300_000 reclaimable pages of 16384 bytes out of a 128 GiB pool. Reading the page size as an
+    # Intel Mac's 4096 would answer 129900.1 — plausible on sight, and wrong by 3.5 GB.
+    assert host.memory_used_mb() == 126384.5
+
+
+def test_memory_in_use_is_absent_rather_than_guessed_when_vm_stat_cannot_be_read(monkeypatch):
+    """Every degraded shape must decline instead of publishing a number. Each of these would
+    otherwise read some count as zero and render as a confident occupancy on the dashboard."""
+    import sys
+
+    from shared.system import host
+
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(host, "_sysctl", lambda name: "137438953472")
+
+    def vm_stat_says(text: str) -> None:
+        monkeypatch.setattr(host.subprocess, "check_output", lambda *a, **k: text.encode())
+
+    monkeypatch.setattr(host.platform, "system", lambda: "Darwin")
+    vm_stat_says("Mach Virtual Memory Statistics:\nPages free: 100000.\n")
+    assert host.memory_used_mb() is None  # header carried no page size to scale by
+
+    vm_stat_says("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 100000.\n")
+    assert host.memory_used_mb() is None  # inactive and speculative never arrived
+
+    def explode(*a, **k):
+        raise OSError("vm_stat is not here")
+
+    monkeypatch.setattr(host.subprocess, "check_output", explode)
+    assert host.memory_used_mb() is None
+
+    # And a Linux node without psutil never shells out to a macOS tool in the first place.
+    monkeypatch.setattr(host.platform, "system", lambda: "Linux")
+    vm_stat_says(_VM_STAT_ARM64)
+    assert host.memory_used_mb() is None
 
 
 def test_serve_load_merges_vram_with_active_tasks(monkeypatch, tmp_path):

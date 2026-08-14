@@ -39,14 +39,19 @@ def resolve_budget() -> Budget:
         snap = gpu.load_snapshot()
         total_mb = float(snap.get("memory_total_mb") or 0.0)
         used_mb = float(snap.get("memory_used_mb") or 0.0)
-        avail_mb = (total_mb - used_mb) if (total_mb - used_mb) > 0 else total_mb
+        # A card at (or over, from measurement noise) capacity must read as "no room left",
+        # not "the whole card is free" — the old `else total_mb` reported a 100%-full GPU as
+        # 100% free, which is exactly the case this branch exists to catch.
+        avail_mb = (total_mb - used_mb) if (total_mb - used_mb) > 0 else 0.0
         gb = avail_mb / 1024.0
         name = _nvidia_name()
         detected = f"{name}, {gb:.1f} GB VRAM" if name else f"{gb:.1f} GB VRAM"
         return Budget(int(avail_mb * 1024 * 1024), "vram", detected, backend="cuda")
 
     # Apple Silicon: the GPU shares unified memory, so hw.memsize is the pool — but
-    # that pool is also system RAM, so the same OS/app reserve applies.
+    # that pool is also system RAM (and hw.memsize is the machine TOTAL, not a live
+    # "available now" reading like NVIDIA/RAM below), so overcommitting it swaps the
+    # whole OS, not just failing one model load. Keep the explicit reserve here.
     if _is_apple_silicon():
         total_mb = float(gpu.load_snapshot().get("memory_total_mb") or 0.0)
         if total_mb > 0:
@@ -58,14 +63,12 @@ def resolve_budget() -> Budget:
                           backend="metal")
 
     # Intel Mac / AMD / no GPU: an integrated GPU's few GB of VRAM is not a useful
-    # inference budget — llama.cpp runs on CPU here, so the budget is system RAM,
-    # minus a reserve for the OS and other apps.
+    # inference budget — llama.cpp runs on CPU here, so the budget is system RAM.
+    # No separate reserve here either, same reasoning as the Apple Silicon branch.
     info = host.gather()
     gb = info.memory_available_gb or info.memory_total_gb
-    reserve = max(3.0, gb * 0.15)
-    usable = max(gb - reserve, 0.0)
-    return Budget(int(usable * GIB), "ram",
-                  f"{usable:.1f} GB usable system RAM of {gb:.0f} GB (no usable GPU)")
+    return Budget(int(gb * GIB), "ram",
+                  f"{gb:.1f} GB available system RAM (no usable GPU)")
 
 
 def _nvidia_name() -> str | None:
