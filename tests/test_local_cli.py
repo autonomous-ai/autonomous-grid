@@ -16605,7 +16605,7 @@ def test_serve_heartbeat_tick_rotates_a_due_seat_even_when_the_relay_errors(monk
         _mock_serve_engine(monkeypatch, vendor)
         ticks = []
 
-        def fake_heartbeat(url, tok, *, load):
+        def fake_heartbeat(url, tok, *, load, meta=None):
             ticks.append(1)
             if len(ticks) >= 2:
                 state.stop.set()  # end the loop AFTER tick 2's wait
@@ -16647,7 +16647,7 @@ def test_serve_heartbeat_refresh_failure_never_stops_the_engine(monkeypatch, tmp
     _mock_serve_engine(monkeypatch, vendor)
     ticks = []
 
-    def fake_heartbeat(url, tok, *, load):
+    def fake_heartbeat(url, tok, *, load, meta=None):
         ticks.append(1)
         if len(ticks) >= 3:
             state.stop.set()
@@ -17091,7 +17091,10 @@ def test_serve_heartbeat_once_ok_reports_inflight_load(monkeypatch, tmp_path):
     monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})  # no-GPU box: load is just active_tasks + platform
     state = _serve_state(monkeypatch, tmp_path)
     seen = {}
-    monkeypatch.setattr(relay, "heartbeat", lambda url, tok, *, load: seen.update(load=load) or "ok")
+    monkeypatch.setattr(
+        relay, "heartbeat",
+        lambda url, tok, *, load, meta=None: seen.update(load=load, meta=meta) or "ok",
+    )
     assert serve.heartbeat_once(state) == "ok"
     assert seen["load"] == {"active_tasks": 0, "platform": "linux"}
 
@@ -17100,7 +17103,7 @@ def test_serve_heartbeat_once_re_registers_when_pruned(monkeypatch, tmp_path):
     from remote import relay, serve
 
     state = _serve_state(monkeypatch, tmp_path)
-    monkeypatch.setattr(relay, "heartbeat", lambda url, tok, *, load: "missing")
+    monkeypatch.setattr(relay, "heartbeat", lambda url, tok, *, load, meta=None: "missing")
     calls = []
     monkeypatch.setattr(serve, "register_once", lambda s: calls.append(s))
     assert serve.heartbeat_once(state) == "missing"
@@ -17254,7 +17257,7 @@ def test_serve_heartbeat_loop_stops_when_auth_exhausted(monkeypatch, tmp_path):
 
     state = _serve_state(monkeypatch, tmp_path, refresh_token=None)  # nothing to refresh with
 
-    def _raise_unauth(url, tok, *, load):
+    def _raise_unauth(url, tok, *, load, meta=None):
         raise relay.RelayUnauthorized()
 
     monkeypatch.setattr(relay, "heartbeat", _raise_unauth)
@@ -17310,7 +17313,7 @@ def test_serve_heartbeat_loop_records_a_relay_failure_and_heals_on_the_next_beat
 
     beats = []
 
-    def flaky(url, tok, *, load):
+    def flaky(url, tok, *, load, meta=None):
         beats.append(1)
         state.stop.set()  # exactly one tick per _heartbeat_loop call
         if len(beats) == 1:
@@ -17355,7 +17358,7 @@ def test_serve_heartbeat_loop_does_not_touch_the_record_on_a_healthy_tick(monkey
     monkeypatch.setattr(run_records, "mutate_record",
                         lambda *a, **k: mutations.append(a[:2]) or real_mutate(*a, **k))
 
-    def ok(url, tok, *, load):
+    def ok(url, tok, *, load, meta=None):
         state.stop.set()
         return "ok"
 
@@ -17400,7 +17403,7 @@ def test_serve_retries_the_registration_stamp_until_it_lands(monkeypatch, tmp_pa
     serve.register_once(state)  # registers with the relay; the record write is lost
     assert run_records.read_record("n1", "remote").get("registered_at") is None
 
-    def ok(url, tok, *, load):
+    def ok(url, tok, *, load, meta=None):
         state.stop.set()
         return "ok"
 
@@ -17435,7 +17438,7 @@ def test_serve_keeps_retrying_a_heal_whose_own_write_failed(monkeypatch, tmp_pat
 
     beats = []
 
-    def flaky(url, tok, *, load):
+    def flaky(url, tok, *, load, meta=None):
         beats.append(1)
         state.stop.set()
         if len(beats) == 1:
@@ -17562,7 +17565,11 @@ def test_meta_labels_all_external_union_as_external(monkeypatch, tmp_path):
         {"endpoint_url": "http://e1/v1", "models": ["a"], "engine_label": None},
         {"endpoint_url": "http://e2/v1", "models": ["b"], "engine_label": None},
     ]}
-    assert serve._meta(multi_external, "remote") == {"name": "mybox", "engine": "external"}
+    got = serve._meta(multi_external, "remote")
+    # Subset, not the whole dict: `_meta` also carries what the machine IS (device / chip / …),
+    # which is whatever box runs this suite. Asserting equality tied the engine-label rule to the
+    # test runner's hardware.
+    assert (got["name"], got["engine"]) == ("mybox", "external")
 
     single_external = {"endpoint_url": "http://h/v1", "models": ["a"]}  # flat single external → external
     assert serve._meta(single_external, "remote")["engine"] == "external"
