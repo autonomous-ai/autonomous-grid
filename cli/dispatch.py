@@ -42,6 +42,9 @@ AGNOSTIC = frozenset({
     # `train` talks to whatever rollout endpoint its config names (a local proxy or a hosted
     # relay URL work identically), so it is deliberately mode-blind like `engine`/`agent`.
     "train",
+    # `stt` hits the account-level control plane — there's no "this grid" for it to route
+    # through, so it is mode-blind too.
+    "stt",
 })
 
 # Mode-gated commands: real local behaviour today; a clear stub in remote mode until later slices

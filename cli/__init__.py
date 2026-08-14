@@ -55,6 +55,7 @@ from .models import cmd_catalog, cmd_pull, cmd_rm
 from .parser import build_parser
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
+from .stt import cmd_stt_transcribe
 
 __all__ = [
     "main",
@@ -104,4 +105,5 @@ __all__ = [
     "cmd_engine_status",
     "cmd_engine_start",
     "cmd_engine_stop",
+    "cmd_stt_transcribe",
 ]

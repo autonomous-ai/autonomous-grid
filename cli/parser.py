@@ -47,6 +47,7 @@ from .remote_router import (
     parse_advisor_token,
 )
 from .request import cmd_chat, cmd_edit, cmd_image, cmd_video
+from .stt import cmd_stt_transcribe
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_engine_setup(sub)
     _add_launch(sub)
     _add_train(sub)
+    _add_stt(sub)
 
     return parser
 
@@ -879,3 +881,18 @@ def _add_train(sub) -> None:
     deploy.add_argument("--name", default=None, help="Adapter name to serve under.")
     deploy.add_argument("--config", default=None, help="Fill nodes/name from a run config.")
     deploy.set_defaults(handler=cmd_train_deploy)
+
+
+def _add_stt(sub) -> None:
+    stt = sub.add_parser("stt", help="Speech-to-text (voice input)")
+    stt_sub = stt.add_subparsers(dest="subcommand", required=True)
+
+    transcribe = stt_sub.add_parser("transcribe", help="Transcribe a short audio clip to text")
+    transcribe.add_argument("audio", help="Path to the audio file (WAV) to transcribe.")
+    transcribe.add_argument(
+        "--lang", default="en",
+        help="Recognition language hint, 'en' or 'vi' (default: en).",
+    )
+    transcribe.add_argument("--timeout", type=float, default=30.0)
+    transcribe.add_argument("--json", action="store_true", help="Print the full JSON response.")
+    transcribe.set_defaults(handler=cmd_stt_transcribe)

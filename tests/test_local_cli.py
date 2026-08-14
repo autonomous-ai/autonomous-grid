@@ -7912,6 +7912,136 @@ def test_chat_refuses_codex_models_client_side_in_both_modes(monkeypatch, tmp_pa
     assert "responses" not in str(exc.value)
 
 
+def _seed_stt_session(monkeypatch, tmp_path, *, api_url="https://api.example"):
+    from remote import credentials
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    credentials.save_credentials({"session_token": "session-test", "api_url": api_url})
+
+
+def test_stt_transcribe_prints_transcript_and_posts_multipart(monkeypatch, tmp_path, capsys):
+    """Success path: the file is posted as multipart/form-data with the stored session bearer
+    and ?lang= query, and the default output is just the transcript — the one thing
+    grid-app's GridCliSttClient reads from stdout."""
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"RIFF....")  # contents are irrelevant; the CLI never inspects them
+
+    calls = []
+
+    def fake_post(url, *, params, headers, files, timeout):
+        calls.append({
+            "url": url, "params": params, "headers": headers, "timeout": timeout,
+            "filename": files["file"][0], "content_type": files["file"][2],
+        })
+        return httpx.Response(200, json={
+            "success": True, "data": {"transcript": "turn on the lights", "lang": "en"},
+        })
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert cli.main(["stt", "transcribe", str(clip)]) == 0
+    assert capsys.readouterr().out.strip() == "turn on the lights"
+    assert calls == [{
+        "url": "https://api.example/v1/audio/transcriptions",
+        "params": {"lang": "en"},
+        "headers": {"Authorization": "Bearer session-test"}, "timeout": 30.0,
+        "filename": "clip.wav", "content_type": "audio/wav",
+    }]
+
+
+def test_stt_transcribe_requires_a_saved_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("no session, no network call"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stt", "transcribe", str(clip)])
+    assert "not signed in" in str(exc.value).lower()
+    assert "grid login" in str(exc.value)
+
+
+def test_stt_transcribe_missing_file_errors_before_network(monkeypatch, tmp_path):
+    _seed_stt_session(monkeypatch, tmp_path)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("no file, no network call"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["stt", "transcribe", str(tmp_path / "missing.wav")])
+    assert "not found" in str(exc.value).lower()
+
+
+def test_stt_transcribe_http_error_prints_status_and_body(monkeypatch, tmp_path, capsys):
+    """A non-2xx is reported as `HTTP <code>: <body>` so GridCliSttClient can map it to a
+    friendly sentence without re-parsing JSON."""
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(
+        401, json={"detail": "Invalid or expired Grid session"}))
+
+    assert cli.main(["stt", "transcribe", str(clip)]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("HTTP 401:")
+    assert "Invalid or expired Grid session" in out
+
+
+def test_stt_transcribe_json_prints_raw_response(monkeypatch, tmp_path, capsys):
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(
+        200, json={"success": True, "data": {"transcript": "hi", "lang": "en"}}))
+
+    assert cli.main(["stt", "transcribe", str(clip), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "success": True, "data": {"transcript": "hi", "lang": "en"},
+    }
+
+
+def test_stt_transcribe_lang_defaults_to_en_and_is_forwarded(monkeypatch, tmp_path):
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    seen = {}
+
+    def fake_post(url, **kwargs):
+        seen.update(kwargs)
+        return httpx.Response(200, json={"success": True, "data": {"transcript": "", "lang": "vi"}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    assert cli.main(["stt", "transcribe", str(clip), "--lang", "vi"]) == 0
+    assert seen["params"] == {"lang": "vi"}
+
+
+def test_stt_transcribe_network_error_goes_to_stderr(monkeypatch, tmp_path, capsys):
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+
+    def raise_connect_error(*args, **kwargs):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "post", raise_connect_error)
+
+    assert cli.main(["stt", "transcribe", str(clip)]) == 1
+    assert "Couldn't reach the transcription service" in capsys.readouterr().err
+
+
+def test_stt_is_agnostic_and_runs_the_same_in_remote_mode(monkeypatch, tmp_path, capsys):
+    """`stt` hits the account control plane, not "this grid" — like `catalog`/`train`, it runs
+    identically whichever mode is active."""
+    _seed_stt_session(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"x")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: httpx.Response(
+        200, json={"success": True, "data": {"transcript": "ok", "lang": "en"}}))
+
+    assert cli.main(["--remote", "stt", "transcribe", str(clip)]) == 0
+    assert capsys.readouterr().out.strip() == "ok"
+
+
 def test_remote_join_api_codex_probe_failure_spawns_and_stores_nothing(monkeypatch, tmp_path):
     """Acceptance: every probe-failure class ends with no record written and nothing spawned. The
     OAuth bundle itself deliberately SURVIVES — it is the operator's credential, not this join's
