@@ -188,11 +188,24 @@ reason. **Roll the relay out BEFORE the provider fleet.**
 beat, and the result push. Re-keying one and not the others snapshots or pushes from the wrong
 worktree, and the tree beat degrades to `None` on any fault, so it fails silently.
 
-⚠️ **Per-conversation workspaces need a layout and a bound.** Three conversations of one member on
-the 581 MiB repository measured in 0033 issue 16a is ~12 GB of checkouts. One local clone per
-`(project, member)` with a `git worktree` per conversation shares the object store; whether that is
-viable is a measurement (below), and **whichever way it goes, workspace eviction is required** —
-`GRID_MAX_TASKS` bounds concurrent runs, not accumulated directories.
+⚠️ **Per-conversation workspaces need a layout and a bound.** Three conversations of one member as
+separate clones cost **3.28 GB** — MEASURED (issue 35, below), on the same repository 0033 issue 16a
+used, which has since grown to 792 MiB / 34,159 commits. One local clone per `(project, member)`
+with a `git worktree` per conversation shares the object store and is **viable**: measured, the Nth
+worktree adds **305.8 MiB** against the Nth clone's **1,043.4 MiB**, so three conversations cost
+1.62 GB instead of 3.28 GB. **Workspace eviction is still required** — `GRID_MAX_TASKS` bounds
+concurrent runs, not accumulated directories.
+
+> ⚠️ **AMENDED 2026-08-14 — this paragraph asserted "~12 GB of checkouts" and that figure is wrong
+> by ~3.8×.** Nobody had taken it; it was the estimate issue 35 existed to replace, and the
+> measurement contradicts it. Amended rather than reinterpreted, per issue 35's eighth criterion.
+>
+> **The conclusion survives and its justification is weaker than this ADR implied.** Sharing the
+> object store really does pay — 52.9% of the equivalent clones, and 3.4× cheaper for each
+> conversation after the first — so D-c's layout stands on the measurement. But it stands on 1.6 GB
+> saved out of 3.3 GB, not on 12 GB, and any future argument that reaches for the old figure is
+> reaching for a number that was never measured. `tests/measure_non_dev_design.py --tier git`
+> re-takes it.
 
 ### D-d — The relay applies every successful turn to `main`, and it does so OUTSIDE the settle request
 
@@ -538,13 +551,18 @@ rule — it asks the question rather than being refused by it.
 
 ## What must be measured before this is built
 
-| Measurement | What it decides | What a wrong guess costs |
+**TAKEN, 2026-08-14 (issue 35).** Re-runnable as `tests/measure_non_dev_design.py` in
+autonomous-grid, against git 2.54.0 and Claude Code 2.1.232, on the same repository 0033 issue 16a
+used (now 792 MiB / 34,159 commits / 73 authors). One row contradicted this ADR and D-c above is
+amended; the rest hold.
+
+| Measurement | What it decides | Answer |
 |---|---|---|
-| `git worktree` on a shared object store: is `info/exclude` in the common dir; do N worktrees fetch concurrently without lock contention | D-c's provider layout | ~12 GB of checkouts for three conversations of one member on the 581 MiB repository |
-| **`merge-tree --write-tree` on a large repository** | D-d's apply step and D-f's refresh — how long the apply holds its serialization | the apply becomes the grid's bottleneck and nobody knows until a real team is on it |
-| Does Claude Code's compaction **shorten** the `.jsonl`, and can `--resume` resume a compacted transcript after a round trip through a git ref | D-j's fast-forward rule, and whether a long conversation survives at all | a conversation that silently starts fresh at turn N |
-| Transcript growth across ~50 turns | whether the side ref is fetched and pushed every turn or only on change | a turn pays a growing constant before the agent starts |
-| The **real** tier-3 rate on a real repository with a real team | the whole cost model of D-d and D-g | the table below gives the probability `main` moves during a merge; it does not give how often two people touch the same lines |
+| `git worktree` on a shared object store: is `info/exclude` in the common dir; do N worktrees fetch concurrently without lock contention | D-c's provider layout | **`info/exclude` is COMMON-directory** (a per-worktree one is not honoured, with a positive control proving the probe worked). **4/4 concurrent fetches into one object store succeeded**, no lock contention, 0.171–0.173 s. Nth worktree **+305.8 MiB** vs Nth clone **+1,043.4 MiB**. ⚠️ The old *"~12 GB"* cost was **3.28 GB** — see D-c's amendment |
+| **`merge-tree --write-tree` on a large repository** | D-d's apply step and D-f's refresh — how long the apply holds its serialization | **41–43 ms** median clean across runs (2,008 commits divergent), **23.5 ms** median conflicting. The apply is **not** the grid's bottleneck: it holds its lock for tens of milliseconds |
+| Does Claude Code's compaction **shorten** the `.jsonl`, and can `--resume` resume a compacted transcript after a round trip through a git ref | D-j's fast-forward rule, and whether a long conversation survives at all | **Compaction does NOT shorten it** — the file GREW 717,340 → 1,157,756 bytes across the compacting turns; it appends a summary and a boundary. **A compacted transcript DOES resume** after a real push/fetch round trip and re-materialization at a different absolute path |
+| Transcript growth across ~50 turns | whether the side ref is fetched and pushed every turn or only on change | **A flat toll, not a growing one**: turn 1 costs 87,222 bytes, every turn after it ~12.8 KB (turn 2 13,672 · turn 25 12,768 · turn 50 12,851). 50 turns = **717 KB**. The per-turn ADDITION is constant; the BLOB to move grows linearly |
+| The **real** tier-3 rate on a real repository with a real team | the whole cost model of D-d and D-g | **~25.0%** — 125 of 500 replayed pairs of commits by different authors within 15 minutes, sampled at an even stride over 29,553 eligible pairs (20,000 commits, 56 authors). High enough that **a merge turn is an ordinary running cost, not an edge case**. An **estimate** that OVER-counts (git-conflict ⊋ agent-unresolvable), and its method and limits travel with it |
 
 The `1 − e^(−RT)` arithmetic that forces the apply's serialization, using 0033's own figures as the
 first row:
