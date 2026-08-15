@@ -491,6 +491,136 @@ def test_the_two_refusal_codes_this_cli_branches_on_are_the_ones_the_relay_sends
         "'the trunk you asked for is already there'")
 
 
+def test_the_terminal_state_set_is_the_same_in_all_four_copies():
+    """ADR 0034 D-a keeps the state sets on the TURN and unrenamed on the wire — and there are FOUR
+    copies of them in step, not two.
+
+    grid-src holds three and pins them against each other (`test_task_events.py`): `TERMINAL_STATES`
+    in `tasks.py`, its private twin in `task_events.py`, and `TASK_ACTIVE_STATES` in `db.py`, which
+    is the predicate of the partial unique index and is documented as FROZEN. The fourth is here,
+    and until this test nothing in either repository compared it to the other three.
+
+    What drift costs is asymmetric, which is why the CLI's copy is the conservative half: a state
+    this build has never heard of is treated as not-yet-finished, so `grid task fetch` refuses
+    rather than handing back the input files as though they were the result. That is a good default
+    and it is not a substitute for agreeing — a terminal state MISSING from this set makes every
+    fetch of a task that ended in it refuse forever, with the relay reporting a perfectly finished
+    task.
+
+    The two sets are complements of one closed set of six, so this asserts the relationship rather
+    than either list: an overlap would let a "terminal" report leave the member's slot held with no
+    reaper watching it.
+    """
+    from cli import remote_task
+
+    terminal = _relay_string_set("TERMINAL_STATES", module="tasks.py")
+    private_twin = _relay_string_set("_TERMINAL_STATES", module="task_events.py")
+    active = _relay_string_set("TASK_ACTIVE_STATES", module="db.py")
+
+    assert terminal == private_twin, (
+        "grid-src's own two copies of the terminal set have drifted from each other")
+    assert remote_task._TERMINAL_STATES == terminal, (
+        f"this CLI treats {sorted(remote_task._TERMINAL_STATES)} as terminal and the relay reports "
+        f"{sorted(terminal)} — `grid task fetch` refuses a finished task, or hands back input files "
+        f"as though they were a result")
+    assert not (terminal & active), (
+        "a state is both terminal and active, so a finished task would hold its member's slot with "
+        "no reaper watching it")
+
+
+def test_the_claim_payload_carries_both_ids_and_they_are_not_one_key():
+    """ADR 0034 D-a's second spelling, asserted STRUCTURALLY rather than by running an old provider.
+
+    `conversation_id` joins the claim payload in issue 37 and `task_id` keeps meaning the TURN —
+    what `/lease`, `/result`, `/events` and `/cancel` address, and what this provider hands its
+    lease renewer (`remote/task_lease.renew_task_lease`). One spelling for both is how a provider
+    renews the wrong id, gets a bare 404 — byte-identical to the one an older relay sends for a
+    route it does not have — stops renewing WITHOUT killing the agent, and leaves the run
+    unattended until its lease expires. Nothing goes red anywhere in that story.
+
+    Read off `_claim_one`'s returned dict rather than off a live response, because the key that
+    matters most is the one this provider does NOT read yet: issue 38 is where a missing
+    `conversation_id` becomes a terminal refusal, and this is what says the relay is already ahead
+    of the fleet when that lands.
+    """
+    keys = _relay_claim_keys()
+
+    assert "task_id" in keys, (
+        "grid-src's claim no longer sends `task_id`; the lease renewer has nothing to renew with")
+    assert "conversation_id" in keys, (
+        "grid-src's claim no longer sends `conversation_id` — from issue 38 this provider refuses "
+        "such a claim outright rather than running in a member-level workspace")
+    assert "member_key" in keys, (
+        "the key `remote/tasks.run_task` already refuses a claim without (ADR 0033 D-g) is gone")
+
+
+def _relay_string_set(name, module):
+    """A set or tuple of STRING literals out of a grid-src module, parsed rather than imported.
+
+    A third sibling of `_relay_constant` and `_relay_string_constant`, and separate for their
+    reason: each refuses a shape it does not understand instead of returning something plausible.
+    The two spellings accepted here are the two grid-src uses — `frozenset({...})` for the terminal
+    sets and a bare tuple for `TASK_ACTIVE_STATES`, which is a tuple because it is the predicate of
+    a partial index. Returned as a `frozenset` so a caller compares membership, never order.
+    """
+    import ast
+
+    source = _relay_module(module)
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    for node in ast.parse(source.read_text()).body:
+        if not (isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == name for t in node.targets)):
+            continue
+        value = node.value
+        # `frozenset({...})` / `set([...])` — the collection is the call's single argument.
+        if isinstance(value, ast.Call) and len(value.args) == 1:
+            value = value.args[0]
+        assert isinstance(value, (ast.Set, ast.Tuple, ast.List)), (
+            f"grid-src's {name} is no longer a literal collection, so this lockstep check cannot "
+            f"read it — teach this helper the new shape rather than deleting the check")
+        members = []
+        for element in value.elts:
+            assert isinstance(element, ast.Constant) and isinstance(element.value, str), (
+                f"grid-src's {name} holds something that is not a plain string literal, so this "
+                f"check would compare a set it has only partly read")
+            members.append(element.value)
+        assert members, f"grid-src's {name} is empty, so comparing against it proves nothing"
+        return frozenset(members)
+    raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
+
+
+def _relay_claim_keys():
+    """The key set of the dict `_claim_one` answers a provider with, parsed out of grid-src.
+
+    Reads the LAST `return {...}` in the function, which is the payload — `_claim_one`'s only other
+    return is a bare `None` for an empty queue. A dict whose keys stopped being plain literals is an
+    error rather than a partial answer, for `_relay_string_set`'s reason.
+    """
+    import ast
+
+    source = _relay_module("tasks.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    for node in ast.walk(ast.parse(source.read_text())):
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_claim_one"):
+            continue
+        dicts = [child.value for child in ast.walk(node)
+                 if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict)]
+        assert dicts, (
+            "grid-src's `_claim_one` no longer returns a dict literal, so this check cannot read "
+            "the claim payload's shape — teach it the new one rather than deleting the check")
+        keys = []
+        for key in dicts[-1].keys:
+            assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+                "the claim payload has a computed key, so this check would compare a shape it has "
+                "only partly read")
+            keys.append(key.value)
+        return frozenset(keys)
+    raise AssertionError("_claim_one is no longer defined in grid-src's tasks.py")
+
+
 def test_the_owner_role_this_cli_filters_on_is_the_one_the_relay_writes():
     """`grid task create` with no `--project` resolves the caller's OWN project called `default`,
     and `owner` is the whole of what makes it theirs (ADR 0033 D-a / D-o).
