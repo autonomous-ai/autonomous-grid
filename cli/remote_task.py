@@ -328,7 +328,7 @@ _OWNER_ROLE = "owner"
 _NO_PROJECT = (
     "No project given. A task runs on a project's code, so it needs to know which one.\n"
     "\n"
-    "  grid project list                                  # your projects\n"
+    "  grid project list                                  # projects you can work in\n"
     "  grid task create --project <id> --prompt '...'\n"
     "\n"
     "No projects yet?  grid project create --name my-app")

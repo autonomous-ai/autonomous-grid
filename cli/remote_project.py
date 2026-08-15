@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from . import project_arg, project_providers
+from . import project_arg, project_providers, project_visibility
 
 
 def cmd_remote_project(args: argparse.Namespace) -> int:
@@ -39,6 +39,15 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
             "archive": project_archive.project_archive,
             "unarchive": project_archive.project_unarchive,
             "delete": project_archive.project_delete,
+        }[args.subcommand](args)
+    if args.subcommand in ("share", "private"):
+        # ADR 0034 D-k (issue 36). Their handlers live in `cli/project_visibility.py`, for the same
+        # reason the three above live in `cli/project_archive.py` — imported at module scope with
+        # the other two `cli.` siblings, because this file already reads its constants at :196 and
+        # :702 and a second local import would be two spellings of one dependency.
+        return {
+            "share": project_visibility.project_share,
+            "private": project_visibility.project_private,
         }[args.subcommand](args)
     if args.subcommand == "wip":
         if args.wip_action != "reset":
@@ -180,6 +189,12 @@ def _project_list(args: argparse.Namespace) -> int:
         # follows in `project_providers.print_unserved`. A truthy test would also mark a row whose
         # `archived` a proxy had stringified to `"false"`.
         marker = "  (archived)" if project.get("archived") is True else ""
+        # ⚠️ `== VISIBILITY_PRIVATE`, never falsiness (ADR 0034 D-k, issue 36). *Absent ⇒ grid* is
+        # what every relay predating this slice says, and that reading has to stay available — a
+        # truthy test would mark every project on an old relay as private, and the `or '?'` idiom
+        # used for `role` above would be worse still, printing a guess where a fact belongs.
+        if project.get("visibility") == project_visibility.VISIBILITY_PRIVATE:
+            marker += "  (private)"
         print(f"{str(project.get('id') or '?'):38}  "
               f"{str(project.get('role') or '?'):8}  {project.get('name') or '?'}{marker}")
     return 0
@@ -679,6 +694,14 @@ def _project_status(args: argparse.Namespace) -> int:
         # choice: `test_task_lease.py` retypes every printed `grid …` hint through the real parser,
         # and it reads to end of line.
         print(f"Put it back with: grid project unarchive {args.project_id}")
+    # ⚠️ `== VISIBILITY_PRIVATE`, never falsiness (ADR 0034 D-k, issue 36). *Absent ⇒ grid*, which
+    # is every relay predating this slice. Only the RESTRICTED state is announced: on a relay that
+    # serves D-k, grid-visible is the default and saying so on every status would be noise, while
+    # "private" is a deliberate act somebody needs reminding of before they wonder why a colleague
+    # cannot see their work.
+    if answer.get("visibility") == project_visibility.VISIBILITY_PRIVATE:
+        print("PRIVATE — only its members can reach it.")
+        print(f"Share it with: grid project share {args.project_id}")
     print(f"{trunk}={answer.get('main_commit') or '(none yet)'}")
     print(f"{branch}={answer.get('wip_commit') or '(nothing yet)'}")
 

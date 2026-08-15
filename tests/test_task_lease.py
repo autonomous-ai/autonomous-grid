@@ -1460,9 +1460,13 @@ def test_the_archived_keys_this_cli_reads_are_the_ones_the_relay_writes():
     side reads a reply this repository wrote down, so a relay that renamed one leaves both suites
     green and the feature quietly half-working.
     """
-    view = _relay_function_strings("_project_view", module="projects.py")
+    # `project_view`, public since ADR 0034 D-k (issue 36) — `project_visibility` answers with the
+    # same shape, so a second hand-written copy of it would be the drift this check exists to catch.
+    # The rename is what made THIS test go red, which is the helper doing its job: it reads a name
+    # out of grid-src rather than trusting one.
+    view = _relay_function_strings("project_view", module="projects.py")
     assert "archived" in view, (
-        "grid-src's `_project_view` no longer carries `archived`, so `grid project list` would "
+        "grid-src's `project_view` no longer carries `archived`, so `grid project list` would "
         "show an archived project as though it were live")
 
     # The PARAMETER names, not the body's string literals: a query parameter's wire name is its
@@ -1503,3 +1507,89 @@ def test_the_archive_refusal_codes_are_the_ones_the_relay_sends():
     assert any("archive" in value for value in empty), (
         "grid-src's delete refusal no longer names `grid project archive`, which is the only thing "
         "a member refused for a non-empty project can do instead")
+
+
+def test_the_visibility_values_this_cli_sends_are_the_ones_the_relay_accepts():
+    """The wire values ADR 0034 D-k (issue 36) hand-duplicates across the two repositories.
+
+    `grid project private` posts `{"visibility": "private"}` and the relay's `_visibility` refuses
+    anything outside its own closed set — so a rename on either side turns the command into a **422
+    on every invocation**. Loud, which is the good direction; pinned anyway because the READING side
+    fails silently: `grid project list` and `grid project status` compare against `private` to mark a
+    project, and a rename there simply stops marking one. A member would learn that their project is
+    still shared by finding out a colleague can read it.
+
+    ⚠️ Read as CONSTANTS, not as literals in the validator's body. The first draft of this test
+    scanned `project_visibility._visibility` for its strings and went red immediately — that
+    function validates against `project_access.VISIBILITIES` and contains no value at all, so a
+    body scan would have proved nothing about the wire and everything about the relay's spelling
+    habits. The constants are what both routes and both readings resolve through.
+    """
+    from cli import project_visibility
+
+    assert project_visibility.VISIBILITY_PRIVATE == _relay_string_constant(
+        "VISIBILITY_PRIVATE", module="project_access.py"), (
+        "grid-src no longer accepts the value `grid project private` sends")
+    assert project_visibility.VISIBILITY_GRID == _relay_string_constant(
+        "VISIBILITY_GRID", module="project_access.py"), (
+        "grid-src no longer accepts the value `grid project share` sends")
+
+
+def test_the_visibility_key_this_cli_reads_is_the_one_the_relay_writes():
+    """`visibility` on the project view and on `/status`, and it raises nowhere.
+
+    That is exactly why it is pinned here: every unit test on this side reads a reply this
+    repository wrote down, so a relay that renamed the key would leave both suites green and the
+    marking quietly absent. The same argument `archived` carries two tests up.
+    """
+    view = _relay_function_strings("project_view", module="projects.py")
+    assert "visibility" in view, (
+        "grid-src's `project_view` no longer carries `visibility`, so `grid project list` would "
+        "show a private project as though anyone on the grid could read it")
+
+    # `grid_access` beside it: the setting and its EFFECT are two facts, and a CLI reading only the
+    # first prints "shared with everyone" about a project nobody but its members can reach. It
+    # raises nowhere and the CLI keys on an explicit `False`, so a rename is silent in exactly the
+    # direction that matters — `share` over-claims, `private` stays accurate.
+    assert "grid_access" in view, (
+        "grid-src's `project_view` no longer carries `grid_access`, so `grid project share` would "
+        "claim a widening on a relay that does not serve the rule at all")
+
+    status = _relay_function_strings("project_status", module="project_status.py")
+    assert "grid_access" in status, (
+        "grid-src's `/projects/{id}/status` no longer carries `grid_access`")
+    assert "visibility" in status, (
+        "grid-src's `/projects/{id}/status` no longer carries `visibility`, so `grid project "
+        "status` cannot tell a member their project is restricted")
+
+
+def test_a_project_you_are_not_a_member_of_can_never_read_as_yours():
+    """⚠️ **The load-bearing relation in issue 36, and it is between two of the relay's OWN
+    constants** — so this is the one lockstep check whose two halves both live over there.
+
+    `GET /relay/v1/projects` now lists projects the caller has no membership row in, and reports
+    `role` as `project_access.GRID_ROLE` for them. `cli/remote_task._own_default_project` filters
+    that listing on `role == "owner"` to decide which project a `grid task create` with no
+    `--project` means — and a project NAME is unique per OWNER rather than per grid, so on any real
+    grid several people have a `default`.
+
+    The day those two strings collided, every forgotten `--project` would run somebody's task in a
+    colleague's project, silently. Nothing else in either repository would notice: the create
+    succeeds, the task runs, the work lands — in the wrong history.
+
+    Asserted from this side because this is where the damage lands, and `test_project_visibility.py`
+    asserts it over there too because a cross-repo check SKIPS whenever grid-src is not beside this
+    worktree, which is every CI run.
+    """
+    from cli import remote_task
+
+    owner = _relay_string_constant("OWNER_ROLE", module="project_members.py")
+    grid = _relay_string_constant("GRID_ROLE", module="project_access.py")
+
+    assert owner != grid, (
+        "grid-src reports the same `role` for a project you own and one you merely reach through "
+        "the grid, so a projectless `grid task create` would resolve `default` to a colleague's "
+        "project")
+    assert remote_task._OWNER_ROLE == owner, (
+        "this CLI's owner filter no longer matches the role grid-src writes")
+    assert remote_task._OWNER_ROLE != grid

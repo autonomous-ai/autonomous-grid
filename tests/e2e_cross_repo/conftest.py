@@ -171,3 +171,37 @@ def spawn_provider(relay, provider_nodes, fake_agent_bin, workspace_root, tmp_pa
         provider.stop()
     for handle in logs:
         handle.close()
+
+
+@pytest.fixture(scope="session")
+def relay_private_domain(tmp_path_factory):
+    """A THIRD relay, on ADR 0034 D-k's network type but **NOT in Grid mode** — so it serves the
+    rule not at all, and that is the point of it.
+
+    Its own process for `relay_short_budgets`' reason: grid-src reads `GRID_NETWORK_TYPE` from the
+    environment at import time, so a relay with a different topology is a different process. Its own
+    database too, so its projects do not appear in the listings every other module asserts on.
+
+    ⚠️ **This fixture cannot exercise D-k's positive path, and nothing in this suite can.**
+    `grid_access_enabled()` requires `config.grid_mode` AND `private-domain`, and
+    `H.start_relay` sets `GRID_MODE=false` for every relay it starts — because the harness mints its
+    own JWTs and Grid mode refuses everything but a control-plane-signed token (see this file's
+    `relay_home` docstring for the same constraint from the other side). So the pair this fixture
+    creates is exactly the misconfiguration the gate exists to refuse, and `test_15` asserts the
+    refusal.
+
+    ⚠️ **Read the suite's green count accordingly.** A passing run does NOT mean a colleague
+    reaching a project nobody invited them to has been exercised end to end — it means the rule is
+    correctly OFF here. The positive path is covered only at unit level, in grid-src's
+    `test_project_visibility.py`, against a relay whose config that suite patches. That is a real
+    gap, named rather than left for somebody to infer: closing it means teaching `_harness.py` to
+    sign against a local JWKS (`config.grid_token_jwks_path`) and giving this fixture a grid-mode
+    sibling. Deliberately not done in issue 36; the alternative was leaving the gate open.
+    """
+    proc, base = H.start_relay(tmp_path_factory.mktemp("relay-private-domain"), extra_env={
+        "GRID_NETWORK_TYPE": "private-domain",
+    })
+    try:
+        yield base
+    finally:
+        H.stop_relay(proc)

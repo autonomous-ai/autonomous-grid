@@ -655,3 +655,84 @@ def test_14_a_project_is_archived_and_unarchived_and_an_empty_one_is_deleted(
                           headers={"Authorization": f"Bearer {owner_token}"})
     assert gone.status_code == 404, gone.text
     assert gone.json()["detail"]["code"] == "no_such_project", gone.text
+
+
+def test_15_the_grid_access_rule_is_not_served_outside_grid_mode(
+        relay_private_domain, tmp_path):
+    """ADR 0034 D-k / issue 36 — the **fail-closed** half, which is the half this harness can prove.
+
+    D-k's premise is *authenticated on this grid ⇒ a colleague*, and only Grid mode enforces it: the
+    relay takes a control-plane-signed token there and refuses public API keys outright. Outside it
+    `_extract_auth` accepts any `lga_sk_` key and any locally-signed JWT, neither carrying a domain
+    claim — so `GRID_MODE=false GRID_NETWORK_TYPE=private-domain` would hand every key holder every
+    non-private project on the relay.
+
+    That combination shipped in the first draft of this slice and was found in review. **It is
+    exactly this harness's own configuration**, which is why the test belongs here rather than in a
+    unit suite: `relay_private_domain` sets the network type, and `_harness.start_relay` sets
+    `GRID_MODE=false` for every relay it starts. Nothing else in either repository puts those two
+    facts in one process.
+
+    ⚠️ **This asserts the rule is OFF, and that is a deliberate downgrade from what this test used
+    to do.** It drove the positive case through real git — a colleague cloning a project nobody
+    invited them to, seeing `main` and no WIP branches — and that case is now unreachable here,
+    because a relay in Grid mode will not accept the tokens `_harness.token` mints. Restoring it
+    means teaching the harness to sign against a local JWKS (`config.grid_token_jwks_path`), which
+    is follow-up work. The positive case is covered at unit level by
+    `grid-src/tests/test_project_visibility.py`, which drives `task_git._access` directly.
+    """
+    import os
+    import subprocess
+
+    from remote import relay as relay_client
+
+    alice = H.token("alice", "alice-node")
+    bob = H.token("bob", "bob-node")
+
+    project_id = relay_client.create_project(relay_private_domain, alice, name="p-shared")["id"]
+    relay_client.init_project(relay_private_domain, alice, project_id)
+
+    # 1. The relay says so on the wire, which is what stops the CLI claiming a widening it did not
+    #    perform. `grid_access` is the whole reason that key exists.
+    listed = relay_client.list_projects(relay_private_domain, alice)["projects"]
+    mine = [p for p in listed if p["id"] == project_id]
+    assert mine, listed
+    assert mine[0]["grid_access"] is False, (
+        "a relay outside Grid mode reported that it serves projects grid-wide")
+    assert mine[0]["visibility"] == "grid", (
+        "the STORED setting must still read back as stored — only its effect is withheld")
+
+    # 2. And it really is not served: bob is on this grid and sees nothing of alice's.
+    assert relay_client.list_projects(relay_private_domain, bob)["projects"] == [], (
+        "a colleague reached a project on a relay whose premise for letting them is not enforced")
+    refused = _refusal(
+        lambda: relay_client.project_status(relay_private_domain, bob, project_id))
+    bogus = _refusal(lambda: relay_client.project_status(
+        relay_private_domain, bob, "11111111-2222-3333-4444-555555555555"))
+    assert refused == bogus, (refused, bogus)
+
+    # 3. Through REAL GIT, over the same fence: no ref of alice's is advertised to bob at all.
+    url = relay_client.git_remote_url(relay_private_domain, project_id)
+    listed_refs = subprocess.run(
+        ["git", "ls-remote", url, "refs/heads/*"], capture_output=True, text=True, timeout=60,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
+             "GIT_CONFIG_KEY_0": "http.extraHeader",
+             "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {bob}"})
+    assert listed_refs.returncode != 0, (
+        f"a colleague cloned a project the relay does not actually serve them: "
+        f"{listed_refs.stdout!r}")
+
+    # 4. The owner is untouched by all of it — the fail-closed direction must not cost alice her own
+    #    project, or "off" would be a degrade rather than the pre-36 behaviour.
+    assert relay_client.project_status(
+        relay_private_domain, alice, project_id)["project_id"] == project_id
+    assert "refs/heads/main" in H.git_ls_remote(url, "refs/heads/*", bearer=alice)
+
+
+def _refusal(call):
+    """What a refused call SAYS, as a comparable value. Anything else is a test failure."""
+    try:
+        call()
+    except SystemExit as exc:
+        return str(exc)
+    raise AssertionError("the call was expected to be refused and was not")

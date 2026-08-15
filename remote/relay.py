@@ -894,6 +894,40 @@ def delete_project(signaling_url: str, access_token: str, project_id: str) -> di
         missing_route_hint=_OLD_RELAY_NO_ARCHIVE)
 
 
+# A relay that predates ADR 0034 D-k (issue 36) has no visibility route, and answers the same bare
+# framework 404 an unknown project id would produce on a relay that does.
+#
+# ⚠️ **Its own sentence**, for `_OLD_RELAY_NO_ARCHIVE`'s reason: `_OLD_RELAY` claims the relay has no
+# projects at all, which is false here and would send somebody to check a feature that works.
+#
+# It says what the relay's silence MEANS, not only that the route is missing: on a relay this old
+# every project is reachable by its members alone, which is the state a caller reaching for
+# `private` was asking for. Saying so is the difference between "your project is exposed and you
+# cannot fix it" and "it is already as private as this relay can make it".
+_OLD_RELAY_NO_VISIBILITY = (
+    "This grid's relay cannot change a project's visibility — it predates that route. On a relay "
+    "this old a project is reachable by its members alone, which is what `private` asks for, so "
+    "nothing is exposed. Ask its operator to update it if you want to share projects grid-wide."
+)
+
+
+def set_project_visibility(signaling_url: str, access_token: str, project_id: str,
+                           *, visibility: str) -> dict[str, Any]:
+    """Set who may reach a project (``POST /relay/v1/projects/{id}/visibility``), ADR 0034 D-k.
+
+    `grid` — anyone authenticated to this grid — or `private`, its members alone. Owner only, and
+    idempotent: the reply's `changed` says whether THIS call did it.
+
+    The value is sent verbatim rather than as a boolean, because the relay's column is an enum ADR
+    0034 D-k leaves open and a `bool` here would be a second vocabulary to map onto it.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/visibility",
+        json={"visibility": visibility},
+        missing_route_hint=_OLD_RELAY_NO_VISIBILITY)
+
+
 def init_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
     """Give an empty project a trunk (``POST /relay/v1/projects/{id}/init``), ADR 0033 D-o.
 

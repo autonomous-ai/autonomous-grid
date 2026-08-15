@@ -884,6 +884,8 @@ grid project list [--all] [--grid <grid>] [--json]
 grid project archive       <project-id> [--grid <grid>] [--json]
 grid project unarchive     <project-id> [--grid <grid>] [--json]
 grid project delete        <project-id> [--yes] [--grid <grid>] [--json]
+grid project share         <project-id> [--grid <grid>] [--json]
+grid project private       <project-id> [--grid <grid>] [--json]
 grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
@@ -1256,6 +1258,35 @@ in that case the recovery is a new project, not this command.
 
 Both are the project **owner's**. Another member is refused with a reason; someone who is not a
 member gets the same "no such project" a stranger always gets.
+
+### Who can reach a project
+
+On a grid the control plane provisions per email domain, **anyone signed in can work in any project
+on it**, without being added to each one. They become a member the first time they actually do
+something — create a task, commit a file, run `grid project status` — and until then the project's
+member list is who has *worked* in it, not who has looked.
+
+`grid project private <id>` restricts a project to its members. Everyone who has already worked in
+it **keeps access**: this stops anyone else joining, it does not remove anybody.
+`grid project share <id>` puts it back, and sharing is the default for a new project.
+`grid project list` marks a restricted one `(private)`, and `grid project status` says so too.
+
+Both are the project **owner's**, like archive and delete.
+
+Someone outside a private project is refused with exactly the answer they would get for a project id
+that does not exist — the same words, the same code. That is deliberate: the id is the only thing
+standing between one team's source and another's, so a refusal that told them the project was real
+would turn every project route into a way to test ids.
+
+Writes are included, not just reads: someone reaching a project this way can create tasks, commit
+files, integrate, promote and reset a WIP branch in it, exactly as a member added by hand can. That
+is what "works in any project" means — the grid, not an invitation, is the boundary. Mark a project
+private if that is not what you want for it.
+
+⚠️ **On any other grid this rule does not apply at all** and a project is reachable by its members
+alone, exactly as before. The relay decides that from its own configuration — it must be running
+against the hosted control plane *and* be a one-grid-per-email-domain network — rather than from
+anything a client sends. `grid project status` reports which, so you never have to guess.
 
 ## Task
 

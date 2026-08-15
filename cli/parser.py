@@ -518,7 +518,8 @@ def _add_project(sub) -> None:
     starter.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     starter.set_defaults(handler=cmd_remote_project)
 
-    listing = project_sub.add_parser("list", help="List the projects you are a member of")
+    listing = project_sub.add_parser(
+        "list", help="List the projects you can work in")
     listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     # ADR 0033 D-p / issue 33. Archived projects are hidden by default because this listing is what
@@ -575,6 +576,39 @@ def _add_project(sub) -> None:
     remover.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     remover.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     remover.set_defaults(handler=cmd_remote_project)
+
+    # ADR 0034 D-k / issue 36 — who on the grid may reach a project. Registered next to the
+    # lifecycle verbs above because they answer neighbouring questions about the same row, and a
+    # person deciding to archive a project is often deciding who should see it.
+    sharer = project_sub.add_parser(
+        "share",
+        help="Let anyone on this grid work in the project, without being added to it",
+        description=(
+            "Share a project with everyone on this grid. Anyone signed in can then work in it "
+            "without being added as a member, and they become one the first time they do.\n\n"
+            "This is the DEFAULT for a new project. Use `grid project private` to restrict one.\n\n"
+            "Owner only. Nothing is destroyed and nothing is moved — this changes who may reach "
+            "the project, not what is in it."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(sharer)
+    sharer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    sharer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    sharer.set_defaults(handler=cmd_remote_project)
+
+    privater = project_sub.add_parser(
+        "private",
+        help="Restrict the project to its members",
+        description=(
+            "Make a project private: only its members can reach it — read it, clone it, list its "
+            "tasks or work in it.\n\n"
+            "Everyone who has already worked in the project is a member and KEEPS access. This "
+            "stops anyone else joining, it does not remove anybody.\n\n"
+            "Owner only. Reverse it at any time with `grid project share`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(privater)
+    privater.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    privater.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    privater.set_defaults(handler=cmd_remote_project)
 
     member = project_sub.add_parser("member", help="List, add and remove project members")
     member_sub = member.add_subparsers(dest="member_action", required=True)

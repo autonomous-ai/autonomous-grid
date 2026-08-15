@@ -34531,6 +34531,10 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
     (["project", "archive", "P1"], ["project", "archive", "--project", "P1"]),
     (["project", "unarchive", "P1"], ["project", "unarchive", "--project", "P1"]),
     (["project", "delete", "P1"], ["project", "delete", "--project", "P1"]),
+    # ADR 0034 D-k / issue 36. The walk found these two before this table did, which is what the
+    # count assertion below is for.
+    (["project", "share", "P1"], ["project", "share", "--project", "P1"]),
+    (["project", "private", "P1"], ["project", "private", "--project", "P1"]),
     (["project", "member", "list", "P1"], ["project", "member", "list", "--project", "P1"]),
     (["project", "member", "add", "P1", "--email", "a@b.c"],
      ["project", "member", "add", "--project", "P1", "--email", "a@b.c"]),
@@ -34808,3 +34812,256 @@ def test_an_empty_project_flag_on_clone_is_refused_before_the_directory_shift():
     with pytest.raises(SystemExit) as caught:
         _settled(["project", "clone", "--project", "", "mydir"])
     assert "empty" in str(caught.value), caught.value
+
+
+# --- ADR 0034 D-k / issue 36: `grid project share | private` ---
+#
+# Two verbs for one enum, and every test below that touches `visibility` compares against an
+# EXPLICIT value and never on truthiness — *absent ⇒ grid-visible* is what a relay predating this
+# slice says, and that reading has to stay available. The dangerous direction is the quiet one: a
+# CLI that reported "private" for a project the relay never restricted.
+
+
+def test_project_private_posts_the_value_to_the_visibility_route(monkeypatch, tmp_path, capsys):
+    """The tracer bullet. One route, and the VALUE travels in the body — the relay's column is an
+    enum ADR 0034 D-k leaves open, so a boolean here would be a second vocabulary to map onto it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "private", "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "private", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/visibility")
+    assert seen["body"] == {"visibility": "private"}, seen["body"]
+    out = capsys.readouterr().out
+    assert "P1" in out
+    assert "share" in out, f"the way back is not named: {out!r}"
+
+
+def test_project_share_posts_the_other_value(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "grid", "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "share", "P1"])
+
+    assert rc == 0
+    assert seen["body"] == {"visibility": "grid"}, seen["body"]
+    out = capsys.readouterr().out
+    assert "private" in out, f"the way back is not named: {out!r}"
+
+
+def test_project_private_says_when_it_was_already_private(monkeypatch, tmp_path, capsys):
+    """`changed: false` is a 200, not a failure — the state the caller asked for is the state that
+    holds, the reading archive and init both apply to a double-submit."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+        "archived": False, "visibility": "private", "changed": False}))
+    rc = cli.main(["project", "private", "P1"])
+
+    assert rc == 0
+    assert "already" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("reply", [
+    {"id": "P1"},                                       # the key is missing entirely
+    {"id": "P1", "visibility": "grid"},                 # the relay did the OPPOSITE
+    {"id": "P1", "visibility": True},                   # a boolean where an enum belongs
+    {"id": "P1", "visibility": "Private"},              # a spelling this build does not know
+])
+def test_project_private_refuses_to_call_an_unreadable_reply_a_restriction(
+        monkeypatch, tmp_path, reply):
+    """The house guard, and the one that matters most in this slice. A member told their project is
+    private walks away and stops thinking about it; if the relay never restricted it, colleagues
+    keep reading their work and nothing ever says so."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "private", "P1"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("verb", ["share", "private"])
+def test_the_visibility_route_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path, verb):
+    """A brand-new route, so a relay that predates it answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1"])
+
+    message = str(caught.value).lower()
+    assert "relay" in message, caught.value
+    # ⚠️ NOT `_OLD_RELAY`'s sentence: this relay HAS projects and is missing one route.
+    assert "does not have projects yet" not in message, caught.value
+    # And it says what the silence MEANS — on a relay this old a project is members-only already,
+    # so somebody who reached for `private` has what they asked for and must not be left thinking
+    # their work is exposed with no way to fix it.
+    assert "members" in message, caught.value
+
+
+@pytest.mark.parametrize("verb", ["share", "private"])
+def test_a_real_404_from_the_visibility_route_is_not_masked(monkeypatch, tmp_path, verb):
+    """The paired negative: a relay that HAS the route and answers 404 about the project must show
+    its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1"])
+
+    assert "no such project" in str(caught.value).lower(), caught.value
+    assert "predates" not in str(caught.value).lower(), caught.value
+
+
+def test_project_list_marks_a_private_project_and_leaves_the_rest_alone(monkeypatch, tmp_path,
+                                                                       capsys):
+    """*Absent ⇒ grid-visible.* The middle row is what a relay predating this slice sends for every
+    project, and marking it private would tell a whole grid their work was restricted when it is
+    not."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"projects": [
+        {"id": "P1", "name": "shared", "role": "owner", "visibility": "grid"},
+        {"id": "P2", "name": "from-an-old-relay", "role": "owner"},
+        {"id": "P3", "name": "secret", "role": "owner", "visibility": "private"},
+    ]}))
+    rc = cli.main(["project", "list"])
+
+    assert rc == 0
+    # `ID  ROLE  NAME` — key on the NAME, which is the third column.
+    lines = {line.split()[2]: line for line in capsys.readouterr().out.splitlines()
+             if line.startswith("P")}
+    assert "(private)" not in lines["shared"], lines["shared"]
+    assert "(private)" not in lines["from-an-old-relay"], lines["from-an-old-relay"]
+    assert "(private)" in lines["secret"], lines["secret"]
+
+
+def test_project_list_shows_the_grid_role_a_colleagues_project_carries(monkeypatch, tmp_path,
+                                                                       capsys):
+    """`role` is `grid` for a project reached without a membership row (ADR 0034 D-k). Printed as
+    it is, so a person can tell "I am not in this one" from a field the relay did not send."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"projects": [
+        {"id": "P1", "name": "theirs", "role": "grid", "visibility": "grid"},
+    ]}))
+    rc = cli.main(["project", "list"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "grid" in out and "theirs" in out, out
+    assert "?" not in out, f"a defined role was rendered as a missing field: {out!r}"
+
+
+def test_project_status_announces_private_and_stays_quiet_about_grid(monkeypatch, tmp_path,
+                                                                     capsys):
+    """Only the RESTRICTED state is announced. Grid-visible is the default on a relay that serves
+    D-k, so saying it on every status is noise; private is a deliberate act somebody needs
+    reminding of before they wonder why a colleague cannot see their work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = {
+        "project_id": "P1", "member_key": "a" * 32, "trunk": "main",
+        "main_commit": "c" * 40, "branch": "wip/" + "a" * 32, "wip_commit": "c" * 40,
+        "ahead": 0, "behind": 0, "archived": False, "can_promote": True,
+    }
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={**body, "visibility": "private"}))
+    assert cli.main(["project", "status", "P1"]) == 0
+    private_out = capsys.readouterr().out
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={**body, "visibility": "grid"}))
+    assert cli.main(["project", "status", "P1"]) == 0
+    grid_out = capsys.readouterr().out
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    assert cli.main(["project", "status", "P1"]) == 0
+    old_relay_out = capsys.readouterr().out
+
+    assert "PRIVATE" in private_out, private_out
+    assert "grid project share P1" in private_out, private_out
+    assert "PRIVATE" not in grid_out, grid_out
+    assert "PRIVATE" not in old_relay_out, (
+        "a relay that sends no visibility was reported as having restricted the project")
+
+
+def test_project_share_does_not_claim_a_widening_the_relay_cannot_perform(monkeypatch, tmp_path,
+                                                                          capsys):
+    """`grid_access: false` — the relay saying it does not share projects grid-wide at all.
+
+    Found in review of ADR 0034 D-k. The setting and its EFFECT are two facts: on any grid but a
+    per-email-domain one the `visibility` column is written and honoured by nothing, so a CLI that
+    read `visibility: "grid"` alone printed "Anyone signed in to this grid can now work in it"
+    about a project only its members can reach. `private` was accurate on such a relay; `share` was
+    not, which is the direction that matters.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+        "archived": False, "visibility": "grid", "grid_access": False, "changed": True}))
+    rc = cli.main(["project", "share", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Anyone signed in to this grid can now work in it" not in out, out
+    assert "does not share projects grid-wide" in out, out
+
+
+@pytest.mark.parametrize("grid_access", [True, None])
+def test_project_share_claims_the_widening_when_the_relay_does_serve_it(
+        monkeypatch, tmp_path, capsys, grid_access):
+    """`True`, and — the paired negative — a reply with the key ABSENT.
+
+    ⚠️ `is False`, never falsiness. *Absent ⇒ served* is the only available reading: a relay that
+    answers this route at all has this slice, and one that does not answers a 404 that became
+    `_OLD_RELAY_NO_VISIBILITY`. Keying on truthiness would make every reply a proxy had stripped
+    read as "this grid shares nothing", which is the opposite of the truth.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = {"id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "grid", "changed": True}
+    if grid_access is not None:
+        body["grid_access"] = grid_access
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    rc = cli.main(["project", "share", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Anyone signed in to this grid can now work in it" in out, out
+    assert "does not share projects grid-wide" not in out, out
