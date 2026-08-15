@@ -975,7 +975,20 @@ def finish_project_import(signaling_url: str, access_token: str,
         missing_route_hint=_OLD_RELAY, timeout=_IMPORT_FINISH_TIMEOUT)
 
 
-def create_project(signaling_url: str, access_token: str, *, name: str) -> dict[str, Any]:
+# Which bootstrap `POST /relay/v1/projects` is asked for (ADR 0034 D-o, issue 48).
+#
+# ⚠️ **Hand-duplicated in grid-src `project_trunk.py`**, where they are named constants for this
+# reason; `tests/test_task_lease.py` parses them from there rather than restating them.
+#
+# Only `BOOTSTRAP_EMPTY` is ever sent by this CLI. `BOOTSTRAP_IMPORT` exists because the relay
+# accepts it and a direct HTTP client may want to say so, but leaving the key off produces the
+# identical outcome — a trunkless project — so there is no flag for it and nothing here to test.
+BOOTSTRAP_EMPTY = "empty"
+BOOTSTRAP_IMPORT = "import"
+
+
+def create_project(signaling_url: str, access_token: str, *, name: str,
+                   bootstrap: str | None = None) -> dict[str, Any]:
     """Create-or-get the caller's project called ``name`` (``POST /relay/v1/projects``).
 
     Idempotent, so running `grid project create` twice with one name is not punished — it answers
@@ -987,9 +1000,25 @@ def create_project(signaling_url: str, access_token: str, *, name: str) -> dict[
     has no `default`, because minting one as a side effect of a forgotten flag left people owning
     projects they never asked for. `cli/remote_project._project_create` is now the only caller, and
     creating a project is an explicit act.
+
+    ``bootstrap`` rides the same request (ADR 0034 D-o, issue 48) and the key is **omitted entirely**
+    when it is `None` — the `list_tasks(mine=…)` precedent, and here it is the whole compatibility
+    story: the body a caller without the flag sends is byte-for-byte what every relay has always
+    been given.
+
+    ⚠️ **An old relay DROPS this key rather than refusing it** — `create_project` over there reads
+    only `name` and has no unknown-key check — so it answers 201 for a project with no trunk. That
+    makes this the `project_id` echo-back shape from ADR 0033 issue 10: *a new key on an EXISTING
+    endpoint degrades silently, where a new route would have given a loud bare 404*. Nothing here
+    can prevent it; `cli/remote_project` checks the postcondition in the reply and refuses to call
+    it a success, which converts silently-wrong into loudly-wrong. **Roll the relay out before the
+    CLI.**
     """
+    body: dict[str, Any] = {"name": name}
+    if bootstrap is not None:
+        body["bootstrap"] = bootstrap
     return _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/projects",
-                         json={"name": name}, missing_route_hint=_OLD_RELAY)
+                         json=body, missing_route_hint=_OLD_RELAY)
 
 
 def list_projects(signaling_url: str, access_token: str, *,

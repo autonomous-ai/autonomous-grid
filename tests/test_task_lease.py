@@ -507,6 +507,29 @@ def test_the_owner_role_this_cli_filters_on_is_the_one_the_relay_writes():
         "OWNER_ROLE", module="project_members.py")
 
 
+def test_the_bootstrap_values_this_cli_sends_are_the_ones_the_relay_accepts():
+    """ADR 0034 D-o (issue 48): `bootstrap` on `POST /relay/v1/projects`.
+
+    ⚠️ **This pair has no safe degrade and that is why it is here.** grid-src's `create_project`
+    reads `name` and nothing else — there is no unknown-key refusal on that route — so a relay
+    that has not been updated DROPS the key and answers 201 for a project with no trunk. A typo in
+    either copy therefore does not fail loudly anywhere: this CLI would send `"emtpy"`, a new relay
+    would refuse it with a 422 naming the field, and an OLD one would create a trunkless project
+    and report success. The client's postcondition check catches the second case; only this check
+    catches the first before it ships.
+
+    `BOOTSTRAP_IMPORT` is asserted even though this CLI never sends it. It is half of the closed set
+    the relay validates against, and a value that drifted out of that set is exactly what would make
+    a future `--for-import` flag refuse on arrival.
+    """
+    from remote import relay
+
+    assert relay.BOOTSTRAP_EMPTY == _relay_string_constant(
+        "BOOTSTRAP_EMPTY", module="project_trunk.py")
+    assert relay.BOOTSTRAP_IMPORT == _relay_string_constant(
+        "BOOTSTRAP_IMPORT", module="project_trunk.py")
+
+
 def test_the_capacity_load_key_this_provider_publishes_is_the_one_the_relay_reads():
     """The other lockstep value this slice adds (ADR 0033 D-l, issue 19b).
 

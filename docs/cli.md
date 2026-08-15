@@ -878,7 +878,7 @@ guidance to switch.
 ## Project
 
 ```
-grid project create --name <name> [--grid <grid>] [--json]
+grid project create --name <name> [--empty] [--grid <grid>] [--json]
 grid project init          <project-id> [--grid <grid>] [--json]
 grid project list [--all] [--grid <grid>] [--json]
 grid project archive       <project-id> [--grid <grid>] [--json]
@@ -950,12 +950,12 @@ A task is cut from — and, on success, fast-forwards — **`wip/<member-key>`**
 branch. `main` is not touched by a task at all. That is what lets several people work in one project
 without their results racing for one ref.
 
-A project's `main` therefore has to **exist before its first task**: a project that has just been
-created has no commits, and creating a task in one is refused with a message saying so. Two commands
-give it one — `grid project init` for an empty trunk, `grid project import` for a repository that
-already exists. **The relay is `main`'s only writer** — a `git push` of `main` is refused whatever
-state the project is in — so those two create it, `promote` moves it afterwards, and nothing else
-touches it.
+A project's `main` therefore has to **exist before its first task**: a project created with no
+commits refuses task creation with a message saying so. Three things give it one — `grid project
+create --empty`, which does it in the same request; `grid project init`, for a project that already
+exists; and `grid project import`, for a repository that already exists. **The relay is `main`'s
+only writer** — a `git push` of `main` is refused whatever state the project is in — so those three
+create it, `promote` moves it afterwards, and nothing else touches it.
 
 ### Cloning a project onto your own machine
 
@@ -1042,19 +1042,41 @@ It does need the relay itself reachable: it is a fetch.
 
 ### Starting a project with an empty trunk
 
-`grid project init <project-id>` creates the project's `main` at a single empty root commit. That is
-all it does, and it is what a new piece of work needs: without it, starting from nothing meant
-making a throwaway repository locally, committing something, and importing it, purely to satisfy a
-bootstrap the grid can do itself.
+**Choose when you create it.** `grid project create --name <name> --empty` makes the project *and*
+its trunk in one request, so the next thing you do works. Without `--empty` the project is created
+with no trunk on purpose, which is what you want when a repository is about to be imported into it.
 
-The trunk it makes holds **no files**, and the command takes none. Work reaches `main` by promoting
-a branch — a task, or `grid project commit` — and never by a bootstrap, so a request carrying files
-is refused rather than quietly ignored.
+```
+grid project create --name acme --empty     # ready to work in immediately
+grid project create --name acme             # leave it empty; an import is coming
+```
 
-⚠️ **It cannot be undone, and it closes the other door.** A project that has been initialized can no
-longer import a repository, because a second trunk would move `main` out from under every member's
-branch and nothing could integrate back. For the same reason nothing runs it for you: `grid task
-create` on a trunkless project tells you to run it, and does not decide on your behalf.
+⚠️ **The two choices are not equally reversible, and this is the one sentence that matters:**
+
+| you chose | you can still | you can no longer |
+|---|---|---|
+| `--empty` | start work straight away | bring an existing repository in — ever |
+| nothing | bring an existing repository in, or run `grid project init` later | start work until you do one of those |
+
+**Pick `--empty` when the work starts here; leave it off when the code already exists somewhere
+else.** A project that has a trunk can never be imported into, because a second trunk would move
+`main` out from under every member's branch and nothing could integrate back. Nothing undoes it —
+not `grid project delete`, which refuses a project that has a trunk.
+
+`grid project init <project-id>` is the same operation for a project that is already there, and it
+is what to run if `--empty` was not passed and no import is coming. Both make **one empty root
+commit** and hold **no files**: work reaches `main` by promoting a branch — a task, or `grid project
+commit` — and never by a bootstrap, so a request carrying files is refused rather than quietly
+ignored.
+
+Nothing runs either of them for you. `grid task create` on a trunkless project tells you what to do
+and does not decide on your behalf, because the choice is one-way.
+
+⚠️ **`--empty` needs a relay that has it.** An older one ignores the flag and creates the project
+without a trunk, so the command refuses rather than reporting a success it did not get, prints the
+project id, and names `grid project init <project-id>` — which still works, and so does `import`,
+because nothing has claimed the trunk. Under `--json` the reply is still written to stdout and the
+explanation goes to stderr, with a non-zero exit code.
 
 ### Importing an existing repository
 

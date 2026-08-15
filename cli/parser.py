@@ -489,6 +489,12 @@ def _add_project(sub) -> None:
 
     create = project_sub.add_parser("create", help="Create (or get) one of your projects by name")
     create.add_argument("--name", required=True, help="What to call it. Unique among your own.")
+    # ADR 0034 D-o (issue 48). Without it a project is created with no trunk and the very next
+    # thing anybody does is refused, which is the first wall a new user hits.
+    create.add_argument(
+        "--empty", action="store_true",
+        help=("Give it a trunk now, so a task can run in it immediately. "
+              "IRREVERSIBLE: a project that has a trunk can never `grid project import`."))
     create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_project)

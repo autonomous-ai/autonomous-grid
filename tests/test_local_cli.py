@@ -23669,6 +23669,183 @@ def test_project_create_prints_the_id_a_task_needs(monkeypatch, tmp_path, capsys
     assert "P1" in capsys.readouterr().out
 
 
+def test_project_create_empty_asks_the_relay_for_the_trunk_in_the_same_request(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-o / issue 48. One request, and the project is ready to talk to.
+
+    The test above is this one's negative control and stays unchanged: without `--empty` the body
+    is still exactly `{"name": …}`, so every relay that has ever answered this route keeps working.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={
+            "id": "P1", "name": "acme", "owner_id": "u1",
+            "bootstrap": {"status": "initialized", "commit": "a" * 40,
+                          "created": True, "trunk": "main"}})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects")
+    assert seen["body"] == {"name": "acme", "bootstrap": "empty"}
+    out = capsys.readouterr().out
+    assert "P1" in out
+    assert "a" * 40 in out, out
+    # The two "give it a trunk" hints are the whole point of NOT being printed here: it has one.
+    assert "project init" not in out, out
+    assert "project import" not in out, out
+
+
+def test_project_create_empty_on_a_relay_that_drops_the_key_refuses_and_names_the_fix(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-o / issue 48 — the degrade, and it is the reason this slice has a client guard.
+
+    grid-src's `create_project` reads only `name` and has no unknown-key check, so a relay that
+    predates this answers **201 for a trunkless project**: the flag is not refused, it is dropped.
+    That is the `project_id` echo-back shape from issue 10 — a new key on an EXISTING endpoint
+    degrades silently where a new ROUTE would have given a loud bare 404 the missing-route hint
+    could explain.
+
+    So the client checks the postcondition. It cannot prevent the create (already done); it can
+    stop it being reported as one that gave the project a trunk, which is the whole difference.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    # An old relay's answer, verbatim: the project, and no idea the key was there.
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    message = str(caught.value)
+    assert "P1" in message, message
+    # The fix must be the command the relay would have run, and it must be runnable as printed.
+    assert "grid project init P1" in message, message
+    # NOT `relay._OLD_RELAY`, which says the relay has no projects — it plainly does, it just
+    # answered, and sending somebody to check a working feature is its own bug.
+    assert "does not have projects yet" not in message, message
+    assert "Not Found" not in message, message
+    # The id still reached stdout: the project exists and that is the thing they need.
+    assert "P1" in capsys.readouterr().out
+
+
+def test_project_create_empty_json_still_emits_the_document_and_exits_non_zero(
+        monkeypatch, tmp_path, capsys):
+    """The `--json` half of the same degrade, decided with the product owner.
+
+    stdout stays ONE parseable document — the contract issue 32 landed — while the explanation goes
+    to stderr and the exit code carries the verdict. An application that got a zero here would have
+    a project it believes is ready and a first conversation that is about to be refused.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty", "--json"])
+
+    # `SystemExit` carrying a STRING exits the process 1 and writes that string to stderr —
+    # measured, not assumed, because `!= 0` alone would also pass for `SystemExit("")`, which exits
+    # 1 while telling the operator nothing. What is asserted is the message a person reads.
+    assert isinstance(caught.value.code, str) and caught.value.code.strip(), caught.value.code
+    assert "grid project init P1" in caught.value.code, caught.value.code
+    out = capsys.readouterr().out
+    # Parseable, and it is the relay's reply rather than a message about it. The explanation is NOT
+    # here — it goes to stderr with the exit code — or stdout would not be one document.
+    assert json.loads(out) == {"id": "P1", "name": "acme", "owner_id": "u1"}
+
+
+def test_project_create_empty_shows_the_relays_own_words_when_it_refuses_the_key(
+        monkeypatch, tmp_path):
+    """A relay NEW enough to validate the value refuses it with a code and a sentence of its own.
+
+    Distinct from the silent-drop case above and it must not be answered with the same home-made
+    prose: this relay knows about bootstraps and is saying something specific about the one it was
+    sent, so `_task_oneshot`'s own rendering is what a member needs to read.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "invalid_request", "field": "bootstrap",
+        "message": "bootstrap must be one of empty, import, or left out entirely."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    message = str(caught.value)
+    assert "bootstrap must be one of empty, import" in message, message
+    assert "grid project init" not in message, message
+
+
+@pytest.mark.parametrize("block", [
+    {"status": "created", "commit": "a" * 40, "trunk": "main"},   # a status this cannot read
+    {"status": "initialized", "trunk": "main"},                    # initialized, but of what?
+    {"status": "initialized", "commit": "", "trunk": "main"},      # an empty oid is not one
+    "initialized",                                                  # not even a block
+])
+def test_project_create_empty_refuses_to_call_an_unreadable_reply_a_trunk(
+        monkeypatch, tmp_path, block):
+    """The house guard `grid project init` already applies, on the nested reply.
+
+    A trunk is created once and can never be created again, so "probably fine" is the one thing
+    this must not print: the next thing a member does is start a conversation against it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1", "bootstrap": block}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    assert "grid project init P1" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("argv", [
+    ["project", "create", "--name", "acme"],
+    ["project", "create", "--name", "acme", "--json"],
+    ["project", "create", "--name", "acme", "--empty"],
+    ["project", "create", "--name", "acme", "--empty", "--json"],
+])
+def test_project_create_survives_a_reply_that_is_not_even_an_object(monkeypatch, tmp_path, argv):
+    """A 2xx whose body is a JSON array or string — a proxy, a captive portal — is a clean refusal.
+
+    `_task_oneshot` returns `resp.json()` verbatim, so the body reaches this handler unexamined and
+    an unguarded `.get()` escapes `main()` as a traceback, breaking this plane's "any failure is a
+    clean `SystemExit`" contract. The same hole is already closed one command at a time elsewhere in
+    this suite — `test_task_create_survives_a_project_listing_that_is_not_an_object` and
+    `test_task_get_json_still_prints_a_body_that_is_not_even_an_object`.
+
+    ⚠️ **Two of these four rows are a REGRESSION this slice caused and two are older.** `--json`
+    used to early-return before any `.get()` ran, and folding `--empty` into the handler replaced
+    that with a fall-through, so the `project_id` line began running on every path. The two
+    non-`--json` rows were broken before this slice as well; the guard fixes all four, and they are
+    parametrized together so nobody has to remember which was which.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(201, json=["not", "an", "object"]))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(argv)
+
+    # A sentence, not a traceback — and never an empty exit that reads as "the CLI is broken".
+    assert isinstance(caught.value.code, str) and caught.value.code.strip(), caught.value.code
+
+
 def test_project_init_posts_to_the_init_route_and_sends_no_body(monkeypatch, tmp_path, capsys):
     """ADR 0033 D-o end to end through `cli.main`. The second way a project gets a trunk, and the
     only one available to somebody starting a new piece of work with no repository to import.

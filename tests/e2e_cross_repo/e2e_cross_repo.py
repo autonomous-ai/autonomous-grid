@@ -729,6 +729,74 @@ def test_15_the_grid_access_rule_is_not_served_outside_grid_mode(
     assert "refs/heads/main" in H.git_ls_remote(url, "refs/heads/*", bearer=alice)
 
 
+def test_16_a_project_created_empty_runs_its_first_task_with_no_second_command(
+        relay, owner_token, spawn_provider):
+    """ADR 0034 D-o / issue 48, at the one place the WIRE can be checked rather than the constants.
+
+    Both unit suites read a reply the same repository wrote down — the CLI test asserts against an
+    `httpx.MockTransport` answer authored here, the relay test against its own handler — so a relay
+    that nested the trunk block under another key, sent `status: "created"`, or put the oid under
+    `oid`, leaves BOTH green while `grid project create --empty` refuses every real create with the
+    sentence about an old relay. That failure mode is worse than the one it exists to catch, because
+    the advice it prints is wrong: it would tell a member to run `grid project init` against a relay
+    that had just initialized their trunk.
+
+    ⚠️ **The negative half is the load-bearing one and cannot be checked anywhere else.** grid-src's
+    `create_project` has no unknown-key refusal, so "the relay ignored `bootstrap`" and "the relay
+    honoured it" are told apart ONLY by what comes back in the body. A unit test cannot see that
+    distinction — it authors the body — so the assertion that a plain create carries no trunk block
+    is a real check here and a tautology anywhere else.
+    """
+    from cli import remote_task
+    from remote import relay as relay_client
+
+    # 1. The reply keys `cli/remote_project._bootstrapped_trunk` branches on, from the real relay.
+    created = relay_client.create_project(
+        relay, owner_token, name="p-empty", bootstrap=relay_client.BOOTSTRAP_EMPTY)
+    project_id = created["id"]
+    boot = created.get("bootstrap")
+    assert isinstance(boot, dict), created
+    assert boot.get("status") == "initialized", boot
+    assert boot.get("trunk") == "main", boot
+    assert len(boot.get("commit") or "") == 40, boot
+    assert boot.get("created") is True, boot
+
+    # 2. `/status` is a second, independent reader of the same ref — the relay agreeing with itself
+    #    about what it did, rather than this test agreeing with the reply it was handed.
+    status = relay_client.project_status(relay, owner_token, project_id)
+    assert status.get("main_commit") == boot["commit"], status
+
+    # 3. Asking again is the postcondition holding, not a collision — on the wire, where the 409
+    #    `init` sends for the same state would be indistinguishable at unit level from a 200 the
+    #    client happened to be handed.
+    again = relay_client.create_project(
+        relay, owner_token, name="p-empty", bootstrap=relay_client.BOOTSTRAP_EMPTY)
+    assert again["id"] == project_id, again
+    assert again["bootstrap"]["created"] is False, again
+    assert again["bootstrap"]["commit"] == boot["commit"], again
+
+    # 4. The negative control. A plain create says nothing about a trunk and has none — which is
+    #    what makes the client's postcondition check able to tell an old relay from a new one.
+    plain = relay_client.create_project(relay, owner_token, name="p-plain")
+    assert "bootstrap" not in plain, plain
+    # Keyed on the CODE rather than on the sentence: the words are the relay's and may be reworded,
+    # and "no" appears in most English. `_NO_TRUNK` is what `grid task create` itself branches on.
+    try:
+        relay_client.create_task(relay, owner_token, prompt="x", project_id=plain["id"])
+    except relay_client.TaskRefusal as exc:
+        assert exc.refusal_code == remote_task._NO_TRUNK, exc.refusal_code
+    else:
+        raise AssertionError("a task was created in a project that was never bootstrapped")
+
+    # 5. And the point of all of it: the project works, first time, with nothing run in between.
+    spawn_provider()
+    task = relay_client.create_task(
+        relay, owner_token, prompt="SAY hello from a project that was born ready",
+        project_id=project_id)
+    ended = H.await_state(relay, owner_token, task["id"], {"completed", "failed"}, timeout=120)
+    assert ended["state"] == "completed", ended
+
+
 def _refusal(call):
     """What a refused call SAYS, as a comparable value. Anything else is a test failure."""
     try:

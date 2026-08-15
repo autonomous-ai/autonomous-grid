@@ -109,21 +109,105 @@ def _project_create(args: argparse.Namespace) -> int:
     from remote import relay
 
     base, token, label = _resolve(args)
-    project = relay.create_project(base, token, name=args.name)
+    empty = bool(getattr(args, "empty", False))
+    project = relay.create_project(
+        base, token, name=args.name, bootstrap=relay.BOOTSTRAP_EMPTY if empty else None)
+    trunk = _bootstrapped_trunk(project) if empty else None
 
-    if _emit(args, project):
+    emitted = _emit(args, project)
+    # `isinstance` before any `.get()`: `_task_oneshot` returns `resp.json()` verbatim, so a 2xx
+    # carrying a JSON array, string or number — a proxy, a captive portal — reaches this line, and
+    # an `AttributeError` would escape `main()` as a traceback instead of this plane's clean
+    # `SystemExit`. Checked HERE rather than only inside `_bootstrapped_trunk`, because the id is
+    # read on every path including the ones that never look at a trunk.
+    #
+    # ⚠️ Under `--json` the document has ALREADY been written, so this is a refusal after a
+    # successful print — which is correct and is the same ordering the bootstrap guard below uses:
+    # stdout stays one parseable document, the explanation goes to stderr, the exit code carries
+    # the verdict.
+    if not isinstance(project, dict):
+        raise SystemExit(
+            f"The relay answered {args.name!r} with something that is not a project object, so "
+            f"this cannot tell you whether one was created. "
+            f"`grid project create --name {args.name} --json` shows what it sent.")
+
+    if not emitted:
+        # `.get()` throughout: the reply shape is the relay's, and an older one may not send
+        # every key.
+        print(f"project {project.get('id') or '(no id)'} on {label}")
+        print(f"name={project.get('name') or 'unknown'}")
+    project_id = project.get("id") or "<id>"
+
+    if empty:
+        if trunk is None:
+            # The project EXISTS — it is the trunk that did not happen — so the id is printed above
+            # (or is in the JSON) before this fires, and the sentence says so. Raised AFTER `_emit`
+            # so `--json`'s contract holds: stdout is still one parseable document, the explanation
+            # goes to stderr, and the exit code is what an application branches on. Reporting 0
+            # here would be a flag silently ignored, which is the one outcome this whole slice
+            # exists to remove.
+            raise SystemExit(_no_bootstrap_message(args, project_id))
+        if not emitted:
+            print(f"{trunk.get('trunk') or 'main'} is now at {trunk.get('commit')} on {label}")
+            print()
+            print(f"Next: grid task create --project {project_id} --prompt '<what to do>'")
         return 0
-    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    print(f"project {project.get('id') or '(no id)'} on {label}")
-    print(f"name={project.get('name') or 'unknown'}")
+
+    if emitted:
+        return 0
     # NOT `grid task create` (ADR 0033 D-o, issue 25). A project has no trunk when it is created, so
     # that advice was guaranteed to fail — the first thing a new user was told to do was the one
     # thing that could not work. The next step is a trunk, and there are two ways to get one.
-    project_id = project.get('id') or '<id>'
     print("\nGive it a trunk — a task is cut from `main` and it has none yet:")
     print(f"  grid project init {project_id}                 # start empty")
     print(f"  grid project import <path> {project_id}        # bring an existing repository")
     return 0
+
+
+def _bootstrapped_trunk(project) -> dict | None:
+    """The trunk block a `--empty` create really produced, or `None` if it did not.
+
+    `_project_init`'s house guard, applied to the nested reply: a `dict` under `bootstrap`, the
+    status that route sends, and a commit. Anything else is `None` — including the case this check
+    exists for, a relay that predates issue 48 and DROPPED the key while answering 201.
+
+    `isinstance` before `.get`: `_task_oneshot` returns `resp.json()` verbatim, so a 200 carrying a
+    list or a string — a proxy, a captive portal — reaches here, and an `AttributeError` would
+    escape `main()` as a traceback instead of this plane's clean `SystemExit`.
+    """
+    if not isinstance(project, dict):
+        return None
+    trunk = project.get("bootstrap")
+    if not isinstance(trunk, dict):
+        return None
+    if trunk.get("status") != "initialized" or not trunk.get("commit"):
+        return None
+    return trunk
+
+
+def _no_bootstrap_message(args: argparse.Namespace, project_id: str) -> str:
+    """What to say when `--empty` was asked for and no trunk came back.
+
+    Deliberately NOT `relay._OLD_RELAY`, which says the relay has no projects at all: it plainly
+    does — it just answered — and sending somebody to check a feature that works is the mistake
+    `_OLD_RELAY_NO_VISIBILITY` was added to avoid.
+
+    The line offered is `grid project init`, which is the same operation the relay would have run,
+    and it is re-runnable: it is the trunk that is missing, not the project.
+    """
+    grid = getattr(args, "grid", None)
+    suffix = f" --grid {grid}" if grid else ""
+    return (
+        f"Project {project_id} was created, but this relay ignored --empty and gave it no trunk — "
+        f"it predates the bootstrap key, which it drops rather than refusing. Nothing else is "
+        f"wrong, and the project is fine.\n"
+        f"\n"
+        f"  Give it one with the command the relay would have run:\n"
+        f"    grid project init {project_id}{suffix}\n"
+        f"\n"
+        f"  Or bring an existing repository in instead — still possible, because nothing has "
+        f"claimed the trunk yet:\n"
+        f"    grid project import <path> {project_id}{suffix}")
 
 
 def _project_init(args: argparse.Namespace) -> int:
