@@ -15,6 +15,7 @@ Run:  .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_cross_repo.py -q
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from datetime import datetime, timedelta
@@ -681,7 +682,6 @@ def test_15_the_grid_access_rule_is_not_served_outside_grid_mode(
     is follow-up work. The positive case is covered at unit level by
     `grid-src/tests/test_project_visibility.py`, which drives `task_git._access` directly.
     """
-    import os
     import subprocess
 
     from remote import relay as relay_client
@@ -878,6 +878,106 @@ def test_17_a_second_conversation_of_one_member_starts_fresh_on_one_provider(
     conversations = sorted(p for p in members[0].iterdir() if (p / "workspace").is_dir())
     assert len(conversations) == 2, (
         f"expected one workspace per conversation under {members[0]}, found {conversations!r}")
+
+
+def test_18_a_conversations_transcript_leaves_the_projects_history(
+        relay, relay_home, owner_token, spawn_provider, workspace_root):
+    """ADR 0034 D-j / issue 39, at the one seam where both repositories are on the wire together.
+
+    Three things can only be checked here, and each of them leaves BOTH unit suites green when it
+    breaks:
+
+      * **the fence grants the ref**. The provider builds `refs/grid/agent/<conversation_id>` from
+        its own copy of `TRANSCRIPT_PREFIX` and the relay builds the same string to put in
+        `push_refs`. No wire value carries the name, so the AST lockstep test catches the two
+        constants DISAGREEING — it cannot catch them agreeing while the fence computes the ref from
+        the wrong column, or narrows it to the wrong lease. Here the push either lands or 403s.
+      * **the trunk really is clean.** A provider-side test can only assert what its own
+        `commit_and_push` staged; this asserts what is in `main` on the relay after a real settle
+        and a real auto-apply.
+      * **`transcript_commit` survives the round trip.** Both suites read a payload their own
+        repository wrote down. Only a real claim proves the relay sends the key and the provider
+        reads the same one.
+
+    ⚠️ What is NOT here, and is not an omission: a second TURN of one conversation fetching the ref
+    back. Every `POST /tasks` mints a conversation and issue 47 owns the route that posts into an
+    existing one, so no turn on this wire has a pin to fetch yet. The fetch-and-resume half is
+    covered on the provider side, where a job dict IS the claim payload, and by the paid
+    `e2e_live_agent.py` against the real binary.
+    """
+    import subprocess
+
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-transcript-side-ref",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    created = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE kept.txt HELLO-8812; SAY done")
+    done = H.await_state(relay, owner_token, created["id"], {"completed", "failed"}, timeout=120)
+    assert done["state"] == "completed", done
+
+    url = relay_client.git_remote_url(relay, project)
+    conversation = _one_conversation_dir(workspace_root, project)
+
+    # 1. The ref reached the relay's REPOSITORY, read off disk rather than over the wire.
+    #
+    #    ⚠️ It cannot be checked with `ls-remote` as the member, and finding that out is what this
+    #    test is for: the fence un-hides this namespace only to the caller holding that
+    #    conversation's LEASE, and by now the turn is over, so `alice` is correctly shown nothing.
+    #    The first draft asserted `ls-remote` was non-empty and failed against a working
+    #    implementation. On disk is the only place "the push landed" and "this caller may see it"
+    #    are separate questions.
+    repo = relay_home / "projects" / f"{project}.git"
+    tip = subprocess.run(
+        ["git", "--git-dir", str(repo), "rev-parse", "--verify", "--quiet",
+         f"refs/grid/agent/{conversation}^{{commit}}"],
+        capture_output=True, text=True).stdout.strip()
+    assert tip, (
+        f"the conversation's transcript never reached the relay — the git fence refused the push, "
+        f"or the two repositories disagree about the ref prefix. Conversation: {conversation}")
+    published = subprocess.run(
+        ["git", "--git-dir", str(repo), "ls-tree", "-r", "--name-only", tip],
+        capture_output=True, text=True).stdout
+    assert ".jsonl" in published, (
+        f"the transcript ref exists but carries no session file: {published!r}")
+
+    # 2. And the MEMBER is not offered it over the wire, which is the privacy half ADR 0033 listed
+    #    as permanently out of scope. Asserted through the real fence, with the ref provably there.
+    assert not H.git_ls_remote(url, f"refs/grid/agent/{conversation}", bearer=owner_token), (
+        "a member's clone is offered a conversation's transcript ref")
+
+    # 3. The member's own branch carries the work and NOT the conversation.
+    #
+    #    ⚠️ `wip/<member_key>`, not `main`. A settle fast-forwards the member's WIP branch and `main`
+    #    is written by promote and import alone (ADR 0033 D-c) — the auto-apply that moves the trunk
+    #    on every successful turn is a LATER slice of ADR 0034. The first draft asserted against
+    #    `main` and read an empty tree. The WIP branch is the right target anyway: it is what the
+    #    member's next turn is cut from, and it is exactly where the transcript used to accumulate.
+    branch = relay_client.project_status(relay, owner_token, project)["branch"]
+    listing = subprocess.run(
+        ["git", "--git-dir", str(repo), "ls-tree", "-r", "--name-only", f"refs/heads/{branch}"],
+        capture_output=True, text=True).stdout
+    assert "kept.txt" in listing, f"the agent's work is not on the member's branch: {listing!r}"
+    assert ".grid" not in listing, (
+        f"the member's branch still carries the reserved directory, so every turn adds a transcript "
+        f"to what the next one is cut from: {listing!r}")
+
+
+def _one_conversation_dir(workspace_root, project):
+    """The single conversation id under this project on provider A, DISCOVERED not derived.
+
+    Recomputing it here would make this test agree with a rule this repository does not own — the
+    ids are the relay's. Same reasoning as `_harness.sweep_transcript_links`.
+    """
+    members = sorted((workspace_root / "A" / "projects" / project).iterdir())
+    assert len(members) == 1, f"expected one member's directory, found {members!r}"
+    conversations = sorted(p.name for p in members[0].iterdir() if (p / "workspace").is_dir())
+    assert len(conversations) == 1, f"expected one conversation, found {conversations!r}"
+    return conversations[0]
 
 
 def _refusal(call):

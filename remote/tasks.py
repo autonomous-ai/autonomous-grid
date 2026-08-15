@@ -645,7 +645,19 @@ def run_task(job: dict[str, Any],
                 # the agent — which has no grid credential and must not get one. Empty on every
                 # ordinary task and on every claim from a relay that predates integration, which is
                 # the pre-integration behaviour rather than a new failure.
-                merge_ref=str(job.get("merge_ref") or ""))
+                merge_ref=str(job.get("merge_ref") or ""),
+                # THIS CONVERSATION's transcript (ADR 0034 D-j, issue 39). The REF is built here
+                # from the conversation id rather than taken off the wire — the prefix is the
+                # duplicated constant, so there is no name for a proxy to mangle — and the PIN is
+                # what the relay decided this turn should resume.
+                #
+                # *Absent ⇒ nothing is fetched and the agent starts a fresh session*, which is a
+                # conversation's first turn and also every claim from a relay predating this key.
+                # A fetch that FAILS is an `InputFetchError` and is handled below, which is what
+                # keeps "the relay has a transcript and I could not get it" from becoming a silent
+                # fresh start.
+                transcript_ref=task_repo.transcript_ref(conversation_id),
+                transcript_commit=str(job.get("transcript_commit") or ""))
         except task_repo.InputFetchError as exc:
             # BEFORE the blanket handler below, and that order is the whole change (ADR 0033 issue
             # 16a, criterion 4). The fetch is the one step whose failure is about this attempt
@@ -1278,16 +1290,32 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         # this path, and a hostile one would have failed the task before any of this ran. Built one
         # level short, this commits from a worktree the agent never touched.
         member_key = str(job.get("member_key") or "")
+        conversation_id = str(job.get("conversation_id") or "")
         workspace = task_agent.workspace_for(
-            str(job.get("project_id") or ""), member_key, str(job.get("conversation_id") or ""))
+            str(job.get("project_id") or ""), member_key, conversation_id)
+        # THE CONVERSATION FIRST, and the order is a decision (ADR 0034 D-j, issue 39).
+        #
+        # Both pushes are failable and both are retried the same way, so the order only decides
+        # which failure costs less. The transcript is the smaller push and the one whose loss is
+        # unrecoverable — the result branch is reset to `input_commit` by the reaper and rebuilt by
+        # the retry, while a conversation nobody published is simply gone. Publishing it first also
+        # means a turn whose result push fails has still recorded what the agent did.
+        #
+        # A `PushError` here lands in the same handler as `commit_and_push`'s and produces the same
+        # outcome: no terminal report, the lease lapses, the reaper reclaims. That is deliberately
+        # NOT a terminal `failed` — D-j says a failed transcript push must fail the turn, and this
+        # codebase's word for that is "do not report success and let it be retried", exactly as a
+        # failed result push already behaves. A terminal failure would spend the whole turn on a
+        # transient network fault.
+        task_repo.push_transcript(
+            workspace, url=remote.url, token=remote.token,
+            ref=task_repo.transcript_ref(conversation_id))
         pushed = task_repo.commit_and_push(
             workspace, url=remote.url, token=remote.token,
             branch=str(job.get("branch") or ""),
             message=f"task {job.get('task_id')} ({outcome.state})",
-            # Only THIS member's conversation is staged (ADR 0033 D-g). Passed as a built path
-            # rather than as a key, so `task_repo` needs no copy of the path-segment rule and the
-            # containment check is `relative_to` refusing.
-            transcript=task_agent.transcript_dir(workspace, member_key),
+            # No `transcript=` any more (ADR 0034 D-j, issue 39). The conversation does not travel
+            # in this commit; `_push_transcript` above has already put it on its own ref.
             # Who asked for this task (ADR 0033 D-m). Straight off the claim payload and NOT
             # coerced here: `identity_or_default` is the boundary, and it is the one place that
             # knows git's rules — an empty name is a refusal, a NUL never reaches git at all.

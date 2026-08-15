@@ -463,6 +463,61 @@ def test_the_cancel_code_this_provider_kills_on_is_the_one_the_relay_sends():
         "CANCELLED_CODE", module="task_errors.py")
 
 
+def test_the_claim_pins_the_transcript_a_retry_must_resume():
+    """ADR 0034 D-j's latch, asserted structurally rather than by running an old relay.
+
+    "A failed task's conversation does not carry forward" was recorded by issue 06 as a deliberate
+    consequence, but it was never a RULE — it fell out of the transcript riding in a commit that only
+    reached `main` on success. Off the merge path it has to be rebuilt by hand, and a retry and a
+    follow-up are **not** distinguishable from the claim payload: they arrive as the same shape, and
+    `attempt` does not separate them because `_claim_one` increments it on every claim including the
+    first.
+
+    So the relay pins the side ref's oid on the TURN row when the turn is created, and sends it here.
+    A retry re-claims the same row and therefore sees the same pin — the transcript as it was BEFORE
+    the attempt it is retrying. A follow-up is a new row pinned at its own creation and sees the tip.
+    The provider needs no branch of its own, which is the point: the pin IS the answer.
+
+    ⚠️ This is the ONE place the relay sends a bare oid to a provider, and it inverts `merge_ref`'s
+    argument next to it. `merge_commit` is deliberately withheld because a bare oid is unfetchable —
+    `uploadpack.allowAnySHA1InWant` is off. This one works because the provider fetches by NAME and
+    the pin is guaranteed reachable in what it fetched, precisely because the ref is fast-forward
+    only. Drop the fast-forward rule and this key stops working, which is what makes that rule
+    load-bearing rather than tidy.
+
+    *Absent ⇒ the provider fetches no transcript and starts a fresh session* — an older relay's
+    behaviour, and never a failure. So the rollout order is the relay before the fleet, and this
+    check is what catches a rename before it gets that far.
+    """
+    keys = _relay_claim_keys()
+
+    assert "transcript_commit" in keys, (
+        "grid-src's claim no longer pins the transcript oid, so an automatic retry inherits the "
+        "conversation of the attempt it is retrying instead of resetting with its workspace — "
+        "silently, because the turn completes and every other signal reads healthy")
+
+
+def test_the_transcript_ref_prefix_this_provider_pushes_to_is_the_one_the_fence_grants():
+    """ADR 0034 D-j: a conversation's transcript lives on `refs/grid/agent/<conversation_id>`.
+
+    The provider BUILDS this ref name — `task_repo.transcript_ref(conversation_id)` — and the relay
+    builds the same name to put in `push_refs` and to un-hide in `transfer.hideRefs`. Nothing on the
+    wire carries it, so the prefix is the whole of what the two repositories have to agree about.
+    The pinned oid rides the claim; the NAME does not, deliberately, because a name a client derives
+    from a duplicated constant is one fewer field a proxy can mangle.
+
+    Drift is silent on both sides and total: the fence hides a namespace the provider never asks
+    about and refuses the one it does, so `git push` fails with `provider_may_not_push_ref`, the
+    settle reports nothing, and the turn is reclaimed until `retries_exhausted` — while every unit
+    test in BOTH repositories passes. That is the `refs/integrate/*` dev-VM CRITICAL's shape exactly,
+    which is why this check exists before either half is written rather than after.
+    """
+    from remote import task_repo
+
+    assert task_repo.TRANSCRIPT_PREFIX == _relay_string_constant(
+        "TRANSCRIPT_PREFIX", module="task_repo.py")
+
+
 def test_the_two_refusal_codes_this_cli_branches_on_are_the_ones_the_relay_sends():
     """The CLI's half of the parsed-`detail` register (ADR 0033 D-o, issue 26).
 

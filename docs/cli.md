@@ -1568,8 +1568,8 @@ A claimed task first brings the workspace to the task's input commit: it fetches
 branch from the relay over the same git-over-HTTP front the client uses, and resets the workspace to
 it exactly, so a previous task's leftovers can never be mistaken for this task's input. **`git` must
 be installed on the provider.** The one directory spared is `.grid/`, which is the provider's own
-state — it is why nothing may be uploaded there, and it is excluded from the result commit too, with
-one exception: `.grid/agent/<member>/` holds that member's conversation and *is* committed (see
+state — it is why nothing may be uploaded there, and it is excluded from the result commit too,
+without exception: the conversation that used to ride along in it now travels on its own ref (see
 [Continuing a conversation](#continuing-a-conversation) below). If the input cannot be checked out
 the task fails **without spawning the agent** — an agent run against input that never arrived
 produces a confidently wrong answer.
@@ -1714,27 +1714,36 @@ starting cold, and they do so even when a different provider serves them.
 The mechanism is the repository. Claude Code keeps a session's transcript — and the agent's own
 `memory/` — in a folder named after its working directory, and it writes through a symlink, so the
 provider points that folder at `.grid/agent/<member>/` inside that conversation's workspace. The
-transcript is then carried by the ordinary result commit, with no separate synchronization step: a
-provider that has done nothing but clone the repository has the conversation the moment it checks
-the task out. This is why every provider must agree on `GRID_TASK_ROOT` — the folder's name is
+transcript is then published to **`refs/grid/agent/<conversation>`**, a ref of its own that the
+provider holding the conversation's lease pushes at the end of every turn, and fetches before the
+next one starts. This is why every provider must agree on `GRID_TASK_ROOT` — the folder's name is
 derived from the *absolute* path, so a different root is a different conversation.
 
-A conversation belongs to one member, so a follow-up task continues **your own** and never a
-colleague's. It is not private, though: the transcript travels in the ordinary commit, so once a
-branch has been promoted and merged, everyone working in the project has a copy of everyone's.
+**Your conversations are yours.** The ref is outside `refs/heads/`, and the relay advertises it only
+to the provider currently holding that conversation's lease — so `grid project clone` does not carry
+it, and no colleague receives it. Nothing about a conversation reaches the project's own history.
 
 Two consequences worth knowing:
 
-- **A failed task's conversation does not carry forward.** `main` only advances on success, and the
-  next task is cut from `main`, so a project resumes from its last *successful* state rather than
-  from a broken one.
+- **A failed turn's conversation is published, but an automatic retry does not inherit it.** What
+  the agent did is kept, so the next thing you type continues from it. A retry of the same turn is
+  different: it resets to the conversation as it stood *before* the attempt that failed, rather than
+  re-reading whatever confused the agent into failing.
 - **If the transcript is missing or unreadable, the task starts a fresh session rather than
   failing** — and says so, in three places, deliberately: as a `starting a fresh session (…)` line
   in `grid task follow`, in the task's durable event log, and on the task itself as
   `session_reset_reason`, which `grid task get --json` reports. The last of those is the one that
   survives everything: progress events stop if the provider loses the task's lease mid-run, so the
-  reason is also carried on the final report and recorded by the relay. The commonest cause is the
-  previous task having failed.
+  reason is also carried on the final report and recorded by the relay.
+  This covers a conversation that genuinely has no transcript yet. It does **not** cover a provider
+  that was told one exists and could not fetch it — that turn is left for another provider to retry
+  rather than quietly starting over, because the two are indistinguishable from the workspace and
+  only one of them is harmless.
+
+A conversation's transcript is kept while the conversation is in use and collected once it has been
+idle for `TASK_CONVERSATION_RETENTION_SECONDS` (30 days by default; `0` keeps them forever). It is
+measured from the conversation's most recent turn, never from any single turn ending — a
+conversation has no "finished" state.
 
 The conversation is written only by the provider: the relay refuses any uploaded file under
 `.grid/`. The provider's credential never goes near it — the config directory is required to be an

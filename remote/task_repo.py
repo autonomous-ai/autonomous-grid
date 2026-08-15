@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,28 @@ INTEGRATE_PREFIX = "refs/integrate/"
 # than that and still narrow enough to keep a leading `-`, a space, a `..` traversal and an empty id
 # out of a git argv.
 _INTEGRATE_REF = re.compile(re.escape(INTEGRATE_PREFIX) + r"[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A full object id, as the relay stores and sends it. Narrow on purpose: this value reaches a git
+# argv, and unlike a ref name there is no legitimate reason for it to hold anything but hex.
+_OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# Where THIS CONVERSATION's transcript lives (ADR 0034 D-j, issue 39). Duplicated from grid-src's
+# `task_repo.TRANSCRIPT_PREFIX`, and unlike `INTEGRATE_PREFIX` the name is **not** on the wire at
+# all: this side builds it from `conversation_id`, and the relay builds the same string to grant it
+# in `push_refs` and to un-hide it in `transfer.hideRefs`. The prefix is therefore the whole of what
+# the two repositories have to agree about, and drift is silent on both sides — the fence hides a
+# namespace this provider never asks about and refuses the one it does, so every task is reclaimed
+# to `retries_exhausted` with both test suites green. `tests/test_task_lease.py` parses grid-src's
+# assignment rather than restating it.
+#
+# Why the transcript stopped riding the result commit: issue 06 put it there so it would travel to
+# whichever provider served next, which was right while there was one session per MEMBER. One
+# session per CONVERSATION (issue 38) makes that 105 KB-2 MB of `.jsonl` per turn in the shared
+# trunk, every conversation's merge carrying every other's, inside a directory a non-developer reads
+# as "my project's files".
+TRANSCRIPT_PREFIX = "refs/grid/agent/"
+# What a transcript ref may contain. Same shape and same reason as `_INTEGRATE_REF`: the relay builds
+# conversation ids from a uuid4, so this is deliberately wider than that and still narrow enough to
+# keep a leading `-`, a space, a `..` traversal and an empty id out of a git argv.
+_TRANSCRIPT_REF = re.compile(re.escape(TRANSCRIPT_PREFIX) + r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Wall-clock ceiling for one git invocation. A fetch from a local bundle is milliseconds; this stops
 # a wedged git (a stale `index.lock` from a killed previous task) from consuming the task's whole
 # deadline before the agent ever starts.
@@ -347,20 +370,30 @@ def _env(token: str | None = None, author: GitIdentity | None = None) -> dict[st
 
 def _run(workspace: Path, *args: str, token: str | None = None,
          timeout: float = _GIT_TIMEOUT_SECONDS,
-         author: GitIdentity | None = None) -> str:
+         author: GitIdentity | None = None,
+         index: Path | None = None) -> str:
     """One git invocation inside `workspace`, or `CheckoutError` carrying git's own words.
 
     `GIT_SAFETY_CONFIG` is applied as `-c` on EVERY call rather than once at clone time, because a
     config written into `.git/config` is itself something a previous run could have changed. See
     that constant for what the two settings buy and — measured — what they do not.
+
+    `index` points this one call at a THROWAWAY index (ADR 0034 D-j, issue 39), which is how the
+    transcript is staged without ever entering the project's own. A `GIT_INDEX_FILE` that leaked into
+    other calls would be far worse than the problem it solves, so it is a per-call argument rather
+    than something `_env` knows about: the result commit's index is the one thing in this module that
+    must not acquire a `.grid/` entry, since that is the whole of what this slice removes.
     """
     safety: list[str] = []
     for key, value in GIT_SAFETY_CONFIG:
         safety += ["-c", f"{key}={value}"]
+    env = _env(token, author)
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     try:
         proc = subprocess.run(
             ["git", *safety, "-C", str(workspace), *args],
-            capture_output=True, text=True, env=_env(token, author), timeout=timeout)
+            capture_output=True, text=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise CheckoutError(f"git {args[0]} timed out after {timeout:.0f}s") from None
     except OSError as exc:
@@ -374,21 +407,30 @@ def _run(workspace: Path, *args: str, token: str | None = None,
 
 
 def _ensure_repo(workspace: Path) -> None:
-    """Make `workspace` a git working copy, and keep `.grid/` out of every commit made from it —
-    except `.grid/agent/`, which is the project's conversation and has to travel.
+    """Make `workspace` a git working copy, and keep `.grid/` out of every commit made from it.
 
     The exclude is written on every call rather than only at init, because it is what keeps the
     provider's own state out of the requesting user's repository under `git add -A`. A file that
     only got written at init would go missing the first time a workspace was restored from
     anywhere else.
 
-    The whole of `.grid/` is excluded here, and the issue-06 carve-out is made by `commit_and_push`
-    **force-adding** `.grid/agent/` instead of by a `!` negation in this file. That is not a style
-    choice: a *tracked* `.gitignore` outranks `$GIT_DIR/info/exclude`, so a project whose repository
-    ignores (say) `*.jsonl` or `memory/` would silently defeat a negation written here — the task
-    would still report `completed`, the transcript would simply never be committed, and the loss
-    would only surface when a different provider found no conversation to resume. A forced add
-    overrides every ignore source, so the rule cannot be shadowed by the repository's own contents.
+    **The whole of `.grid/` is excluded, without exception, since ADR 0034 D-j (issue 39).** It used
+    to have one: issue 06 carved `.grid/agent/` back in so the conversation would travel in the
+    result commit, and that carve-out was a force-add in `commit_and_push` rather than a `!` negation
+    here. The transcript now travels on `refs/grid/agent/<conversation_id>` instead, so the force-add
+    is gone and this file's rule is uniform again.
+
+    ⚠️ **The reason the carve-out was never written here still applies to `push_transcript`, which
+    inherited it.** A *tracked* `.gitignore` outranks `$GIT_DIR/info/exclude`, so a project whose
+    repository ignores (say) `*.jsonl` or `memory/` would silently defeat a negation written in this
+    file — the task would still report `completed` and the transcript would simply never be
+    published. That is why the side-ref publish stages with `add -f`, and why
+    `test_the_projects_own_gitignore_cannot_suppress_the_conversation` was re-aimed rather than
+    deleted.
+
+    ⚠️ **This file has no say over paths git already TRACKS**, which is what `commit_and_push`'s
+    `git rm --cached -r .grid/agent` is for: every project that ran a task under ADR 0033 has
+    transcripts tracked in its history, and an exclude does nothing about those.
 
     `GIT_SAFETY_CONFIG` is written into the workspace's own config on every call too, and for a
     narrower reason than ADR 0033 D-f gives. D-f says the environment "can be overridden by an agent
@@ -408,7 +450,8 @@ def _ensure_repo(workspace: Path) -> None:
 
 
 def materialize(workspace: Path, *, url: str, token: str, branch: str,
-                input_commit: str, merge_ref: str = "") -> None:
+                input_commit: str, merge_ref: str = "",
+                transcript_ref: str = "", transcript_commit: str = "") -> None:
     """Bring `workspace` to exactly `input_commit` on `branch`. Raises `CheckoutError` on any failure.
 
     Raising rather than returning a status is deliberate: the ONLY safe response to input that did
@@ -447,6 +490,19 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
         raise CheckoutError(
             f"the claim's merge_ref {merge_ref!r} is not a {INTEGRATE_PREFIX}<id> ref, so this "
             f"provider will not hand it to git")
+    # The same rule for the transcript ref, and for the same reason: it reaches a git argv. This one
+    # is built HERE from `conversation_id` rather than sent by the relay, so a malformed value means
+    # a malformed conversation id — still terminal, because no provider can fix it and retrying
+    # spends every attempt reaching `retries_exhausted`.
+    if transcript_ref and not _TRANSCRIPT_REF.fullmatch(transcript_ref):
+        raise CheckoutError(
+            f"the transcript ref {transcript_ref!r} is not a {TRANSCRIPT_PREFIX}<id> ref, so this "
+            f"provider will not hand it to git")
+    # A pin with no ref to find it in is a claim this provider cannot act on, and it is the shape a
+    # caller bug takes rather than an old relay's: an old relay sends neither.
+    if transcript_commit and not _OID.fullmatch(transcript_commit):
+        raise CheckoutError(
+            f"the claim's transcript_commit {transcript_commit!r} is not an object id")
 
     _ensure_repo(workspace)
     try:
@@ -457,6 +513,24 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
             # collected this ref early answers with a failure naming the ref, and combining them
             # would lose the input fetch's success to the merge ref's failure.
             _run(workspace, "fetch", "--quiet", url, f"+{merge_ref}:{merge_ref}",
+                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+        if transcript_commit:
+            # THE CONVERSATION (ADR 0034 D-j, issue 39), and only when the relay pinned one. An
+            # unpinned turn fetches nothing: either the conversation has no transcript yet, or the
+            # relay predates this key — both mean "start fresh", which is the safe degrade.
+            #
+            # Gated on the PIN rather than on the ref, because the pin is what says a transcript
+            # exists. `transcript_ref` is derived from the conversation id and is always non-empty.
+            #
+            # ⚠️ Fetched BY NAME even though the pin is what gets checked out. A bare oid is
+            # unfetchable — `uploadpack.allowAnySHA1InWant` is off — and the pin is reachable inside
+            # what the name brings back only because this ref is fast-forward only. That is the
+            # dependency that makes the fast-forward rule load-bearing rather than tidy.
+            #
+            # Its own invocation, for the merge ref's reason: this failure has to be
+            # distinguishable, because "the relay says a transcript exists and I could not get it"
+            # must NOT become a silent fresh session.
+            _run(workspace, "fetch", "--quiet", url, f"+{transcript_ref}:{transcript_ref}",
                  token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
     except CheckoutError as exc:
         # The ONLY lines in this function that talk to the relay, and so the only ones whose failure
@@ -474,6 +548,23 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
     # a nested repository a previous agent may have cloned, and `-e` spares the one directory that
     # is ours rather than the task's.
     _run(workspace, "clean", "--quiet", "-ffdx", "-e", RESERVED_DIR)
+
+    if transcript_commit:
+        # The conversation, put where Claude Code will look for it (ADR 0034 D-j, issue 39). AFTER
+        # the reset and the clean, both of which spare `.grid/` but neither of which would put a
+        # transcript there.
+        #
+        # ⚠️ **`restore --worktree`, never `checkout <oid> -- <path>`.** Measured on git 2.54.0:
+        # `checkout` writes the INDEX as well, so those paths would become staged entries in the
+        # project's index and `commit_and_push` would commit them straight back into the trunk —
+        # reintroducing, by a different route, the exact thing this slice removes. `restore` with
+        # `--worktree` alone touches no index at all.
+        #
+        # The PINNED oid, not the ref's tip. On a retry the tip is what the failed attempt pushed and
+        # the pin is what preceded it, and resuming the failed attempt's own confusion on every retry
+        # is what ADR 0034 D-j's latch exists to prevent.
+        _run(workspace, "restore", "--source", transcript_commit, "--worktree", "--",
+             f"{RESERVED_DIR}/{TRANSCRIPT_DIR}")
 
 
 def list_files(workspace: Path, *,
@@ -514,16 +605,16 @@ def _split(output: str) -> list[str]:
 
 
 def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
-                    message: str, transcript: Path,
-                    author: GitIdentity | None = None) -> Pushed:
+                    message: str, author: GitIdentity | None = None) -> Pushed:
     """Commit whatever the agent left and push `branch`. Returns the result commit and what the
     agent left unresolved.
 
-    `transcript` is this member's conversation directory inside the worktree — what
-    `task_agent.transcript_dir(workspace, member_key)` returns, already built and already validated.
-    **Required, deliberately.** A defaulted one that a caller forgot would be issue 06's failure
-    exactly: the task reports `completed`, the push lands, and the conversation is simply never
-    committed — visible only when a different provider finds nothing to resume, tasks later.
+    ⚠️ **The conversation is NOT in what this pushes** (ADR 0034 D-j, issue 39). It used to be, and
+    the `transcript` parameter that carried it is gone rather than defaulted — a defaulted one would
+    be a caller that silently kept the old behaviour. The transcript goes to
+    `refs/grid/agent/<conversation_id>` via `push_transcript`, and the one thing this function still
+    does about it is `git rm --cached` the copies a pre-0034 project already has TRACKED, without
+    which they would be re-staged by `add -A` on every turn forever.
 
     `author` is the project member the claim named (ADR 0033 D-m); the committer is `grid` whatever
     it says. `None` gives the pre-0033 identity on both — what an older relay's payload produces,
@@ -545,18 +636,12 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
     if not url:
         raise PushError("no git remote to push the result to")
 
-    # Computed BEFORE the block below, so a directory outside the worktree is refused in its own
-    # words rather than escaping the `except CheckoutError` as a bare `ValueError` from somewhere
-    # inside a commit. `relative_to` raising IS the containment check — deliberately, rather than a
-    # second copy of `task_agent`'s path-segment allowlist, which would be one more rule to keep in
-    # step and one more place to get it wrong.
-    try:
-        transcript_pathspec = transcript.relative_to(workspace).as_posix()
-    except ValueError:
-        raise PushError(
-            f"the transcript directory {transcript} is not inside the workspace {workspace}; "
-            f"refusing to commit, because the pathspec would reach outside the task's worktree"
-        ) from None
+    # No transcript containment check here any more, and it is gone rather than relaxed (ADR 0034
+    # D-j, issue 39). It existed because a caller-supplied directory became a `git add` PATHSPEC, so
+    # a path outside the worktree had to be refused before it reached argv. Nothing here takes that
+    # directory now: the only `.grid/agent` pathspec below is a module constant, and where the
+    # transcript actually goes is `push_transcript`'s business. A check with nothing left to check
+    # would read as protection that is no longer protecting anything.
 
     # BEFORE `add -A`, which is the only moment this fact exists (ADR 0033 D-e, issue 15).
     #
@@ -582,32 +667,31 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
         unchecked = str(exc)
 
     try:
+        # ⚠️ **BEFORE `add -A`, and this line is the whole of the migration** (ADR 0034 D-j, issue
+        # 39). The transcript now travels on `refs/grid/agent/<conversation_id>` and the exclude
+        # `_ensure_repo` writes keeps `.grid/` out of every commit — but `$GIT_DIR/info/exclude` has
+        # **no say over files git already TRACKS**, and every project that has run a task under
+        # ADR 0033 has `.grid/agent/**` tracked in `main`. Without this, `add -A` below goes on
+        # staging every modification to them forever: the trunk quietly stays fat, every member
+        # keeps receiving every other member's conversation, and *every test on a fresh project
+        # passes*. That asymmetry is why the flip test seeds a tracked transcript.
+        #
+        # `--cached`, so the files stay on disk: they are this conversation's live transcript, which
+        # the agent is still appending to and which `push_transcript` publishes moments later.
+        # `--ignore-unmatch`, so a project with nothing tracked there is a no-op rather than an
+        # error — `git rm` treats an unmatched pathspec as a failure, exactly as `git add` does, and
+        # the overwhelmingly common case after the first turn is that there is nothing to remove.
+        # Measured on git 2.54.0: exit 0 with no output when nothing matches, and when the directory
+        # does not exist at all.
+        _run(workspace, "rm", "--cached", "-r", "--quiet", "--ignore-unmatch", "--",
+             f"{RESERVED_DIR}/{TRANSCRIPT_DIR}")
         _run(workspace, "add", "-A")
-        # THIS MEMBER's conversation, added explicitly and by force (ADR 0032 issue 06; per member
-        # since ADR 0033 D-g). `-f` because EVERY ignore source has to be overridden, not just the
-        # one we wrote: `.grid/` is excluded wholesale by `_ensure_repo`, and a tracked `.gitignore`
-        # in the user's own repository outranks that file anyway. `-A` within the pathspec so a
-        # memory file the agent deleted is staged as a deletion rather than lingering forever.
+        # No force-add of the transcript any more, and its absence is the feature. Issue 06 added
+        # one so the conversation would ride the result commit to the next provider; ADR 0034 D-j
+        # moves it to a side ref, so a force-add here would put back exactly what the slice removes.
+        # `add -A` above does not re-stage it: `.grid/` is excluded and, after the `rm --cached`,
+        # untracked.
         #
-        # Scoped to `.grid/agent/<member_key>` rather than all of `.grid/agent`, because after a
-        # promote every member's transcript is a tracked file in every other member's checkout and
-        # a wider pathspec would force-add all of them back on every task.
-        #
-        # ⚠️ It is NOT full containment, and must not be read as any. `add -A` above has ALREADY
-        # staged whatever the agent did to another member's transcript, because the exclude
-        # `_ensure_repo` writes has no say over files git already TRACKS — so the narrow pathspec
-        # here only ever gets to decide about UNTRACKED cross-member writes. The tracked-file leak
-        # is real, known, and deferred: closing it depends on merge semantics for `.grid/agent/`
-        # that arrive with integration (ADR 0033, issues 13-15). Pinned meanwhile by
-        # `test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the_reserved_directory`,
-        # which seeds a second member's transcript and asserts the leak, so closing it later is a
-        # deliberate flip of that assertion rather than a surprise.
-        #
-        # Guarded on existence because `git add` treats a pathspec matching nothing as an error, and
-        # a task whose agent never started has no transcript directory to add — that outcome must
-        # still commit and push, since a failed attempt is pushed too.
-        if transcript.is_dir():
-            _run(workspace, "add", "-f", "-A", "--", transcript_pathspec)
         # The ONE invocation here that writes an identity, so the author travels no further than it.
         _run(workspace, "commit", "--quiet", "--allow-empty", "-m", message, author=author)
         commit = _run(workspace, "rev-parse", "HEAD").strip()
@@ -622,6 +706,152 @@ def commit_and_push(workspace: Path, *, url: str, token: str, branch: str,
     except CheckoutError as exc:
         raise PushError(f"could not push {branch}: {exc}") from None
     return Pushed(commit=commit, unresolved=unresolved, unchecked=unchecked)
+
+
+def transcript_ref(conversation_id: str) -> str:
+    """Where this conversation's transcript lives (ADR 0034 D-j, issue 39).
+
+    Built here rather than taken off the claim, which is why `TRANSCRIPT_PREFIX` is the lockstep
+    value and the ref name is not: a name a provider derives from a duplicated constant is one fewer
+    field a proxy can mangle, and the relay derives the identical string to grant it in `push_refs`.
+
+    An empty id answers an empty string rather than raising, and the difference from grid-src's
+    `transcript_ref` — which refuses one — is deliberate. On the relay an empty id would silently
+    widen a fence grant to a namespace shared by everybody. Here it can only mean "this claim named
+    no conversation", which `run_task` has already refused terminally before any of this runs; an
+    exception thrown from a path that cannot be reached would be a second, worse answer to a question
+    already answered.
+    """
+    return f"{TRANSCRIPT_PREFIX}{conversation_id}" if conversation_id else ""
+
+
+def push_transcript(workspace: Path, *, url: str, token: str, ref: str) -> str | None:
+    """Publish this conversation's transcript to its side ref (ADR 0034 D-j, issue 39).
+
+    Answers the commit pushed, or `None` when the agent produced no transcript at all — a turn whose
+    agent never started, which still has to settle. Raises `PushError` on any failure, exactly like
+    `commit_and_push`: a conversation that evaporates in silence is the outcome D-j names as
+    unacceptable, so "best effort" is not on offer here.
+
+    **Built through a THROWAWAY INDEX, and every part of that is load-bearing:**
+
+      * `GIT_INDEX_FILE` at a temp path means these paths never enter the project's own index, so the
+        result commit cannot acquire a `.grid/` entry — which is precisely what this slice removes.
+        Measured on git 2.54.0: after this sequence `git status --porcelain` in the workspace is
+        empty.
+      * `add -f` because EVERY ignore source has to be overridden. `.grid/` is excluded wholesale by
+        `_ensure_repo`, and a *tracked* `.gitignore` in the user's own repository outranks that file
+        anyway — a project that ignores `*.jsonl` or `memory/` would otherwise publish an empty
+        transcript while reporting `completed`. That is issue 06's silent-loss failure, reached
+        through the new path, and `test_the_projects_own_gitignore_cannot_suppress_the_conversation`
+        is the test that would catch it.
+      * `commit-tree` with the FETCHED TIP as parent, never with the pinned oid. The pin decides what
+        content was materialized; the parent decides that the push fast-forwards. On a retry those
+        differ — the content is older than the tip — and using the pin as parent would build a
+        sibling that `receive.denyNonFastForwards` refuses, so a retry could never publish anything.
+
+    The tree covers `.grid/agent` as a whole rather than one member's subdirectory. The workspace is
+    already per conversation (ADR 0034 D-c), so there is only one conversation's transcript in it,
+    and narrowing further would be a second copy of the member-key rule for no gain.
+    """
+    if not ref.startswith("refs/"):
+        # A full ref name, for `push_import`'s reason: the relay authorizes an exact ref, and a
+        # short name would be resolved by git into something else entirely.
+        raise PushError(f"a transcript ref must be a full ref name, got {ref!r}")
+    if not url:
+        raise PushError("no git remote to push the transcript to")
+
+    transcript = workspace / RESERVED_DIR / TRANSCRIPT_DIR
+
+    # ⚠️ **The parent comes from the RELAY, fetched HERE, and this function must not borrow it from
+    # anywhere else.** It used to read whatever `materialize` had left on the local ref — and that
+    # fetch is gated on the PIN, so a conversation's FIRST turn (no pin, by definition) fetched
+    # nothing. `git push <oid>:<ref>` creates no local ref either, so after a successful publish
+    # this workspace held no record of it. A first turn that needed a second attempt — its result
+    # push failed, the reaper reclaimed it, the workspace survived `clean -ffdx -e .grid` — then
+    # built a SECOND root commit and was refused as a non-fast-forward, identically, on every
+    # remaining attempt, until `retries_exhausted`. The agent's work and its transcript were both
+    # fine throughout. Reproduced on git 2.54.0; `test_publishing_a_transcript_twice_from_one_
+    # workspace_fast_forwards` is the regression test.
+    #
+    # Best-effort, and the swallow is bounded rather than lazy: a ref that does not exist yet is a
+    # conversation's first publish, which is the ordinary case. A fetch that fails for a REAL reason
+    # (the network, the relay) leaves `parent` empty, so the push below builds a root commit and is
+    # refused LOUDLY as a non-fast-forward — a `PushError`, no terminal report, and the reaper
+    # retries the whole turn. There is no arrangement here that loses a conversation quietly.
+    if url:
+        try:
+            _run(workspace, "fetch", "--quiet", url, f"+{ref}:{ref}",
+                 token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+        except CheckoutError:
+            pass
+
+    parent = ""
+    try:
+        parent = _run(workspace, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").strip()
+    except CheckoutError:
+        # `rev-parse --verify --quiet` exits non-zero for a ref that is not there, which is not an
+        # error here: it is a first turn.
+        parent = ""
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="grid-transcript-") as scratch:
+            index = Path(scratch) / "index"
+            # Guarded on the directory only because `git add` calls an unmatched pathspec an ERROR.
+            # Whether there is anything to publish is decided from the TREE below, not from here.
+            if transcript.is_dir():
+                _run(workspace, "add", "-f", "-A", "--", f"{RESERVED_DIR}/{TRANSCRIPT_DIR}",
+                     index=index)
+            tree = _run(workspace, "write-tree", index=index).strip()
+            # ⚠️ **"Is there anything to publish" is a question about the TREE, and asking the
+            # DIRECTORY instead was a real bug with a permanent consequence.** `link_transcript`
+            # creates `.grid/agent/<member_key>/` BEFORE the agent starts, so a turn whose agent
+            # never opened a session leaves that directory existing and EMPTY — `is_dir()` is true,
+            # nothing stages, and `write-tree` answers the empty tree (measured, git 2.54.0). An
+            # empty commit was then published as the conversation's first state, the next turn
+            # pinned it, and `git restore --source=<it> -- .grid/agent` failed with
+            # `pathspec '.grid/agent' did not match any file(s) known to git`. That call is outside
+            # `materialize`'s retryable arm, so the turn failed TERMINALLY — and so did every turn
+            # after it, because the pin of a conversation whose ref never moves never changes. The
+            # conversation was permanently unusable, and the message named a pathspec nobody wrote.
+            #
+            # Read with `ls-tree` rather than compared against a hardcoded empty-tree oid: that oid
+            # differs between SHA-1 and SHA-256 repositories, and this has no business knowing which
+            # it is in.
+            empty = not _run(workspace, "ls-tree", "--name-only", tree).strip()
+            if empty and not parent:
+                # Nothing to publish and nothing published before. An ordinary outcome — the turn
+                # still settles — and an empty commit would spend a round trip to say so while
+                # poisoning every later turn of this conversation.
+                return None
+            if empty:
+                # ⚠️ **A history that exists plus nothing to publish is a REFUSAL.**
+                # `commit-tree <empty> -p <parent>` is a valid FAST-FORWARD child, so this would
+                # land cleanly and report success while replacing the whole conversation with an
+                # empty commit. "Nothing to record" and "everything recorded is gone" are different
+                # observations and only the first is ordinary.
+                raise PushError(
+                    f"this conversation has a published transcript at {ref} but there is nothing "
+                    f"under {transcript} to publish now; refusing, because the commit that would be "
+                    f"pushed replaces the conversation with an empty tree")
+            args = ["commit-tree", tree, "-m", f"conversation transcript for {ref}"]
+            if parent:
+                args += ["-p", parent]
+            commit = _run(workspace, *args).strip()
+    except CheckoutError as exc:
+        raise PushError(f"could not build the transcript commit: {exc}") from None
+
+    if commit == parent:
+        # The agent changed nothing the transcript records. Nothing to push, and saying so beats a
+        # no-op round trip; the ref already names this commit.
+        return commit
+
+    try:
+        _run(workspace, "push", "--quiet", url, f"{commit}:{ref}",
+             token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+    except CheckoutError as exc:
+        raise PushError(f"could not push the conversation's transcript to {ref}: {exc}") from None
+    return commit
 
 
 def _unresolved_paths(workspace: Path) -> tuple[str, ...]:

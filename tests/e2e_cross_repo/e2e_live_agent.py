@@ -249,3 +249,149 @@ def test_a_second_conversation_does_not_recall_the_first(
         f"{second.get('claude_session_id')}. The provider's own Claude config directory holds: "
         + repr(sorted(p.name for p in (Path.home() / ".claude" / "projects").glob("*")
                       if members[0].name in p.name)))
+
+
+def test_a_real_conversation_survives_losing_its_workspace_and_travels_on_its_side_ref(
+        relay, owner_token, spawn_live_provider, live_workspace_root, tmp_path):
+    """ADR 0034 D-j / issue 39 against the REAL binary, and the one check that costs money.
+
+    Everything else about this slice is checked against `fake_claude.py`, which writes a one-line
+    `.jsonl` it invented. What only the real binary can answer is whether a REAL transcript — tens of
+    kilobytes of structured session state, possibly compacted — survives being packed onto a ref,
+    losing its workspace entirely, and being restored at the same absolute path by a process that has
+    never seen it. Issue 35 measured that the mechanism works in isolation (`measure_non_dev_design`:
+    a compacted transcript resumed after a real push/fetch round trip). This is the same question
+    asked of THIS code path.
+
+    ⚠️ **Driven at `run_task` rather than through the relay, deliberately.** Every `POST /tasks`
+    mints a fresh conversation and issue 47 owns the route that posts a second turn into an existing
+    one — so a second turn of one conversation cannot be created over the wire at all yet. The claim
+    payload IS `run_task`'s interface, so a hand-built job here is the real thing rather than a
+    stand-in; what is faked is only the relay's decision about which conversation this turn belongs
+    to, which is exactly the part issue 47 will supply. The relay's own half of the pin has its own
+    tests in grid-src.
+
+    The token is only ever SAID, never written to a file, so nothing in the git history can carry it
+    across — and the negative control at the end proves a conversation never told it cannot produce
+    it either.
+
+    ⚠️ **MEASURED while mutation-testing this test, and it bounds what "a different provider" means
+    here.** Deleting the workspace does NOT delete the operator's `~/.claude`, which this module
+    deliberately uses because a custom config directory does not authenticate. With the `restore`
+    removed from `materialize`, the agent reported `session_reset_reason` correctly — no transcript
+    — and STILL answered with the token, because the workspace PATH is unchanged and the vendor keys
+    its own storage on that path. So on this machine the token can reach a rebuilt workspace by a
+    route that is not the side ref, and the load-bearing assertion is `session_reset_reason` rather
+    than the token. A genuinely different machine has neither, which is what a two-host run would add
+    and this one cannot.
+    """
+    from remote import task_agent, task_repo, tasks
+
+    if not shutil.which("claude"):
+        pytest.skip("Claude Code is not on PATH; the live agent checks need the real binary")
+    # The fixture's own guard, needed here too: this test never spawns a provider process, so it
+    # would otherwise run with `tests/conftest.py`'s non-authenticating config directory.
+    spawn_live_provider  # noqa: B018 — requested for its `GRID_TASK_CLAUDE_CONFIG_DIR` removal
+
+    conversation = "live-sideref-0001"
+    monkey_root = live_workspace_root
+    os.environ["GRID_TASK_ROOT"] = str(monkey_root)
+    os.environ["GRID_TASK_TIMEOUT_SECONDS"] = _TASK_TIMEOUT_SECONDS
+    os.environ["ANTHROPIC_MODEL"] = _MODEL
+
+    member = "9f2b" * 8
+    remote, base = _bare_repo_with_a_trunk(tmp_path)
+    workspace = task_agent.workspace_for("live-proj", member, conversation)
+
+    def job(task_id, branch, **extra):
+        return {"task_id": task_id, "project_id": "live-proj", "member_key": member,
+                "conversation_id": conversation, "branch": branch, "input_commit": base, **extra}
+
+    # --- turn 1: plant a token in the conversation and nowhere else ------------------------
+    first = tasks.run_task(
+        job("L1", "task/L1",
+            prompt="Remember this token for later: OKAPI-9931. Reply with just the word OK. "
+                   "Create or modify no file."),
+        remote=remote)
+    assert first.state == "completed", first.error
+    session = first.session_id
+    assert session, "the real binary reported no session id"
+    task_repo.commit_and_push(workspace, url=remote.url, token=remote.token,
+                              branch="task/L1", message="task L1 (completed)")
+    pinned = task_repo.push_transcript(
+        workspace, url=remote.url, token=remote.token,
+        ref=task_repo.transcript_ref(conversation))
+    assert pinned, "the real transcript was never published to its side ref"
+
+    # --- the workspace, gone. Only the ref carries the conversation now --------------------
+    shutil.rmtree(workspace.parent)
+    assert not workspace.exists()
+
+    # --- turn 2: the same conversation, on a workspace that has to be rebuilt --------------
+    _git_bare(remote.url, "branch", "task/L2", base)
+    second = tasks.run_task(
+        job("L2", "task/L2", prompt="What token did I ask you to remember? Reply with just it.",
+            resume_session_id=session, transcript_commit=pinned),
+        remote=remote)
+
+    assert second.state == "completed", second.error
+    assert not second.session_reset_reason, (
+        f"the agent was told to resume a session it could not use, so the conversation was lost "
+        f"rather than carried: {second.session_reset_reason}")
+    assert "OKAPI-9931" in (second.output or ""), (
+        f"a REAL transcript did not survive the round trip through {task_repo.transcript_ref(conversation)} "
+        f"— the token was only ever spoken, so the side ref is the only way it could have "
+        f"travelled. The agent said: {second.output!r}")
+
+    # --- the negative control, and it is not optional -------------------------------------
+    #
+    # ⚠️ **The token assertion above is NOT known to be discriminating on its own, and this is what
+    # says so.** Mutation-testing this test (deleting the `restore` from `materialize`) left the
+    # agent still answering `OKAPI-9931` while `session_reset_reason` correctly reported no
+    # transcript — so something other than the side ref can supply that answer, and a positive-only
+    # test would have been reporting on the wrong thing. A third turn in a FRESH conversation, with
+    # no pin and no session, is the row that tells the two apart: if it also knows the token, then
+    # the check above proves nothing and the only load-bearing assertion here is the reset reason.
+    control_conversation = "live-sideref-control"
+    _git_bare(remote.url, "branch", "task/L3", base)
+    control = tasks.run_task(
+        {"task_id": "L3", "project_id": "live-proj", "member_key": member,
+         "conversation_id": control_conversation, "branch": "task/L3", "input_commit": base,
+         "prompt": "What token did I ask you to remember? Reply with just it."},
+        remote=remote)
+
+    assert control.state == "completed", control.error
+    assert "OKAPI-9931" not in (control.output or ""), (
+        f"a conversation that was never told the token still produced it, so the assertion above "
+        f"is not evidence that the transcript travelled — it is evidence of nothing. The control "
+        f"said: {control.output!r}")
+
+
+def _bare_repo_with_a_trunk(tmp_path):
+    """A bare repo standing in for the relay's, with one commit on `main`. Returns (remote, commit).
+
+    Real git, and deliberately not through `task_repo`: a test that built its remote with the code
+    under test would agree with itself just as happily if both were wrong.
+    """
+    from remote.task_repo import GitRemote
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git_bare(seed, "init", "--quiet", "-b", "main", ".")
+    (seed / "a.txt").write_text("x\n")
+    _git_bare(seed, "add", "-A")
+    _git_bare(seed, "commit", "--quiet", "-m", "seed")
+    commit = _git_bare(seed, "rev-parse", "HEAD").strip()
+    bare = tmp_path / "origin.git"
+    _git_bare(tmp_path, "clone", "--bare", "-q", str(seed), str(bare))
+    _git_bare(bare, "branch", "task/L1", commit)
+    return GitRemote(url=str(bare), token="tok"), commit
+
+
+def _git_bare(cwd, *args):
+    """git in a hermetic environment, the way every other real-git helper in this suite runs it."""
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "HOME": "/nonexistent", "GIT_AUTHOR_NAME": "grid", "GIT_AUTHOR_EMAIL": "grid@invalid",
+           "GIT_COMMITTER_NAME": "grid", "GIT_COMMITTER_EMAIL": "grid@invalid"}
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                          check=True, env=env).stdout

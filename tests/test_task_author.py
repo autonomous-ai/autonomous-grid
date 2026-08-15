@@ -68,18 +68,6 @@ def _remote_for(tmp_path, branch, files, name="origin.git"):
     return GitRemote(url=str(bare), token="tok"), _git(bare, "rev-parse", branch).stdout.strip()
 
 
-def _transcript_dir(path):
-    """This member's conversation directory inside `path`, which `commit_and_push` now requires.
-
-    Required rather than defaulted there, so a caller cannot silently stop committing the
-    conversation — see that function. Here it is setup noise: nothing in this module writes a
-    transcript, and every test below is about the author.
-    """
-    from remote import task_agent
-
-    return task_agent.transcript_dir(path, _MEMBER)
-
-
 def _idents(repo, rev):
     """`author-name|author-email|committer-name|committer-email`, the four fields this slice moves.
 
@@ -122,7 +110,6 @@ class TestTheResultCommitCarriesTheMember:
 
         pushed = task_repo.commit_and_push(
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-            transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice Nguyen", "alice@example.com"))
 
         assert _idents(remote.url, pushed.commit) == f"Alice Nguyen|alice@example.com|{GRID}"
@@ -136,8 +123,7 @@ class TestTheResultCommitCarriesTheMember:
         (path / "fix.py").write_text("done\n")
 
         pushed = task_repo.commit_and_push(
-            path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-            transcript=_transcript_dir(path))
+            path, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
 
         assert _idents(remote.url, pushed.commit) == f"{GRID}|{GRID}"
 
@@ -156,7 +142,6 @@ class TestTheResultCommitCarriesTheMember:
 
         task_repo.commit_and_push(
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-            transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice Nguyen", "alice@example.com"))
 
         blamed = _git(path, "blame", "--line-porcelain", "-L", "2,2", "a.txt").stdout
@@ -352,7 +337,6 @@ class TestTheIsolationIsUnchanged:
 
         pushed = task_repo.commit_and_push(
             path, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-            transcript=_transcript_dir(path),
             author=task_repo.GitIdentity("Alice", "alice@example.com"))
 
         assert _idents(remote.url, pushed.commit) == f"Alice|alice@example.com|{GRID}"

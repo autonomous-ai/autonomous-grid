@@ -2380,7 +2380,7 @@ def test_a_resolved_merge_is_committed_with_both_parents(tmp_path):
     Measured rather than assumed, and landed as a test rather than a note: if this ever stops being
     true, every merge task in the fleet starts being refused as a failed integration.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, input_commit, merge_ref, pinned = _conflicted_remote(tmp_path)
     workspace = tmp_path / "ws"
@@ -2393,8 +2393,7 @@ def test_a_resolved_merge_is_committed_with_both_parents(tmp_path):
 
     pushed = task_repo.commit_and_push(
         workspace, url=remote.url, token=remote.token, branch="task/T1",
-        message="task T1 (completed)",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        message="task T1 (completed)")
 
     parents = _git(remote.url, "rev-list", "--parents", "-n", "1",
                    pushed.commit).stdout.split()[1:]
@@ -2416,7 +2415,7 @@ def test_conflict_markers_the_agent_never_resolved_are_reported(tmp_path):
     So it is read HERE, before `add -A`, and reported. The work is still committed and pushed —
     ADR 0032 D-e — because a user must be able to see what the agent did.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
     workspace = tmp_path / "ws"
@@ -2425,8 +2424,7 @@ def test_conflict_markers_the_agent_never_resolved_are_reported(tmp_path):
 
     pushed = task_repo.commit_and_push(
         workspace, url=remote.url, token=remote.token, branch="task/T1",
-        message="task T1 (completed)",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        message="task T1 (completed)")
 
     assert pushed.unresolved == ("shared.txt",), pushed.unresolved
     # Pushed anyway: the branch is the only copy of what the agent did.
@@ -2451,7 +2449,7 @@ def test_a_resolution_the_agent_left_unstaged_is_still_unresolved(tmp_path):
     failed, one run is wasted, and the work is still pushed for the member to read. The alternative
     cost is somebody's deletion silently discarded, permanently, with every signal reading healthy.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
     workspace = tmp_path / "ws"
@@ -2462,8 +2460,7 @@ def test_a_resolution_the_agent_left_unstaged_is_still_unresolved(tmp_path):
     (workspace / "shared.txt").write_text(_OURS.replace("OURS-5\n", "OURS-5\nTHEIRS-5\n"))
 
     pushed = task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
 
     assert pushed.unresolved == ("shared.txt",), pushed.unresolved
 
@@ -2472,7 +2469,7 @@ def test_a_conflict_the_agent_staged_is_resolved_however_it_chose_to_resolve_it(
     """Taking one side wholesale — including deleting the file — is a judgement call, not this
     check's business. What the check asks is only whether the agent DECIDED, and `git add`/`git rm`
     is how git records that a person decided."""
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
     workspace = tmp_path / "ws"
@@ -2481,8 +2478,7 @@ def test_a_conflict_the_agent_staged_is_resolved_however_it_chose_to_resolve_it(
     _git(workspace, "rm", "-q", "-f", "shared.txt")
 
     pushed = task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
 
     assert pushed.unresolved == (), pushed.unresolved
 
@@ -2529,7 +2525,7 @@ def test_a_conflict_with_no_markers_at_all_is_still_caught(tmp_path):
     silence, which is exactly the failure ADR 0033 D-e exists to prevent, reached through a conflict
     type the first version of this check was blind to.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, input_commit, merge_ref = _modify_delete_remote(tmp_path)
     workspace = tmp_path / "ws"
@@ -2539,8 +2535,7 @@ def test_a_conflict_with_no_markers_at_all_is_still_caught(tmp_path):
     assert "<<<<<<< " not in (workspace / "shared.txt").read_text()
 
     pushed = task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
 
     assert pushed.unresolved == ("shared.txt",), (
         "a modify/delete conflict the agent never resolved was reported as a clean merge")
@@ -2548,7 +2543,7 @@ def test_a_conflict_with_no_markers_at_all_is_still_caught(tmp_path):
 
 def test_an_ordinary_task_reports_nothing_unresolved(tmp_path):
     """No merge, no unmerged paths — the check must not invent one for every ordinary task."""
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     workspace = tmp_path / "ws"
@@ -2558,8 +2553,7 @@ def test_an_ordinary_task_reports_nothing_unresolved(tmp_path):
     (workspace / "a.txt").write_text("edited\n")
 
     pushed = task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
 
     assert pushed.unresolved == (), pushed.unresolved
 
@@ -2714,40 +2708,46 @@ class _RecordingPublisher:
 
 
 def _job_with_input(commit, branch="task/T1", member_key=_MEMBER,
-                    conversation_id=_CONVERSATION):
-    return {"task_id": "T1", "prompt": "p", "project_id": "proj-1", "member_key": member_key,
-            # ⚠️ `task_id` is the TURN and `conversation_id` is the CONVERSATION — two keys for two
-            # objects (ADR 0034 D-a). `run_task` REFUSES a claim without the second, so every job
-            # dict here needs it even when the test is about something else.
-            "conversation_id": conversation_id,
-            "branch": branch, "input_commit": commit}
+                    conversation_id=_CONVERSATION, **overrides):
+    job = {"task_id": "T1", "prompt": "p", "project_id": "proj-1", "member_key": member_key,
+           # ⚠️ `task_id` is the TURN and `conversation_id` is the CONVERSATION — two keys for two
+           # objects (ADR 0034 D-a). `run_task` REFUSES a claim without the second, so every job
+           # dict here needs it even when the test is about something else.
+           "conversation_id": conversation_id,
+           "branch": branch, "input_commit": commit}
+    # `**overrides` rather than a named `transcript_commit=` parameter: this dict IS the claim
+    # payload, and a test about a key the relay may or may not send should be able to add or omit it
+    # the way the relay does, without this helper growing a keyword per wire value.
+    job.update(overrides)
+    return job
 
 
-def test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the_reserved_directory(
+def test_the_agents_work_is_pushed_and_the_conversation_no_longer_travels_with_it(
         agent, tmp_path, monkeypatch):
-    """The issue's demo from the provider's end: the agent writes a file, and that file is in the
-    commit the relay is told about — and so is the conversation it had.
+    """The agent's work is in the commit the relay is told about; the conversation is NOT.
 
-    `.grid/agent/<member_key>/` rides along; the rest of `.grid/` does not. The transcript and the
-    agent's `memory/` ARE this member's conversation, and the ordinary result commit is how they
-    reach their next task and its next provider (issue 06). Anything else under `.grid/` is the
-    provider's own state and belongs in nobody else's repository.
+    ⚠️ **This is a DELIBERATE FLIP of what this test asserted before ADR 0034 D-j (issue 39), and
+    the flip is the point rather than a side effect.** It used to require
+    `.grid/agent/<member_key>/` in the result commit and — in its last two lines — to assert the
+    cross-member leak as a known limit, with a message saying that if a later slice closed it, this
+    assertion was the one to flip. This is that slice, and this is that flip.
 
-    **This reverses issue 05**, which excluded all of `.grid/` on the reasoning that the transcript
-    was provider internals. That exclusion makes cross-provider resume impossible — the whole of
-    issue 06 — and contradicts ADR 0032 D-b, which describes the transcript as "then committed back
-    to the user's repo". The relay's refusal to accept an UPLOAD anywhere under `.grid/` is
-    unchanged, so the conversation is still written only by the provider.
+    What changed underneath it: issue 06 put the transcript in the result commit so it would reach
+    the next provider, which was right while there was one session per MEMBER. Issue 38 gave every
+    CONVERSATION its own session, so the same arrangement writes 105 KB-2 MB of `.jsonl` into the
+    shared trunk on every turn and hands every member every other member's. The transcript now
+    travels on `refs/grid/agent/<conversation_id>` instead, pushed by the lease holder.
 
-    The forced add is scoped to this member's own subtree (ADR 0033 D-g). A second member's
-    directory is present in the checkout below, because that is what every workspace looks like
-    after one integration — and the assertion on it records a REAL LIMIT rather than a protection:
-    the narrow pathspec stops the forced add reaching another member's transcript, but `git add -A`
-    still stages a modification to one, because `$GIT_DIR/info/exclude` does not apply to files git
-    already tracks. So an agent that writes into `.grid/agent/<someone else>/` has that change
-    committed. Reachable only after a promote, harmless to the other member's own branch until they
-    integrate, and closing it belongs with the merge semantics for `.grid/agent/` that issues 13–15
-    decide. Pinned here so it is a known property with a place for the fix to land, not a surprise.
+    ⚠️ **The fixture seeds a SECOND MEMBER'S TRANSCRIPT AS A TRACKED FILE, and that is the whole
+    test rather than scenery.** `$GIT_DIR/info/exclude` has no say over files git already tracks, so
+    simply removing the force-add leaves `git add -A` staging every modification to them forever.
+    "The trunk holds no transcripts" then passes on a fresh project and fails on every project that
+    has ever run a task — which is every real one. Only `git rm --cached` closes it, and only a
+    fixture with a tracked transcript can tell the two implementations apart.
+
+    Issue 05 excluded all of `.grid/`; issue 06 carved `.grid/agent/` back in; this restores the
+    exclusion for a different reason than 05 had. The relay's refusal to accept an UPLOAD anywhere
+    under `.grid/` is unchanged throughout.
     """
     from remote import tasks
 
@@ -2772,36 +2772,37 @@ def test_the_agents_work_is_pushed_with_its_conversation_but_not_the_rest_of_the
     pushed = reported["result_commit"]
     assert pushed and pushed != commit, "nothing new was pushed"
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed).stdout.split()
-    assert "fix.py" in listing
-    assert f".grid/agent/{_MEMBER}/sess-1.jsonl" in listing, listing
-    assert f".grid/agent/{_MEMBER}/memory/note.md" in listing, listing
+    assert "fix.py" in listing, listing
     assert ".grid/scratch.txt" not in listing, listing
-    # The limit named in the docstring, asserted rather than described. `git add -A` stages the
-    # modification because the file is TRACKED and `info/exclude` has no say over tracked files —
-    # the narrow pathspec never gets a chance to not-add it. If a later slice closes this, this
-    # assertion is the one that flips, and it should flip deliberately.
-    other = _git(remote.url, "show", f"{pushed}:.grid/agent/{_OTHER_MEMBER}/sess-9.jsonl").stdout
-    assert other == "tampered\n", (
-        f"another member's transcript is no longer writable by this task ({other!r}) — if that is "
-        f"deliberate, this test and issue 11's 'what this does NOT fix' both need updating")
+    # The flip. Not "this member's transcript is absent" but "NO transcript is", including the one
+    # that was already tracked when the task started — which is the half a fresh-project test cannot
+    # see and the half `git rm --cached` exists for.
+    assert not [path for path in listing if path.startswith(".grid/")], (
+        f"the result commit still carries the reserved directory, so every turn adds a transcript "
+        f"to the shared trunk and every member's clone holds every other member's: {listing}")
 
 
 def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
         agent, tmp_path, monkeypatch):
     """A **tracked** `.gitignore` outranks `$GIT_DIR/info/exclude`, so the conversation is
-    force-added rather than merely un-excluded.
+    force-added onto its side ref rather than merely un-excluded.
+
+    ⚠️ **The rule survived ADR 0034 D-j; only the ref it applies to moved.** Before issue 39 the
+    force-add was in `commit_and_push` and put the transcript in the result commit. That add is gone,
+    but `push_transcript` still stages with `-f`, and for exactly the reason issue 06 established —
+    which is why this test was re-aimed rather than deleted.
 
     Entirely plausible input: the requesting user's repository is an AI-agent project that ignores
     `*.jsonl` or `memory/`, or the agent — running under `bypassPermissions` — writes a `.gitignore`
     itself. The failure it produces is the silent kind this feature is most exposed to: the task
-    still reports `completed` with a session id, the transcript simply never enters the commit, and
+    still reports `completed` with a session id, the transcript simply never reaches the ref, and
     nothing surfaces until a *different* provider finds no conversation to resume and reports the
     misleading "no transcript for session X in this workspace".
 
     The same provider masks it for a while, too — its local `.grid/agent/` survives
     `clean -ffdx -e .grid` whether or not it was ever pushed.
     """
-    from remote import tasks
+    from remote import task_repo, tasks
 
     remote, commit = _remote_for(
         tmp_path, "task/T1",
@@ -2818,9 +2819,13 @@ def test_the_projects_own_gitignore_cannot_suppress_the_conversation(
     tasks._run_and_report(_FakeState(), _job_with_input(commit))
 
     assert reported["state"] == "completed"
-    listing = _git(remote.url, "ls-tree", "-r", "--name-only", reported["result_commit"]).stdout.split()
+    ref = task_repo.transcript_ref(_CONVERSATION)
+    listing = _git(remote.url, "ls-tree", "-r", "--name-only", ref).stdout.split()
     assert f".grid/agent/{_MEMBER}/sess-1.jsonl" in listing, listing
     assert f".grid/agent/{_MEMBER}/memory/note.md" in listing, listing
+    # And still not in the project's own history, which is the other half of the same rule.
+    assert ".grid" not in _git(
+        remote.url, "ls-tree", "-r", "--name-only", reported["result_commit"]).stdout
 
 
 def test_two_members_tasks_on_one_provider_do_not_reset_each_others_workspace(
@@ -3001,8 +3006,7 @@ def test_a_task_whose_agent_left_no_transcript_still_commits_and_pushes(
 
     from remote import task_repo
     pushed = task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1",
-        transcript=task_agent.transcript_dir(workspace, _MEMBER))
+        workspace, url=remote.url, token=remote.token, branch="task/T1", message="task T1")
 
     listing = _git(remote.url, "ls-tree", "-r", "--name-only", pushed.commit).stdout.split()
     assert "fix.py" in listing, listing
@@ -3085,6 +3089,140 @@ def test_a_push_that_fails_reports_no_terminal_state_at_all(agent, tmp_path, mon
     assert reports == [], "a terminal state was reported for a result that is not in the repository"
     assert any(kind == "task.stderr" and "the relay refused" in fields.get("text", "")
                for kind, fields in publisher.published), publisher.published
+
+
+def test_a_transcript_push_that_fails_reports_no_terminal_state_either(
+        agent, tmp_path, monkeypatch):
+    """ADR 0034 D-j: *"a failed push of the side ref fails the turn too — best-effort here means
+    conversations evaporate in silence."*
+
+    "Fails the turn" is spelled here exactly as a failed RESULT push already is, and that is a
+    decision rather than an accident: report nothing terminal, let the lease lapse, let the reaper
+    reclaim. A terminal `failed` would be louder and worse — it would spend the whole turn on a
+    transient network fault, and no retry could ever recover a conversation the relay never
+    received. What D-j forbids is the third option, carrying on as though the push had worked.
+
+    Both halves are asserted, for the reason the result-push test beside this one gives: that
+    NOTHING was reported, and that the reason still reached the user's event log. A silent abandon
+    satisfies the first and is precisely the failure being prevented.
+    """
+    from remote import task_repo, tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent(f"mkdir -p .grid/agent/{_MEMBER}\n"
+          f"echo transcript > .grid/agent/{_MEMBER}/sess-1.jsonl\n"
+          "echo fixed > fix.py\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    def refuse(*_a, **_k):
+        raise task_repo.PushError(
+            "could not push the conversation's transcript to refs/grid/agent/c1: the relay refused")
+
+    monkeypatch.setattr(task_repo, "push_transcript", refuse)
+    reports = []
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: reports.append(k))
+    publisher = _RecordingPublisher()
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: publisher)
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reports == [], (
+        "a terminal state was reported for a turn whose conversation never reached the relay — "
+        "the turn looks finished and the conversation is gone")
+    assert any(kind == "task.stderr" and "the relay refused" in fields.get("text", "")
+               for kind, fields in publisher.published), publisher.published
+
+
+def test_a_transcript_the_relay_pinned_that_cannot_be_fetched_does_not_start_a_fresh_session(
+        agent, tmp_path, monkeypatch):
+    """ADR 0034 D-j: *"missing transcript" stops being one fact.*
+
+    Before this slice, no transcript on disk meant the predecessor legitimately produced none, and
+    starting fresh was right. Now it can also mean *the relay has one and this provider failed to
+    fetch it* — and the provider cannot tell those apart by looking at the workspace. The pin is what
+    distinguishes them: a turn the relay pinned has a transcript waiting for it, so a fetch that
+    fails must NOT fall through to `resumable_session` and quietly start over.
+
+    The fetch failure is an `InputFetchError`, which reports nothing terminal and lets the reaper
+    retry — the same treatment the input fetch already gets, and for the same reason: another
+    provider may well succeed.
+
+    ⚠️ The alternative this forbids is the silent one. A fresh session here completes the turn,
+    returns a session id, pushes a result and reads healthy everywhere, while the person watching
+    finds the agent has forgotten everything they told it.
+    """
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reports = []
+    monkeypatch.setattr(tasks, "report_once", lambda *a, **k: reports.append(k))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    # A pin naming a commit this project's repository has never held: the shape of a provider that
+    # cannot reach the ref, or a relay that collected it early.
+    tasks._run_and_report(
+        _FakeState(),
+        _job_with_input(commit, transcript_commit="b" * 40))
+
+    assert reports == [], (
+        "a turn whose pinned transcript could not be fetched reported a terminal state instead of "
+        "being left for the reaper — so it either started a fresh session in silence or failed "
+        "permanently on something another provider could have done")
+
+
+def test_a_claim_with_no_pinned_transcript_fetches_nothing_and_starts_fresh(
+        agent, tmp_path, monkeypatch):
+    """The old-relay degrade, and the one direction that must never be a failure (ADR 0034 D-j).
+
+    A relay predating issue 39 sends no `transcript_commit` at all, and a conversation's FIRST turn
+    on a current relay sends `None`. Both mean the same thing — there is nothing to resume — and both
+    must run exactly as they did before this slice: no fetch, no refusal, a fresh session.
+
+    That asymmetry is why the rollout order is the relay before the fleet: an un-upgraded provider
+    ignores the key, and an un-upgraded relay simply never sends it.
+    """
+    from remote import tasks
+
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    _relay_git_url(monkeypatch, remote.url)
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    reported = {}
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.update(kw))
+    monkeypatch.setattr(tasks, "_publisher_for", lambda *a, **k: _NullPublisher())
+
+    tasks._run_and_report(_FakeState(), _job_with_input(commit))
+
+    assert reported["state"] == "completed", reported
+
+
+def test_the_reserved_directory_exclude_is_one_uniform_line_and_this_slice_did_not_touch_it(
+        tmp_path):
+    """ADR 0034 D-j's first correction, asserted rather than assumed.
+
+    The first draft of issue 39 made "collapse `$GIT_DIR/info/exclude` to one uniform line" an
+    acceptance criterion — which passes today with no code written, because `_ensure_repo` has
+    always written exactly `/.grid/`, unconditionally and with no per-member shape. Nothing in this
+    repository asserted that, so the criterion could neither be verified nor falsified.
+
+    It matters beyond bookkeeping: this file is what keeps the provider's own state out of the
+    requesting user's repository under `git add -A`, and since issue 39 it is also what keeps the
+    transcript out. A `!` negation added here would be the silent failure issue 06 documented — a
+    *tracked* `.gitignore` outranks this file, so the carve-out would work on most projects and
+    vanish on the ones that ignore `*.jsonl`.
+    """
+    from remote import task_repo
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task_repo._ensure_repo(workspace)
+
+    exclude = (workspace / ".git" / "info" / "exclude").read_text()
+
+    assert exclude.splitlines() == ["# written by grid — see ADR 0032", "/.grid/"], (
+        f"the reserved-directory exclude is no longer one uniform line: {exclude!r}")
 
 
 def test_a_task_with_no_git_plane_reports_normally_and_pushes_nothing(agent, monkeypatch):
@@ -3303,7 +3441,7 @@ def test_a_refused_push_raises_push_error_and_not_checkout_error(tmp_path):
     failure it sees — so without the translation the push path would inherit the checkout path's
     meaning, and a lost result would be recorded as a finished, failed task nothing ever retries.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     workspace = tmp_path / "ws"
@@ -3315,8 +3453,7 @@ def test_a_refused_push_raises_push_error_and_not_checkout_error(tmp_path):
     with pytest.raises(task_repo.PushError) as caught:
         task_repo.commit_and_push(
             workspace, url=str(tmp_path / "no-such-repo.git"), token="tok",
-            branch="task/T1", message="task T1 (completed)",
-            transcript=task_agent.transcript_dir(workspace, _MEMBER))
+            branch="task/T1", message="task T1 (completed)")
 
     assert not isinstance(caught.value, task_repo.CheckoutError)
     # Still carries git's own words, which are the only thing that says WHY.
@@ -3330,7 +3467,7 @@ def test_a_push_that_is_refused_leaves_the_result_committed_locally(tmp_path):
     at the workspace, still finds what the agent produced rather than an uncommitted tree that the
     next attempt's `reset --hard` would erase.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     workspace = tmp_path / "ws"
@@ -3341,8 +3478,7 @@ def test_a_push_that_is_refused_leaves_the_result_committed_locally(tmp_path):
 
     with pytest.raises(task_repo.PushError):
         task_repo.commit_and_push(workspace, url=str(tmp_path / "gone.git"), token="tok",
-                                  branch="task/T1", message="task T1 (completed)",
-                                  transcript=task_agent.transcript_dir(workspace, _MEMBER))
+                                  branch="task/T1", message="task T1 (completed)")
 
     assert _git(workspace, "rev-parse", "HEAD").stdout.strip() != commit
     assert "fix.py" in _git(workspace, "show", "--name-only", "--format=", "HEAD").stdout
@@ -4098,13 +4234,19 @@ def test_a_relay_that_names_no_session_runs_fresh_without_reporting_anything(
 
 def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repository(
         agent, tmp_path, monkeypatch):
-    """The acceptance criterion, and the reason the transcript is committed at all.
+    """The acceptance criterion, and the reason the transcript is published at all.
 
     A single-host rehearsal of the issue-01 spike: provider A runs a task and pushes; its workspace
     is then **deleted entirely** and a **different config directory** takes over, which is what
     provider B has — no workspace, no transcript, nothing but the repository. The workspace PATH
     stays identical, because that is the lockstep value Claude Code derives the transcript
     directory from.
+
+    ⚠️ **Since ADR 0034 D-j (issue 39) the conversation arrives on its SIDE REF, and this test is
+    what says "only".** Provider B's input commit carries no `.grid/agent` path at all — the trunk
+    holds none any more — so if the side-ref fetch did nothing, `sess-1.jsonl` would simply be
+    absent and the agent would start fresh. The final assertion is therefore no longer incidental
+    detail: it is the whole difference between this feature working and reporting that it did.
 
     What this does NOT prove is a genuinely different machine, OS, or Claude Code version. Providers
     should stay version-pinned until a two-host run says otherwise (PRD, "still unproven").
@@ -4134,6 +4276,14 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
     first = tasks.run_task(_job(input_commit=first_input, branch="task/T1"), remote=remote)
     assert first.state == "completed", first.error
     pushed = task_repo_commit_and_push(workspace, remote, "task/T1")
+    # What the relay pins on the next turn of this conversation, and the only thing carrying the
+    # transcript now: the result commit above holds none.
+    pinned = task_repo_push_transcript(workspace, remote)
+    assert pinned, "provider A published no transcript, so there is nothing for B to resume"
+    assert ".grid/agent" not in _git(
+        remote.url, "ls-tree", "-r", "--name-only", pushed).stdout, (
+        "the result commit still carries the conversation, so this test would pass without the "
+        "side ref ever being fetched")
 
     # --- everything provider A had, gone ----------------------------------------------------
     shutil.rmtree(workspace)
@@ -4148,16 +4298,249 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
 
     second = tasks.run_task(
         _job(task_id="T2", input_commit=pushed, branch="task/T2",
-             resume_session_id="sess-1"),
+             resume_session_id="sess-1", transcript_commit=pinned),
         remote=remote)
 
     assert second.state == "completed", second.error
     assert "--resume sess-1" in seen.read_text(encoding="utf-8"), \
-        "provider B started a fresh session instead of continuing the project's"
-    # The conversation itself arrived, not merely the id — including the agent's own memory.
+        "provider B started a fresh session instead of continuing the conversation"
+    # The conversation itself arrived, not merely the id — including the agent's own memory, and
+    # over the side ref alone.
     rebuilt = task_agent.transcript_dir(task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION), _MEMBER)
     assert (rebuilt / "sess-1.jsonl").exists()
+    assert (rebuilt / "memory" / "note.md").read_text() == "remembered\n"
     assert (rebuilt / "memory" / "note.md").read_text(encoding="utf-8") == "remembered\n"
+
+
+def test_publishing_a_transcript_twice_from_one_workspace_fast_forwards(agent, tmp_path):
+    """A turn with NO pin can publish more than once, which is the retry path for a FIRST turn.
+
+    ⚠️ **This was a real CRITICAL, reproduced with git 2.54.0 before it was fixed.** `push_transcript`
+    used to take its parent from the LOCAL `refs/grid/agent/<id>`, which only ever existed as a side
+    effect of `materialize`'s fetch — and that fetch is gated on the pin. A conversation's first turn
+    has no pin by definition, so:
+
+      1. attempt 1 publishes a ROOT commit and the push lands. **`git push <oid>:<ref>` creates no
+         local ref**, so nothing in this workspace records that it happened;
+      2. attempt 1's RESULT push then fails for any transient reason — no terminal report, which is
+         the designed behaviour, and the reaper reclaims the turn;
+      3. attempt 2 runs in the same workspace (`clean -ffdx -e .grid` spares the transcript), still
+         has no pin, still fetches nothing, so `parent` is empty again and it builds a SECOND root
+         commit. `receive.denyNonFastForwards` rejects it — and will reject every later attempt
+         identically, because nothing ever fetches that ref for this row.
+
+    The turn then burns every attempt and lands on `retries_exhausted` with the agent's work and its
+    transcript both perfectly fine. It affects the first turn of every conversation and every merge
+    task, which is the commonest case in the system.
+
+    The fix is that `push_transcript` establishes its own parent from the RELAY rather than trusting
+    a local ref somebody else's code path may or may not have populated.
+    """
+    from remote import task_agent, task_repo
+
+    remote, base = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = task_agent_workspace()
+    # `run_task` creates the directory before `materialize` sees it; `git init` refuses otherwise.
+    task_agent.ensure_workspace(workspace)
+    task_repo.materialize(workspace, url=remote.url, token=remote.token,
+                          branch="task/T1", input_commit=base)
+    transcript = task_agent_transcript_dir(workspace)
+    transcript.mkdir(parents=True, exist_ok=True)
+    ref = task_repo.transcript_ref(_CONVERSATION)
+
+    (transcript / "sess-1.jsonl").write_text("A\n")
+    first = task_repo.push_transcript(workspace, url=remote.url, token=remote.token, ref=ref)
+    assert first, "the first publish produced nothing"
+
+    # No pin, no materialize in between — exactly what a reclaimed first turn looks like.
+    (transcript / "sess-1.jsonl").write_text("A\nB\n")
+    second = task_repo.push_transcript(workspace, url=remote.url, token=remote.token, ref=ref)
+
+    assert second and second != first
+    assert _git(remote.url, "merge-base", "--is-ancestor", first, second).returncode == 0, (
+        "the second publish is not a descendant of the first, so the relay refuses it as a "
+        "non-fast-forward and every later attempt is refused identically")
+    assert _transcript_body(remote, second) == "A\nB\n"
+
+
+def test_a_turn_whose_agent_wrote_no_transcript_publishes_nothing_at_all(agent, tmp_path):
+    """An EMPTY transcript directory is "nothing to publish", exactly like a missing one.
+
+    ⚠️ **This is reachable on the most ordinary path there is, and it poisons the conversation
+    permanently.** `link_transcript` creates `.grid/agent/<member_key>/` BEFORE the agent starts, so
+    a turn whose agent never opened a session — it failed early, it was killed, it simply wrote
+    nothing — leaves that directory existing and empty. Keyed on the DIRECTORY, `push_transcript`
+    then stages nothing, and `git write-tree` over an index nothing was staged into returns the
+    EMPTY TREE (measured, git 2.54.0) — so an empty commit is published as the conversation's first
+    state.
+
+    The next turn of that conversation pins that commit, and `git restore --source=<it> --worktree
+    -- .grid/agent` fails with `pathspec '.grid/agent' did not match any file(s) known to git`. That
+    call is outside `materialize`'s retryable arm, so the turn fails TERMINALLY — and so does every
+    turn after it, because the pin never changes for a conversation whose ref never moves. The
+    conversation is permanently unusable and the message names a pathspec nobody wrote.
+
+    So the decision is made from the TREE, never from the directory: an empty tree is nothing to
+    publish whether the directory is absent or merely empty.
+    """
+    from remote import task_agent, task_repo
+
+    remote, base = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = task_agent_workspace()
+    task_agent.ensure_workspace(workspace)
+    task_repo.materialize(workspace, url=remote.url, token=remote.token,
+                          branch="task/T1", input_commit=base)
+    # Exactly what `link_transcript` leaves behind for an agent that then writes nothing.
+    task_agent_transcript_dir(workspace).mkdir(parents=True, exist_ok=True)
+    ref = task_repo.transcript_ref(_CONVERSATION)
+
+    published = task_repo.push_transcript(
+        workspace, url=remote.url, token=remote.token, ref=ref)
+
+    assert published is None, (
+        "an empty conversation was published as a commit; the next turn will pin it and fail "
+        "terminally on `pathspec .grid/agent did not match`, and so will every turn after it")
+    assert not _git(remote.url, "rev-parse", "--verify", "--quiet", ref,
+                    check=False).stdout.strip(), "an empty transcript ref was created"
+
+
+def test_a_conversation_with_a_history_is_never_published_as_an_empty_tree(agent, tmp_path):
+    """If the transcript directory has vanished but the ref has history, REFUSE — never publish.
+
+    ⚠️ Measured on git 2.54.0: `git write-tree` against an index nothing was staged into returns the
+    EMPTY TREE and exits 0, and `commit-tree <empty> -p <parent>` is a perfectly valid fast-forward
+    child. So a workspace whose `.grid/agent` disappeared between materialize and settle — an agent
+    running `rm -rf`, a half-cleaned directory — would push a commit that silently ERASES the whole
+    conversation, land cleanly, and report success.
+
+    "Nothing to record" and "everything that was recorded is gone" are not the same observation, and
+    only the first is an ordinary outcome. A conversation that HAS a history and now has no files is
+    the second, so it fails the turn rather than publishing.
+    """
+    import shutil
+
+    from remote import task_agent, task_repo
+
+    remote, base = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = task_agent_workspace()
+    # `run_task` creates the directory before `materialize` sees it; `git init` refuses otherwise.
+    task_agent.ensure_workspace(workspace)
+    task_repo.materialize(workspace, url=remote.url, token=remote.token,
+                          branch="task/T1", input_commit=base)
+    transcript = task_agent_transcript_dir(workspace)
+    transcript.mkdir(parents=True, exist_ok=True)
+    ref = task_repo.transcript_ref(_CONVERSATION)
+    (transcript / "sess-1.jsonl").write_text("A\n")
+    published = task_repo.push_transcript(workspace, url=remote.url, token=remote.token, ref=ref)
+    assert published
+
+    shutil.rmtree(workspace / ".grid" / "agent")
+
+    with pytest.raises(task_repo.PushError, match="transcript"):
+        task_repo.push_transcript(workspace, url=remote.url, token=remote.token, ref=ref)
+
+    assert _git(remote.url, "rev-parse", ref).stdout.strip() == published, (
+        "the conversation's history was replaced by an empty tree")
+
+
+def task_agent_transcript_dir(workspace, member_key=_MEMBER):
+    from remote import task_agent
+
+    return task_agent.transcript_dir(workspace, member_key)
+
+
+def _transcript_body(remote, oid, member_key=_MEMBER):
+    """What `sess-1.jsonl` says at one point in a conversation's history, read from the bare repo."""
+    return _git(remote.url, "show",
+                f"{oid}:.grid/agent/{member_key}/sess-1.jsonl").stdout
+
+
+def test_a_retry_resumes_the_pinned_transcript_while_a_follow_up_takes_the_tip(
+        agent, tmp_path, monkeypatch):
+    """ADR 0034 D-j's latch, with its three arms asserted separately.
+
+    Issue 06 recorded *"a failed task's conversation does not carry forward"* as a deliberate
+    consequence, but nothing ever enforced it: the transcript rode a commit that only reached `main`
+    on success. Off the merge path it has to be rebuilt, and the three arms are:
+
+      1. a **failed** turn still PUBLISHES its transcript — so the next thing a person types
+         continues from what the agent actually did, however badly it went;
+      2. the next **user** turn resumes that, because the relay pins the ref's tip when it creates
+         the turn;
+      3. an **automatic retry** resumes the oid pinned when the turn was created — the conversation
+         as it stood BEFORE the attempt that failed — because the retry re-claims the same row and
+         the relay never re-pins it.
+
+    ⚠️ **Arm 3 is the only test in this suite that can tell the PIN from the TIP**, and that gap was
+    found by mutation: restoring from `transcript_ref` instead of `transcript_commit` passes the
+    cross-provider resume test, because on a follow-up they are the same commit. They differ only
+    here, which is why the fixture goes to the trouble of building a history with two distinct
+    states.
+
+    The provider's interface is the claim payload, so these are hand-built job dicts. That is not a
+    shortcut around the relay: `run_task` takes exactly this dict off the wire, and the relay's half
+    of the pin has its own tests in grid-src.
+    """
+    from remote import tasks
+
+    remote, base = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    workspace = task_agent_workspace()
+
+    # --- turn 1: the conversation as it stood before anything went wrong --------------------
+    agent(f"mkdir -p .grid/agent/{_MEMBER}\n"
+          f"echo A > .grid/agent/{_MEMBER}/sess-1.jsonl\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    assert tasks.run_task(_job(input_commit=base, branch="task/T1"),
+                          remote=remote).state == "completed"
+    task_repo_commit_and_push(workspace, remote, "task/T1")
+    before = task_repo_push_transcript(workspace, remote)
+
+    # --- turn 2: pinned at `before`, and it FAILS after appending to the conversation --------
+    agent(f"echo B >> .grid/agent/{_MEMBER}/sess-1.jsonl\n"
+          "printf '{\"type\":\"result\",\"is_error\":true,\"result\":\"broke\"}\\n'\n")
+    _git(remote.url, "branch", "task/T2", base)
+    failed = tasks.run_task(
+        _job(task_id="T2", input_commit=base, branch="task/T2", transcript_commit=before),
+        remote=remote)
+    assert failed.state == "failed"
+    after = task_repo_push_transcript(workspace, remote)
+
+    # ARM 1 — the failed turn published, and it published something new.
+    assert after and after != before, "a failed turn did not publish its conversation"
+    assert _transcript_body(remote, after) == "A\nB\n", (
+        "the failed attempt's own words are not on the ref, so nothing a person types next can "
+        "continue from what the agent actually did")
+
+    # ARM 2 — the next USER turn is pinned at the tip and sees the failed attempt's work.
+    seen = tmp_path / "follow-up.txt"
+    agent(f"cat .grid/agent/{_MEMBER}/sess-1.jsonl > {seen}\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    _git(remote.url, "branch", "task/T3", base)
+    assert tasks.run_task(
+        _job(task_id="T3", input_commit=base, branch="task/T3", transcript_commit=after),
+        remote=remote).state == "completed"
+    assert seen.read_text() == "A\nB\n", (
+        "a follow-up turn did not see the conversation the failed turn left behind")
+
+    # ARM 3 — the automatic RETRY carries turn 2's original pin and must NOT see `B`.
+    seen_retry = tmp_path / "retry.txt"
+    agent(f"cat .grid/agent/{_MEMBER}/sess-1.jsonl > {seen_retry}\n"
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    assert tasks.run_task(
+        _job(task_id="T2", attempt=2, input_commit=base, branch="task/T2",
+             transcript_commit=before),
+        remote=remote).state == "completed"
+    assert seen_retry.read_text() == "A\n", (
+        "the retry inherited the conversation of the attempt it is retrying — including whatever "
+        "confused the agent into failing — instead of resetting to the pinned state. Every retry "
+        "would re-read the same broken conversation and the turn would end at retries_exhausted")
+
+
+def task_agent_workspace():
+    """This suite's one conversation workspace, spelled once."""
+    from remote import task_agent
+
+    return task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION)
 
 
 def task_repo_commit_and_push(workspace, remote, branch, member_key=_MEMBER):
@@ -4166,11 +4549,24 @@ def task_repo_commit_and_push(workspace, remote, branch, member_key=_MEMBER):
     `.commit` rather than the whole `Pushed`: every caller here wants a revision to hand to git, and
     the other half — what the agent left unresolved — has its own tests.
     """
-    from remote import task_agent, task_repo
+    from remote import task_repo
 
     return task_repo.commit_and_push(
-        workspace, url=remote.url, token=remote.token, branch=branch, message="task T1 (completed)",
-        transcript=task_agent.transcript_dir(workspace, member_key)).commit
+        workspace, url=remote.url, token=remote.token, branch=branch, message="task T1 (completed)").commit
+
+
+def task_repo_push_transcript(workspace, remote, conversation_id=_CONVERSATION):
+    """Publish the conversation the way `_push_result` does, and answer the oid the relay would pin.
+
+    A second helper rather than a flag on the one above, because since ADR 0034 D-j they are two
+    pushes to two refs with two failure meanings — and because the value this one returns is the
+    thing a later turn's claim carries, which the result commit is not.
+    """
+    from remote import task_repo
+
+    return task_repo.push_transcript(
+        workspace, url=remote.url, token=remote.token,
+        ref=task_repo.transcript_ref(conversation_id))
 
 
 @pytest.mark.parametrize("body,expected_in_reason", [
