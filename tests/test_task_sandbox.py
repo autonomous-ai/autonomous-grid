@@ -39,6 +39,10 @@ from pathlib import Path
 
 import pytest
 
+# One of the relay's conversation uuids (ADR 0034 D-c), which is now a segment of every workspace
+# path this module measures.
+_CONVERSATION = "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f"
+
 
 @pytest.fixture
 def config_dir(tmp_path):
@@ -292,7 +296,8 @@ def test_the_settings_argument_is_one_json_element_that_round_trips(tmp_path, co
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the seatbelt profile is a macOS argv element")
-def test_a_workspace_path_long_enough_to_break_exec_says_so_on_stderr(config_dir, capsys):
+def test_a_workspace_path_long_enough_to_break_exec_says_so_on_stderr(
+        config_dir, capsys, monkeypatch):
     """Measured: past roughly 120 characters, every Bash command in the task dies with `E2BIG`.
 
     The seatbelt profile is handed to each sandboxed command as one argv element and grows with this
@@ -304,11 +309,20 @@ def test_a_workspace_path_long_enough_to_break_exec_says_so_on_stderr(config_dir
     profile than 186, so the length is a symptom and not the cause. A hard limit built on a proxy
     that non-monotonic would refuse providers that work, on a rule that cannot be defended — so this
     prints the clue where an operator is already looking and lets the task run.
+
+    ⚠️ **The path is built by `workspace_for`, not by hand, and that is not tidiness.** Since ADR
+    0034 D-c the check measures the operator's ROOT — everything above `projects/` — so a
+    hand-written path with a different number of levels measures a different prefix and can go
+    quietly silent. This one did: `/private/tmp/<40>/<40>/<40>/workspace` used to warn, and under
+    the re-anchored rule its "root" is `/private`, which is eight characters.
     """
-    from remote import task_sandbox
+    from remote import task_agent, task_sandbox
 
     task_sandbox._WARNED_ABOUT.clear()
-    long_path = Path("/private/tmp") / ("d" * 40) / ("e" * 40) / ("f" * 40) / "workspace"
+    monkeypatch.setenv(
+        "GRID_TASK_ROOT",
+        "/private/tmp/" + "d" * (task_sandbox.WORKSPACE_ROOT_WARNING_CHARS + 1))
+    long_path = task_agent.workspace_for("proj-1", "9f2b" * 8, _CONVERSATION)
 
     task_sandbox.policy(long_path, config_dir)
 
@@ -320,6 +334,64 @@ def test_a_workspace_path_long_enough_to_break_exec_says_so_on_stderr(config_dir
     # thousands of times and bury whatever else its log had to say.
     task_sandbox.policy(long_path, config_dir)
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the seatbelt profile is a macOS argv element")
+def test_the_default_layout_does_not_warn_now_that_the_path_is_two_levels_deeper(
+        config_dir, capsys, monkeypatch):
+    """ADR 0034 D-c added a segment, and the budget this warning measures is the OPERATOR's.
+
+    `/var/grid/projects/<uuid-36>/<member_key-32>/workspace` was 98 characters and the whole-path
+    threshold was 120, so an operator had 22 characters of headroom before grid started blaming
+    them. The conversation segment makes the same default path 135 — past the old threshold — so a
+    whole-path check would fire on every macOS provider running a stock layout, every task, forever.
+    A warning that always fires is one nobody reads, and it would be pointing at a root the operator
+    never chose.
+
+    So the check moved onto the part they DO choose. The grid-owned suffix is fixed and known; what
+    varies is `GRID_TASK_ROOT`, and its budget is unchanged.
+    """
+    from remote import task_agent, task_sandbox
+
+    task_sandbox._WARNED_ABOUT.clear()
+    monkeypatch.setenv("GRID_TASK_ROOT", task_agent.DEFAULT_WORKSPACE_ROOT)
+    default = task_agent.workspace_for(
+        "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f", "9f2b" * 8,
+        "8d1a4c60-3b2e-4f7a-95d8-6e0f1a2b3c4d")
+
+    task_sandbox.policy(default, config_dir)
+
+    # Stated so the arithmetic in `task_sandbox` is checked against the real builder rather than
+    # against a number somebody carried across by hand.
+    assert len(str(default)) > task_sandbox.WORKSPACE_ROOT_WARNING_CHARS, (
+        "the default path is shorter than the ROOT budget, so this test would pass without the "
+        "re-anchoring it exists to prove")
+    assert capsys.readouterr().err == "", (
+        "the stock layout warns about its own depth — an operator is being told to shorten a root "
+        "they did not choose, on every task")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the seatbelt profile is a macOS argv element")
+def test_a_root_the_operator_buried_still_warns(config_dir, capsys, monkeypatch):
+    """The positive control for the test above, and the reason the warning still exists at all.
+
+    Without this the re-anchoring could have been "stop warning", which is the same diff from the
+    stock layout's point of view and loses the clue an operator needs when every Bash call in their
+    tasks dies with `E2BIG`.
+    """
+    from remote import task_agent, task_sandbox
+
+    task_sandbox._WARNED_ABOUT.clear()
+    monkeypatch.setenv(
+        "GRID_TASK_ROOT",
+        "/private/tmp/" + "d" * (task_sandbox.WORKSPACE_ROOT_WARNING_CHARS + 1))
+
+    task_sandbox.policy(
+        task_agent.workspace_for("proj-1", "9f2b" * 8, _CONVERSATION), config_dir)
+
+    warning = capsys.readouterr().err
+    assert "E2BIG" in warning, warning
+    assert task_sandbox.WORKSPACE_ROOT_HINT in warning, warning
 
 
 def test_confinement_is_on_unless_an_operator_turns_it_off(monkeypatch):

@@ -371,7 +371,7 @@ serving is **opt-in and off by default**.
 ```bash
 export GRID_TASKS=1                 # required — nothing claims tasks without it
 export GRID_MAX_TASKS=2             # tasks run at once (default 1)
-export GRID_TASK_ROOT=/var/grid     # where workspaces live
+export GRID_TASK_ROOT=/var/grid     # where workspaces live — keep it SHORT (see below)
 grid join <grid> --api claude       # a provider must join an engine; the task loop lives inside it
 ```
 
@@ -379,7 +379,7 @@ grid join <grid> --api claude       # a provider must join an engine; the task l
 |---|---|---|
 | `GRID_TASKS` | off | `1`/`true`/`yes`/`on` to claim tasks |
 | `GRID_MAX_TASKS` | `1` | concurrent tasks |
-| `GRID_TASK_ROOT` | `/var/grid` | workspace root |
+| `GRID_TASK_ROOT` | `/var/grid` | workspace root — `<root>/projects/<project>/<member>/<conversation>/workspace`. **Keep it short**: the whole path becomes one directory name for the agent's transcript, and grid adds ~126 characters below the root. A provider refuses a workspace whose name would exceed the limit rather than losing the conversation silently |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | budget for one run |
 | `GRID_TASK_SANDBOX` | on | `0` disables confinement — for debugging only |
 | `GRID_TASK_ALLOWED_DOMAINS` | — | hosts a task's own commands may reach |

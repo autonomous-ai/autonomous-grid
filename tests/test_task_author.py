@@ -32,6 +32,8 @@ GRID = "grid|grid@invalid"
 # the AUTHOR this module is about: the key names the workspace, the author names the person, and
 # nothing derives one from the other.
 _MEMBER = "9f2b" * 8
+# The conversation a workspace belongs to since ADR 0034 D-c — a relay-minted uuid4.
+_CONVERSATION = "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f"
 
 
 def _git(cwd, *args, check=True):
@@ -95,7 +97,7 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
 
     def _materialize(remote, commit, branch="task/T1"):
-        path = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER))
+        path = task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION))
         task_repo.materialize(path, url=remote.url, token=remote.token,
                               branch=branch, input_commit=commit)
         return path
@@ -191,6 +193,9 @@ class TestTheClaimPayloadIsWhereTheAuthorComesFrom:
         path = workspace(remote, commit)
         (path / "fix.py").write_text("done\n")
         job = {"task_id": "T1", "project_id": "proj-1", "member_key": _MEMBER,
+               # The CONVERSATION this turn continues (ADR 0034 D-c). `run_task`
+               # refuses a claim without it, so every job dict here carries one.
+               "conversation_id": _CONVERSATION,
                "branch": "task/T1", **job_extra}
         outcome, landed = tasks._push_result(
             job, tasks.TaskOutcome("completed", "ok", None), True, remote, _Publisher())

@@ -7,7 +7,9 @@ already use. Pass a path explicitly to run them. See `README.md`.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -120,8 +122,25 @@ def fake_agent_bin(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def workspace_root(tmp_path_factory):
-    return Path(str(tmp_path_factory.mktemp("provider-workspaces")))
+def workspace_root():
+    """The providers' `GRID_TASK_ROOT`, and a SHORT one.
+
+    ⚠️ **Not `tmp_path_factory`, for the reason `e2e_live_agent.live_workspace_root` gives at
+    length.** Its roots are ~96 characters before grid adds the 126 that ADR 0034 D-c's workspace
+    path costs, and the whole thing is flattened into ONE transcript directory name. Claude Code
+    stops using such a name verbatim past ~200 — measured — so `task_agent.link_transcript` refuses,
+    and every task in this directory would fail on a limit no real deployment meets (`/var/grid`
+    flattens to 135). `fake_claude.py` derives its own transcript path the same way the real binary
+    does, so this is not an artefact of the fake: it is the production shape.
+
+    `/private/tmp` rather than `/tmp` so the path is already its own realpath — on macOS `/tmp` is a
+    symlink, and a root that resolves elsewhere is issue 06's trap.
+    """
+    root = Path(tempfile.mkdtemp(prefix="ge2e-", dir="/private/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture

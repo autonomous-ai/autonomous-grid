@@ -797,6 +797,89 @@ def test_16_a_project_created_empty_runs_its_first_task_with_no_second_command(
     assert ended["state"] == "completed", ended
 
 
+def test_17_a_second_conversation_of_one_member_starts_fresh_on_one_provider(
+        relay, owner_token, spawn_provider, workspace_root):
+    """ADR 0034 D-c / issue 38, at the one seam where both repositories are on the wire together.
+
+    `conversation_id` is a lockstep value with the fail-CLOSED direction: `remote/tasks.run_task`
+    refuses a claim without it, terminally. Every unit test on the provider side reads a job dict
+    this repository wrote down, and every unit test on the relay side reads a payload grid-src wrote
+    down — so a relay that renamed the key, nested it, or stopped sending it leaves BOTH suites
+    green while every task on every provider fails. Only a real claim over the wire can tell.
+
+    The second half is the behaviour a person sees: two conversations in one project, on ONE
+    provider process and for ONE member, and the second is not continuing the first's session.
+    `fake_claude.py` refuses a workspace that is not conversation-keyed, so a dropped segment breaks
+    this test at the agent as well as at the assertions.
+
+    ⚠️ **Separate CONVERSATION, not separate repository** — and the distinction is asserted in both
+    directions here because the first draft of this test got it backwards. The turns of one project
+    share its git history: the second turn is cut from the member's WIP branch, which the first turn
+    fast-forwarded, so it legitimately sees the first conversation's files. What must not be shared
+    is the Claude Code session, and that is what the workspace path decides.
+
+    ⚠️ What is NOT here, and is not an omission: a SECOND TURN of one conversation resuming its own
+    session. Every `POST /tasks` mints a conversation and the route that posts a turn into an
+    existing one is issue 47, so until it ships nothing can resume anything. The paid
+    `e2e_live_agent.py` carries the half that needs the real binary.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-two-conversations",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE only-in-the-first.txt ZEBRA-4417; SAY remembered")
+    first_done = H.await_state(
+        relay, owner_token, first["id"], {"completed", "failed"}, timeout=120)
+    assert first_done["state"] == "completed", first_done
+
+    second = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="READ only-in-the-first.txt; SAY done")
+    second_done = H.await_state(
+        relay, owner_token, second["id"], {"completed", "failed"}, timeout=120)
+
+    # 1. Both ran. A relay that stopped sending `conversation_id` fails here first, and loudly —
+    #    which is the whole reason the provider refuses rather than falling back.
+    assert second_done["state"] == "completed", (
+        f"the second conversation did not complete — if its error names conversation_id, the "
+        f"relay is not sending the key this provider refuses to run without: {second_done}")
+
+    # 2. The FILES are shared and that is correct — the second turn is cut from the member's WIP
+    #    branch, which the first turn fast-forwarded, so its workspace is materialized from a commit
+    #    holding the first conversation's work. Pinned rather than assumed, because "a second
+    #    conversation starts fresh" is easy to read as "it starts from an empty project", and an
+    #    edit that made that true would break every follow-up in a real team's repository.
+    assert "ZEBRA-4417" in (second_done.get("result_text") or ""), (
+        f"the second conversation could not see the project's own files — a conversation is a "
+        f"separate SESSION, not a separate repository: {second_done}")
+
+    # 3. The SESSION is not shared, which is the whole slice. `fake_claude.py` echoes back the id it
+    #    was told to `--resume`, so two conversations handed one session id would report one here —
+    #    which is exactly what the deleted "most recent turn of this (project, owner)" lookup did.
+    assert first_done.get("claude_session_id") and second_done.get("claude_session_id")
+    assert first_done["claude_session_id"] != second_done["claude_session_id"], (
+        "both conversations reported one session id — the relay is still resolving the resume "
+        "target per (project, owner) rather than per conversation, so the second conversation is "
+        "continuing the first one's Claude Code session")
+    assert not second_done.get("session_reset_reason"), (
+        f"the second conversation was told to resume a session it could not use — a conversation "
+        f"with no predecessor should be asked to resume nothing at all: {second_done}")
+
+    # 4. On DISK, keyed by the conversation. Discovered rather than derived: the ids are the relay's
+    #    and recomputing them here would make this test agree with a rule this repository does not
+    #    own (`_harness.sweep_transcript_links` reads symlink targets for the same reason).
+    members = sorted((workspace_root / "A" / "projects" / project).iterdir())
+    assert len(members) == 1, f"expected one member's directory, found {members!r}"
+    conversations = sorted(p for p in members[0].iterdir() if (p / "workspace").is_dir())
+    assert len(conversations) == 2, (
+        f"expected one workspace per conversation under {members[0]}, found {conversations!r}")
+
+
 def _refusal(call):
     """What a refused call SAYS, as a comparable value. Anything else is a test failure."""
     try:

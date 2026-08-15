@@ -538,18 +538,20 @@ def test_the_claim_payload_carries_both_ids_and_they_are_not_one_key():
     route it does not have — stops renewing WITHOUT killing the agent, and leaves the run
     unattended until its lease expires. Nothing goes red anywhere in that story.
 
-    Read off `_claim_one`'s returned dict rather than off a live response, because the key that
-    matters most is the one this provider does NOT read yet: issue 38 is where a missing
-    `conversation_id` becomes a terminal refusal, and this is what says the relay is already ahead
-    of the fleet when that lands.
+    Read off `_claim_one`'s returned dict rather than off a live response, because two of these
+    keys are ones `remote/tasks.run_task` REFUSES a claim without — terminally, so a relay that
+    stopped sending either would fail every task on the fleet rather than degrade. That is the
+    fail-closed direction by design, and it is why the rollout order is the relay BEFORE the
+    providers; this check is what catches the rename before it gets that far.
     """
     keys = _relay_claim_keys()
 
     assert "task_id" in keys, (
         "grid-src's claim no longer sends `task_id`; the lease renewer has nothing to renew with")
     assert "conversation_id" in keys, (
-        "grid-src's claim no longer sends `conversation_id` — from issue 38 this provider refuses "
-        "such a claim outright rather than running in a member-level workspace")
+        "grid-src's claim no longer sends `conversation_id` — `remote/tasks.run_task` refuses such "
+        "a claim outright (ADR 0034 D-c) rather than running in a member-level workspace, so every "
+        "task on every provider would fail")
     assert "member_key" in keys, (
         "the key `remote/tasks.run_task` already refuses a claim without (ADR 0033 D-g) is gone")
 

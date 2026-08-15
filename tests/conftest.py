@@ -2,9 +2,36 @@
 
 Everything here exists to stop a test reaching something real. Nothing here sets up a feature.
 """
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture
+def short_task_root():
+    """A `GRID_TASK_ROOT` short enough to be the shape a real provider has.
+
+    Not a safety net and the one thing in this file that is not — it is here because more than one
+    suite needs it and two copies would drift.
+
+    `tmp_path` is about **96** characters (`/private/var/folders/…/pytest-of-<user>/pytest-N/
+    <test-name>0`). ADR 0034 D-c's workspace adds **126** more, and the whole path is then flattened
+    into ONE directory name by `task_agent.transcript_dir_name`. Claude Code stops using such a name
+    verbatim past ~200 — MEASURED, it keeps a prefix and appends a hash nothing here can reproduce —
+    so `link_transcript` refuses, and every test that spawns an agent would fail on a limit no real
+    deployment meets. `/var/grid` flattens to **135**.
+
+    Under `/private/tmp` rather than `/tmp` so the path is already its own realpath: on macOS `/tmp`
+    is a symlink, and a root that resolves elsewhere is the issue-06 trap this suite has met once.
+    """
+    root = Path(tempfile.mkdtemp(prefix="gt-", dir="/private/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

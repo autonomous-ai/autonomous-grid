@@ -129,6 +129,40 @@ def _transcript_dir() -> pathlib.Path | None:
     return pathlib.Path(config) / "projects" / _TRANSCRIPT_NAME.sub("-", os.getcwd())
 
 
+def _require_a_conversation_keyed_workspace() -> None:
+    """Refuse a cwd that is not `…/projects/<project>/<member>/<conversation>/workspace`.
+
+    The same kind of refusal this file already makes for the agent flags, and for the same reason:
+    this fake cannot behave like Claude Code, so the honest thing it CAN check is that the provider
+    asked for what the design requires. Since ADR 0034 D-c the workspace path IS the conversation's
+    identity — the real binary derives a session's transcript directory from it — so a provider that
+    dropped the conversation segment would run every conversation of a member in one directory, and
+    each of them would resume the wrong session.
+
+    Checked here rather than only in a test's assertions so that a dropped segment breaks the FREE
+    cross-repo E2E and not only the paid one. Shape, never values: this process has no way to know
+    which project or conversation it is serving, and inventing one would be a second place that has
+    to agree with the relay about how a uuid is spelled.
+    """
+    parts = pathlib.Path(os.getcwd()).parts
+    if len(parts) < 5 or parts[-1] != "workspace" or "projects" not in parts:
+        sys.stderr.write(
+            f"fake claude: cwd {os.getcwd()!r} is not a task workspace at all\n")
+        raise SystemExit(64)
+    projects = len(parts) - 1 - list(reversed(parts)).index("projects")
+    # `projects + 1`, not `projects`: the marker is not one of the segments being counted. Getting
+    # this wrong refuses every task with a message about the segment count being one too high —
+    # which is what it did, and what the free E2E caught on its first run.
+    below = parts[projects + 1:-1]
+    if len(below) != 3:
+        sys.stderr.write(
+            f"fake claude: the workspace is keyed on {len(below)} segment(s) below `projects/` "
+            f"({below!r}), and ADR 0034 D-c requires three — project, member key, conversation. "
+            f"Two means every conversation of one member shares this directory, so each of them "
+            f"resumes the wrong Claude Code session.\n")
+        raise SystemExit(64)
+
+
 def main() -> int:
     if sys.argv[1:2] == ["--version"]:
         # Answered before anything else, and without the argv check: this is how the provider's
@@ -136,6 +170,7 @@ def main() -> int:
         sys.stdout.write(f"{_VERSION}\n")
         return 0
     prompt, resume = _parse_argv(sys.argv[1:])
+    _require_a_conversation_keyed_workspace()
     session = resume or str(uuid.uuid4())
     _emit({"type": "system", "subtype": "init", "session_id": session})
 

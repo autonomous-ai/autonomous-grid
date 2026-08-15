@@ -212,9 +212,10 @@ def _safe_segment(kind: str, value: str) -> str:
     worse still: pathlib *discards* the left operand when the right one is absolute, so the root is
     silently gone (ADR 0032 D-b applies the same rule to the filenames a client uploads).
 
-    `kind` is in the message because there are now two segments and they come from different places
-    — a project id the relay minted and a `member_key` it derived — so "not a safe path segment" on
-    its own would leave an operator with two things to check and no way to tell which.
+    `kind` is in the message because there are now THREE segments and they come from different
+    places — a project id the relay minted, a `member_key` it derived, and a `conversation_id` it
+    minted — so "not a safe path segment" on its own would leave an operator with three things to
+    check and no way to tell which.
     """
     if not isinstance(value, str):
         raise ValueError(f"{kind} must be a string, got {type(value).__name__}")
@@ -225,23 +226,34 @@ def _safe_segment(kind: str, value: str) -> str:
     return value
 
 
-def workspace_for(project_id: str, member_key: str) -> Path:
-    """The working directory a task for `member_key` on `project_id` runs in (ADR 0033 D-g).
+def workspace_for(project_id: str, member_key: str, conversation_id: str) -> Path:
+    """The working directory one turn of `conversation_id` runs in (ADR 0033 D-g, ADR 0034 D-c).
 
-    Keyed on the PAIR, not the project. Claude Code derives a session's transcript directory from
-    the working directory, so the cwd *is* the conversation's identity — and two members' tasks
-    landing on one provider would otherwise share a directory that `materialize` opens with
-    `reset --hard` and `clean -ffdx`, deleting one agent's work while it runs.
+    Keyed on the TRIPLE. Claude Code derives a session's transcript directory from the working
+    directory, so the cwd *is* the conversation's identity — and the two levels below `projects`
+    are the same argument made twice:
 
-    **Both** segments are validated, because the second is just as much off the wire as the first:
-    `member_key` is the relay's own `sha256(user_id)` truncated, but this provider is handed it by
-    an authenticated party, and authenticated is not trusted. It is also why the key exists at all —
-    the raw `user_id` is `grid:<network>:<sub>`, and a colon fails `_SAFE_PROJECT_ID` here for the
-    same reason git refuses it in a ref name.
+      * `member_key` (D-g) — two MEMBERS' tasks landing on one provider would otherwise share a
+        directory that `materialize` opens with `reset --hard` and `clean -ffdx`, deleting one
+        agent's work while it runs;
+      * `conversation_id` (D-c) — one member's two CONVERSATIONS are two Claude Code sessions, and
+        one directory can only ever be one session. Without this level a person opens a second
+        conversation and it resumes the first, which is precisely what issue 38 exists to stop.
+
+    **All three** segments are validated, because each is just as much off the wire as the first:
+    `member_key` is the relay's own `sha256(user_id)` truncated and `conversation_id` its own
+    `uuid4()`, but this provider is handed both by an authenticated party, and authenticated is not
+    trusted. It is also why the key exists at all — the raw `user_id` is `grid:<network>:<sub>`, and
+    a colon fails `_SAFE_PROJECT_ID` here for the same reason git refuses it in a ref name.
+
+    `conversation_id` is a REQUIRED positional and deliberately has no default. A default would
+    quietly rebuild the member-level path for any caller that forgot it — the exact directory this
+    level exists to stop two conversations sharing — and nothing downstream would look wrong.
     """
     return (workspace_root() / "projects"
             / _safe_segment("project id", project_id)
             / _safe_segment("member key", member_key)
+            / _safe_segment("conversation id", conversation_id)
             / "workspace")
 
 
@@ -338,6 +350,30 @@ def transcript_dir_name(cwd: Path) -> str:
     return _TRANSCRIPT_NAME_REPLACED.sub("-", str(cwd.resolve(strict=False)))
 
 
+# How long that name may get before the binary stops using it verbatim.
+#
+# MEASURED against Claude Code 2.1.232 on 2026-08-15, and found by `tests/e2e_cross_repo/
+# e2e_live_agent.py` rather than reasoned: past a limit the binary keeps a PREFIX of the flattened
+# path and appends a short hash. In one operator's `~/.claude/projects/`, a 186-character name was
+# kept whole while every over-long one was written as exactly **207** characters — a 200-character
+# prefix, a hyphen, and a 6-character suffix (`xw9fqz`, `8zkx3g`, …) that is not derivable from the
+# path. Our own computation for those runs was 232.
+#
+# So beyond the limit this provider CANNOT know where the binary will write. That is not a cosmetic
+# mismatch: `link_transcript` plants its symlink at the name we compute, nothing writes through it,
+# and the transcript never reaches the worktree — while the task completes, the session id comes
+# back and the push lands. Issue 06's failure exactly, re-armed by ADR 0034 D-c, which adds 37
+# characters to every workspace path.
+#
+# ⚠️ **200, not 207, and the data cannot tell them apart.** Every truncated name is 207 long, which
+# is what BOTH "cap at 207" and "cap at 200, then append 7" produce; the only name observed kept
+# whole was 186, which discriminates neither. The direction to be wrong in is refusing a provider
+# that would have worked, never accepting one that silently loses every conversation it runs. The
+# stock layout flattens to **135**, so this has 65 characters of headroom against a real deployment
+# and cannot fire on one.
+TRANSCRIPT_NAME_MAX_CHARS = 200
+
+
 def configured_claude_config_dir() -> Path | None:
     """The operator's fixed config directory, validated, or `None` when they set none.
 
@@ -418,10 +454,24 @@ def link_transcript(workspace: Path, member_key: str) -> Path:
             "refusing to run, because the provider's credential would be committed to the "
             "requesting user's repository")
 
+    # BEFORE anything is created. Past `TRANSCRIPT_NAME_MAX_CHARS` the binary writes to a name we
+    # cannot compute (see that constant), so the link below would be planted somewhere nothing
+    # writes through and the conversation would be lost from the first turn with every other signal
+    # healthy. `run_task` treats a failure here as terminal, which is the right trade: no provider
+    # can fix this by retrying, and the operator is told exactly what to shorten.
+    name = transcript_dir_name(workspace)
+    if len(name) > TRANSCRIPT_NAME_MAX_CHARS:
+        raise OSError(
+            f"the workspace path flattens to a {len(name)}-character transcript directory name, "
+            f"and Claude Code stops using such a name verbatim past {TRANSCRIPT_NAME_MAX_CHARS} — "
+            f"it keeps a prefix and appends a hash this provider cannot reproduce, so the "
+            f"conversation would be written outside the repository and lost. Point "
+            f"{WORKSPACE_ROOT_ENV} at a shorter directory ({workspace})")
+
     target = transcript_dir(workspace, member_key)
     target.mkdir(parents=True, exist_ok=True)
 
-    link = config_dir / "projects" / transcript_dir_name(workspace)
+    link = config_dir / "projects" / name
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink():
         # Ours from a previous task, or pointing somewhere stale. A symlink holds no data, so

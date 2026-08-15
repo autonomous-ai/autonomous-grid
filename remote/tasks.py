@@ -572,14 +572,39 @@ def run_task(job: dict[str, Any],
     if not member_key:
         return failed(
             "the relay's claim named no member_key, so this provider cannot tell whose workspace "
-            "and whose conversation this task belongs to. It refuses to run rather than share one "
-            "project-level workspace between members. Upgrade the relay (ADR 0033 issue 11).")
+            "this task belongs to. It refuses to run rather than share one project-level workspace "
+            "between members. Upgrade the relay (ADR 0033 issue 11).")
+
+    # WHICH CONVERSATION this turn continues (ADR 0034 D-c). The second wire field on this path that
+    # is refused rather than defaulted, and for the same reason one level down: a missing key would
+    # put the agent in the MEMBER's directory, which changes `transcript_dir_name(cwd)`, which makes
+    # that conversation permanently unresumable — while the turn completes, the push lands, and
+    # every other signal reads healthy. Falling back to the member level would also be the very
+    # directory two of a member's conversations must not share.
+    #
+    # A SEPARATE sentence from the one above, deliberately (D-c). Both mean "upgrade the relay", but
+    # they arrive at different releases and name different keys: fused, an operator whose relay is
+    # missing this one is sent to check ADR 0033 issue 11, a slice they already deployed.
+    #
+    # ⚠️ It must be a refusal WRITTEN HERE and not merely the `TypeError` that `workspace_for`'s
+    # required third argument would raise below. That crash is caught by the guarded block, arrives
+    # as "could not start the agent: workspace_for() missing 1 required positional argument", and
+    # hands an operator a Python signature instead of an instruction — while looking, from every
+    # state and every path on disk, exactly like this.
+    conversation_id = str(job.get("conversation_id") or "")
+    if not conversation_id:
+        return failed(
+            "the relay's claim named no conversation_id, so this provider cannot tell which "
+            "conversation this turn continues. It refuses to run rather than share one "
+            "member-level workspace between a member's conversations, which would make each of "
+            "them unresumable. Upgrade the relay (ADR 0034 issue 38).")
 
     sink = publish if publish is not None else _no_publish
     timeout = task_timeout()
     try:
         workspace = task_agent.ensure_workspace(
-            task_agent.workspace_for(str(job.get("project_id") or ""), member_key))
+            task_agent.workspace_for(
+                str(job.get("project_id") or ""), member_key, conversation_id))
         # The writable cache tree beside it, created in the same guarded block so a provider whose
         # task root is unwritable fails here — as "could not create …" on a task that cost nothing —
         # rather than three minutes later as an `EROFS` inside somebody's `npm install`.
@@ -904,63 +929,75 @@ def _run_and_report(state: Any, job: dict[str, Any], capacity: Any = None) -> No
 
     project_id = str(job.get("project_id") or "")
     member_key = str(job.get("member_key") or "")
-    if not _reserve_workspace(project_id, member_key):
+    conversation_id = str(job.get("conversation_id") or "")
+    if not _reserve_workspace(project_id, member_key, conversation_id):
         # DELIBERATELY no terminal report, the same policy as a result that could not be pushed:
         # terminal is the one state nothing retries, and nothing has been done. Left `running`, its
         # lease lapses and the relay hands it to a provider that can actually run it.
-        _warn(f"refusing task {task_id}: this provider is already running a task in project "
-              f"{project_id}'s workspace for member {member_key}, and two agents in one workspace "
-              f"would destroy each other's work. No terminal state is reported, so the task's "
-              f"lease lapses and the relay reclaims it. The relay is supposed to make this "
-              f"impossible — if it recurs, its one-active-task-per-member index is not holding. "
-              f"Two DIFFERENT members in this project are fine and are not refused here.")
+        _warn(f"refusing task {task_id}: this provider is already running a turn of conversation "
+              f"{conversation_id} in project {project_id} for member {member_key}, and two agents "
+              f"in one workspace would destroy each other's work. No terminal state is reported, "
+              f"so the task's lease lapses and the relay reclaims it. The relay is supposed to "
+              f"make this impossible — if it recurs, its one-running-turn-per-conversation index "
+              f"is not holding. A DIFFERENT conversation, or a different member, is fine in this "
+              f"project and is not refused here.")
         return
     try:
         _supervise_one_task(state, job, task_id, capacity)
     finally:
         # In a `finally`, and unconditional: a supervisor that raised on its way out must not take
-        # the workspace with it, or one bad task locks that member out of that project on this
-        # provider for the life of the process.
-        _release_workspace(project_id, member_key)
+        # the workspace with it, or one bad task locks that conversation out on this provider for
+        # the life of the process.
+        _release_workspace(project_id, member_key, conversation_id)
 
 
-# The (project, member) pairs this process is running a task in, so two workers can never share a
-# workspace. A set rather than a lock per pair: the collection is tiny, it is only ever touched at
-# the two ends of a task, and a dict of locks would need its own lock to grow safely anyway.
+# The (project, member, conversation) triples this process is running a turn of, so two workers can
+# never share a workspace. A set rather than a lock per triple: the collection is tiny, it is only
+# ever touched at the two ends of a turn, and a dict of locks would need its own lock to grow safely
+# anyway.
 #
-# The PAIR since ADR 0033 D-g, because that is what a workspace is. Keyed on the project alone, this
-# refused the second member's task in a project the moment concurrency was switched on.
-_WORKSPACES_IN_USE: set[tuple[str, str]] = set()
+# The PAIR since ADR 0033 D-g and the TRIPLE since ADR 0034 D-c, because that is what a workspace is
+# — this key must be the one `task_agent.workspace_for` builds a path from, or it guards a directory
+# nobody uses. Keyed on the project alone, this refused the second MEMBER's task the moment
+# concurrency was switched on; keyed on the pair, it refuses a member's second CONVERSATION the same
+# way, which is the failure issue 40 would otherwise walk straight into.
+_WORKSPACES_IN_USE: set[tuple[str, str, str]] = set()
 _WORKSPACES_LOCK = threading.Lock()
 
 
-def _reserve_workspace(project_id: str, member_key: str) -> bool:
-    """Take this (project, member) workspace for the caller. False means a worker already has it.
+def _reserve_workspace(project_id: str, member_key: str, conversation_id: str) -> bool:
+    """Take this conversation's workspace for the caller. False means a worker already has it.
 
-    Two different members of one project reserve two different workspaces and never collide — which
-    is the whole of the re-key, and is what stops a provider running two members' tasks from
+    Two conversations of one member — like two members of one project — reserve two different
+    workspaces and never collide, which is the whole of the re-key and is what stops a provider
     refusing the second one into `retries_exhausted`.
 
-    An empty project id or member key reserves nothing and always succeeds: `run_task` refuses such
-    a job with a readable message of its own, and there is no workspace to protect. Reserving
-    `(project_id, "")` instead would make a SECOND keyless task collide with the first and take the
-    silent no-report path above, replacing a refusal the user can read with one they cannot.
+    An empty project id, member key or conversation id reserves nothing and always succeeds:
+    `run_task` refuses such a job with a readable message of its own, and there is no workspace to
+    protect. Reserving `(project_id, member_key, "")` instead would make a SECOND keyless turn
+    collide with the first and take the silent no-report path above, replacing a refusal the user
+    can read with one they cannot.
+
+    ⚠️ That "always succeeds" arm is only safe because the refusal exists. Add a segment here
+    without one in `run_task` and an empty id reserves nothing while `workspace_for` is still handed
+    it — two conversations then share one directory with no lock at all, which is worse than the
+    collision this function exists to prevent.
     """
-    if not project_id or not member_key:
+    if not project_id or not member_key or not conversation_id:
         return True
     with _WORKSPACES_LOCK:
-        if (project_id, member_key) in _WORKSPACES_IN_USE:
+        if (project_id, member_key, conversation_id) in _WORKSPACES_IN_USE:
             return False
-        _WORKSPACES_IN_USE.add((project_id, member_key))
+        _WORKSPACES_IN_USE.add((project_id, member_key, conversation_id))
         return True
 
 
-def _release_workspace(project_id: str, member_key: str) -> None:
+def _release_workspace(project_id: str, member_key: str, conversation_id: str) -> None:
     """Give the workspace back. `discard`, so releasing twice is not an error."""
-    if not project_id or not member_key:
+    if not project_id or not member_key or not conversation_id:
         return
     with _WORKSPACES_LOCK:
-        _WORKSPACES_IN_USE.discard((project_id, member_key))
+        _WORKSPACES_IN_USE.discard((project_id, member_key, conversation_id))
 
 
 def _supervise_one_task(state: Any, job: dict[str, Any], task_id: str, capacity: Any) -> None:
@@ -1149,8 +1186,13 @@ def _tree_beat(job: dict[str, Any], publisher: Any) -> Callable[[], None] | None
     try:
         from . import task_tree
 
+        # The SAME triple `run_task` builds its workspace from (ADR 0033 D-g, ADR 0034 D-c), read
+        # off the job again because this runs before `run_task` does. A path that is one level up
+        # snapshots a directory the agent is not in, and nothing here would say so: the construction
+        # raises, this returns `None`, and the task simply has no live view for its whole run.
         workspace = task_agent.workspace_for(
-            str(job.get("project_id") or ""), str(job.get("member_key") or ""))
+            str(job.get("project_id") or ""), str(job.get("member_key") or ""),
+            str(job.get("conversation_id") or ""))
         return task_tree.WorkspaceTree(workspace, publisher).beat
     except (Exception, SystemExit) as exc:
         _warn(f"could not set up workspace tree snapshots for task {job.get('task_id')} ({exc!r}); "
@@ -1231,11 +1273,13 @@ def _push_result(job: dict[str, Any], outcome: TaskOutcome, spawned: bool,
         return outcome, True
 
     try:
-        # The same pair `run_task` built its workspace from, and reached only when the agent was
-        # SPAWNED — so `workspace_for` has already accepted both segments once on this path, and a
-        # hostile one would have failed the task before any of this ran.
+        # The same TRIPLE `run_task` built its workspace from (ADR 0034 D-c), and reached only when
+        # the agent was SPAWNED — so `workspace_for` has already accepted all three segments once on
+        # this path, and a hostile one would have failed the task before any of this ran. Built one
+        # level short, this commits from a worktree the agent never touched.
         member_key = str(job.get("member_key") or "")
-        workspace = task_agent.workspace_for(str(job.get("project_id") or ""), member_key)
+        workspace = task_agent.workspace_for(
+            str(job.get("project_id") or ""), member_key, str(job.get("conversation_id") or ""))
         pushed = task_repo.commit_and_push(
             workspace, url=remote.url, token=remote.token,
             branch=str(job.get("branch") or ""),

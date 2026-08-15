@@ -27318,6 +27318,10 @@ def test_task_error_message_survives_a_body_that_blows_the_recursion_limit(monke
 # ADR 0033 D-g a task's workspace belongs to a (project, member) pair and `run_task` REFUSES a claim
 # without one, so every job dict below needs it even when the test is about something else.
 _TASK_MEMBER_KEY = "9f2b" * 8
+# The CONVERSATION a turn belongs to (ADR 0034 D-c). `run_task` REFUSES a claim without
+# one — a member-level workspace would be a second conversation's directory too — so
+# every job dict below needs it even when the test is about something else.
+_TASK_CONVERSATION_ID = "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f"
 
 
 def _child(argv, *, timeout=5.0, publish=None, translator=None):
@@ -27335,7 +27339,7 @@ def _child(argv, *, timeout=5.0, publish=None, translator=None):
         translator=translator)
 
 
-def test_run_task_reports_failure_rather_than_raising(monkeypatch, tmp_path):
+def test_run_task_reports_failure_rather_than_raising(monkeypatch, tmp_path, short_task_root):
     """Every failure mode of the child is a FAILED task, never an exception into the loop.
 
     Patches `Popen` rather than `run`: the child is spawned and streamed now, so a spawn that
@@ -27350,30 +27354,32 @@ def test_run_task_reports_failure_rather_than_raising(monkeypatch, tmp_path):
     from remote import tasks
     from remote import task_agent
 
-    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("GRID_TASK_ROOT", str(short_task_root))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
     monkeypatch.setattr(tasks.subprocess, "Popen", _raise(OSError("no such binary")))
 
     outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID,
                               "prompt": "x"})
 
     assert outcome.state == "failed"
     assert "no such binary" in outcome.error
 
 
-def test_run_task_times_out_into_a_failed_state(monkeypatch, tmp_path):
+def test_run_task_times_out_into_a_failed_state(monkeypatch, tmp_path, short_task_root):
     """The fast unit form of the deadline. `test_a_child_that_writes_nothing_still_times_out`
     proves it against a real wedged child; this one pins the mapping to a failed outcome."""
     import subprocess as _subprocess
 
     from remote import task_agent, tasks
 
-    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("GRID_TASK_ROOT", str(short_task_root))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
     monkeypatch.setattr(
         tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="claude", timeout=1)))
 
     outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID,
                               "prompt": "x"})
 
     assert outcome.state == "failed"
@@ -27411,7 +27417,8 @@ def test_run_task_refuses_a_job_with_no_project(monkeypatch):
     """
     from remote import tasks
 
-    outcome = tasks.run_task({"task_id": "T1", "member_key": _TASK_MEMBER_KEY, "prompt": "x"})
+    outcome = tasks.run_task({"task_id": "T1", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID, "prompt": "x"})
 
     assert outcome.state == "failed"
     assert "could not start the agent" in outcome.error
@@ -27517,12 +27524,12 @@ def test_a_child_emitting_non_utf8_bytes_does_not_silently_truncate_the_output()
     assert published[0] == "before" and published[-1] == "after"
 
 
-def test_run_task_without_a_publisher_still_works(monkeypatch, tmp_path):
+def test_run_task_without_a_publisher_still_works(monkeypatch, tmp_path, short_task_root):
     """`publish` is optional so the loop, the tests, and any future caller can run a task without
     wiring a channel — the child is the point, the stream is an observer."""
     from remote import task_agent, tasks
 
-    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path))
+    monkeypatch.setenv("GRID_TASK_ROOT", str(short_task_root))
     monkeypatch.setenv("GRID_TASK_TIMEOUT_SECONDS", "20")
     script = tmp_path / "claude"
     script.write_text(
@@ -27532,6 +27539,7 @@ def test_run_task_without_a_publisher_still_works(monkeypatch, tmp_path):
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: str(script))
 
     outcome = tasks.run_task({"task_id": "T1", "project_id": "p1", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID,
                               "prompt": "solo"})
 
     assert (outcome.state, outcome.error) == ("completed", None)

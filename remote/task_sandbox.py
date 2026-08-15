@@ -138,15 +138,42 @@ _DENIED_ENV_NAMES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # built on a proxy this shaky would refuse working providers on a rule that cannot be defended.
 # What an operator needs here is the clue, printed where they are already looking when tasks fail.
 #
-# `/var/grid/projects/<uuid>/<member_key>/workspace` is **98** characters — 65 for the pre-issue-11
-# path plus 33 for the separator and the 32-hex key (ADR 0033 D-g). Counted rather than estimated,
-# because an earlier version of this comment said "roughly 16 more" and the difference is the whole
-# margin: 98 leaves 22 characters before the warning, so an operator who moves the root more than
-# that much deeper starts seeing it. Still inside the threshold by design, and the threshold stays a
-# warning rather than becoming a refusal. Not applied off macOS: bubblewrap does not pass a profile
-# this way, and D-n already requires the Linux backend to be re-measured on the fleet rather than
-# assumed to behave like seatbelt.
-WORKSPACE_PATH_WARNING_CHARS = 120
+# ⚠️ **The budget is the OPERATOR'S ROOT, not the whole path, and that is the ADR 0034 D-c change.**
+# The measured figure has always been about the whole path — but the whole path is mostly ours, and
+# telling an operator to shorten a root they did not choose is not advice. The arithmetic:
+#
+#     grid-owned suffix, D-g   /projects/<uuid-36>/<member_key-32>/workspace          =  89
+#     grid-owned suffix, D-c   + /<conversation_id-36>                                = 126
+#     old whole-path threshold                                                          120
+#     the operator's budget, unchanged                             120 - 89           =  31
+#
+# So the default `/var/grid` (9 characters) sat 22 inside the threshold before and sits 22 inside it
+# now, while the absolute path went 98 -> 135. Keeping the whole-path check would have fired on every
+# macOS provider running a stock layout, on every task — and a warning that always fires is one
+# nobody reads, which costs exactly the operator this exists for.
+#
+# ⚠️ **Disclosed rather than glossed: the residual margin against the real failure shrank by 37
+# characters even though the operator's budget did not.** The measured `E2BIG` break was near 160 and
+# the stock path is now 135. That is uncomfortable, and it is not fixed by moving a threshold —
+# nothing here can make the profile smaller. The honest reading is that a macOS provider on a deep
+# root is closer to the wall than it was; the fleet is Linux, where the profile is not passed this
+# way at all, and re-measuring seatbelt against the new depth belongs with issue 50, which is what
+# decides the layout underneath this path.
+#
+# A WARNING and not a refusal, deliberately. The relationship is not a clean threshold — 160 produced
+# a LARGER profile than 186 — so the length is a symptom rather than the cause, and a hard limit
+# built on a proxy this shaky would refuse working providers on a rule that cannot be defended.
+# What an operator needs here is the clue, printed where they are already looking when tasks fail.
+#
+# Not applied off macOS: bubblewrap does not pass a profile this way, and D-n already requires the
+# Linux backend to be re-measured on the fleet rather than assumed to behave like seatbelt.
+WORKSPACE_ROOT_WARNING_CHARS = 31
+
+# How many characters of the workspace path this repo owns rather than the operator — `/projects`,
+# the three wire-supplied segments with their separators, and `/workspace`. Derived from the path in
+# hand instead of restated as a number, because the number moved once already (issue 38) and a
+# hand-carried copy is what would go stale next time a level is added.
+_GRID_OWNED_LEVELS = 5
 
 
 def enabled() -> bool:
@@ -338,18 +365,39 @@ def _read_rule(path: str) -> str:
 _WARNED_ABOUT: set[str] = set()
 
 
+def _task_root_of(workspace_path: str) -> str:
+    """The operator-chosen prefix of a workspace path — everything above `projects/`.
+
+    Read off the path rather than from `task_agent.workspace_root()`, for two reasons that both
+    bite: `task_agent` imports THIS module, so asking it would close a cycle; and the policy is
+    built from whatever path the caller was handed, so a check against the environment could pass
+    while the path in the profile is somebody else's.
+
+    A path with fewer levels than `workspace_for` builds answers `""`, which never warns. That is
+    the right direction: this is a hint about a configuration, and a path shaped unlike ours is not
+    one it can say anything true about.
+    """
+    parents = Path(workspace_path).parents
+    if len(parents) <= _GRID_OWNED_LEVELS:
+        return ""
+    return str(parents[_GRID_OWNED_LEVELS - 1])
+
+
 def _warn_if_the_path_is_long_enough_to_break_exec(workspace_path: str) -> None:
-    """Say it on stderr, once per path, and carry on. See `WORKSPACE_PATH_WARNING_CHARS`."""
-    if sys.platform != "darwin" or len(workspace_path) <= WORKSPACE_PATH_WARNING_CHARS:
+    """Say it on stderr, once per path, and carry on. See `WORKSPACE_ROOT_WARNING_CHARS`."""
+    root = _task_root_of(workspace_path)
+    if sys.platform != "darwin" or len(root) <= WORKSPACE_ROOT_WARNING_CHARS:
         return
     if workspace_path in _WARNED_ABOUT:
         return
     _WARNED_ABOUT.add(workspace_path)
     print(
-        f"Warning: the task workspace path is {len(workspace_path)} characters. macOS builds the "
-        f"sandbox profile into a single exec argument, and past roughly "
-        f"{WORKSPACE_PATH_WARNING_CHARS} it can exceed the limit — every command the agent runs "
-        f"then fails with E2BIG. Point {WORKSPACE_ROOT_HINT} at a shorter directory if tasks report "
+        f"Warning: {WORKSPACE_ROOT_HINT} is {len(root)} characters, and the whole task workspace "
+        f"path is {len(workspace_path)}. macOS builds the sandbox profile into a single exec "
+        f"argument, and past roughly 160 characters it can exceed the limit — every command the "
+        f"agent runs then fails with E2BIG. Grid adds about "
+        f"{len(workspace_path) - len(root)} characters of its own below the root, so keep "
+        f"{WORKSPACE_ROOT_HINT} under {WORKSPACE_ROOT_WARNING_CHARS} characters if tasks report "
         f"that. ({workspace_path})",
         file=sys.stderr, flush=True)
 

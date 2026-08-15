@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -43,15 +44,31 @@ _SETTLE_TIMEOUT = 300.0
 
 
 @pytest.fixture(scope="module")
-def live_workspace_root(tmp_path_factory):
-    """ONE root shared by every provider in this module.
+def live_workspace_root():
+    """ONE root shared by every provider in this module, and a SHORT one.
 
     Not a root each, unlike the fake-agent harness: the workspace path is a lockstep value precisely
     because the transcript directory's name is derived from it, so two providers that disagree about
     it cannot resume each other's conversation. A root each would quietly test the one arrangement
     the design forbids.
+
+    ⚠️ **Not `tmp_path_factory`, and that is a finding rather than a preference.** Its roots look
+    like `/private/var/folders/…/pytest-of-<user>/pytest-2204/live-workspaces0` — 96 characters
+    before grid adds any of its own. Under ADR 0034 D-c the whole path then flattens to a
+    232-character transcript directory name, and Claude Code stops using such a name verbatim past
+    ~200: MEASURED, it keeps a 200-character prefix and appends a hash this repository cannot
+    reproduce, so the provider's symlink is planted where nothing writes and the transcript never
+    reaches the worktree. `task_agent.TRANSCRIPT_NAME_MAX_CHARS` carries the measurement and
+    `link_transcript` now refuses outright — so with `tmp_path_factory` this module would fail every
+    task on a real limitation that a real deployment (`/var/grid`, 135 characters flattened) never
+    meets. A short root under `/private/tmp` is the production shape, which is what this module is
+    for.
     """
-    return Path(str(tmp_path_factory.mktemp("live-workspaces")))
+    root = Path(tempfile.mkdtemp(prefix="grid-live-", dir="/private/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture
@@ -140,17 +157,35 @@ def test_a_real_agent_run_reports_tool_activity_while_it_is_still_working(
     assert done.get("claude_session_id"), "the real binary's session id never reached the task row"
 
 
-def test_a_second_task_recalls_what_the_first_one_was_told(
+def test_a_second_conversation_does_not_recall_the_first(
         relay, owner_token, spawn_live_provider, live_workspace_root):
-    """Issue 06's live check, scripted: the conversation travels through the repository.
+    """ADR 0034 D-c / issue 38, against the REAL binary — the only seam that can see this.
 
-    The workspace is DELETED between the two tasks and the second one runs under a different provider
-    identity, so nothing left on disk can explain a pass — the token is never written to a file, only
-    said. What carries it is the transcript, committed by the ordinary result commit, fast-forwarded
-    onto `main`, and checked out again by whoever claims next.
+    ⚠️ **OVERTURNS `test_a_second_task_recalls_what_the_first_one_was_told`.** That test asserted
+    the opposite and was right for its release: before D-c a member had one workspace per project,
+    so their second task resumed their first task's session by construction. Since D-c the workspace
+    is keyed by the conversation and every `POST /tasks` mints one, so two tasks are two
+    conversations and the second starts fresh. That is the feature, stated as a person sees it: they
+    open a second conversation and it does not remember the first.
+
+    Only a live run can check it. The transcript directory's name is a contract with the Claude Code
+    binary — issue 06's bug was the provider planting its symlink at an unresolved path while the
+    binary wrote elsewhere, and every unit test agreed with it because each compared our own
+    computation against itself. Two conversations that quietly shared one directory would look
+    exactly like this test's setup and pass every assertion the fake agent can make.
+
+    The token is only ever SAID, never written to a file, so nothing in the shared git history can
+    carry it between the two — which is what makes the negative meaningful. The turns of one project
+    DO share its files; they must not share its session.
+
+    ⚠️ **What is deliberately not here: a second TURN of one conversation resuming its own session
+    after its workspace is deleted and a different provider claims it.** Issue 38's acceptance
+    criteria ask for it, and the route that posts a turn into an existing conversation is issue 47 —
+    until it ships there is no way to reach a conversation twice, so the check has nothing to run
+    against. It belongs with 47 and is recorded there rather than approximated here.
     """
-    project = "live-resume"
-    first_provider = spawn_live_provider("A")
+    project = "live-two-conversations"
+    spawn_live_provider("A")
 
     planted = H.create(
         relay, owner_token,
@@ -161,40 +196,56 @@ def test_a_second_task_recalls_what_the_first_one_was_told(
         relay, owner_token, planted["id"], {"completed", "failed"}, timeout=_SETTLE_TIMEOUT)
     assert first["state"] == "completed", first
     session = first.get("claude_session_id")
-    assert session, "no session id was captured from the first task"
+    assert session, "no session id was captured from the first conversation"
 
-    first_provider.stop()
-
-    # DISCOVERED, not derived. Since ADR 0033 D-g the workspace is
-    # `projects/<project_id>/<member_key>/workspace`, and `member_key` is `sha256(user_id)`
-    # truncated by the RELAY. Recomputing it here would make this test agree with a rule this
-    # repository does not own — the same reason `_harness.sweep_transcript_links` reads symlink
-    # targets instead of predicting their names. One member has run tasks in this project, so there
-    # is exactly one directory, and asserting that is itself worth doing.
-    members = sorted((live_workspace_root / "projects" / first["project_id"]).iterdir())
-    assert len(members) == 1, f"expected one member's workspace, found {members!r}"
-    workspace = members[0] / "workspace"
-    transcripts = sorted((workspace / ".grid" / "agent" / members[0].name).glob("*.jsonl"))
-    assert transcripts, (
-        f"the agent's transcript never landed in {workspace / '.grid' / 'agent' / members[0].name}"
-        f" — this is issue 06's failure mode, and it is silent through every other signal")
-    shutil.rmtree(workspace)
-
-    spawn_live_provider("B")
     asked = H.create(
         relay, owner_token,
-        "What was the token I asked you to remember? Reply with just the token and nothing else. "
-        "Create or modify no file.",
+        "What was the token I asked you to remember? If you were not told one in this conversation, "
+        "reply with exactly NOTHING-WAS-SAID. Create or modify no file.",
         project=project)
     second = H.await_state(
         relay, owner_token, asked["id"], {"completed", "failed"}, timeout=_SETTLE_TIMEOUT)
-
     assert second["state"] == "completed", second
-    assert "ZEBRA-4417" in (second.get("result_text") or ""), (
-        f"the second task did not recall the token — the conversation did not travel: {second!r}")
-    assert second.get("claude_session_id") == session, (
-        f"the session id changed across a resume ({session} -> {second.get('claude_session_id')}) — "
-        f"a resume appends to the same transcript and keeps its id")
+
+    # 1. It did not remember. The whole demo.
+    assert "ZEBRA-4417" not in (second.get("result_text") or ""), (
+        f"the second conversation recalled the first one's token, so the two are sharing a Claude "
+        f"Code session — which means one workspace directory: {second!r}")
+
+    # 2. And it was a fresh session rather than a failed resume. Without this, a provider that asked
+    #    to resume a transcript it could not find would satisfy the assertion above while reporting
+    #    a reset — the agent "forgetting" for the wrong reason, which is a bug wearing the feature's
+    #    clothes.
+    assert second.get("claude_session_id") != session, second
     assert not second.get("session_reset_reason"), (
-        f"the second task started a FRESH session instead of resuming: "
-        f"{second.get('session_reset_reason')!r}")
+        f"the second conversation was TOLD to resume something and could not — it should have been "
+        f"asked to resume nothing at all: {second.get('session_reset_reason')!r}")
+
+    # 3. Two workspaces on disk, each with its own transcript. DISCOVERED, not derived: the member
+    #    key is `sha256(user_id)` truncated by the RELAY and the conversation id is the relay's
+    #    uuid, so recomputing either here would make this test agree with a rule this repository
+    #    does not own — the same reason `_harness.sweep_transcript_links` reads symlink targets
+    #    instead of predicting their names.
+    members = sorted((live_workspace_root / "projects" / first["project_id"]).iterdir())
+    assert len(members) == 1, f"expected one member's directory, found {members!r}"
+    conversations = sorted(p for p in members[0].iterdir() if (p / "workspace").is_dir())
+    assert len(conversations) == 2, (
+        f"expected one workspace per conversation under {members[0]}, found {conversations!r}")
+
+    # 4. Issue 06's property, kept and now checked per conversation: the real binary wrote its
+    #    transcript THROUGH our symlink and into the worktree. This is the assertion that fails if
+    #    `transcript_dir_name` and the binary disagree about the deeper path, and it is silent
+    #    through every other signal — the task completes, the session id comes back, the push lands.
+    landed = {
+        conversation.name: sorted(
+            p.name for p in
+            (conversation / "workspace" / ".grid" / "agent" / members[0].name).glob("*.jsonl"))
+        for conversation in conversations
+    }
+    assert all(landed.values()), (
+        f"a conversation's transcript never reached its worktree — issue 06's failure mode at the "
+        f"depth ADR 0034 D-c added, and it is silent through every other signal. Found {landed!r}; "
+        f"the first conversation's session was {session}, the second's "
+        f"{second.get('claude_session_id')}. The provider's own Claude config directory holds: "
+        + repr(sorted(p.name for p in (Path.home() / ".claude" / "projects").glob("*")
+                      if members[0].name in p.name)))
