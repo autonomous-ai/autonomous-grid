@@ -1275,6 +1275,167 @@ def test_22_two_conversations_run_a_whole_session_and_the_work_appears_by_itself
         f"the reader does not know what a branch is. Surface: {surface[:600]}")
 
 
+def test_23_a_collision_is_resolved_by_the_conversation_that_caused_it(
+        relay, relay_home, owner_token, spawn_provider, workspace_root):
+    """ADR 0034 D-g / issue 42, at the one seam where both repositories are on the wire.
+
+    Two conversations change the same line. The first reaches `main`; the second cannot, so the relay
+    hands the collision back to the conversation that caused it — as a turn of that conversation, in
+    the same Claude Code session, **ahead of the follow-up its owner had already typed**. Nobody runs
+    a command, and nothing anybody reads names a branch.
+
+    ⚠️ **The ordering is the criterion** (issue 42): *"a merge turn that runs last fails this"*. The
+    claim orders by `created_at`, so the merge turn is the newest row in the queue and the follow-up
+    is older — left alone, the follow-up runs first on work the grid has not combined, conflicts in
+    its turn, and queues another merge turn per typed-ahead message.
+
+    ⚠️ **The whole loop is real here and nowhere else.** The relay decides the tier and cuts the
+    turn; the provider fetches `refs/integrate/<id>` and spawns; `fake_claude` runs a genuine
+    `git merge` and stages every conflicted path; the provider's `ls-files --unmerged` guard reads
+    the index BEFORE `git add -A`; settle checks the pinned oid; and the apply sweep puts the result
+    on the trunk. A unit test can hold any one of those against a fixture, and none of them against
+    each other.
+    """
+    import subprocess
+
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-collide", bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+    repo = relay_home / "projects" / f"{project}.git"
+
+    def _trunk_shared():
+        """`shared.txt` as the project holds it, or `""` while the trunk has no such file yet.
+
+        ⚠️ **Content, never `commit in ls-remote(main)` — the shape `test_22` uses.** The trunk does
+        not stop at any one of these results: the scaffolding turn below applies too, cleanly, so
+        `main` ends up a DESCENDANT of whichever commit is being waited for rather than equal to it.
+        An equality check therefore reports a trunk that contains everything as work that never
+        landed — and it does so INTERMITTENTLY, depending on which apply the sweep reached first,
+        which is the worst possible way for a test to be wrong. Measured: this test passed alone and
+        failed inside the full module.
+        """
+        shown = subprocess.run(
+            ["git", "--git-dir", str(repo), "show", "refs/heads/main:shared.txt"],
+            capture_output=True, text=True)
+        return shown.stdout if shown.returncode == 0 else ""
+
+    # Both cut from the trunk as it stands now, so whichever lands second cannot reach it. The same
+    # timing `test_22` relies on, and the same one a real team produces without trying.
+    #
+    # ⚠️ **WHICH of them loses is not decidable from here, and assuming it made this test pass alone
+    # and fail inside the full module.** A create returns once its turn is `preparing`; it becomes
+    # claimable when its input commit lands, and the provider is polling throughout — so under load
+    # the second create's git work can finish first and be claimed first. The loser is therefore
+    # DISCOVERED below, from the merge turn the relay cut, which is also the more honest assertion:
+    # the conflict goes to the conversation that caused it, whichever that turns out to be.
+    alice = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="WRITE shared.txt from-alice; SAY done")
+    bob = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="WRITE shared.txt from-bob; SAY done")
+    # ⚠️ **This one is scaffolding and it is what makes the ordering assertion honest.** The provider
+    # runs ONE turn at a time (`provider_process.py`'s worker default), so an unrelated turn created
+    # HERE — after the collision and before the follow-up — occupies it across the apply tick that
+    # discovers the conflict. Without it the follow-up becomes claimable the instant its sibling
+    # settles and is picked up before the sweep has run, which is a race in the harness rather than
+    # a property of the design, and would make this test flaky in the direction that reads as a pass.
+    blocker = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="SLEEP 10; SAY done")
+    # One into EACH conversation, typed while their turns were still running so both are OLDER than
+    # any merge turn. Both, because the loser is not known yet — and the one in the conversation that
+    # wins is harmless: its own turn is cut from a trunk that has not moved and it writes nothing.
+    typed_ahead = {
+        turn["conversation_id"]: relay_client.send_turn(
+            relay, owner_token, turn["conversation_id"], prompt="READ shared.txt; SAY continued")
+        for turn in (alice, bob)}
+
+    finished = {}
+    for turn in (alice, bob):
+        finished[turn["conversation_id"]] = H.await_state(
+            relay, owner_token, turn["id"], {"completed", "failed"}, timeout=120)
+    assert [done["state"] for done in finished.values()] == ["completed", "completed"], finished
+    assert H.wait_for(lambda: "from-" in _trunk_shared(), timeout=45.0), (
+        f"neither result reached the project, so there is no collision to hand back. "
+        f"Applies owed: {_applies(relay_home)}")
+
+    # 1. A merge turn appears in that conversation, marked as machinery rather than as a message.
+    def _merge_turn():
+        listed = relay_client.list_tasks(relay, owner_token, project, mine=False, limit=50)
+        for task in listed.get("tasks") or ():
+            if task.get("kind") == "merge":
+                return task
+        return None
+
+    merge = H.wait_for(_merge_turn, timeout=45.0)
+    assert merge, "the collision was never handed back to anybody"
+    losing = merge["conversation_id"]
+    assert losing in finished, (
+        f"the collision was handed to a conversation that did not cause it: {merge!r}")
+    follow_up = typed_ahead[losing]
+    assert merge["id"] not in (follow_up["id"], blocker["id"])
+
+    # 2. It runs BEFORE that conversation's typed-ahead message — **the criterion**. Compared on
+    #    `claimed_at`, which is a record of what the provider was handed and when, rather than on a
+    #    state read at a moment that races the very scheduling under test.
+    merge_done = H.await_state(
+        relay, owner_token, merge["id"], {"completed", "failed"}, timeout=120)
+    assert merge_done["state"] == "completed", merge_done
+    follow_up_now = relay_client.get_task(relay, owner_token, follow_up["id"])
+    assert merge_done["claimed_at"], merge_done
+    assert (follow_up_now["claimed_at"] is None
+            or follow_up_now["claimed_at"] > merge_done["claimed_at"]), (
+        f"the typed-ahead message ran first, so it worked from a tree the grid had not combined and "
+        f"will collide all over again: follow-up {follow_up_now}, merge {merge_done}")
+
+    # 3. The same session, which is the entire justification for asking this conversation rather
+    #    than the grid. `fake_claude` echoes back whatever it is told to `--resume`.
+    assert merge_done["claude_session_id"] == finished[losing]["claude_session_id"], (
+        f"the merge turn started a fresh session, so the agent resolving the collision had none of "
+        f"the intent that is the only reason to ask it: {merge_done}")
+
+    # 4. And BOTH people's work is in the project, with nobody having run a command. Content is the
+    #    criterion: a two-parent commit that discarded one side satisfies every structural check
+    #    there is, which is the failure ADR 0033 issue 15 measured.
+    assert H.wait_for(
+        lambda: "from-alice" in _trunk_shared() and "from-bob" in _trunk_shared(),
+        timeout=45.0), (
+        f"the project holds {_trunk_shared()!r} — one side was discarded, or the merge never "
+        f"reached the trunk at all. Applies owed: {_applies(relay_home)}")
+
+    # 5. Nothing a person reads names a branch — including the relay's own merge prompt, which is
+    #    why `kind` exists. The merge turn's `prompt` is deliberately NOT in this surface: it is the
+    #    relay's text for an agent, and issue 42's answer is that a client renders the KIND instead.
+    said = [str(merge_done.get("result_text") or ""), str(merge_done.get("error") or ""),
+            str(finished[losing].get("result_text") or "")]
+    for turn in (finished[losing], merge):
+        said.extend(str(payload) for _seq, payload in relay_client.stream_task_events(
+            relay, owner_token, turn["id"], after_seq=-1))
+    surface = " ".join(said).lower()
+    assert len(surface) > 200, (
+        f"only {len(surface)} characters of what a person reads were captured, so finding no branch "
+        f"vocabulary in it proves nothing: {surface!r}")
+    leaked = [word for word in _BRANCH_VOCABULARY if word in surface]
+    assert not leaked, (
+        f"a person whose work collided was shown {leaked}. Surface: {surface[:600]}")
+
+
+def _applies(relay_home):
+    """The relay's apply queue, read straight out of its SQLite file.
+
+    Only ever used to make a failure diagnosable: the trunk not moving is the symptom of every fault
+    in that queue, and without the row — its state, its attempts, its error — the message says
+    nothing about which. The relay's stdout is a pipe nothing drains, so this is the only place the
+    reason is reachable from a test.
+    """
+    import sqlite3
+
+    with sqlite3.connect(relay_home / "e2e.db") as db:
+        return db.execute(
+            "SELECT state, attempts, merge_turn_id, error, conflicts FROM trunk_applies "
+            "ORDER BY created_at").fetchall()
+
+
 def _one_conversation_dir(workspace_root, project):
     """The single conversation id under this project on provider A, DISCOVERED not derived.
 

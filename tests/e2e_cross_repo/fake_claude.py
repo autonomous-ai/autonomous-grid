@@ -24,6 +24,14 @@ The prompt is the script. Directives are separated by `;`:
     SLEEP <seconds>                   stay alive (a task that takes a while)
     FAIL <message>                    write to stderr and exit 1
     SAY <text>                        assistant text
+
+⚠️ **One prompt is not a script and must not be**: the RELAY's own merge prompt (ADR 0034 D-g, issue
+42), which is the only text in this system an agent is handed by anything other than a person. It is
+English, so the directive parser would meet `Resolve` and exit 2 — every merge turn failing for a
+reason that has nothing to do with what is under test. `_resolve_the_merge` recognises it and does
+the real thing with real git instead. What that buys is that the relay's ancestry check and the
+provider's `ls-files --unmerged` guard are both judging a genuine two-parent commit that this file
+did not fake.
 """
 from __future__ import annotations
 
@@ -31,6 +39,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -163,6 +172,74 @@ def _require_a_conversation_keyed_workspace() -> None:
         raise SystemExit(64)
 
 
+# How the relay asks for a merge (ADR 0034 D-g, issue 42). Matched on the INSTRUCTION rather than on
+# a marker of its own, because there is no marker: the prompt is what reaches an agent, and a fake
+# that keyed on something the relay would have to add would be testing a channel the real binary does
+# not have. `refs/integrate/` is the prefix both repositories duplicate.
+_MERGE_INSTRUCTION = re.compile(r"git merge (refs/integrate/[A-Za-z0-9._-]+)")
+
+
+def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=check)
+
+
+def _resolve_the_merge(ref: str) -> list[str]:
+    """Do what the relay's prompt asks, with real git. Returns what to SAY about it.
+
+    ⚠️ **The ref must already be HERE, and refusing otherwise is the honest check this file can
+    make.** ADR 0033 D-e has the provider fetch `merge_ref` onto the identical local name before the
+    spawn, precisely because the agent is handed no grid credential and must never get one. A fake
+    that fetched it itself, or that shrugged when it was missing, would keep passing after the
+    provider stopped fetching — and the real binary would then fail every merge turn with a git error
+    nobody could trace back here.
+
+    The resolution keeps BOTH sides, and `git add`s every conflicted path. Taking one side would
+    satisfy the relay's ancestry check while destroying somebody's work, which is the failure ADR
+    0033 issue 15 measured; staging nothing would leave the index unmerged, which the provider's own
+    `ls-files --unmerged` guard fails the turn for. Both are real outcomes this fake must not
+    accidentally produce.
+    """
+    present = _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
+    if present.returncode != 0:
+        sys.stderr.write(
+            f"fake claude: the grid asked me to merge {ref}, which is not in this repository. The "
+            f"provider is supposed to fetch it onto that exact name before spawning me, and I have "
+            f"no credential to fetch it myself (ADR 0033 D-e).\n")
+        raise SystemExit(64)
+
+    # `check=False`, because a CONFLICTING merge is the expected outcome and exits non-zero.
+    merged = _git("merge", "--no-commit", "--no-ff", ref, check=False)
+    # ⚠️ **But "it exited non-zero" is not "it conflicted", and not checking cost this file the one
+    # honesty it has.** A merge refused for any other reason — a dirty tree left by an earlier step,
+    # unrelated histories — leaves no `MERGE_HEAD`, so the unmerged list reads back EMPTY, the loop
+    # below does nothing, and the commit at the end succeeds on whatever happened to be staged. This
+    # process would then report a cheerful success having never merged `ref` at all, and the E2E
+    # would be green on a provider that fetched nothing. `MERGE_HEAD` is the only artefact that says
+    # a merge really started; git writes it for a conflicting merge and for a clean `--no-commit`
+    # one alike.
+    if _git("rev-parse", "--verify", "--quiet", "MERGE_HEAD", check=False).returncode != 0:
+        sys.stderr.write(
+            f"fake claude: `git merge {ref}` did not start a merge at all (exit "
+            f"{merged.returncode}), so there is nothing here to resolve and reporting success would "
+            f"be a lie: {merged.stderr.strip()!r}\n")
+        raise SystemExit(64)
+    unmerged = [path for path in _git(
+        "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if path]
+    for path in unmerged:
+        ours = _git("show", f":2:{path}", check=False)
+        theirs = _git("show", f":3:{path}", check=False)
+        sides = [side.stdout for side in (ours, theirs) if side.returncode == 0]
+        if not sides:
+            # Deleted on both sides. `git rm` is how the INDEX is told that was the decision — the
+            # relay's prompt says so, and an unstaged deletion reads as an unresolved path.
+            _git("rm", "-q", "--", path)
+            continue
+        pathlib.Path(path).write_text("".join(sides), encoding="utf-8")
+        _git("add", "--", path)
+    _git("commit", "--quiet", "--no-edit", "-m", f"merge {ref}")
+    return [f"combined {len(unmerged)} file(s)" if unmerged else "nothing to combine"]
+
+
 def main() -> int:
     if sys.argv[1:2] == ["--version"]:
         # Answered before anything else, and without the argv check: this is how the provider's
@@ -180,6 +257,15 @@ def main() -> int:
         # Appended, never rewritten: a resume continues the same file and keeps the same id.
         with (transcript / f"{session}.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"sessionId": session, "prompt": prompt}) + "\n")
+
+    merge = _MERGE_INSTRUCTION.search(prompt)
+    if merge:
+        # Not a script. See the module docstring: the relay wrote this one, in English, and the
+        # directive parser below would meet `Resolve` and exit 2.
+        said = _resolve_the_merge(merge.group(1))
+        _emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+               "duration_ms": 1234, "session_id": session, "result": " ".join(said)})
+        return 0
 
     said: list[str] = []
     turns = 0

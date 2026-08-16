@@ -934,6 +934,46 @@ def test_the_task_view_names_the_conversation_a_follow_up_is_addressed_to():
         "cancel or fetch")
 
 
+def test_the_merge_turn_marker_this_cli_reads_is_the_one_the_relay_writes():
+    """ADR 0034 D-g (issue 42): `kind` on the task view.
+
+    ⚠️ **A typo in either copy is SILENT in the direction that matters.** This CLI compares for
+    equality and treats anything else as a person's message, which is the correct degrade for an old
+    relay — so a drifted literal does not raise, does not warn, and does not fail a request. It shows
+    the relay's own merge prompt, `git merge` and a `refs/integrate/…` ref included, in a column
+    headed PROMPT beside the member's own messages and attributed to them. Every unit test on this
+    side reads a document this repo wrote down, so both suites stay green.
+
+    Parsed out of grid-src rather than restated, the rule this file has followed since the lease
+    pair. **The relay before the CLI**, like every other value on this view.
+
+    `MESSAGE_KIND` is asserted too even though this CLI never compares against it: it is the other
+    half of the closed set `task_view` answers with, and a value that drifted out of it would make
+    `kind` report something neither side recognises while both remain internally consistent.
+    """
+    from cli import remote_task
+
+    assert remote_task._MERGE_KIND == _relay_string_constant("MERGE_KIND", module="db.py")
+    assert _relay_string_constant("MESSAGE_KIND", module="db.py") == "message"
+
+
+def test_the_task_view_says_whether_a_person_or_the_grid_asked_for_a_turn():
+    """ADR 0034 D-g (issue 42). The marker has to be on the view a MEMBER reads, not only in the
+    database: `grid task list` and an application's conversation view are where a merge turn is
+    otherwise indistinguishable from something the person typed.
+
+    Separate from the equality check above because the two fail differently. That one catches the
+    literals drifting apart; this one catches the key never arriving — the relay stores `kind`
+    faithfully, the CLI reads `task.get("kind")`, and the answer is `None` on every row forever, so
+    every merge turn renders as a person's message and nothing anywhere is inconsistent.
+    """
+    keys = _relay_return_keys("task_view", module="tasks.py")
+
+    assert "kind" in keys, (
+        "grid-src's task_view no longer says who asked for a turn, so every merge turn the relay "
+        "inserts is rendered as a message the member typed — including the relay's own git prose")
+
+
 def test_the_owner_role_this_cli_filters_on_is_the_one_the_relay_writes():
     """`grid task create` with no `--project` resolves the caller's OWN project called `default`,
     and `owner` is the whole of what makes it theirs (ADR 0033 D-a / D-o).

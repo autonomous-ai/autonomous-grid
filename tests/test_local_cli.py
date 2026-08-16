@@ -22642,6 +22642,67 @@ def test_task_follow_shows_the_workspace_and_then_only_what_changed(monkeypatch,
     assert out.count("README.md") == 1, "an unchanged path must not be reprinted on every snapshot"
 
 
+def test_task_follow_says_a_held_result_is_being_combined_rather_than_dumping_json(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g (issue 42). The turn this event lands on was reported COMPLETED, so nothing else
+    in the stream reads as a problem — and the fallback arm would print the raw payload, conflicting
+    file paths and all, at somebody who does not know what a conflict is.
+
+    The relay's event carries `conflicts` as DATA; the sentence a person reads is this repo's, which
+    is where ADR 0034 D-m's no-git-vocabulary rule can be enforced by a test.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.apply_blocked", "conflicts": ["src/main.py"],
+                   "source_commit": "a" * 40, "merge_turn_id": "m-1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err
+
+    assert "m-1" in everything, "nothing names the step that is going to resolve it"
+    for word in ("conflict", "merge", "branch", "refs/"):
+        assert word not in everything.lower(), (
+            f"git vocabulary reached a person's screen: {word!r}")
+
+
+def test_task_follow_tells_the_person_what_to_do_when_the_grid_could_not_combine_the_work(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g forbids leaving a person *"at a terminal failure they cannot act on"*.
+
+    ⚠️ **This is a different instruction from the event above, which is why it is a different
+    TYPE.** `task.apply_blocked` means a step is running and there is nothing to do; this one means
+    nothing more will happen unless they say something. Rendered the same way, an application shows
+    a dead end as progress for as long as it takes somebody to notice.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.apply_unresolved", "conflicts": ["src/main.py"],
+                   "source_commit": "a" * 40, "merge_turn_id": "m-1",
+                   "merge_turn_state": "failed"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err
+
+    assert "grid task send" in everything, "the person is told nothing they can do"
+    for word in ("conflict", "merge", "branch", "refs/"):
+        assert word not in everything.lower(), (
+            f"git vocabulary reached a person's screen: {word!r}")
+
+
 def test_task_follow_says_when_a_tree_was_truncated(monkeypatch, tmp_path, capsys):
     """"500 files" and "500 of 12,431 files" are different facts, and only the second one tells a
     user that what they are looking at is a dependency install rather than their project."""
@@ -32147,6 +32208,106 @@ def test_task_list_gets_the_list_route_for_a_project(monkeypatch, tmp_path, caps
     assert seen["query"]["project_id"] == "P1"
     out = capsys.readouterr().out
     assert "t-1" in out and "completed" in out and "fix the parser" in out
+
+
+_A_MERGE_TURNS_PROMPT = (
+    "Resolve a git merge conflict in this repository.\n\n"
+    "You are on branch `task/m-1`. The commit to merge into it is the ref `refs/integrate/m-1`, "
+    "which is already present in this repository.\n1. Run `git merge refs/integrate/m-1`."
+)
+
+
+def test_task_get_on_a_failed_merge_turn_says_what_the_person_can_do(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g (issue 42). A merge turn that fails ends with the PROVIDER's words —
+    `_push_result` names the paths git still has unresolved, which is a correct diagnostic for an
+    operator and the one message the design says must not be a non-developer's last word.
+
+    Kept, not replaced: `error=` still prints verbatim, because whoever runs the grid needs it. What
+    is added is the sentence that turns a dead end into a next step.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "m-1", "conversation_id": "c-1", "kind": "merge", "state": "failed",
+        "error": "the agent reported success but left src/main.py unmerged in git's index",
+    }))
+
+    rc = cli.main(["task", "get", "m-1"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "unmerged in git's index" in captured.out, "the operator's diagnostic was thrown away"
+    assert "grid task send c-1" in captured.out + captured.err, (
+        "the person is left at a failure naming file paths with nothing they can do")
+
+
+def test_task_get_on_an_ordinary_failed_turn_says_no_such_thing(monkeypatch, tmp_path, capsys):
+    """The control. An ordinary turn that failed is the agent not managing what it was asked; there
+    is nothing about combining anybody's work, and offering that advice would send a person looking
+    for a collision that never happened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "conversation_id": "c-1", "kind": "message", "state": "failed",
+        "error": "the tests did not pass",
+    }))
+
+    cli.main(["task", "get", "t-1"])
+
+    captured = capsys.readouterr()
+    assert "combine" not in (captured.out + captured.err).lower()
+
+
+def test_task_list_shows_a_merge_turn_as_a_step_rather_than_as_something_somebody_typed(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g (issue 42). A merge turn's `prompt` is the RELAY's — `merge_tiers._MERGE_PROMPT`,
+    which names branches, refs and `git merge` — and this table puts it in a column headed PROMPT
+    beside the member's own messages, attributed to that member.
+
+    So a person reading their own conversation is shown git vocabulary they never wrote, as though
+    they wrote it. `kind` is the wire value that lets a client render it as machinery instead
+    (ADR 0034 D-m: no git vocabulary reaches the application's surface).
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        return httpx.Response(200, json={"tasks": [
+            {"id": "t-1", "project_id": "P1", "state": "completed", "kind": "message",
+             "prompt": "fix the parser", "member_key": "def456"},
+            {"id": "m-1", "project_id": "P1", "state": "queued", "kind": "merge",
+             "prompt": _A_MERGE_TURNS_PROMPT, "member_key": "def456"},
+        ], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fix the parser" in out, "a person's own message stopped being shown"
+    for word in ("git merge", "branch", "refs/integrate"):
+        assert word not in out, f"the relay's merge prompt reached the surface: {word!r}"
+    assert "m-1" in out
+
+
+def test_task_list_treats_a_relay_that_sends_no_kind_as_a_persons_message(
+        monkeypatch, tmp_path, capsys):
+    """The `serves_you` / `archived` / `visibility` rule, for the fourth time: *absent ⇒ a person's
+    message*, which is every relay before this slice. Keyed on an explicit `"merge"`, never on
+    truthiness — a falsy test here would relabel every row on an old relay as machinery and hide
+    every prompt anybody had ever typed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"tasks": [
+        {"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "fix the parser",
+         "member_key": "def456"},
+    ], "next_after": None}))
+
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    assert "fix the parser" in capsys.readouterr().out
 
 
 def test_task_list_all_asks_for_the_whole_project(monkeypatch, tmp_path, capsys):

@@ -60,6 +60,31 @@ _QUEUE_EXPIRED_NOTE = ("it ran out of time WAITING for a provider rather than wh
                        "grid is short of task capacity, not the task at fault. "
                        "`grid project status` says who is online and paused.")
 
+# A turn the GRID added to a conversation rather than one a person sent (ADR 0034 D-g, issue 42).
+# LOCKSTEP with grid-src's `db.MERGE_KIND`, kept in step by editing both repos;
+# `tests/test_task_lease.py` parses that module rather than restating the string.
+#
+# ⚠️ *Absent ⇒ a person's message* — every relay before this slice, and the reading `task_view` gives
+# a NULL column — so this is compared for EQUALITY and never tested for truthiness. The
+# `serves_you` / `archived` / `visibility` rule for the fourth time: a falsy test would relabel every
+# row an old relay sends as machinery and hide every prompt anybody had typed.
+_MERGE_KIND = "merge"
+# What a merge turn shows where a person's message would be. The relay's own prompt goes in its
+# place: it names a branch, a `refs/integrate/…` ref and `git merge`, and ADR 0034 D-m is that no git
+# vocabulary and no raw git error reaches this surface. The relay is free to reword its prompt
+# without this line moving, which is why the substitution is here rather than a shorter prompt there.
+_MERGE_TURN_LABEL = "(the grid is combining this work with a colleague's)"
+
+
+def _is_merge_turn(task: object) -> bool:
+    """Did the grid add this turn, or did a person send it? (ADR 0034 D-g, issue 42.)
+
+    One reader, so the *absent means a message* rule is applied in one place. `.get` on a non-dict is
+    the shape guard every reader of a relay document here carries — `list_tasks` hands back whatever
+    the relay sent, and a row that is not an object must not raise in the middle of a table.
+    """
+    return isinstance(task, dict) and task.get("kind") == _MERGE_KIND
+
 
 def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
     """(relay_base, access_token, label) for the selected grid. Clean SystemExit if signed-out."""
@@ -1088,6 +1113,40 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
                 f"already merged into the conversation's branch stays there "
                 f"(`grid project wip reset <project-id> <conversation-id> --commit <base>` "
                 f"moves it back).", file=sys.stderr)
+    elif kind == "task.apply_blocked":
+        # The turn this lands on was reported COMPLETED (ADR 0034 D-g, issue 42), so nothing else in
+        # the stream reads as a problem — and the fallback arm below would print the raw payload,
+        # conflicting file paths and all, at somebody who does not know what a conflict is.
+        #
+        # On stdout rather than stderr, unlike the disclosures around it: this is progress, not a
+        # diagnostic. A step is running and there is nothing for the reader to do.
+        step = event.get("merge_turn_id")
+        print(f"[{seq}] your work is finished; the grid is combining it with a colleague's change"
+              + (f" (step {step})" if step else ""))
+    elif kind == "task.apply_unresolved":
+        # ⚠️ **A DIFFERENT instruction from the event above, which is why the relay gives it a
+        # different type.** That one means a step is running; this one means nothing more will happen
+        # unless the person says something. Rendered alike, a dead end reads as progress.
+        #
+        # No file paths and no git vocabulary (ADR 0034 D-m). The relay's `conflicts` list is DATA
+        # for an application; the sentence is this repo's, which is where that rule is testable.
+        where = event.get("conversation_id")
+        print(f"[{seq}] this change has not appeared in the project yet — somebody changed the same "
+              f"thing at the same time and the grid could not combine the two. Your work is safe in "
+              f"this conversation.", file=sys.stderr)
+        print(f"     Ask for it again with:  grid task send "
+              f"{where or '<conversation-id>'} --prompt '<what to do>'", file=sys.stderr)
+    elif kind == "task.apply_failed":
+        # The relay has tried and failed to put this result into the project enough times that
+        # "transient" has stopped being the likeliest explanation (ADR 0034 D-d, issue 41). Its
+        # `reason` is the relay's own words — displayed VERBATIM and never compared, the `task.retry`
+        # rule — so it goes to stderr with the other diagnostics rather than into the sentence.
+        print(f"[{seq}] the grid has not been able to put this change into the project"
+              + (f" after {event['attempts']} attempts" if event.get("attempts") else "")
+              + ". It keeps trying; tell whoever runs this grid if it does not clear.",
+              file=sys.stderr)
+        if event.get("reason"):
+            print(f"     {event['reason']}", file=sys.stderr)
     elif kind == "task.cancelled":
         # Somebody stopped this run (ADR 0033 D-l, issue 19b). On stderr with the other
         # disclosures: it says nothing about the result and everything about why there is not one,
@@ -1279,7 +1338,12 @@ def _task_list(args: argparse.Namespace) -> int:
 
     print(f"{'TASK':38}  {'STATE':10}  {'MEMBER':34}  PROMPT")
     for task in tasks:
-        prompt = " ".join(str(task.get("prompt") or "").split())
+        # A merge turn's prompt is the RELAY's, not this member's (ADR 0034 D-g, issue 42). Printed
+        # verbatim it puts `git merge`, a branch name and a `refs/integrate/…` ref in a column headed
+        # PROMPT, attributed to the person whose conversation it is — the exact thing ADR 0034 D-m
+        # says must never reach this surface, and words they did not write.
+        prompt = (_MERGE_TURN_LABEL if _is_merge_turn(task)
+                  else " ".join(str(task.get("prompt") or "").split()))
         if len(prompt) > _PROMPT_COLUMN:
             prompt = prompt[:_PROMPT_COLUMN - 1] + "…"
         print(f"{str(task.get('id') or '?'):38}  "
@@ -1462,6 +1526,20 @@ def _task_get(args: argparse.Namespace) -> int:
         print(f"error={task['error']}")
         if task["error"] == QUEUE_EXPIRED:
             print(_QUEUE_EXPIRED_NOTE)
+    if _is_merge_turn(task) and code == _EXIT_ENDED_BADLY:
+        # ADR 0034 D-g (issue 42): a merge turn that fails must not be a person's last word. The
+        # relay's `error` above is the PROVIDER's diagnostic — it names the paths git still has
+        # unresolved, which is exactly right for whoever runs the grid and is the one message the
+        # design says a non-developer must not be left staring at.
+        #
+        # Kept AND followed, rather than replaced: the two readers need different things, and
+        # deleting the operator's half to spare the member would make the fault undiagnosable.
+        # Retrying this turn is deliberately not offered — every attempt is reset to the same input
+        # and meets the same collision, which is why the relay does not retry it either.
+        conversation = task.get("conversation_id")
+        print(f"\nThe grid could not combine this work with a colleague's change. Your work is "
+              f"safe in this conversation — ask for it again with:\n"
+              f"  grid task send {conversation or '<conversation-id>'} --prompt '<what to do>'")
     result = task.get("result_text")
     if result:
         print("\n--- result ---")
