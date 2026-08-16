@@ -914,22 +914,25 @@ def _capacity_pause(capacity: Any) -> float:
 def _run_and_report(state: Any, job: dict[str, Any], capacity: Any = None) -> None:
     """One claimed task, start to terminal report. Guarded so no single task can end the loop.
 
-    The workspace reservation around it exists because a provider may now run several tasks at once
-    (`GRID_MAX_TASKS`). A workspace belongs to a **(project, member) pair** and persists between
-    that pair's tasks, and preparing one runs `reset --hard` and `clean` across it — so two
-    supervisors inside one workspace is not a confusing log, it is one agent's work being deleted
-    underneath it mid-run.
+    The workspace reservation around it exists because a provider may now run several turns at once
+    (`GRID_MAX_TASKS`). A workspace belongs to a **(project, member, conversation) triple** and
+    persists between that conversation's turns, and preparing one runs `reset --hard` and `clean`
+    across it — so two supervisors inside one workspace is not a confusing log, it is one agent's
+    work being deleted underneath it mid-run.
 
-    Keyed on the pair since ADR 0033 D-g, and that is the correction rather than a tidy-up. It used
-    to key on the project alone, justified by the relay's `tasks_one_active_per_project` index —
-    which ADR 0033 replaces with a per-member one. Left alone, this would refuse the second member's
-    task in a project the moment concurrency is switched on, and refuse it with NO terminal report
-    by design: the task sits `running` for a lease TTL, is reclaimed, and can be refused again,
-    reaching `retries_exhausted` on a provider that had capacity the whole time.
+    Keyed on the PAIR since ADR 0033 D-g and on the TRIPLE since ADR 0034 D-c, and each step was a
+    correction rather than a tidy-up. It began keyed on the project alone, justified by the relay's
+    `tasks_one_active_per_project` index; each time that index was re-keyed, this had to follow or it
+    would refuse the newly-allowed thing — and refuse it with NO terminal report by design: the turn
+    sits `running` for a lease TTL, is reclaimed, and can be refused again, reaching
+    `retries_exhausted` on a provider that had capacity the whole time. First that was a project's
+    second MEMBER; then a member's second CONVERSATION.
 
-    The relay's index still makes a repeat of the SAME pair unexpected. It is checked anyway because
-    the two failures are not comparable: refusing a task the relay will hand to someone else costs a
-    lease TTL, and being wrong once about the invariant costs the work.
+    Since ADR 0034 D-b (issue 40) the relay's index is `turns_one_running_per_conversation`, so a
+    repeat of the same TRIPLE is exactly what it forbids — the claim skips a turn whose conversation
+    is already running one, and the index is the backstop behind that. It is checked here anyway
+    because the two failures are not comparable: refusing a turn the relay will hand to someone else
+    costs a lease TTL, and being wrong once about the invariant costs the work.
     """
     task_id = str(job.get("task_id") or "")
     if not task_id:

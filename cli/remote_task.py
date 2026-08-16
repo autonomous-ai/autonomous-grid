@@ -1217,7 +1217,11 @@ def _task_list(args: argparse.Namespace) -> int:
 
 
 def _task_cancel(args: argparse.Namespace) -> int:
-    """Stop a queued or running task and give its member their slot back (ADR 0033 D-l, issue 19b).
+    """Stop a queued or running TURN, leaving its conversation usable (ADR 0033 D-l, issue 19b).
+
+    It ends this run and nothing else. Since ADR 0034 D-b (issue 40) the cancelled turn stops
+    matching the relay's one-running-turn-per-conversation index, so that conversation's next
+    message runs — cancelling is not a way to end a conversation, and the grid has no such verb.
 
     **No confirmation, on purpose.** Every other consequential verb here — promote, integrate,
     commit — does the thing it is asked to do, and an application driving this CLI would have to

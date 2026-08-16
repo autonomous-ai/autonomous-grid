@@ -32184,11 +32184,18 @@ def test_project_status_reports_the_trunk_the_branch_and_the_distance(
             "project_id": "P1", "member_key": "def456", "trunk": "main",
             "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
             "ahead": 3, "behind": 2, "can_promote": False,
-            "active_task": {"id": "t-9", "state": "running", "created_at": "2026-08-08T10:00:00Z",
-                            "deadline_at": None, "provider_id": "node-A", "attempt": 1,
-                            "max_attempts": 3},
+            # `active_turns` / `active_task_ids`, both LISTS since ADR 0034 D-b (issue 40): a
+            # member holds one turn per conversation, so the singular keys could only ever show one
+            # of them. Two here, because a payload with one is satisfied by a renderer that still
+            # reads a single object.
+            "active_turns": [
+                {"id": "t-9", "state": "running", "created_at": "2026-08-08T10:00:00Z",
+                 "deadline_at": None, "provider_id": "node-A", "attempt": 1, "max_attempts": 3},
+                {"id": "t-10", "state": "queued", "created_at": "2026-08-08T10:05:00Z",
+                 "deadline_at": None, "provider_id": None, "attempt": 0, "max_attempts": 3},
+            ],
             "members": [{"member_key": "def456", "role": "owner", "branch": "wip/def456",
-                         "commit": "b" * 40, "active_task_id": "t-9"}],
+                         "commit": "b" * 40, "active_task_ids": ["t-9", "t-10"]}],
             "queue": {"queued": 2, "running": 1, "oldest_queued_at": "2026-08-08T09:00:00Z"}})
 
     _mock_relay(monkeypatch, handler)
@@ -32199,8 +32206,13 @@ def test_project_status_reports_the_trunk_the_branch_and_the_distance(
     out = capsys.readouterr().out
     assert "wip/def456" in out
     assert "3" in out and "2" in out, "the distance is not shown"
-    # The slot holder, by id — a person who cannot create a task needs to know what to wait for.
-    assert "t-9" in out
+    # EVERY turn in flight, by id — a person watching for a result needs to know what to wait for,
+    # and since ADR 0034 D-b there may be several. A renderer that still read the singular
+    # `active_task` shows neither; one that reads only the first shows `t-9` alone.
+    assert "t-9" in out and "t-10" in out, (
+        "the caller's turns in flight are missing or truncated to one")
+    # And one command to watch, naming the OLDEST rather than one line per turn.
+    assert "grid task follow t-9" in out
 
 
 def test_project_status_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):

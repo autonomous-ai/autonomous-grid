@@ -149,10 +149,17 @@ def spawn_provider(relay, provider_nodes, fake_agent_bin, workspace_root, tmp_pa
     started: list[H.Provider] = []
     logs: list = []
 
-    def _spawn(label="A"):
+    def _spawn(label="A", workers=1):
+        """`workers` is how many turns this provider runs AT ONCE (ADR 0034 D-b, issue 40).
+
+        **Default 1, and every existing test depends on it.** `test_09` proves a cancel really
+        stopped an agent by watching a second task become claimable, which is evidence only while
+        this provider has one worker — so concurrency is opt-in per spawn rather than a new default.
+        """
         node_id, node_token = provider_nodes[label]
         env = {
             **os.environ,
+            "GRID_E2E_TASK_WORKERS": str(workers),
             "PATH": f"{fake_agent_bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "GRID_REPO": str(H.GRID_REPO),
             "GRID_SIGNALING_URL": relay,

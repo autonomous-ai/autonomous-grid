@@ -1207,7 +1207,13 @@ _OLD_RELAY_NO_CANCEL = (
 
 
 def cancel_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
-    """End a queued or running task, freeing its member's slot (``POST /relay/v1/tasks/{id}/cancel``).
+    """End a queued or running TURN (``POST /relay/v1/tasks/{id}/cancel``).
+
+    It addresses the turn, not the conversation — `task_id` on the wire has always meant the turn —
+    and the conversation survives it. Since ADR 0034 D-b (issue 40) a cancelled turn simply stops
+    matching `turns_one_running_per_conversation`, so that conversation's next queued message
+    becomes claimable with nothing released and nothing to clean up. Cancelling does NOT end a
+    conversation; the grid has no such verb, because a conversation has no state to end.
 
     No body. The route is addressed by the task id and fenced on the caller's own identity, so
     anything sent here would be a second way of saying who is cancelling what — the reasoning
@@ -1278,8 +1284,13 @@ def project_status(signaling_url: str, access_token: str,
     of polling `git fetch` against the transport issue 16a exists to rescue.
 
     ⚠️ **A CONFLICTING integration moves no ref at all** — it queues a merge task — so the tips are
-    not the whole signal. `active_task` and each member's `active_task_id` are what change there,
+    not the whole signal. `active_turns` and each member's `active_task_ids` are what change there,
     and they are the ones that matter: that is the integration which can run for an hour.
+
+    Both are LISTS since ADR 0034 D-b (issue 40), where they replaced the singular `active_task` /
+    `active_task_id`: a member holds one turn per conversation, so a single value could only ever
+    answer with one of them. *Absent ⇒ nothing to show*, which is exactly what an older relay sends,
+    so the CLI iterates rather than testing for the key. **Roll the relay out before the CLI.**
     """
     return _task_oneshot(
         signaling_url, access_token, "GET",

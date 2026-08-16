@@ -647,35 +647,53 @@ def _relay_string_set(name, module):
     raise AssertionError(f"{name} is no longer defined in grid-src's {module}")
 
 
-def _relay_claim_keys():
-    """The key set of the dict `_claim_one` answers a provider with, parsed out of grid-src.
+# The functions the claim is made of on grid-src's side. `_claim_one` alone until ADR 0034 D-b
+# (issue 40) split the transaction into `_claim_pass` so the catch for an `IntegrityError` raised by
+# the COMMIT could sit outside it — the payload dict moved with the body. Both are searched rather
+# than the name being swapped, because either one holding it is a correct shape and this check is
+# about the KEYS, not about which function returns them.
+_RELAY_CLAIM_FUNCTIONS = ("_claim_one", "_claim_pass")
 
-    Reads the LAST `return {...}` in the function, which is the payload — `_claim_one`'s only other
-    return is a bare `None` for an empty queue. A dict whose keys stopped being plain literals is an
-    error rather than a partial answer, for `_relay_string_set`'s reason.
+
+def _relay_claim_keys():
+    """The key set of the dict the claim answers a provider with, parsed out of grid-src.
+
+    Reads the LAST `return {...}` across `_claim_one`/`_claim_pass`, which is the payload — their
+    only other returns are a bare `None` for an empty queue. A dict whose keys stopped being plain
+    literals is an error rather than a partial answer, for `_relay_string_set`'s reason.
+
+    ⚠️ Finding NO dict at all is an error too, and deliberately not a skip: that is what a rename or
+    a refactor on the other side looks like, and skipping would turn this lockstep check off in
+    silence — which is the one failure it exists to prevent.
     """
     import ast
 
     source = _relay_module("tasks.py")
     if not source.exists():
         pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
-    for node in ast.walk(ast.parse(source.read_text())):
+    tree = ast.parse(source.read_text())
+    dicts = []
+    seen = set()
+    for node in ast.walk(tree):
         if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "_claim_one"):
+                and node.name in _RELAY_CLAIM_FUNCTIONS):
             continue
-        dicts = [child.value for child in ast.walk(node)
-                 if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict)]
-        assert dicts, (
-            "grid-src's `_claim_one` no longer returns a dict literal, so this check cannot read "
-            "the claim payload's shape — teach it the new one rather than deleting the check")
-        keys = []
-        for key in dicts[-1].keys:
-            assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
-                "the claim payload has a computed key, so this check would compare a shape it has "
-                "only partly read")
-            keys.append(key.value)
-        return frozenset(keys)
-    raise AssertionError("_claim_one is no longer defined in grid-src's tasks.py")
+        seen.add(node.name)
+        dicts += [child.value for child in ast.walk(node)
+                  if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict)]
+    assert seen, (
+        f"none of {list(_RELAY_CLAIM_FUNCTIONS)} is defined in grid-src's tasks.py — the claim was "
+        f"renamed, so teach this check the new name rather than deleting it")
+    assert dicts, (
+        "grid-src's claim no longer returns a dict literal, so this check cannot read the claim "
+        "payload's shape — teach it the new one rather than deleting the check")
+    keys = []
+    for key in dicts[-1].keys:
+        assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+            "the claim payload has a computed key, so this check would compare a shape it has "
+            "only partly read")
+        keys.append(key.value)
+    return frozenset(keys)
 
 
 def test_the_owner_role_this_cli_filters_on_is_the_one_the_relay_writes():

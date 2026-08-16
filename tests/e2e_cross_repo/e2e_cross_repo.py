@@ -967,6 +967,111 @@ def test_18_a_conversations_transcript_leaves_the_projects_history(
         f"to what the next one is cut from: {listing!r}")
 
 
+def _both_running(relay, token, ids, timeout=90.0):
+    """Wait until EVERY id is `running` at the same moment, and return their VIEWS from that moment.
+
+    ⚠️ **The point is simultaneity, not completion.** Asserting that two turns both reach
+    `completed` is satisfied by a grid that runs them one after the other — which is exactly what
+    every relay before ADR 0034 D-b did. This polls until both are `running` in one observation, and
+    `None` (a timeout) is the failure the criterion is about.
+
+    ⚠️ **It returns the whole views, so a caller reads every fact from ONE observation.** Re-reading
+    `provider_id` afterwards is a race and it was a real flake: the harness runs a 6s lease with a 1s
+    reaper so reclaims can be observed, and a turn reclaimed between the two reads reports the OTHER
+    provider — which made "two providers" fail intermittently while both had genuinely been running.
+    Turn prompts here stay well inside `H.LEASE_SECONDS` for the same reason.
+    """
+    def observation():
+        views = {task_id: H.get(relay, token, task_id) for task_id in ids}
+        return views if all(v.get("state") == "running" for v in views.values()) else None
+
+    return H.wait_for(observation, timeout=timeout, interval=0.3)
+
+
+def test_19_two_conversations_of_one_member_run_at_the_same_time(
+        relay, owner_token, spawn_provider):
+    """ADR 0034 D-b / issue 40, at the one seam where both repositories are on the wire together.
+
+    Before this slice the relay's index was `tasks_one_active_per_member`, so a member's second
+    `POST /tasks` was refused `member_has_active_task` outright: somebody who wanted the contact
+    form fixed *and* the logo changed had to finish one first. Now they are two conversations and
+    they run together.
+
+    Both halves of the criterion are here because they fail differently:
+
+      * **on ONE provider** — the relay hands out both, and the provider's own workspace reservation
+        (`remote/tasks._reserve_workspace`, keyed on the project/member/conversation triple since
+        issue 38) has to let the second through. Keyed on the pair it would refuse it SILENTLY, with
+        no terminal report, and the turn would sit `running` until its lease lapsed;
+      * **across TWO providers** — nothing about one process's bookkeeping is involved, so this is
+        the relay's claim query alone.
+
+    ⚠️ **The provider is spawned with two workers on purpose.** `provider_process.py` runs one
+    `task_loop` by default and `test_09` depends on that, so concurrency is asked for per spawn.
+    With one worker this test would pass by running the two turns in sequence — the exact
+    green-for-the-wrong-reason it exists to rule out — which is why `_both_running` insists on
+    seeing them running in ONE observation rather than both completing.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A", workers=2)
+    project = relay_client.create_project(
+        relay, owner_token, name="p-concurrent-conversations",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    # Both created BEFORE either can finish — a `SLEEP` long enough that a grid running them in
+    # sequence cannot have them both `running` at once.
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="SLEEP 3; WRITE contact-form.txt FIXED; SAY one")
+    second = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="SLEEP 3; WRITE logo.txt CHANGED; SAY two")
+
+    assert first["id"] != second["id"]
+    assert first["state"] == "queued" and second["state"] == "queued", (
+        f"a create was refused or held: {first} {second}")
+
+    running = _both_running(relay, owner_token, [first["id"], second["id"]])
+    assert running, (
+        "the member's two conversations never ran at the same time — the relay is still handing "
+        "out one turn per member, or the provider refused the second workspace")
+
+
+def test_20_two_conversations_of_one_member_run_across_two_providers(
+        relay, owner_token, spawn_provider):
+    """The same criterion with the provider's own bookkeeping taken out of it.
+
+    Two processes, two node identities, one worker each — so nothing here can be satisfied by one
+    process's workspace reservation being permissive. What is under test is the relay's claim query:
+    it must hand two turns of two conversations to two different providers.
+    """
+    from remote import relay as relay_client
+
+    a = spawn_provider("A")
+    b = spawn_provider("B")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-two-providers",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="SLEEP 3; SAY one")
+    second = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="SLEEP 3; SAY two")
+
+    running = _both_running(relay, owner_token, [first["id"], second["id"]])
+    assert running, "two conversations of one member did not run at once across two providers"
+
+    # From the SAME observation that saw them both running — see `_both_running`. Read again
+    # afterwards this is a race against the harness's deliberately short lease, and it flaked.
+    holders = {view.get("provider_id") for view in running.values()}
+    assert holders == {a.node_id, b.node_id}, (
+        f"the two turns did not land on the two providers this test started, so it says nothing "
+        f"the previous test did not.\n  holders={holders!r}\n"
+        f"  provider A={a.node_id!r} log:\n{a.output()}\n"
+        f"  provider B={b.node_id!r} log:\n{b.output()}")
+
+
 def _one_conversation_dir(workspace_root, project):
     """The single conversation id under this project on provider A, DISCOVERED not derived.
 

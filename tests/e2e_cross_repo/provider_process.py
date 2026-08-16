@@ -64,8 +64,31 @@ def main() -> int:
     task_lease.RENEW_INTERVAL_SECONDS = renew_seconds
 
     state = _State()
-    print(f"provider {state.node_id} up", file=sys.stderr, flush=True)
-    tasks.task_loop(state)
+    # How many turns this provider runs AT ONCE (ADR 0034 D-b, issue 40). **Default 1**, and that
+    # default is load-bearing rather than conservative: `test_09` proves a cancel really stopped an
+    # agent by observing that a second task becomes claimable, which only means anything while this
+    # process has exactly one worker. Every test that does not ask for concurrency must keep it.
+    #
+    # One `task_loop` per worker, on its own thread, sharing one `_State` — which is what
+    # `remote/serve.py` does for `GRID_MAX_TASKS`. Not a rebinding of that variable: this file
+    # deliberately does not go through `serve`, so reading it here would name a knob nothing in this
+    # process consults.
+    workers = int(os.environ.get("GRID_E2E_TASK_WORKERS", "1"))
+    print(f"provider {state.node_id} up ({workers} worker(s))", file=sys.stderr, flush=True)
+    if workers == 1:
+        tasks.task_loop(state)
+        return 0
+
+    threads = [threading.Thread(target=tasks.task_loop, args=(state,), daemon=True)
+               for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    # Joined rather than left to the process exiting: a daemon thread mid-task would be killed
+    # without its lease being given up, which is a different failure from the one any test here is
+    # about. `task_loop` returns when `stop`/`tasks_stop` is set, and the harness ends this process
+    # with a signal, so in practice this blocks until then.
+    for thread in threads:
+        thread.join()
     return 0
 
 

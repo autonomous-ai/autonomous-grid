@@ -975,9 +975,9 @@ it may hold none of your work. If none of your tasks has landed yet your branch 
 grid at all, and the clone starts it at the trunk and tells you so.
 
 **`git push` is refused**, and that is the design rather than a permission to ask for. Your branch is
-written by the grid alone — a task settling, or an integrate — both of which hold your one task slot.
-A push holds nothing, so it could fast-forward your branch while a task of yours is running and break
-that task's result. To land work from a clone: `grid project commit` for files, `grid project
+written by the grid alone — a task settling, or an integrate — both of which the grid serializes
+against your running work. A push holds nothing, so it could fast-forward your branch while a task of
+yours is running and break that task's result. To land work from a clone: `grid project commit` for files, `grid project
 integrate` to bring the trunk in, or `grid task create` for an agent. Resolving a conflict by hand in
 your clone and handing the result to an integration is the intended path.
 
@@ -1139,10 +1139,10 @@ somebody promotes, the *first* promote leaves everyone else unable to promote at
 was cut from a trunk that is now history, and fast-forward-only means no amount of retrying helps.
 
 It is always **your own** branch, so there is no member key to give. That is not a simplification:
-the relay holds your one task slot while it works — by creating a task row, which is exactly what
-stops an integration from moving the branch a task of yours is running on — so the branch it moves
-has to be the one that slot belongs to. Integrating is therefore **refused while you have a task in
-flight**, and the refusal names that task so you can wait on it.
+the relay checks that you have nothing in flight before it starts — which is exactly what stops an
+integration from moving the branch a task of yours is running on — so the branch it moves has to be
+your own. Integrating is therefore **refused while you have any task in flight**, and the refusal
+names one of them so you can wait on it.
 
 Four things can happen, and the command says which:
 
@@ -1154,9 +1154,9 @@ Four things can happen, and the command says which:
   task** and an agent resolves it. The command prints the task id and the conflicting files, and
   **nothing has moved yet** — watch it with `grid task follow <id>`, then promote.
 
-A merge task is an ordinary task in every other respect: it holds your one task slot while it runs,
-it has its own event log, and it is retried if its provider dies. So you cannot create another task
-until it finishes, and the refusal names it.
+A merge task is an ordinary task in every other respect: it has its own event log, and it is retried
+if its provider dies. You **can** start other conversations while it runs — since ADR 0034 D-b a
+create never fails — but you cannot integrate again until it finishes, and that refusal names it.
 
 **What the grid checks is that the merge happened, not that it is right.** When the task settles, the
 relay requires the result to actually contain the `main` it was asked to merge — an agent that
@@ -1178,7 +1178,7 @@ grid project check  <project-id>
 ```
 
 `grid project status` shows where `main` is, where your WIP branch is, how far ahead and behind it
-is, whether a promote would be accepted, what is holding your one task slot and since when, and how
+is, whether a promote would be accepted, which of your turns are in flight and since when, and how
 deep the project's queue is. Before it, "how far behind am I" meant attempting a promote and reading
 the refusal — a call that either releases work or refuses it, used as a question.
 
@@ -1189,8 +1189,8 @@ from a withdrawn one, and those need three different actions — wait, run `grid
 named time. Nothing is printed when the whole fleet is serving.
 
 `grid project check` is the **dry run of `integrate`**. Integration *is* the conflict check without
-it: asking costs your one task slot, and when the answer is that you and somebody else changed the
-same lines it queues a merge task — a paid agent run. `check` spends neither. It reports the same
+it: asking is refused while you have work in flight, and when the answer is that you and somebody
+else changed the same lines it queues a merge task — a paid agent run. `check` costs neither. It reports the same
 four answers `integrate` does (already up to date, a straight fast-forward, a clean merge, or a
 conflict), names the files a conflict would touch, and changes nothing.
 
@@ -1203,8 +1203,9 @@ settles, when an integration lands, or when they commit — so a changed commit 
 
 One case is not a moved commit, and it is the one that runs longest: an integration that
 **conflicts** moves no ref at all, because it queues a merge task instead. That shows up as a held
-task slot — `active_task`, and the member's `active_task_id` — so an application watching only the
-commit ids would see nothing for the whole hour somebody is waiting on it.
+turn — `active_turns`, and the member's `active_task_ids`, both **lists** since ADR 0034 D-b — so an
+application watching only the commit ids would see nothing for the whole hour somebody is waiting on
+it.
 
 ### Committing without an agent
 
@@ -1219,8 +1220,8 @@ grid project commit <project-id> -m "drop the dead module" --delete src/legacy.p
 ```
 
 **It is not a way to push.** The write still goes through the grid, still lands on exactly one ref —
-your own WIP branch — and the grid still holds your one task slot while it does. So it is refused
-while you have a task in flight, and the refusal names that task. `main` is untouched: `promote` is
+your own WIP branch — and the grid still serializes it against your running work. So it is refused
+while you have any task in flight, and the refusal names one of them. `main` is untouched: `promote` is
 still what releases work.
 
 It is always **your own** branch, so there is no member key to give, exactly as with `integrate` and
@@ -1433,7 +1434,9 @@ and `--file` arguments already in them, so the fix is one paste rather than a re
 and each starts from the last one's result. Other members are unaffected: a project with five people
 in it runs five tasks at once, one each. Use different projects to run your own tasks in parallel.
 
-`grid task cancel <task-id>` ends a task that has not finished and gives that slot back at once.
+`grid task cancel <task-id>` ends a task that has not finished. Its **conversation survives**: the
+next message you send continues where it left off, because cancelling stops a run and a conversation
+has no state to end.
 Before it existed the only way out of a task nobody wanted any more was to wait for its deadline —
 an hour if it was running, and up to four if it was still waiting for a provider — and the usual
 reason to reach for it is a conflict-resolution task queued by

@@ -1050,19 +1050,23 @@ def _add_task(sub) -> None:
     # frees and stops, belongs in the sentence that offers it.
     cancel = task_sub.add_parser(
         "cancel",
-        help="Stop a queued or running task and free the member's task slot",
+        help="Stop a queued or running task without ending its conversation",
         description=(
-            "Stop a task that has not finished, and give its member their one task slot back.\n\n"
+            "Stop a task that has not finished.\n\n"
             "Until this existed the only way out of a task nobody wanted any more was to wait for "
             "its deadline — an hour if it was running, and up to four if it was still waiting for "
-            "a provider — with that member unable to start anything else. A conflict-resolution "
-            "task queued by `grid project integrate` is the usual reason to reach for it.\n\n"
+            "a provider. A conflict-resolution task queued by `grid project integrate` is the "
+            "usual reason to reach for it.\n\n"
+            "The CONVERSATION survives. Cancelling stops this run and nothing else, so the next "
+            "message you send continues where it left off — there is no way to end a conversation, "
+            "because the grid holds no such state.\n\n"
             "A project is shared, so any member may cancel any task in it: the colleague whose "
             "merge has been stuck all afternoon is often the person who needs to stop it. The "
             "event log records who did.\n\n"
-            "The slot is free immediately. The agent itself stops within about half a minute, on "
-            "the provider's next lease renewal — and on a provider that has not been updated yet "
-            "it runs to completion, harmlessly, with nothing waiting on it.\n\n"
+            "The conversation is free to take its next message immediately. The agent itself stops "
+            "within about half a minute, on the provider's next lease renewal — and on a provider "
+            "that has not been updated yet it runs to completion, harmlessly, with nothing waiting "
+            "on it.\n\n"
             "Nothing is rewound: the task's branch is left exactly where the agent got to, so "
             "`grid task fetch` still works on it."),
         formatter_class=argparse.RawDescriptionHelpFormatter)

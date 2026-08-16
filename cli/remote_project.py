@@ -819,14 +819,24 @@ def _project_status(args: argparse.Namespace) -> int:
             print(f"Behind {trunk}, so a promote would be refused. "
                   f"Fix it with: grid project integrate {args.project_id}")
 
-    active = answer.get("active_task") or {}
-    if active.get("id"):
-        # The whole point of "who holds my slot, and since when". Without the id there is nothing to
-        # wait on, read or follow.
-        since = active.get("created_at")
-        print(f"\nYour task slot is held by {active['id']} ({active.get('state') or 'unknown'}"
-              + (f", since {since}" if since else "") + ")")
-        print(f"Watch it with: grid task follow {active['id']}")
+    # `active_turns`, a LIST, since ADR 0034 D-b (issue 40): a member holds one turn per
+    # conversation, so the singular `active_task` this used to read could only ever show one of
+    # them. *Absent ⇒ nothing shown*, which is what a relay too old to send it produces — the key is
+    # not falsily-tested for a reason (the `serves_you` rule), it is simply iterated, and an empty
+    # or missing list prints nothing either way. **Roll the relay out before the CLI.**
+    active = answer.get("active_turns") or []
+    running = [turn for turn in active if isinstance(turn, dict) and turn.get("id")]
+    if running:
+        # The whole point of "what am I waiting on, and since when". Without the id there is nothing
+        # to wait on, read or follow.
+        print(f"\nYou have {len(running)} turn(s) in flight:")
+        for turn in running:
+            since = turn.get("created_at")
+            print(f"  {turn['id']} ({turn.get('state') or 'unknown'}"
+                  + (f", since {since}" if since else "") + ")")
+        # One command, naming the OLDEST — the turn a person watching for a result is waiting on.
+        # Printing one per turn would bury the queue block below it on a busy project.
+        print(f"Watch the oldest with: grid task follow {running[0]['id']}")
 
     queue = answer.get("queue") or {}
     providers = answer.get("providers")
