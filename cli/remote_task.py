@@ -1065,22 +1065,29 @@ def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = 
         # not told that reads a repeated run as the agent looping (ADR 0032 D-d).
         #
         # It used to say "Changes the lost attempt made in git are undone", and ADR 0033 D-c made
-        # that FALSE. The reset covers `task/<id>` and nothing else — the reaper never touches a WIP
-        # branch, promote writes only `main`, and there is no revert. So an interrupted settle (the
-        # git write landed, the terminal transaction did not) leaves the lost attempt's work on
-        # `wip/<member_key>`, which is exactly where this member's NEXT task is cut from.
+        # that FALSE. The reset covers `task/<id>` and nothing else — the reaper never touches a
+        # conversation's branch, the relay's apply writes only the trunk, and there is no revert. So
+        # an interrupted settle (the git write landed, the terminal transaction did not) leaves the
+        # lost attempt's work on `wip/<conversation_id>`, which is exactly where this conversation's
+        # NEXT turn is cut from.
         #
         # Naming the recovery is the other half. "Something may be left behind" with no way to act
         # on it is a worse message than the wrong one it replaces.
+        #
+        # ⚠️ **The recovery it names is re-keyed, not deleted** (ADR 0034 D-e/D-m, issue 41): `wip
+        # reset` survives the clean break that takes promote and integrate, and it now takes the
+        # CONVERSATION whose branch is to move. Naming the old member-keyed form here would send
+        # somebody to a command that refuses them.
         attempt = event.get("attempt")
         of = event.get("max_attempts")
         reason = event.get("reason") or "its lease lapsed"
         print(f"[{seq}] attempt {attempt}"
               + (f" of {of}" if of else "")
-              + f" was lost ({reason}); retrying from the task's input. The task's own branch is "
+              + f" was lost ({reason}); retrying from the turn's input. The turn's own branch is "
                 f"reset; anything it did outside git is not, and work an interrupted settle "
-                f"already merged into your wip/ branch stays there "
-                f"(`grid project wip reset` moves it back).", file=sys.stderr)
+                f"already merged into the conversation's branch stays there "
+                f"(`grid project wip reset <project-id> <conversation-id> --commit <base>` "
+                f"moves it back).", file=sys.stderr)
     elif kind == "task.cancelled":
         # Somebody stopped this run (ADR 0033 D-l, issue 19b). On stderr with the other
         # disclosures: it says nothing about the result and everything about why there is not one,

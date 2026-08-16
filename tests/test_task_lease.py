@@ -802,6 +802,115 @@ def test_the_follow_up_route_this_cli_posts_to_is_the_one_the_relay_serves():
         f"'your relay is too old'")
 
 
+def _client_paths(function):
+    """Every path a relay-client function builds from an f-string, with its holes blanked.
+
+    Adjacent f-strings are concatenated by the PARSER, so a path split over two source lines is one
+    `JoinedStr` here — which is what `reset_project_wip` relies on.
+    """
+    import ast
+    import inspect
+
+    return {
+        "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
+        for node in ast.walk(ast.parse(inspect.getsource(function)))
+        if isinstance(node, ast.JoinedStr)
+    }
+
+
+def test_the_commit_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0034 D-e (issue 41): `POST /relay/v1/tasks/{conversation_id}/commit`.
+
+    ⚠️ **This route MOVED, and the move is the safety property.** Under ADR 0033 it was
+    `POST /projects/{id}/commit`, and the branch it wrote was the member's. D-e re-keys that branch
+    to the conversation, so the request has to name one — and adding a `conversation_id` KEY to the
+    old path would have been the silent-degrade shape this tracker has recorded twice (issues 10 and
+    48): the old route reads the keys it knows and drops the rest, so an old relay would answer
+    **200** for a commit that landed on a different branch. A new PATH answers a bare 404 instead.
+
+    Which makes a typo here worse than usual: this CLI would post to a path no relay serves, get
+    FastAPI's bare 404, and `_OLD_RELAY_NO_COMMIT` would turn it into "ask your operator to update
+    the relay" about a relay that is perfectly up to date.
+    """
+    from remote import relay
+
+    sent = _client_paths(relay.commit_project)
+    assert sent, "commit_project no longer builds its path from an f-string; teach this check"
+
+    served = {"/relay/v1" + path.replace("{conversation_id}", "{}")
+              for path in _relay_route_paths("project_commit.py")}
+
+    assert sent <= served, (
+        f"this CLI commits to {sorted(sent - served)}, which grid-src's project_commit.py does not "
+        f"serve — every commit would get a bare 404 and be reported as 'your relay is too old'")
+
+
+def test_the_wip_reset_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0034 D-e (issue 41): the reset is addressed by CONVERSATION, not by member key.
+
+    `wip reset` is the one command of the old surface that SURVIVES the clean break (ADR 0034 D-m),
+    because D-d's apply can still leave a branch ahead of a turn's input and this is the documented
+    recovery. Its path segment changed meaning, and nothing about the URL's SHAPE says so — both
+    spellings are `…/wip/<something>/reset` — so a half-updated pair would 404 or, worse, resolve
+    against a member key that happens to exist.
+    """
+    from remote import relay
+
+    sent = _client_paths(relay.reset_project_wip)
+    assert sent, "reset_project_wip no longer builds its path from an f-string; teach this check"
+
+    served = {"/relay/v1" + path.replace("{project_id}", "{}").replace("{conversation_id}", "{}")
+              for path in _relay_route_paths("projects.py")}
+
+    assert sent <= served, (
+        f"this CLI resets a branch at {sorted(sent - served)}, which grid-src's projects.py does "
+        f"not serve")
+
+
+def test_promote_and_integrate_are_gone_from_BOTH_repositories():
+    """ADR 0034 D-d (issue 41). Their absence is a BREAK rather than a degrade, so it is asserted
+    from both sides at once.
+
+    The relay applies every successful turn to `main` itself, so there is no release to ask for and
+    nothing to integrate back. Both routes and both commands are deleted.
+
+    ⚠️ **The failure this catches is a half-deletion, and it is silent in the direction that
+    matters.** A CLI that kept `grid project promote` against a relay that dropped the route gets
+    FastAPI's bare 404, which `_OLD_RELAY` renders as *"this grid's relay does not have projects
+    yet — ask its operator to update it"* — sending a member to chase an operator over a command
+    this repository was supposed to have removed. Keeping the relay half instead is the milder
+    failure and is still wrong: it leaves a second, unreachable writer of `main`.
+    """
+    from remote import relay
+
+    for gone in ("promote_project", "integrate_project", "preview_integration"):
+        assert not hasattr(relay, gone), (
+            f"remote/relay.py still exposes {gone}; ADR 0034 D-d deleted the route it calls, so "
+            f"every use of it is a bare 404 reported to the member as an out-of-date relay")
+
+    served = set()
+    for module in ("projects.py", "project_status.py"):
+        served |= set(_relay_route_paths(module))
+    offending = {path for path in served
+                 if "promote" in path or "integrate" in path}
+    assert not offending, (
+        f"grid-src still serves {sorted(offending)} — ADR 0034 D-d deletes promote, integrate and "
+        f"the integrate preview, and a route with no client is a second writer of `main` nothing "
+        f"in this repository can see")
+
+    # The tier machinery SURVIVES the route that used to call it — `trunk_apply` asks `decide_tier`
+    # on every settle, and issue 42 needs `_merge_task`. What must not survive is a way in from
+    # outside, so this asserts the module declares no router at all rather than that its paths are
+    # clean. `_relay_route_paths` cannot be used here: it refuses a module with no routes, which is
+    # exactly the state being asserted.
+    tiers = _relay_module("merge_tiers.py")
+    if not tiers.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    assert "@router." not in tiers.read_text(), (
+        "grid-src's merge_tiers.py declares a route again — it is the tier DECISION and the "
+        "merge-turn machinery, and anything reachable there is a writer of `main` with no client")
+
+
 def test_the_task_view_names_the_conversation_a_follow_up_is_addressed_to():
     """ADR 0034 D-n (issue 47): `conversation_id` on `tasks.task_view`.
 

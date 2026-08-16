@@ -21,6 +21,7 @@ import argparse
 # given" — the case that must be refused — would be unobservable by the time we looked.
 _PROJECT_FLAG_DEST = "project_flag"
 _MEMBER_FLAG_DEST = "member_flag"
+_CONVERSATION_FLAG_DEST = "conversation_flag"
 
 # The marker `resolve` keys on. Absent ⇒ this command takes no project id, so resolution is a no-op
 # and the namespace passes through untouched (`grid project create`, `grid project list`, and every
@@ -30,15 +31,17 @@ _PROG = "_project_prog"
 _REQUIRED = "_project_required"
 
 # The two ways to type THIS command, accumulated as its arguments are registered. Grown rather than
-# templated, because a refusal that offers `grid project promote <project-id>` drops the `--member`
-# the caller already typed, and `grid project import <project-id>` is worse still: it PARSES, with
-# the id landing in the `<path>` slot. Both shipped in the first draft and were found in review, so
-# the forms are now derived from the command's real shape and can only be wrong if the registration
-# order is (which argparse would break first).
+# templated, because a refusal that offers `grid project member remove <project-id>` drops the
+# `--member` the caller already typed, and `grid project import <project-id>` is worse still: it
+# PARSES, with the id landing in the `<path>` slot. Both shipped in the first draft and were found
+# in review, so the forms are now derived from the command's real shape and can only be wrong if the
+# registration order is (which argparse would break first).
 _FORMS = "_project_forms"
 
 _LIST_HINT = "`grid project list` shows the ids you are a member of."
 _MEMBER_HINT = "`grid project member list` prints the key for each member."
+_CONVERSATION_HINT = ("`grid task get <turn-id>` prints the conversation a turn belongs to, and "
+                      "`grid task create` prints the one it opened.")
 
 
 def add_project(parser: argparse.ArgumentParser, *, required: bool = True,
@@ -55,6 +58,16 @@ def add_project(parser: argparse.ArgumentParser, *, required: bool = True,
     parser.set_defaults(**{
         _SHAPE: "plain", _PROG: parser.prog, _REQUIRED: required,
         _FORMS: (f"{leading}<project-id>", f"{leading}--project <project-id>")})
+
+
+# What each two-positional shape's SECOND value is called, in every place a refusal has to name it.
+# A table rather than a branch per shape: `member` and `conversation` differ only in their words, and
+# three copies of the same slot arithmetic is how one of them comes to behave differently.
+_SECOND = {
+    "member": ("member_key", _MEMBER_FLAG_DEST, "--member", "member key", _MEMBER_HINT),
+    "conversation": ("conversation_id", _CONVERSATION_FLAG_DEST, "--conversation",
+                     "conversation id", _CONVERSATION_HINT),
+}
 
 
 def _forms_so_far(parser: argparse.ArgumentParser, caller: str) -> tuple[str, str]:
@@ -82,6 +95,32 @@ def add_directory(parser: argparse.ArgumentParser, *, help: str) -> None:
     parser.add_argument("directory", nargs="?", default=None, help=help)
     parser.set_defaults(**{_SHAPE: "directory",
                            _FORMS: (f"{positional} [<directory>]", f"{flag} [<directory>]")})
+
+
+def add_conversation(parser: argparse.ArgumentParser, *,
+                     help: str = "Conversation id from `grid task get <turn-id>`.") -> None:
+    """Register both spellings of a conversation id, and mark the parser as a two-positional shape.
+
+    The third shape beside `add_member` and `add_directory`, added by ADR 0034 D-e (issue 41) when
+    `wip reset` stopped naming a member and started naming the conversation whose branch it moves.
+
+    Call it AFTER `add_project`, for `add_member`'s reason: argparse fills consecutive optional
+    positionals left to right, so the registration order is the order a caller types them.
+
+    ⚠️ **It has to go through this module rather than a bare `add_argument`, and a test says so.**
+    The forms every refusal in here offers are derived from what was registered — so a second
+    REQUIRED positional added behind this module's back makes every refusal offer a command that no
+    longer parses, and `test_a_refusal_only_ever_offers_a_command_that_really_works` is what caught
+    exactly that. It was written as a bare `add_argument` first.
+    """
+    positional, flag = _forms_so_far(parser, "add_conversation")
+    parser.add_argument("conversation_id", nargs="?", default=None, help=help)
+    parser.add_argument(
+        "--conversation", dest=_CONVERSATION_FLAG_DEST, default=None, metavar="ID",
+        help="The same conversation id, named instead of given positionally.")
+    parser.set_defaults(**{_SHAPE: "conversation",
+                           _FORMS: (f"{positional} <conversation-id>",
+                                    f"{flag} --conversation <conversation-id>")})
 
 
 def add_member(parser: argparse.ArgumentParser, *,
@@ -122,8 +161,8 @@ def resolve(args: argparse.Namespace) -> argparse.Namespace:
     _refuse_a_blank_value(args, prog=prog, forms=forms, required=required)
     if shape == "directory":
         args = _shift_the_directory(args, prog=prog, forms=forms)
-    if shape == "member":
-        args = _place_a_lone_positional(args, prog=prog, forms=forms)
+    if shape in _SECOND:
+        args = _place_a_lone_positional(args, shape, prog=prog, forms=forms)
 
     # The project first, so a command missing both is told about its FIRST argument first, the way
     # argparse reports a missing positional.
@@ -133,14 +172,15 @@ def resolve(args: argparse.Namespace) -> argparse.Namespace:
         required=required, forms=forms, hint=_LIST_HINT)
 
     changed: dict[str, str | None] = {}
-    if shape == "member":
-        changed["member_key"] = _merge(
-            prog=prog, label="member key", positional=getattr(args, "member_key", None),
-            flag=getattr(args, _MEMBER_FLAG_DEST, None), spelling="--member", required=True,
+    if shape in _SECOND:
+        dest, flag_dest, spelling, label, hint = _SECOND[shape]
+        changed[dest] = _merge(
+            prog=prog, label=label, positional=getattr(args, dest, None),
+            flag=getattr(args, flag_dest, None), spelling=spelling, required=True,
             # The same whole-command forms, not the project's with a word swapped: the project id
             # comes first, so `<prog> <member-key>` is not a form this command has. Only the hint
             # differs — it is `member list`, not `list`, that prints a key.
-            forms=forms, hint=_MEMBER_HINT)
+            forms=forms, hint=hint)
     # Written to BOTH names: the `project` group's handlers read `project_id` and the `task` group's
     # read `project`, and neither had to change for this slice.
     return argparse.Namespace(
@@ -171,7 +211,9 @@ def _refuse_a_blank_value(args: argparse.Namespace, *, prog: str, forms: tuple[s
             ("project id", getattr(args, "project_id", None), _LIST_HINT),
             ("project id", getattr(args, _PROJECT_FLAG_DEST, None), _LIST_HINT),
             ("member key", getattr(args, "member_key", None), _MEMBER_HINT),
-            ("member key", getattr(args, _MEMBER_FLAG_DEST, None), _MEMBER_HINT)):
+            ("member key", getattr(args, _MEMBER_FLAG_DEST, None), _MEMBER_HINT),
+            ("conversation id", getattr(args, "conversation_id", None), _CONVERSATION_HINT),
+            ("conversation id", getattr(args, _CONVERSATION_FLAG_DEST, None), _CONVERSATION_HINT)):
         if value is None or value.strip():
             continue
         # Only `task create` has somewhere to fall back to, and its refusal has to name it —
@@ -225,39 +267,40 @@ def _shift_the_directory(args: argparse.Namespace, *, prog: str,
         **{**vars(args), "project_id": None, "directory": positional})
 
 
-def _place_a_lone_positional(args: argparse.Namespace, *, prog: str,
+def _place_a_lone_positional(args: argparse.Namespace, shape: str, *, prog: str,
                              forms: tuple[str, str]) -> argparse.Namespace:
     """One positional on a two-positional command — decide which of the two it is, or refuse.
 
     argparse gives it to `project_id` whatever the caller meant (measured), so on its own
-    `promote --project P abc` would quietly promote a project called `abc`.
+    `member remove --project P abc` would quietly act on a project called `abc`.
 
     But it is only AMBIGUOUS when neither flag was given. Name either value and the remaining slot
-    is the only place the positional can go, so `promote P1 --member KEY` and
-    `promote --project P1 KEY` both have exactly one reading and are taken — the same slot shift
+    is the only place the positional can go, so `member remove P1 --member KEY` and
+    `member remove --project P1 KEY` both have exactly one reading and are taken — the same slot shift
     `_shift_the_directory` does for `clone`/`refresh`, and the reason the two flags compose with the
     positionals instead of being a separate dialect. Refusing them (the first draft, caught in
     review) meant a refusal that claimed an ambiguity the flag had already settled.
 
     With BOTH flags given a positional is a stray; `_merge` refuses it, naming both values.
     """
+    dest, flag_dest, _spelling, label, _hint = _SECOND[shape]
     positional = getattr(args, "project_id", None)
-    if positional is None or getattr(args, "member_key", None) is not None:
+    if positional is None or getattr(args, dest, None) is not None:
         return args  # zero or two positionals — nothing to place
 
     project_flag = getattr(args, _PROJECT_FLAG_DEST, None)
-    member_flag = getattr(args, _MEMBER_FLAG_DEST, None)
+    member_flag = getattr(args, flag_dest, None)
     if project_flag is not None and member_flag is None:
-        # The project is named, so the free slot is the member key.
+        # The project is named, so the free slot is the second value.
         return argparse.Namespace(
-            **{**vars(args), "project_id": None, "member_key": positional})
+            **{**vars(args), "project_id": None, dest: positional})
     if member_flag is not None or project_flag is not None:
         # The member is named (the positional is already in the right slot), or both are and the
         # positional is a stray for `_merge` to refuse.
         return args
 
     raise SystemExit(
-        f"{prog}: {positional!r} on its own could be either the project id or the member key.\n"
+        f"{prog}: {positional!r} on its own could be either the project id or the {label}.\n"
         f"Give both, or name them:\n"
         f"    {forms[0]}\n    {forms[1]}\n"
         f"{_LIST_HINT}")

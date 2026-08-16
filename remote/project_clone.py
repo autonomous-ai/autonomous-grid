@@ -52,7 +52,14 @@ class CloneError(Exception):
 class Cloned:
     """Where the clone is and what is checked out in it.
 
-    `started_from_trunk` says the member's branch did not exist on the relay yet, so the checkout
+    ⚠️ **`started_from_trunk` is now always `False`, and it is kept rather than removed** (ADR 0034
+    D-d, issue 41). A clone follows the TRUNK since that slice — the relay applies every finished
+    turn to it, so it holds everybody's work and a per-member branch would be a stale copy of part
+    of it — and the trunk always exists or `clone_project` raises. So the state this described is
+    unreachable from the CLI. It stays on the record because `--json` emits it and removing a key an
+    application may be reading is a wire break this slice has no reason to spend.
+
+    Historically: `started_from_trunk` said the member's branch did not exist on the relay yet, so the checkout
     was cut from the trunk. That is the ORDINARY state of a member who has not run a task — a WIP
     branch is created by the relay when one settles, not when a project is created — and it has to
     reach the member, because `git log` in that clone shows somebody else's history and nothing of
@@ -329,7 +336,11 @@ def clone_project(dest: Path, *, url: str, project_id: str, branch: str, trunk: 
             f"{branch} here has {discarding} commit{'s' if discarding != 1 else ''} the grid does "
             f"not have, and updating this clone would discard them.\n"
             f"  See them:  git -C {dest} log {target}..{branch}\n"
-            f"  Land them: grid project commit {project_id} -m '…' --file <path>\n"
+            # ⚠️ A CONVERSATION id, not this project's (ADR 0034 D-e, issue 41): the branch a
+            # commit lands on is named after a conversation now, so naming the project here would
+            # offer a command that refuses. Left as a placeholder rather than guessed — this
+            # function has no conversation in hand, and inventing one would be worse than asking.
+            f"  Land them: grid project commit <conversation-id> -m '…' --file <path>\n"
             f"  Or keep them aside first: git -C {dest} branch my-work {branch}")
 
     # `-B` so re-cloning into the same directory is an update rather than a refusal.

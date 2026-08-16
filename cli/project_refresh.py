@@ -39,13 +39,17 @@ _ADVICE = {
     # Never `grid project clone` here, even though re-cloning is the documented way to update: it
     # updates by resetting the branch, so on this state it is the one command that destroys the
     # very work being reported. Same wording as `project_clone`'s own refusal.
-    "ahead": "Land them with:\n  grid project commit {project_id} -m '<message>' --file <path>",
+    "ahead": ("Land them with:\n"
+              "  grid project commit <conversation-id> -m '<message>' --file <path>"),
     # Deliberately NO ff line and no `git pull`: the first fails here, and the second "works" by
     # making a merge commit a member can never push. Only one relay write can put the grid's copy
     # somewhere your history does not reach — every other one produces a descendant — so the cause
     # is nameable rather than a shrug.
     "diverged": ("The grid's copy of this branch is not an ancestor of yours. Either somebody ran "
                  "`grid project wip reset`,\nor you rewrote your own history here.\n"
+                 "(A clone follows the project's trunk since ADR 0034 D-d, and the grid only ever "
+                 "advances that — so a\nreset of a conversation's branch is the one relay write "
+                 "that can produce this.)\n"
                  "  See both sides:   git -C {path} log --left-right --oneline {branch}...{upstream}"
                  "\n  Keep yours aside: git -C {path} branch my-work {branch}"),
 }

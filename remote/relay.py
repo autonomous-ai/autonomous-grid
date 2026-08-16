@@ -1083,103 +1083,51 @@ def remove_project_member(signaling_url: str, access_token: str, project_id: str
 
 
 def reset_project_wip(signaling_url: str, access_token: str, project_id: str,
-                      *, member_key: str, commit: str) -> dict[str, Any]:
-    """Put a member's WIP branch back to a named commit (``POST …/wip/{key}/reset``).
+                      *, conversation_id: str, commit: str) -> dict[str, Any]:
+    """Put a conversation's branch back to a named commit (``POST …/wip/{conversation}/reset``).
 
-    The one way out of a WIP branch left ahead of the task branch it settled from (ADR 0033 D-c).
-    Nothing else moves one backwards: members do not push, promote writes only `main`, and there is
-    no revert — so without this a member's next task is silently cut from a lost attempt's work.
+    The one way out of a branch left ahead of the turn that settled onto it (ADR 0033 D-c), and it
+    SURVIVES the clean break that deletes promote and integrate (ADR 0034 D-m) because the relay's
+    own apply can still leave one there. Nothing else moves a branch backwards: members do not push,
+    the apply writes only `main`, and there is no revert until issue 44 — so without this a
+    conversation's next turn is silently cut from a lost attempt's work.
 
-    Addressed by the **member key**, like `remove_project_member` and for the same reason: the key
-    is a path segment by construction and `grid:<network>:<sub>` is not.
+    ⚠️ **Addressed by the CONVERSATION since ADR 0034 D-e**, which is what names the branch. An old
+    relay reads that segment as a member key, finds no such member and answers a real 404
+    `no_such_project_member` — loud, and about a member the caller never named, which is the shape
+    to expect during a skew rather than a silent success.
 
-    Refused by the relay while that member has an active task, which is the serialization that
-    makes two writers of one branch impossible. That refusal arrives as a real 409 with its own
-    words, not as the bare-404 hint below.
+    Refused by the relay while that conversation has a turn in flight, which is what makes two
+    writers of one branch impossible. That refusal arrives as a real 409 with its own words, not as
+    the bare-404 hint below.
     """
     return _task_oneshot(
         signaling_url, access_token, "POST",
         f"/relay/v1/projects/{quote(project_id, safe='')}"
-        f"/wip/{quote(member_key, safe='')}/reset",
+        f"/wip/{quote(conversation_id, safe='')}/reset",
         json={"commit": commit}, missing_route_hint=_OLD_RELAY)
 
 
-def promote_project(signaling_url: str, access_token: str, project_id: str,
-                    *, member_key: str) -> dict[str, Any]:
-    """Fast-forward a project's `main` from a member's WIP branch (``POST …/{id}/promote``).
-
-    `main` is a release branch since ADR 0033 D-b, so nothing a task does reaches it — this is the
-    one thing that moves it, and it is an ENDPOINT rather than a push because keeping the relay
-    `main`'s only writer is what lets a provider be unable to announce its own success.
-
-    The source is named, not assumed to be the caller's own: the moment somebody leaves the team
-    `wip/<departed>` holds everything they never promoted, and there is no adopt, transfer or rename
-    anywhere in this feature. By **member key** for `reset_project_wip`'s reason.
-
-    **Fast-forward only.** A source branch that is behind is refused with a real 409 — a D-l object
-    carrying `main_commit` and `behind` as fields, so a client can serialize its own promotes rather
-    than discover the collision rate empirically. That is not the bare-404 hint below; it is the
-    relay's own answer, and the words belong to it.
-    """
-    return _task_oneshot(
-        signaling_url, access_token, "POST",
-        f"/relay/v1/projects/{quote(project_id, safe='')}/promote",
-        json={"member_key": member_key}, missing_route_hint=_OLD_RELAY)
-
-
-def integrate_project(signaling_url: str, access_token: str,
-                      project_id: str) -> dict[str, Any]:
-    """Bring a project's `main` into the CALLER's WIP branch (``POST …/{id}/integrate``).
-
-    The counterpart to promote, and the thing that makes promote survivable at all: since `main`
-    moves only on a promote, the first one locks every other member out — their branch was cut from
-    a trunk that is now history, so `merge-base --is-ancestor main wip/<theirs>` can never succeed
-    again. This is the only way back.
-
-    **It takes no member key**, which is the one place it differs from `promote_project` and
-    `reset_project_wip`, and it is forced rather than chosen. The relay holds the caller's one task
-    slot by inserting a task row keyed on their own `owner_id` — that INSERT is what serializes an
-    integration against a task already running on the branch it is about to move — so a request that
-    named somebody else's branch would take the wrong person's slot and move a ref their running
-    task was cut from. A departed member's branch is reached through promote and `wip reset`, both
-    of which are safe to address by key.
-
-    **No request body**, because the relay reads none: the branch is the caller's own and the trunk
-    is the project's, so there is nothing to send. Sending `{}` would be a wire detail with nothing
-    behind it.
-
-    Four answers, and the client has to tell them apart without diffing oids: `status` is
-    `up_to_date`, `fast_forward`, `merged` or — since ADR 0033 issue 15 — `merge_task`, which means
-    git could not decide and the relay has QUEUED a task whose agent will. That last one carries a
-    `task_id` and the conflicted paths as `files`, and reports `advanced: false`: nothing has moved,
-    and the caller's one task slot is now held until that task ends.
-
-    A conflict is therefore no longer a refusal. The **409** that remains is
-    `integrate_not_fast_forward` — something moved the caller's branch under a request holding their
-    slot — and it is not the bare-404 hint below, which is only for a relay that predates the route.
-    """
-    return _task_oneshot(
-        signaling_url, access_token, "POST",
-        f"/relay/v1/projects/{quote(project_id, safe='')}/integrate",
-        missing_route_hint=_OLD_RELAY)
-
-
-def commit_project(signaling_url: str, access_token: str, project_id: str, *,
+def commit_project(signaling_url: str, access_token: str, conversation_id: str, *,
                    message: str, files: list[dict[str, Any]] | None = None,
                    deletes: list[str] | None = None) -> dict[str, Any]:
-    """Commit files onto the CALLER's WIP branch without running an agent (``POST …/{id}/commit``).
+    """Commit files onto a conversation's branch, no agent (``POST /tasks/{conversation}/commit``).
 
     ADR 0033 D-j, and the thing that makes the rest of this design usable day to day: without it the
     only route from "I edited a file on my machine" to "it is in the project" is `grid task create
-    --file`, which spends the member's one task slot and then runs an agent that may change the very
-    line being fixed.
+    --file`, which spends a slot and then runs an agent that may change the very line being fixed.
 
     **Not a relaxation of the push ban.** The write still goes through the relay, still lands on
-    exactly one ref, and the relay still holds the member's task slot while it does — so committing
-    is refused while they have a task in flight, exactly as integrating is, and the refusal names it.
+    exactly one ref, and the relay still holds that conversation's slot while it does — so a commit
+    is refused while the conversation has a turn in flight, and the refusal names it.
 
-    **No member key**, for `integrate_project`'s reason: the slot the relay holds is keyed on the
-    caller's own identity, so there is no coherent way to commit onto somebody else's branch.
+    ⚠️ **Addressed by CONVERSATION, on a route that MOVED** (ADR 0034 D-e). The branch is named after
+    a conversation now, so the request has to name one — and it is a new PATH rather than a new key
+    on the old route precisely so an old relay answers the bare 404 below instead of a cheerful 200
+    for a commit that landed on a different branch. **The relay must be rolled out before this CLI.**
+
+    **Its change reaches `main` by itself** (ADR 0034 D-d): the relay enqueues the same apply a
+    turn's settle does. Under ADR 0033 the member ran `grid project promote` afterwards.
 
     The keys are omitted when empty rather than sent as `[]`, matching `create_task`: a relay that
     predates this route answers a bare 404 either way, but a relay that predates only `deletes` must
@@ -1192,8 +1140,19 @@ def commit_project(signaling_url: str, access_token: str, project_id: str, *,
         body["deletes"] = deletes
     return _task_oneshot(
         signaling_url, access_token, "POST",
-        f"/relay/v1/projects/{quote(project_id, safe='')}/commit",
-        json=body, missing_route_hint=_OLD_RELAY)
+        f"/relay/v1/tasks/{quote(conversation_id, safe='')}/commit",
+        json=body, missing_route_hint=_OLD_RELAY_NO_COMMIT)
+
+
+# A relay that predates ADR 0034 D-e (issue 41) has no conversation-addressed commit route. Its own
+# sentence rather than `_OLD_RELAY`, which says the relay has no projects: it plainly has them, it
+# just keeps a member's files on one branch per PERSON rather than one per conversation
+# (`_OLD_RELAY_NO_CANCEL`'s reasoning). Naming the older route would be worse than saying nothing —
+# it still exists there, and using it would put the files on a branch nothing in this release reads.
+_OLD_RELAY_NO_COMMIT = (
+    "This grid's relay cannot commit into a conversation — it predates conversation branches. Ask "
+    "its operator to update it. Nothing was committed."
+)
 
 
 # A relay that predates ADR 0033 issue 19b has no cancel route, and answers the same bare framework
@@ -1339,25 +1298,6 @@ def project_status(signaling_url: str, access_token: str,
     return _task_oneshot(
         signaling_url, access_token, "GET",
         f"/relay/v1/projects/{quote(project_id, safe='')}/status",
-        missing_route_hint=_OLD_RELAY)
-
-
-def preview_integration(signaling_url: str, access_token: str,
-                        project_id: str) -> dict[str, Any]:
-    """What integrating WOULD do (``GET /relay/v1/projects/{id}/integrate/preview``).
-
-    ADR 0033 D-l, issue 19a. Before it, integration *was* the conflict check: asking cost the
-    member's one task slot and, when the answer was "they conflict", queued a paid agent run to
-    resolve them.
-
-    The `status` vocabulary is `integrate_project`'s own — `up_to_date`, `fast_forward`, `merged`,
-    `merge_task` — deliberately, so a caller branches on one set of four words rather than mapping a
-    preview enum onto the real one. It writes nothing and holds no slot, so it answers while the
-    caller already has a task in flight, which is exactly when they want it.
-    """
-    return _task_oneshot(
-        signaling_url, access_token, "GET",
-        f"/relay/v1/projects/{quote(project_id, safe='')}/integrate/preview",
         missing_route_hint=_OLD_RELAY)
 
 

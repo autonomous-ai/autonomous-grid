@@ -127,33 +127,49 @@ def test_04_the_client_fetches_what_the_agent_produced_and_the_wip_branch_moved(
 
     assert (dest / "out" / "result.txt").read_text() == "ZEBRA-4417"
 
-    # The AUTHOR'S WIP BRANCH advanced to the result, which is what makes it the base their next
-    # task is cut from — the property D-e exists to provide.
+    # The CONVERSATION'S branch advanced to the result, which is what makes it the base its next
+    # turn is cut from — the property D-e exists to provide.
     #
-    # ⚠️ This assertion used to name `refs/heads/main`, and ADR 0033 D-c moved it: a settle
-    # fast-forwards `wip/<member_key>` and `main` is written by promote and import alone. It had
-    # been failing since issue 12 and nothing noticed, because this whole directory has been red
-    # since 16b took away the member-push bootstrap `H.create` was relying on.
-    branch = relay_client.project_status(relay, owner_token, done["project_id"])["branch"]
+    # ⚠️ This assertion has moved twice. It named `refs/heads/main` until ADR 0033 D-c made a settle
+    # fast-forward `wip/<member_key>`; ADR 0034 D-e re-keys that to the CONVERSATION, because a
+    # member's conversations run at once and one shared ref means the second one's settle is refused
+    # for doing what it was asked.
+    branch = f"wip/{done['conversation_id']}"
     assert done["result_commit"] in H.git_ls_remote(url, f"refs/heads/{branch}",
                                                     bearer=owner_token)
-    # ...and `main` did NOT move. It is still the seeded import, because nothing has promoted.
-    assert done["result_commit"] not in H.git_ls_remote(url, "refs/heads/main", bearer=owner_token)
+    # ...and the result reaches `main` BY ITSELF (ADR 0034 D-d, issue 41). Nobody promotes; the relay
+    # applies it on its own sweep, which is the headline of the whole feature. Polled rather than
+    # asserted outright because the apply is deliberately OUTSIDE the settle request — that is what
+    # keeps it off the lease TTL — so "done" and "on main" are one tick apart, not one moment.
+    H.wait_for(
+        lambda: done["result_commit"] in H.git_ls_remote(
+            url, "refs/heads/main", bearer=owner_token),
+        timeout=30.0)
 
 
-def test_05_a_failed_task_pushes_its_branch_but_never_moves_the_wip_branch(
+def test_05_a_failed_turn_keeps_its_work_without_reaching_the_project(
         relay, owner_token, spawn_provider):
-    """D-e's asymmetry: the user can still see what the agent did, and the base stays known-good.
+    """D-e's asymmetry, and ADR 0034 D-e inverts half of it.
 
-    The base a task is cut from is `wip/<member_key>` since ADR 0033 D-c, so that — not `main` — is
-    the ref a failure must leave alone. `main` is left alone too, by construction: nothing but a
-    promote or an import writes it at all.
+    The CONVERSATION follows its turns whether they succeed or fail — an agent that broke halfway
+    still did the half it finished, and the next turn's files have to match what the session
+    remembers doing. What a failure must not reach is `main`, which the relay advances only on
+    success (ADR 0034 D-d).
+
+    ⚠️ Under ADR 0033 a failed task moved NOTHING, because the transcript rode in a commit that only
+    reached the trunk on success and the branch was the member's. Both halves of that changed.
     """
     from remote import relay as relay_client
 
     spawn_provider("A")
     good = H.create(relay, owner_token, "WRITE kept.txt first", project="p-failure")["id"]
-    wip_before = H.await_state(relay, owner_token, good, {"completed"})["result_commit"]
+    landed = H.await_state(relay, owner_token, good, {"completed"})
+    url = relay_client.git_remote_url(relay, landed["project_id"])
+    H.wait_for(
+        lambda: landed["result_commit"] in H.git_ls_remote(
+            url, "refs/heads/main", bearer=owner_token),
+        timeout=30.0)
+    trunk_before = H.git_ls_remote(url, "refs/heads/main", bearer=owner_token)
 
     bad = H.create(
         relay, owner_token, "WRITE broken.txt half; FAIL the agent gave up",
@@ -161,12 +177,19 @@ def test_05_a_failed_task_pushes_its_branch_but_never_moves_the_wip_branch(
     failed = H.await_state(relay, owner_token, bad, {"failed"})
 
     assert failed.get("result_commit"), "a failed attempt must still push its branch"
-    assert failed["result_commit"] != wip_before
+    assert failed["result_commit"] != landed["result_commit"]
 
-    url = relay_client.git_remote_url(relay, failed["project_id"])
-    branch = relay_client.project_status(relay, owner_token, failed["project_id"])["branch"]
-    assert wip_before in H.git_ls_remote(url, f"refs/heads/{branch}", bearer=owner_token), (
-        "the WIP branch moved on a FAILED task — the next task is no longer cut from a good base")
+    # The half it finished is on its own conversation's branch, so the next turn starts from it.
+    branch = f"wip/{failed['conversation_id']}"
+    assert failed["result_commit"] in H.git_ls_remote(
+        url, f"refs/heads/{branch}", bearer=owner_token), (
+        "a failed turn left nothing behind — its conversation cannot carry on from where it broke")
+    # And the project did not take it. Given a moment in which it COULD have: the apply sweep runs
+    # every couple of seconds, so an assertion made immediately would pass against a relay that was
+    # about to apply it.
+    time.sleep(5)
+    assert H.git_ls_remote(url, "refs/heads/main", bearer=owner_token) == trunk_before, (
+        "a failed turn reached the project's trunk")
 
 
 def test_06_a_provider_killed_mid_task_loses_it_and_another_one_finishes_the_work(
@@ -561,12 +584,18 @@ def test_13_a_trunkless_project_refuses_a_task_with_a_code_and_init_project_fixe
     assert "PING-2626" in (done.get("result_text") or ""), (
         f"the file uploaded alongside --init-project never reached the agent: {done!r}")
 
-    # 6. And it landed on the member's branch, not on the trunk the flag just made.
-    status = relay_client.project_status(relay, owner_token, project_id)
-    assert status["main_commit"] == root, (
-        f"the trunk moved without a promote: {status['main_commit']} != {root}")
-    assert status["ahead"] >= 1, status
-    assert status["behind"] == 0, status
+    # 6. And it reached the trunk the flag just made — by itself (ADR 0034 D-d, issue 41). This
+    #    asserted the OPPOSITE until that slice: the work landed on the member's branch and the
+    #    trunk stayed at `root` until somebody promoted. `ahead`/`behind` went with the promote they
+    #    described.
+    from remote import relay as _relay_client
+    url = _relay_client.git_remote_url(relay, project_id)
+    H.wait_for(
+        lambda: done["result_commit"] in H.git_ls_remote(url, "refs/heads/main",
+                                                         bearer=owner_token),
+        timeout=30.0)
+    assert relay_client.project_status(relay, owner_token, project_id)["main_commit"] != root, (
+        "the trunk never moved, so `--init-project` produced a project nothing can reach")
 
 
 def test_14_a_project_is_archived_and_unarchived_and_an_empty_one_is_deleted(
@@ -837,6 +866,17 @@ def test_17_a_second_conversation_of_one_member_starts_fresh_on_one_provider(
         relay, owner_token, first["id"], {"completed", "failed"}, timeout=120)
     assert first_done["state"] == "completed", first_done
 
+    # ⚠️ **Wait for the first conversation's work to reach the trunk before opening the second**,
+    # and that wait IS the behaviour rather than a flake guard. A conversation's first turn is cut
+    # from `main` (ADR 0034 D-e), and `main` holds the first conversation's work only once the relay
+    # has applied it (D-d) — which happens on its own sweep, a moment after the turn reports done.
+    # Under ADR 0033 the two conversations shared one member branch, so this question did not arise.
+    url = relay_client.git_remote_url(relay, project)
+    H.wait_for(
+        lambda: first_done["result_commit"] in H.git_ls_remote(
+            url, "refs/heads/main", bearer=owner_token),
+        timeout=30.0)
+
     second = relay_client.create_task(
         relay, owner_token, project_id=project,
         prompt="READ only-in-the-first.txt; SAY done")
@@ -849,11 +889,15 @@ def test_17_a_second_conversation_of_one_member_starts_fresh_on_one_provider(
         f"the second conversation did not complete — if its error names conversation_id, the "
         f"relay is not sending the key this provider refuses to run without: {second_done}")
 
-    # 2. The FILES are shared and that is correct — the second turn is cut from the member's WIP
-    #    branch, which the first turn fast-forwarded, so its workspace is materialized from a commit
-    #    holding the first conversation's work. Pinned rather than assumed, because "a second
-    #    conversation starts fresh" is easy to read as "it starts from an empty project", and an
-    #    edit that made that true would break every follow-up in a real team's repository.
+    # 2. The FILES are shared and that is correct — the second conversation's first turn is cut from
+    #    the TRUNK, which the relay has just applied the first conversation's work to, so its
+    #    workspace is materialized from a commit holding it. Pinned rather than assumed, because "a
+    #    second conversation starts fresh" is easy to read as "it starts from an empty project", and
+    #    an edit that made that true would break every follow-up in a real team's repository.
+    #
+    #    ⚠️ The ROUTE by which they are shared changed at issue 41 and the assertion did not: it used
+    #    to be the member's own branch, which every turn of theirs fast-forwarded. It is now the
+    #    project's trunk, which is a stronger property — a COLLEAGUE's work is there too.
     assert "ZEBRA-4417" in (second_done.get("result_text") or ""), (
         f"the second conversation could not see the project's own files — a conversation is a "
         f"separate SESSION, not a separate repository: {second_done}")
@@ -950,14 +994,14 @@ def test_18_a_conversations_transcript_leaves_the_projects_history(
     assert not H.git_ls_remote(url, f"refs/grid/agent/{conversation}", bearer=owner_token), (
         "a member's clone is offered a conversation's transcript ref")
 
-    # 3. The member's own branch carries the work and NOT the conversation.
+    # 3. The conversation's own branch carries the work and NOT the conversation's transcript.
     #
-    #    ⚠️ `wip/<member_key>`, not `main`. A settle fast-forwards the member's WIP branch and `main`
-    #    is written by promote and import alone (ADR 0033 D-c) — the auto-apply that moves the trunk
-    #    on every successful turn is a LATER slice of ADR 0034. The first draft asserted against
-    #    `main` and read an empty tree. The WIP branch is the right target anyway: it is what the
-    #    member's next turn is cut from, and it is exactly where the transcript used to accumulate.
-    branch = relay_client.project_status(relay, owner_token, project)["branch"]
+    #    ⚠️ `wip/<conversation_id>`, not `main` and no longer `wip/<member_key>`. ADR 0034 D-e
+    #    re-keyed it (issue 41), and this ref is the right target for the same reason it always was:
+    #    it is what the conversation's next turn is cut from, and it is exactly where the transcript
+    #    used to accumulate. `main` is asserted separately, by test 04 — the relay applies to it on
+    #    its own sweep, so reading it here would be a race rather than a fact.
+    branch = f"wip/{conversation}"
     listing = subprocess.run(
         ["git", "--git-dir", str(repo), "ls-tree", "-r", "--name-only", f"refs/heads/{branch}"],
         capture_output=True, text=True).stdout
@@ -1143,6 +1187,92 @@ def test_21_a_follow_up_message_runs_in_the_conversation_it_was_sent_to(
     #    would mean the follow-up ran somewhere the session's transcript is not — the exact failure
     #    `conversation_id`'s fail-closed refusal exists to prevent, arriving by a different door.
     assert _one_conversation_dir(workspace_root, project) == conversation_id
+
+
+# The words a person driving this product must never be shown (ADR 0034 D-m). Not an exhaustive git
+# glossary — a list nobody can satisfy is a list nobody keeps — but the terms this feature's own
+# design deleted or hid: the ones that used to appear because a MEMBER had to move refs by hand.
+_BRANCH_VOCABULARY = ("branch", "wip/", "fast-forward", "fast_forward", "rebase",
+                      "promote", "integrate", "merge conflict", "refs/")
+
+
+def test_22_two_conversations_run_a_whole_session_and_the_work_appears_by_itself(
+        relay, relay_home, owner_token, spawn_provider):
+    """Issue 41's last criterion: a whole session, and nothing anybody reads names a branch.
+
+    Two conversations touching DIFFERENT files, both cut from the trunk, both finishing. The first
+    fast-forwards it; the second is a clean three-way merge the relay makes on its own. Nobody runs a
+    command in between, which is the entire point of ADR 0034 D-d — under D-b's predecessor this
+    needed a `promote`, and once anyone had promoted, an `integrate` before the next one.
+
+    ⚠️ **Two CONVERSATIONS rather than two people, and the limit is the harness's not the design's.**
+    `_harness.start_relay` sets `GRID_MODE=false`, so the relay never writes a `users` row for the
+    tokens minted here and `POST …/members` cannot look a colleague up by email — the same gap
+    `test_15` records about its own downgrade. What is under test is unaffected: the trunk cannot
+    tell whose conversation a result came from, and two owners racing for it is covered where a real
+    interleaving is available, in grid-src's `test_trunk_apply_postgres.py`.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-together", bootstrap="empty")["id"]
+    url = relay_client.git_remote_url(relay, project)
+    trunk_before = H.git_ls_remote(url, "refs/heads/main", bearer=owner_token)
+
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="WRITE alice.txt from-alice; SAY done")
+    second = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="WRITE bob.txt from-bob; SAY done")
+
+    finished = [H.await_state(relay, owner_token, turn["id"], {"completed", "failed"}, timeout=120)
+                for turn in (first, second)]
+    assert [turn["state"] for turn in finished] == ["completed", "completed"], finished
+
+    # 1. Both results reach the project with no command run by anyone — one by fast-forward, the
+    #    other by a merge the relay made. Polled because the apply is deliberately outside the settle
+    #    request (ADR 0034 D-d): "done" and "in the project" are a tick apart, never the same moment.
+    for turn in finished:
+        H.wait_for(
+            lambda commit=turn["result_commit"]: commit in H.git_ls_remote(
+                url, "refs/heads/main", bearer=owner_token),
+            timeout=45.0)
+    assert H.git_ls_remote(url, "refs/heads/main", bearer=owner_token) != trunk_before
+
+    # 2. And BOTH files are there. The trunk moving proves something landed; only the tree proves
+    #    that the second apply merged rather than replacing the first one's work — which is the
+    #    failure a lost update produces, and it looks perfectly healthy from the ref alone.
+    #    Read off the relay's own repository with `ls-tree`, the way `test_18` reads a ref: fetching
+    #    the trunk into a fresh clone is refused by git itself (`refusing to fetch into branch
+    #    'refs/heads/main' checked out at …`), and building a second authenticated-git path in this
+    #    test to work round that would be asserting through machinery nothing else uses.
+    import subprocess
+
+    repo = relay_home / "projects" / f"{project}.git"
+    landed = sorted(subprocess.run(
+        ["git", "--git-dir", str(repo), "ls-tree", "-r", "--name-only", "refs/heads/main"],
+        capture_output=True, text=True, check=True).stdout.split())
+    assert landed == ["alice.txt", "bob.txt"], (
+        f"the project holds {landed} — one conversation's work was replaced rather than combined")
+
+    # 3. Nothing a person reads names a branch. The task views and the whole event stream, which is
+    #    everything `grid task follow` and `grid task get` render.
+    said = []
+    for turn in finished:
+        said.append(str(turn.get("result_text") or ""))
+        said.append(str(turn.get("error") or ""))
+        said.extend(str(payload) for _seq, payload in relay_client.stream_task_events(
+            relay, owner_token, turn["id"], after_seq=-1))
+    surface = " ".join(said).lower()
+    # The control. A denylist over an empty string passes forever, and this surface is assembled
+    # from three optional fields and a stream — any one of which could quietly stop being read.
+    assert len(surface) > 200, (
+        f"only {len(surface)} characters of what a person reads were captured, so finding no "
+        f"branch vocabulary in it proves nothing: {surface!r}")
+    leaked = [word for word in _BRANCH_VOCABULARY if word in surface]
+    assert not leaked, (
+        f"a person following this session was shown {leaked} — ADR 0034 D-m's whole premise is that "
+        f"the reader does not know what a branch is. Surface: {surface[:600]}")
 
 
 def _one_conversation_dir(workspace_root, project):

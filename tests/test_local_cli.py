@@ -22251,11 +22251,18 @@ def test_task_follow_no_longer_claims_a_lost_attempts_git_changes_are_undone(
     """ADR 0033 D-c makes the old sentence FALSE, and it was printed verbatim.
 
     Under ADR 0032 the reaper's reset covered the only ref that mattered, so "Changes the lost
-    attempt made in git are undone" was true. Since D-c a task also fast-forwards
-    `wip/<member_key>` — and the reaper resets `task/<id>` and never that — so an interrupted
-    settle leaves the lost attempt's work on the member's base, where their NEXT task is cut from.
-    Telling a user it was undone is worse than saying nothing: it is the one line they would rely on
-    when deciding whether to re-run the task by hand.
+    attempt made in git are undone" was true. Since D-c a turn also fast-forwards the branch it
+    settles onto — and the reaper resets `task/<id>` and never that — so an interrupted settle
+    leaves the lost attempt's work on the base the NEXT turn is cut from. Telling a user it was
+    undone is worse than saying nothing: it is the one line they would rely on when deciding
+    whether to re-run the work by hand.
+
+    ⚠️ **Re-keyed onto the CONVERSATION by ADR 0034 D-e/D-m (issue 41).** The branch left ahead is
+    `wip/<conversation_id>`, not `wip/<member_key>`, and the recovery this names — `grid project
+    wip reset` — is the one command that SURVIVES the clean break deleting promote and integrate.
+    So the assertions below moved with the vocabulary, and the last one is new: the recovery has to
+    be named in the form that actually parses, because `wip reset` now takes the conversation id as
+    a second positional and the old member-keyed form would refuse whoever retyped it.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -22276,8 +22283,12 @@ def test_task_follow_no_longer_claims_a_lost_attempts_git_changes_are_undone(
         "the CLI still claims the lost attempt's git changes are undone; D-c made that false")
     # What replaced it has to be MORE specific, not merely vaguer — a user who is told nothing
     # about git is left with the same wrong assumption they started with.
-    assert "task's own branch" in captured.err, captured.err
-    assert "wip" in captured.err.lower(), captured.err
+    assert "turn's own branch" in captured.err, captured.err
+    assert "conversation's branch" in captured.err, captured.err
+    # And the recovery is named in a form that PARSES. `wip reset` takes the conversation id as a
+    # second positional since issue 41, so a bare `grid project wip reset` would send the reader to
+    # a command that refuses them for the argument the message never mentioned.
+    assert "grid project wip reset <project-id> <conversation-id>" in captured.err, captured.err
 
 
 def test_task_follow_says_when_the_provider_hit_its_subscriptions_wall(monkeypatch, tmp_path, capsys):
@@ -24038,12 +24049,16 @@ def test_project_member_remove_addresses_the_member_key(monkeypatch, tmp_path, c
         "DELETE", "/relay/v1/projects/P1/members/def456")
 
 
-def test_project_wip_reset_posts_the_commit_to_the_member_keys_route(
+def test_project_wip_reset_posts_the_commit_to_the_conversations_route(
         monkeypatch, tmp_path, capsys):
     """ADR 0033 D-c's recovery path, end to end through `cli.main`.
 
-    Addressed by the **member key**, like `member remove` and for the same reason: the key is a
-    path segment by construction and `grid:<network>:<sub>` is not.
+    ⚠️ **Addressed by the CONVERSATION since ADR 0034 D-e (issue 41)**, where it used to be the
+    member key. That is what names the branch now, and `wip reset` is the one project verb that
+    SURVIVES the clean break deleting promote and integrate (D-m) — the relay's own apply can still
+    leave a branch ahead of the turn that settled onto it, and nothing else moves one backwards.
+
+    The reply's `conversation_id` replaces its `member_key` for the same reason.
     """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
@@ -24053,18 +24068,18 @@ def test_project_wip_reset_posts_the_commit_to_the_member_keys_route(
         seen["method"], seen["path"] = request.method, request.url.path
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={
-            "branch": "wip/def456", "member_key": "def456",
+            "branch": "wip/c-7", "conversation_id": "c-7",
             "commit": "a" * 40, "previous_commit": "b" * 40})
 
     _mock_relay(monkeypatch, handler)
-    rc = cli.main(["project", "wip", "reset", "P1", "def456", "--commit", "a" * 40])
+    rc = cli.main(["project", "wip", "reset", "P1", "c-7", "--commit", "a" * 40])
 
     assert rc == 0
     assert (seen["method"], seen["path"]) == (
-        "POST", "/relay/v1/projects/P1/wip/def456/reset")
+        "POST", "/relay/v1/projects/P1/wip/c-7/reset")
     assert seen["body"] == {"commit": "a" * 40}
     out = capsys.readouterr().out
-    assert "wip/def456" in out and "a" * 40 in out
+    assert "wip/c-7" in out and "a" * 40 in out
     # Where it came FROM is printed too: without it a user who reset to the wrong commit has no
     # record of what to put back, and nothing else anywhere holds that value.
     assert "b" * 40 in out
@@ -24081,391 +24096,52 @@ def test_project_wip_reset_on_an_old_relay_says_the_relay_is_old(monkeypatch, tm
     _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
 
     with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "wip", "reset", "P1", "def456", "--commit", "a" * 40])
+        cli.main(["project", "wip", "reset", "P1", "c-7", "--commit", "a" * 40])
 
     assert "relay" in str(caught.value).lower(), caught.value
 
 
 def test_project_wip_reset_shows_the_relays_own_words_for_a_real_refusal(
         monkeypatch, tmp_path, capsys):
-    """The refusal that actually happens: the member has a task running, so the reset would move
-    the base out from under it. It arrives as a D-l object — `{"code", "message"}` — and the person
-    at the terminal must be shown the MESSAGE, not the raw JSON."""
+    """The refusal that actually happens: the conversation has a turn running, so the reset would
+    move the base out from under it. It arrives as a D-l object — `{"code", "message"}` — and the
+    person at the terminal must be shown the MESSAGE, not the raw JSON.
+
+    Narrower than the rule it replaces since ADR 0034 D-e, and that narrowing is the re-key doing
+    its job: it is this CONVERSATION's turn that blocks the reset, not any turn the member happens
+    to have running elsewhere. The message and its code are the relay's own and are displayed
+    verbatim, so this side asserts only that the sentence arrives and the object does not.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
         "code": "member_has_active_task",
-        "message": "def456 has an active task in this project (T7); resetting now would move the "
+        "message": "c-7 has an active task in this project (T7); resetting now would move the "
                    "base out from under it.",
         "task_id": "T7"}}))
 
     with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "wip", "reset", "P1", "def456", "--commit", "a" * 40])
+        cli.main(["project", "wip", "reset", "P1", "c-7", "--commit", "a" * 40])
 
     assert "active task" in str(caught.value), caught.value
     assert "code" not in str(caught.value), (
         "the raw refusal object reached the user instead of its sentence")
 
 
-def test_project_promote_posts_the_member_key_to_the_promote_route(
-        monkeypatch, tmp_path, capsys):
-    """ADR 0033 D-b end to end through `cli.main`. `main` is a release branch, so it moves when a
-    person asks — and the ask names WHOSE branch, not "mine": the moment somebody leaves the team,
-    `wip/<departed>` holds everything they never promoted and nothing else can move it.
-
-    By **member key** for the same reason `member remove` and `wip reset` are: the key is a path
-    segment by construction and `grid:<network>:<sub>` is not.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    seen = {}
-
-    def handler(request):
-        seen["method"], seen["path"] = request.method, request.url.path
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={
-            "branch": "main", "member_key": "def456", "source_branch": "wip/def456",
-            "commit": "a" * 40, "previous_commit": "b" * 40, "advanced": True,
-            "promotion_id": "p-1"})
-
-    _mock_relay(monkeypatch, handler)
-    rc = cli.main(["project", "promote", "P1", "def456"])
-
-    assert rc == 0
-    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/promote")
-    assert seen["body"] == {"member_key": "def456"}
-    out = capsys.readouterr().out
-    assert "main" in out and "a" * 40 in out
-    # Where it came FROM is printed too: a fast-forward leaves no merge commit, so this line is the
-    # only place the previous release is named — and `receive.denyNonFastForwards` means undoing a
-    # promote is a relay-side operation somebody has to be able to state a commit for.
-    assert "b" * 40 in out
-
-
-def test_project_promote_says_when_nothing_moved_rather_than_claiming_a_release(
-        monkeypatch, tmp_path, capsys):
-    """`advanced: false` is the relay saying the branch was already on `main`. Rendering that as a
-    promotion would tell a team something shipped when nothing did."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "branch": "main", "member_key": "def456", "source_branch": "wip/def456",
-        "commit": "a" * 40, "previous_commit": "a" * 40, "advanced": False,
-        "promotion_id": None}))
-
-    rc = cli.main(["project", "promote", "P1", "def456"])
-
-    assert rc == 0
-    out = capsys.readouterr().out.lower()
-    assert "already" in out, out
-
-
-def test_project_promote_does_not_call_a_reply_it_cannot_read_a_release(monkeypatch, tmp_path):
-    """`advanced` is what says the trunk moved. A reply without it is not a promote that succeeded
-    — it is a reply this CLI cannot read, and the two must not print the same line.
-
-    `_task_oneshot` returns `{}` for any 200 with an empty body, so "not explicitly False" reaches
-    the success branch on a body a proxy stripped, and prints `main is now at ` with no commit at
-    all. Exit code 0, to a human and to a script. There is no relay old enough to be a reason to
-    tolerate it: promote is a brand-new route, so every relay that has it sends the key.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, content=b""))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "promote", "P1", "def456"])
-
-    assert "def456" in str(caught.value) or "promote" in str(caught.value).lower(), caught.value
-
-
-def test_project_promote_says_when_the_release_was_not_recorded(monkeypatch, tmp_path, capsys):
-    """`promotion_id: null` beside `advanced: true` is the relay saying the trunk moved but the row
-    naming who released it could not be written.
-
-    That signal exists precisely so it can be noticed, and the CLI is its only first-party reader.
-    Printing the ordinary success line would leave it discoverable only by an operator grepping the
-    relay's log, or by somebody later finding a hole in the project's release history.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "branch": "main", "member_key": "def456", "source_branch": "wip/def456",
-        "commit": "a" * 40, "previous_commit": "b" * 40, "advanced": True,
-        "promotion_id": None}))
-
-    rc = cli.main(["project", "promote", "P1", "def456"])
-
-    assert rc == 0, "the release landed, so this is not a failure"
-    out = capsys.readouterr().out.lower()
-    assert "a" * 40 in out, "the release itself must still be reported"
-    assert "record" in out, f"the missing record was never mentioned: {out!r}"
-
-
-def test_project_promote_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
-    """Promote is a brand-new route, so a relay that predates it answers the bare framework 404 —
-    which reads as "your project is gone" unless it is turned into a sentence naming the relay."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "promote", "P1", "def456"])
-
-    assert "relay" in str(caught.value).lower(), caught.value
-
-
-def test_project_promote_shows_the_relays_own_words_when_the_branch_is_behind(
-        monkeypatch, tmp_path, capsys):
-    """The refusal that actually happens once two people share a project: somebody else promoted
-    first. It arrives as a D-l object carrying `main_commit` and `behind` as FIELDS — an application
-    branches on those, and the person at the terminal is shown the sentence, never the raw JSON."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
-        "code": "promote_not_fast_forward",
-        "message": "wip/def456 is 2 commit(s) behind main, so it cannot be promoted. Integrate "
-                   "main into it and promote again.",
-        "main_commit": "c" * 40, "source_commit": "d" * 40, "behind": 2}}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "promote", "P1", "def456"])
-
-    assert "behind" in str(caught.value), caught.value
-    assert "code" not in str(caught.value), (
-        "the raw refusal object reached the user instead of its sentence")
-
-
-def test_project_promote_help_discloses_what_reaching_main_means():
-    """Two consequences the issue requires in the CLI's own help text, not only in the ADR.
-
-    Anyone can promote, so code an agent wrote and nobody read can reach the release branch; and
-    `receive.denyNonFastForwards` means a promote cannot be undone by pushing, so there is no revert
-    in this slice at all. Somebody typing this command is the last person who can decide that is
-    acceptable, and they can only decide it if they are told.
-    """
-    parser = cli.build_parser()
-    promote = parser._subparsers._group_actions[0].choices["project"] \
-        ._subparsers._group_actions[0].choices["promote"]
-    help_text = promote.format_help().lower()
-
-    assert "review" in help_text, "the help does not say unreviewed code can reach main"
-    assert "revert" in help_text or "undo" in help_text, (
-        "the help does not say a promote cannot be undone")
-
-
-def test_project_integrate_posts_to_the_integrate_route_and_names_no_member(
-        monkeypatch, tmp_path, capsys):
-    """ADR 0033 D-d end to end through `cli.main`.
-
-    **No member key**, unlike promote and `wip reset`, and that is forced by the mechanism rather
-    than chosen: the relay holds the caller's task slot by INSERTING a row keyed on their own
-    `owner_id`, so a request that moved somebody else's branch would be serialized against the wrong
-    person's running task — the exact failure the row exists to prevent.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    seen = {}
-
-    def handler(request):
-        seen["method"], seen["path"] = request.method, request.url.path
-        seen["body"] = request.content
-        return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
-            "status": "fast_forward", "advanced": True,
-            "commit": "a" * 40, "previous_commit": "b" * 40, "main_commit": "a" * 40})
-
-    _mock_relay(monkeypatch, handler)
-    rc = cli.main(["project", "integrate", "P1"])
-
-    assert rc == 0
-    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/integrate")
-    # No body at all. The relay reads none, so sending one would be a wire detail with nothing
-    # behind it — and an empty JSON body is what a stricter handler would refuse with a 400.
-    assert seen["body"] == b"", seen["body"]
-    out = capsys.readouterr().out
-    assert "wip/def456" in out and "a" * 40 in out
-
-
-def test_project_integrate_distinguishes_up_to_date_from_a_real_integration(
-        monkeypatch, tmp_path, capsys):
-    """`status` is the relay saying which tier answered. Rendering `up_to_date` as an integration
-    would tell somebody `main` had just come into their branch when nothing moved — and the next
-    thing they do on that belief is promote."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
-        "status": "up_to_date", "advanced": False,
-        "commit": "a" * 40, "previous_commit": "a" * 40, "main_commit": "a" * 40}))
-
-    rc = cli.main(["project", "integrate", "P1"])
-
-    assert rc == 0
-    out = capsys.readouterr().out.lower()
-    assert "up to date" in out or "already" in out, out
-    assert "merge" not in out, "a no-op was reported as a merge"
-
-
-def test_project_integrate_says_a_merge_commit_was_made(monkeypatch, tmp_path, capsys):
-    """Tier 2 leaves a merge commit on the member's branch and tier 1 does not. Somebody deciding
-    whether to review before promoting needs to know which happened."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
-        "status": "merged", "advanced": True,
-        "commit": "c" * 40, "previous_commit": "b" * 40, "main_commit": "a" * 40}))
-
-    rc = cli.main(["project", "integrate", "P1"])
-
-    assert rc == 0
-    out = capsys.readouterr().out.lower()
-    assert "merge" in out, out
-
-
-def test_project_integrate_does_not_call_a_reply_it_cannot_read_an_integration(
-        monkeypatch, tmp_path):
-    """`status` is what says which tier answered. A reply without it is not an integration that
-    succeeded — it is a reply this command cannot read, and the two must not print the same.
-
-    The same guard promote has, for the same measured reason: defaulting to the success line
-    reported work as landed for a body a proxy had stripped. Integrate is a brand-new route, so
-    every relay that has it sends the key; there is no old server to be lenient for.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"branch": "wip/def456"}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "integrate", "P1"])
-
-    assert "P1" in str(caught.value), caught.value
-
-
-def test_project_integrate_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
-    """A bare framework 404 from a relay that predates the route. Without the hint the user's whole
-    reward for upgrading this CLI ahead of their relay is the words "Not Found"."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "integrate", "P1"])
-
-    assert "relay" in str(caught.value).lower(), caught.value
-
-
-def test_project_integrate_shows_the_relays_own_words_for_a_refusal(monkeypatch, tmp_path):
-    """A 409 whose `detail` is the D-l object is shown as its SENTENCE, not as raw JSON.
-
-    Since issue 15 a conflict is no longer one of these — it queues a merge task and answers 200 —
-    so the 409 that remains is `integrate_not_fast_forward`: something moved the caller's branch
-    under a request that was holding their slot.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
-        "code": "integrate_not_fast_forward",
-        "message": "Could not advance wip/def456 to abc123. Nothing was integrated; try again.",
-        "branch": "wip/def456"}}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "integrate", "P1"])
-
-    assert "wip/def456" in str(caught.value), caught.value
-    assert "code" not in str(caught.value), (
-        "the raw refusal object reached the user instead of its sentence")
-
-
-def test_project_integrate_reports_a_conflict_as_the_task_that_will_resolve_it(
-        monkeypatch, tmp_path, capsys):
-    """Tier 3 (ADR 0033 D-e, issue 15). A conflict is no longer a dead end — the relay queues a
-    merge task whose agent resolves it, and the id is the only handle the person gets on that run.
-
-    The files are printed too: they are what the agent is about to change, and the whole reason the
-    relay sends them as data rather than only inside a sentence.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "branch": "wip/def456", "status": "merge_task", "advanced": False,
-        "commit": "aaa111", "previous_commit": "aaa111", "main_commit": "bbb222",
-        "task_id": "T-42", "merge_ref": "refs/integrate/T-42", "merge_commit": "bbb222",
-        "files": ["shared.txt"],
-        "message": "main and wip/def456 both changed shared.txt, so they cannot be merged "
-                   "automatically. Task T-42 will resolve it; watch it with "
-                   "`grid task follow T-42`."}))
-
-    assert cli.main(["project", "integrate", "P1"]) == 0
-
-    out = capsys.readouterr().out
-    assert "T-42" in out, out
-    assert "shared.txt" in out, out
-    assert "grid task follow" in out, out
-
-
-def test_project_integrate_will_not_report_a_merge_task_it_was_not_given_the_id_of(
-        monkeypatch, tmp_path):
-    """The same guard the other statuses have, keyed on the field that MATTERS for this one.
-
-    A merge-task reply's whole payload is the task id: without it there is nothing to watch, nothing
-    to wait on, and nothing to say. Printing a success line anyway is how promote once reported work
-    as landed for a body a proxy had stripped.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "branch": "wip/def456", "status": "merge_task", "advanced": False,
-        "files": ["shared.txt"]}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "integrate", "P1"])
-
-    assert "P1" in str(caught.value), caught.value
-
-
-def test_project_integrate_help_discloses_what_a_conflict_costs():
-    """A conflict is no longer refused, but it is not free either: it spends an agent run and holds
-    the member's one task slot while it does. The help is where somebody meets that before they need
-    it — and it is also where the limit lives, since the relay proves the merge HAPPENED and cannot
-    prove it is right."""
-    parser = cli.build_parser()
-    integrate = parser._subparsers._group_actions[0].choices["project"] \
-        ._subparsers._group_actions[0].choices["integrate"]
-    help_text = integrate.format_help().lower()
-
-    assert "conflict" in help_text, "the help does not mention conflicts at all"
-    # The OVERTURNED rule, named exactly rather than by the bare word "refused" — which is still
-    # true of the OTHER rule on this page, that integrating is refused while you have a task in
-    # flight. A user acting on the old claim would go and resolve by hand what the grid is already
-    # resolving for them.
-    assert "conflict is refused" not in help_text, (
-        "the help still says a conflict is refused; since issue 15 it queues a merge task")
-    assert "merge task" in help_text, "the help does not say a conflict becomes a merge task"
-
-
 def test_project_commit_posts_files_and_a_message_to_the_commit_route(
         monkeypatch, tmp_path, capsys):
-    """ADR 0033 D-j end to end through `cli.main`.
+    """ADR 0033 D-j end to end through `cli.main`, re-keyed by ADR 0034 D-e (issue 41).
 
     `grid project commit` is the answer to "the agent got it 90% right, let me fix the last line" —
     the most frequent action of a working day, which the design otherwise answers with a paid agent
-    run. Like integrate and for the same forced reason, it names **no member key**: it commits onto
-    the caller's own WIP branch.
+    run.
+
+    ⚠️ **It names a CONVERSATION, and the ROUTE MOVED with it** — `POST /relay/v1/tasks/{id}/commit`,
+    not `POST /relay/v1/projects/{id}/commit`. A branch belongs to a conversation now, so the
+    request has to name one; and it is a new PATH rather than a new key on the old route precisely
+    so a relay that predates this answers a bare 404 instead of a cheerful 200 for a commit that
+    landed on a different branch. The path is asserted byte-for-byte here for that reason.
     """
     import base64
 
@@ -24479,21 +24155,25 @@ def test_project_commit_posts_files_and_a_message_to_the_commit_route(
         seen["method"], seen["path"] = request.method, request.url.path
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
             "commit": "a" * 40, "previous_commit": "b" * 40,
             "files": ["fix.py"], "deletes": []})
 
     _mock_relay(monkeypatch, handler)
-    rc = cli.main(["project", "commit", "P1", "-m", "fix the last line",
+    rc = cli.main(["project", "commit", "c-7", "-m", "fix the last line",
                    "--file", f"{source}:src/fix.py"])
 
     assert rc == 0
-    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/commit")
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/c-7/commit")
     assert seen["body"]["message"] == "fix the last line"
     assert seen["body"]["files"] == [
         {"path": "src/fix.py", "content_b64": base64.b64encode(b"x = 2\n").decode()}]
     out = capsys.readouterr().out
-    assert "wip/def456" in out and "a" * 40 in out
+    assert "wip/c-7" in out and "a" * 40 in out
+    # ⚠️ And it names NO next step, which is the feature (ADR 0034 D-d). This used to end by telling
+    # the member to run `grid project promote`; the grid applies the commit to the project itself
+    # now, so a trailer naming a deleted command would be the one line here nobody can act on.
+    assert "promote" not in out, out
 
 
 def test_project_commit_sends_the_executable_bit_only_to_set_it_never_to_clear_it(
@@ -24516,12 +24196,12 @@ def test_project_commit_sends_the_executable_bit_only_to_set_it_never_to_clear_i
     def handler(request):
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
             "commit": "a" * 40, "previous_commit": "b" * 40,
             "files": ["build.sh", "notes.md"], "deletes": []})
 
     _mock_relay(monkeypatch, handler)
-    rc = cli.main(["project", "commit", "P1", "-m", "m",
+    rc = cli.main(["project", "commit", "c-7", "-m", "m",
                    "--file", str(script), "--file", str(plain)])
 
     assert rc == 0
@@ -24579,12 +24259,12 @@ def test_project_commit_dir_preserves_executable_bits(monkeypatch, tmp_path):
     def handler(request):
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
             "commit": "a" * 40, "previous_commit": "b" * 40,
             "files": ["scripts/build.sh", "scripts/notes.md"], "deletes": []})
 
     _mock_relay(monkeypatch, handler)
-    assert cli.main(["project", "commit", "P1", "-m", "m", "--dir", str(folder)]) == 0
+    assert cli.main(["project", "commit", "c-7", "-m", "m", "--dir", str(folder)]) == 0
 
     by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
     assert by_path["scripts/build.sh"]["executable"] is True
@@ -24630,19 +24310,19 @@ def test_project_commit_posts_deletes_and_refuses_an_empty_request_locally(
     def handler(request):
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "def456", "branch": "wip/def456",
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
             "commit": "a" * 40, "previous_commit": "b" * 40,
             "files": [], "deletes": ["dead.py"]})
 
     _mock_relay(monkeypatch, handler)
-    assert cli.main(["project", "commit", "P1", "-m", "drop it", "--delete", "dead.py"]) == 0
+    assert cli.main(["project", "commit", "c-7", "-m", "drop it", "--delete", "dead.py"]) == 0
     assert seen["body"]["deletes"] == ["dead.py"]
     assert "files" not in seen["body"], "an empty files list was sent where the key should be absent"
     assert "dead.py" in capsys.readouterr().out
 
     seen.clear()
     with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "commit", "P1", "-m", "nothing"])
+        cli.main(["project", "commit", "c-7", "-m", "nothing"])
     assert "--file" in str(caught.value) and "--delete" in str(caught.value)
     assert seen == {}, "an empty commit was sent to the relay anyway"
 
@@ -24650,7 +24330,17 @@ def test_project_commit_posts_deletes_and_refuses_an_empty_request_locally(
 def test_project_commit_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
     """A bare framework 404 means the route is not there, and "Not Found" reads as "the thing I
     asked for is gone". Keyed on the bare body, so a REAL 404 from a relay that has the route still
-    shows its own words."""
+    shows its own words.
+
+    ⚠️ **This is the whole reason issue 41 MOVED the route rather than adding a key to the old one**
+    (ADR 0034 D-e). `POST /projects/{id}/commit` still exists on an un-upgraded relay, so a
+    conversation id posted there would have been answered 200 for a commit that landed on the
+    member's branch — a branch nothing in this release reads. A new PATH makes that skew loud.
+
+    Its sentence is `relay._OLD_RELAY_NO_COMMIT`, deliberately NOT `_OLD_RELAY`: that one says the
+    relay has no projects, which is plainly false of one still serving `grid project status`, and
+    would send somebody to chase a working feature (`_OLD_RELAY_NO_CANCEL`'s reasoning).
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
     source = tmp_path / "a.txt"
@@ -24659,26 +24349,38 @@ def test_project_commit_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_p
     _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
 
     with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "commit", "P1", "-m", "m", "--file", str(source)])
+        cli.main(["project", "commit", "c-7", "-m", "m", "--file", str(source)])
 
-    assert "relay" in str(caught.value).lower(), caught.value
+    message = str(caught.value)
+    assert "relay" in message.lower(), message
+    assert "conversation" in message.lower(), (
+        "the hint does not say WHAT this relay is too old for, so it reads as the generic "
+        "'no projects here' sentence for a relay that plainly has them")
+    assert "nothing was committed" in message.lower(), (
+        "a refusal for a write must say whether the write happened")
 
 
 def test_project_commit_does_not_call_a_reply_it_cannot_read_a_commit(monkeypatch, tmp_path):
-    """The same rule promote, integrate and import follow. Printing the success line by default is
-    how promote once reported work as landed for a body a proxy had stripped."""
+    """The same rule `project status`, `create` and `import` follow — the promote and integrate that
+    used to be named here went with issue 41. Printing the success line by default is how a promote
+    once reported work as landed for a body a proxy had stripped, and it matters at least as much
+    now: what happens next on that belief is the GRID applying the commit to the project.
+
+    The refusal names the CONVERSATION rather than the project, because that is the id the caller
+    typed and the only one they can retry with.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
     source = tmp_path / "a.txt"
     source.write_text("x\n")
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "branch": "wip/def456", "files": ["a.txt"]}))
+        "project_id": "P1", "branch": "wip/c-7", "files": ["a.txt"]}))
 
     with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "commit", "P1", "-m", "m", "--file", str(source)])
+        cli.main(["project", "commit", "c-7", "-m", "m", "--file", str(source)])
 
-    assert "P1" in str(caught.value), caught.value
+    assert "c-7" in str(caught.value), caught.value
 
 
 def test_project_commit_shows_the_relays_own_words_when_a_task_is_running(monkeypatch, tmp_path):
@@ -24696,7 +24398,7 @@ def test_project_commit_shows_the_relays_own_words_when_a_task_is_running(monkey
         "project_id": "P1", "task_id": "T7"}}))
 
     with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "commit", "P1", "-m", "m", "--file", str(source)])
+        cli.main(["project", "commit", "c-7", "-m", "m", "--file", str(source)])
 
     assert "T7" in str(caught.value), caught.value
 
@@ -24704,16 +24406,31 @@ def test_project_commit_shows_the_relays_own_words_when_a_task_is_running(monkey
 def test_project_commit_help_says_it_is_not_a_push_and_that_deletes_are_checked():
     """Two things a user has to meet before they need them: this does not lift the push ban, and a
     delete of a path that is not there is REFUSED — because git's own answer is to report success
-    and do nothing, which is what somebody would otherwise assume happened."""
+    and do nothing, which is what somebody would otherwise assume happened.
+
+    ⚠️ **The third claim is INVERTED by ADR 0034 D-d (issue 41), not merely reworded.** This help
+    used to have to say the command stops short of `main`, because landing the change there was a
+    separate `grid project promote` the member ran afterwards. The grid applies a commit to the
+    project itself now, so the honest disclosure is the opposite one — there is nothing to run
+    afterwards — and a help still promising a further step would send somebody to a deleted command.
+    Asserted positively so "stops short of main" cannot quietly come back.
+
+    The slot claim is re-keyed rather than dropped: the write still holds a slot, that conversation's
+    rather than the member's one task slot (ADR 0034 D-b/D-e).
+    """
     parser = cli.build_parser()
     committer = parser._subparsers._group_actions[0].choices["project"] \
         ._subparsers._group_actions[0].choices["commit"]
     help_text = committer.format_help().lower()
 
-    assert "task slot" in help_text, "the help does not say it holds your task slot"
+    assert "conversation's slot" in help_text, (
+        "the help does not say it holds that conversation's slot")
     assert "refused" in help_text and "not there" in help_text, (
         "the help does not say a delete of a missing path is refused")
-    assert "main" in help_text, "the help does not say this stops short of main"
+    assert "afterwards" in help_text and "nothing else" in help_text, (
+        "the help does not say the change reaches the project with nothing else to run")
+    assert "main" not in help_text, (
+        "the help still talks about main; since D-d the member never touches it from here")
 
 
 def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):
@@ -32475,10 +32192,20 @@ def test_task_list_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
     assert "relay" in str(caught.value).lower(), caught.value
 
 
-def test_project_status_reports_the_trunk_the_branch_and_the_distance(
+def test_project_status_reports_the_trunk_and_every_turn_in_flight(
         monkeypatch, tmp_path, capsys):
-    """The question promote's refusal used to be the only way to ask — and asking it that way was a
-    write that either released work or refused it."""
+    """"What holds my slot" was answerable before only by attempting a create and reading the 409.
+
+    ⚠️ **Five fields left the reply with the promote they were about** (ADR 0034 D-d/D-e, issue 41):
+    `branch`, `wip_commit`, `ahead`, `behind` and `can_promote`, plus `branch`/`commit` on each
+    `members[]` entry. A member has one branch per CONVERSATION now, so there was no member-level ref
+    left to name, and "may I promote" is a question with no verb behind it.
+
+    What is left is a simpler change signal, and that is the point rather than a consolation: the
+    relay applies every finished turn itself, so `main_commit` moves whenever ANYBODY's work lands —
+    one oid to watch instead of one per member. The reply below carries exactly what a relay on this
+    slice sends, so a renderer that still reached for a distance would have nothing to read.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
     seen = {}
@@ -32487,8 +32214,7 @@ def test_project_status_reports_the_trunk_the_branch_and_the_distance(
         seen["method"], seen["path"] = request.method, request.url.path
         return httpx.Response(200, json={
             "project_id": "P1", "member_key": "def456", "trunk": "main",
-            "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-            "ahead": 3, "behind": 2, "can_promote": False,
+            "main_commit": "a" * 40,
             # `active_turns` / `active_task_ids`, both LISTS since ADR 0034 D-b (issue 40): a
             # member holds one turn per conversation, so the singular keys could only ever show one
             # of them. Two here, because a payload with one is satisfied by a renderer that still
@@ -32499,8 +32225,8 @@ def test_project_status_reports_the_trunk_the_branch_and_the_distance(
                 {"id": "t-10", "state": "queued", "created_at": "2026-08-08T10:05:00Z",
                  "deadline_at": None, "provider_id": None, "attempt": 0, "max_attempts": 3},
             ],
-            "members": [{"member_key": "def456", "role": "owner", "branch": "wip/def456",
-                         "commit": "b" * 40, "active_task_ids": ["t-9", "t-10"]}],
+            "members": [{"member_key": "def456", "role": "owner",
+                         "active_task_ids": ["t-9", "t-10"]}],
             "queue": {"queued": 2, "running": 1, "oldest_queued_at": "2026-08-08T09:00:00Z"}})
 
     _mock_relay(monkeypatch, handler)
@@ -32509,8 +32235,8 @@ def test_project_status_reports_the_trunk_the_branch_and_the_distance(
     assert rc == 0
     assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/status")
     out = capsys.readouterr().out
-    assert "wip/def456" in out
-    assert "3" in out and "2" in out, "the distance is not shown"
+    # The trunk and its tip: the one oid an application watches for change since D-d.
+    assert "main" in out and "a" * 40 in out, out
     # EVERY turn in flight, by id — a person watching for a result needs to know what to wait for,
     # and since ADR 0034 D-b there may be several. A renderer that still read the singular
     # `active_task` shows neither; one that reads only the first shows `t-9` alone.
@@ -32518,6 +32244,10 @@ def test_project_status_reports_the_trunk_the_branch_and_the_distance(
         "the caller's turns in flight are missing or truncated to one")
     # And one command to watch, naming the OLDEST rather than one line per turn.
     assert "grid task follow t-9" in out
+    # ⚠️ Nothing may offer the deleted verbs. This is the assertion that would have caught a status
+    # renderer left half-migrated: `ahead`/`behind` are absent from the reply, so the old code path
+    # would print its "Nothing to compare yet" branch and advise a promote that no longer parses.
+    assert "promote" not in out and "integrate" not in out, out
 
 
 def test_project_status_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):
@@ -32531,72 +32261,6 @@ def test_project_status_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_
         cli.main(["project", "status", "P1"])
 
     assert "P1" in str(caught.value)
-
-
-def test_project_check_previews_an_integration_without_performing_one(
-        monkeypatch, tmp_path, capsys):
-    """The whole value of the command: it is a GET, and it never reaches the integrate route."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    seen = {}
-
-    def handler(request):
-        seen["method"], seen["path"] = request.method, request.url.path
-        return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "def456", "branch": "wip/def456", "trunk": "main",
-            "status": "merged", "would_conflict": False, "files": [],
-            "main_commit": "a" * 40, "source_commit": "b" * 40, "ahead": 1, "behind": 1})
-
-    _mock_relay(monkeypatch, handler)
-    rc = cli.main(["project", "check", "P1"])
-
-    assert rc == 0
-    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/integrate/preview")
-    out = capsys.readouterr().out.lower()
-    assert "merge" in out
-    # It must say nothing happened. A person reading "main was merged into wip/def456" from a
-    # preview would believe their branch had moved.
-    assert "would" in out or "nothing" in out, out
-
-
-def test_project_check_names_the_files_a_conflict_would_touch(monkeypatch, tmp_path, capsys):
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "member_key": "def456", "branch": "wip/def456", "trunk": "main",
-        "status": "merge_task", "would_conflict": True, "files": ["a.txt", "src/b.py"],
-        "main_commit": "a" * 40, "source_commit": "b" * 40, "ahead": 1, "behind": 1}))
-
-    rc = cli.main(["project", "check", "P1"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "a.txt" in out and "src/b.py" in out
-    assert "grid project integrate P1" in out, "it does not say how to act on the answer"
-
-
-def test_project_check_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "check", "P1"])
-
-    assert "P1" in str(caught.value)
-
-
-def test_project_check_help_says_it_spends_nothing():
-    """The reason to reach for it over `grid project integrate`. Somebody who does not know it is
-    free will use the one that costs a task slot and possibly an agent run."""
-    parser = cli.build_parser()
-    check = parser._subparsers._group_actions[0].choices["project"] \
-        ._subparsers._group_actions[0].choices["check"]
-    help_text = check.format_help().lower()
-
-    assert "conflict" in help_text
-    assert "slot" in help_text or "agent" in help_text, (
-        "the help does not say what checking costs compared with integrating")
 
 
 def test_task_list_passes_the_filters_and_the_cursor_through(monkeypatch, tmp_path, capsys):
@@ -32657,50 +32321,6 @@ def test_task_list_will_not_report_a_reply_it_cannot_read_as_an_empty_project(
         cli.main(["task", "list", "--project", "P1"])
 
     assert "P1" in str(caught.value)
-
-
-def test_project_status_will_not_guess_can_promote_from_its_absence(monkeypatch, tmp_path):
-    """`can_promote` is the same class of field as promote's `advanced`, and gets the same rule.
-
-    `_project_promote` refuses a reply whose `advanced` is anything but an explicit True/False,
-    because a silently-defaulted "no" is how promote once reported a release for a body a proxy had
-    stripped. This treated a missing `can_promote` as False and printed an actionable line — and
-    because the relay defines it as exactly `behind == 0`, a reply keeping `ahead`/`behind` and
-    dropping it produced a self-contradiction: "ahead=3 behind=0" followed by "Behind main, so a
-    promote would be refused."
-
-    There is no relay old enough to be a reason for leniency: `/status` is a new route, so every
-    relay that has it sends the key.
-    """
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 3, "behind": 0}))            # `can_promote` missing
-
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["project", "status", "P1"])
-
-    assert "P1" in str(caught.value)
-
-
-def test_project_status_reports_a_promotable_branch_as_promotable(monkeypatch, tmp_path, capsys):
-    """The positive control for the guard above — without it, "refuse when absent" is satisfied by
-    refusing everything."""
-    _seed_running_remote_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 3, "behind": 0, "can_promote": True,
-        "active_task": None, "members": [], "queue": {}}))
-
-    rc = cli.main(["project", "status", "P1"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "grid project promote P1 def456" in out, out
 
 
 # ---------------------------------------------------------------------------
@@ -32821,8 +32441,7 @@ def test_project_status_says_a_provider_has_withdrawn_and_when_it_returns(
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
         "providers": {"online": 2, "paused": 1, "resumes_at": "2026-08-09T11:30:00+00:00"}}))
 
@@ -32843,8 +32462,7 @@ def test_project_status_stays_quiet_about_a_fleet_that_is_all_serving(
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 3, "running": 1, "oldest_queued_at": None},
         "providers": {"online": 2, "paused": 0, "resumes_at": None}}))
 
@@ -32873,8 +32491,7 @@ def test_project_status_says_when_this_grid_does_not_serve_you(monkeypatch, tmp_
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
-        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 2, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
         "providers": {"online": 2, "paused": 0, "resumes_at": None, "serves_you": False}}))
 
@@ -32895,8 +32512,7 @@ def test_project_status_says_nothing_about_domains_when_the_relay_omits_the_key(
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
-        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
         "providers": {"online": 2, "paused": 0, "resumes_at": None}}))
 
@@ -32923,8 +32539,7 @@ def test_project_status_says_you_are_unserved_even_when_the_queue_is_EMPTY(
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
-        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
         "providers": {"online": 2, "paused": 0, "resumes_at": None, "serves_you": False}}))
 
@@ -32948,8 +32563,7 @@ def test_project_status_with_an_empty_queue_says_nothing_about_a_fleet_that_serv
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
-        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
         "providers": {"online": 2, "paused": 1, "resumes_at": "2026-08-09T11:30:00+00:00",
                       "serves_you": True}}))
@@ -32975,8 +32589,7 @@ def test_project_status_says_you_are_unserved_even_when_the_COUNTS_are_unreadabl
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
-        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": queued, "running": 0, "oldest_queued_at": None},
         "providers": {"online": None, "paused": "many", "serves_you": False}}))
 
@@ -32994,8 +32607,7 @@ def test_project_status_says_when_a_queue_has_nobody_to_serve_it(monkeypatch, tm
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": None,
-        "ahead": None, "behind": None, "can_promote": False, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 2, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
         "providers": {"online": 0, "paused": 0, "resumes_at": None}}))
 
@@ -33007,20 +32619,26 @@ def test_project_status_says_when_a_queue_has_nobody_to_serve_it(monkeypatch, tm
 def test_project_status_from_a_relay_too_old_to_report_providers_still_works(
         monkeypatch, tmp_path, capsys):
     """*Absent ⇒ nothing said.* The whole block is new in 19b, so a relay that predates it sends no
-    `providers` key at all and the rest of the status must render exactly as it did."""
+    `providers` key at all and the rest of the status must render exactly as it did.
+
+    The positive control moved with issue 41: it used to be the member's WIP branch line, which is
+    one of the five fields ADR 0034 D-d took out of this reply. It is the TRUNK now — still a line
+    the renderer only reaches by having read the reply, which is all this control was ever for.
+    Without one, "says nothing about providers" would be satisfied by a status that printed nothing
+    at all.
+    """
     _seed_running_remote_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 1, "running": 0, "oldest_queued_at": None}}))
 
     rc = cli.main(["project", "status", "P1"])
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "wip/def456" in out
+    assert "main=" + "a" * 40 in out, out
     assert "paused" not in out.lower() and "no provider" not in out.lower()
 
 
@@ -33045,8 +32663,7 @@ def test_project_status_says_nothing_about_a_provider_block_it_cannot_read(
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
         "providers": {"paused": 2}}))          # no `online` at all
 
@@ -33086,8 +32703,7 @@ def test_project_status_never_renders_a_provider_count_that_is_not_one(
     state.set_mode("remote")
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "def456", "trunk": "main",
-        "main_commit": "a" * 40, "branch": "wip/def456", "wip_commit": "b" * 40,
-        "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
         "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
         "providers": providers}))
 
@@ -33548,13 +33164,18 @@ _MEMBER_KEY = "abc123abc123abc123abc123abc1231f"
 
 
 def _relay_bare_repo(tmp_path, *, member_key=_MEMBER_KEY, name="relay.git", with_wip=True):
-    """A bare repository shaped like the relay's: a `main`, and the member's `wip/<key>` past it.
+    """A bare repository shaped like the relay's: a `main`, and a member's `wip/<key>` past it.
 
-    ⚠️ `with_wip=False` is the state of every project nobody has run a task in yet, and it is the
-    DEFAULT state, not an edge case: the relay creates a member's WIP branch when one of their tasks
-    settles or when they commit — never when a project is created or joined. This fixture seeded the
-    branch unconditionally at first, so no unit test could see it, and `--track origin/<branch>`
-    failed against the real relay at the first clone. Found by `tests/e2e_cross_repo/`.
+    The seeded WIP branch earns its keep as a NEGATIVE control since ADR 0034 D-d (issue 41): a
+    clone follows the trunk now, so `test_project_clone_checks_out_the_trunk` asserts the branch's
+    file is absent, which only means something while the branch is really there and really ahead.
+
+    ⚠️ `with_wip=False` no longer has a caller. It used to be the state of every project nobody had
+    run a task in — the relay created a member's WIP branch when one of their tasks settled, never
+    when a project was created — and the clone had to cut the branch from the trunk itself, which is
+    a path that failed against the real relay until `tests/e2e_cross_repo/` found it. Since the CLI
+    asks for the trunk by name that arm is unreachable from this side; the knob is kept because
+    `clone_project` still has the code and nothing here should quietly delete its only way in.
 
     Real git, because `clone_project` runs real git. A local path is a perfectly good git "URL", so
     the whole init/config/fetch/checkout path runs with no HTTP server in the way — what HTTP adds
@@ -33593,26 +33214,37 @@ def _relay_bare_repo(tmp_path, *, member_key=_MEMBER_KEY, name="relay.git", with
 
 
 def _status_reply(member_key=_MEMBER_KEY, **over):
+    """The reply a relay on ADR 0034 issue 41 sends.
+
+    ⚠️ `branch`, `wip_commit`, `ahead`, `behind` and `can_promote` are GONE (D-d/D-e). They are not
+    merely unread here — leaving them in would let a clone that still reached for `branch` pass
+    against a payload no relay produces, which is the whole failure mode `_status_reply` sits in
+    front of.
+    """
     body = {"project_id": "P1", "member_key": member_key, "trunk": "main",
-            "branch": f"wip/{member_key}", "main_commit": "a" * 40, "wip_commit": "b" * 40,
-            "ahead": 1, "behind": 0, "can_promote": True, "active_task": None, "members": [],
+            "main_commit": "a" * 40, "active_turns": [], "members": [],
             "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
             "providers": {"online": 1, "paused": 0, "resumes_at": None}}
     body.update(over)
     return body
 
 
-def test_project_clone_checks_out_the_members_own_wip_branch(monkeypatch, tmp_path, capsys):
-    """A clone lands on the member's own work, not on the trunk.
+def test_project_clone_checks_out_the_trunk(monkeypatch, tmp_path, capsys):
+    """A clone lands on the TRUNK, which since ADR 0034 D-d is everybody's work.
 
-    `main` moves only on a promote (ADR 0033 D-b), so a project whose members have not released yet
-    has a trunk holding none of their task results. Cloning to `main` would show an empty-looking
-    project to the person who just watched a task finish. Both refs are fetched; only the checkout
-    differs.
+    ⚠️ **This inverts what it used to assert, and the reason is the whole of issue 41.** Under
+    ADR 0033 `main` moved only on a promote, so a project whose members had not released yet had a
+    trunk holding none of their task results — cloning to `main` would have shown an empty-looking
+    project to somebody who had just watched a task finish, so the clone followed the member's own
+    `wip/<key>`. The relay applies every finished turn to the trunk itself now, so that reasoning
+    is gone with the promote: a per-member branch would be a stale copy of PART of the project, and
+    there is no longer one branch per member to copy from anyway — there is one per conversation.
+
+    The status reply is where the branch name came from, so the CLI reads `trunk` and nothing else.
     """
     _seed_credential_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
-    bare, _trunk_tip, wip_tip = _relay_bare_repo(tmp_path)
+    bare, trunk_tip, _wip_tip = _relay_bare_repo(tmp_path)
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
     monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
     dest = tmp_path / "clone"
@@ -33620,55 +33252,50 @@ def test_project_clone_checks_out_the_members_own_wip_branch(monkeypatch, tmp_pa
     rc = cli.main(["project", "clone", "P1", str(dest)])
 
     assert rc == 0, capsys.readouterr().out
-    head = subprocess.run(["git", "-C", str(dest), "rev-parse", "--abbrev-ref", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
-    assert head == f"wip/{_MEMBER_KEY}"
-    assert (dest / "mine.txt").read_text() == "the member's own work\n"
-    # The trunk came too — integrating and promoting both need it locally.
-    trunk = subprocess.run(["git", "-C", str(dest), "rev-parse", "refs/remotes/origin/main"],
-                           capture_output=True, text=True)
-    assert trunk.returncode == 0, "main was not fetched"
-    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
-                          text=True).stdout.strip() == wip_tip
-
-
-def test_project_clone_works_for_a_member_whose_branch_the_relay_has_not_made_yet(
-        monkeypatch, tmp_path, capsys):
-    """The state of every member who has not run a task, which is everybody on day one.
-
-    A WIP branch is written by the RELAY — when a task settles, or on `grid project commit`. It does
-    not exist because a project was created or because somebody joined it. So `--track
-    origin/wip/<key>` fails outright ("not a commit and a branch cannot be created from it") for the
-    most ordinary case there is.
-
-    This was invisible to the unit suite until the cross-repo E2E hit it, because the fixture here
-    always seeded the branch. The clone now cuts the member's branch from the trunk, configures the
-    upstream by hand (`--set-upstream-to` needs the remote ref to exist, which is the whole problem),
-    and SAYS so — a clone whose `git log` shows only somebody else's commits needs explaining.
-    """
-    _seed_credential_grid(monkeypatch, tmp_path)
-    state.set_mode("remote")
-    bare, trunk_tip, wip_tip = _relay_bare_repo(tmp_path, with_wip=False)
-    assert wip_tip is None
-    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(wip_commit=None)))
-    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
-    dest = tmp_path / "clone"
-
-    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, capsys.readouterr().out
 
     def git(*args):
         return subprocess.run(["git", "-C", str(dest), *args],
                               capture_output=True, text=True).stdout.strip()
 
-    assert git("rev-parse", "--abbrev-ref", "HEAD") == f"wip/{_MEMBER_KEY}"
-    assert git("rev-parse", "HEAD") == trunk_tip, "the branch should start at the trunk"
-    # The upstream is configured even though the remote ref does not exist yet, so the member's
-    # first `git pull` after their first task lands just works.
-    assert git("config", "--local", "--get", f"branch.wip/{_MEMBER_KEY}.remote") == "origin"
-    assert git("config", "--local", "--get",
-               f"branch.wip/{_MEMBER_KEY}.merge") == f"refs/heads/wip/{_MEMBER_KEY}"
-    out = capsys.readouterr().out
-    assert "nothing on it yet" in out, "a clone showing only somebody else's history needs a word"
+    assert git("rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert git("rev-parse", "HEAD") == trunk_tip
+    assert (dest / "trunk.txt").read_text() == "on main\n"
+    # ⚠️ And NOT the member's branch, even though the fixture seeded one and it is further along.
+    # Without this the assertions above are satisfied by a clone that checked out `main` because the
+    # WIP branch happened to be missing, which is a different bug wearing the same output.
+    assert not (dest / "mine.txt").exists(), (
+        "the clone followed the member's WIP branch; since D-d it follows the trunk")
+    # `git pull` has an upstream without the member configuring one.
+    assert git("config", "--local", "--get", "branch.main.remote") == "origin"
+    assert git("config", "--local", "--get", "branch.main.merge") == "refs/heads/main"
+
+
+def test_project_clone_refuses_a_project_whose_trunk_the_relay_did_not_name(
+        monkeypatch, tmp_path):
+    """A reply this command cannot read is not a project — the rule `project status`, `commit` and
+    `import` all follow.
+
+    ⚠️ **Keyed on `trunk` since issue 41**, where it used to be keyed on `branch`. That is the right
+    replacement rather than the nearest one: the trunk is what the clone is now OF, and every relay
+    answering this route names it. Guessing `main` here instead would put the relay's ref-naming
+    rule in a second place, free to disagree with it — the reason the old code refused to guess
+    `wip/<key>` either.
+
+    It must not reach git at all: `git_remote_url` is left unpatched, so a clone that got that far
+    would fail on a URL rather than on the missing key, and the message would blame the network.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reply = _status_reply()
+    del reply["trunk"]
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(tmp_path / "clone")])
+
+    message = str(caught.value)
+    assert "P1" in message and "trunk" in message.lower(), message
+    assert not (tmp_path / "clone").exists(), "a directory was made for a reply we could not read"
 
 
 def test_project_clone_refuses_a_project_that_has_no_trunk_either(monkeypatch, tmp_path):
@@ -33878,8 +33505,13 @@ def test_project_clone_says_push_is_refused_and_what_to_do_instead(monkeypatch, 
 
     out = capsys.readouterr().out
     assert "git push" in out and "refused" in out
-    assert "grid project commit P1" in out
-    assert "grid project integrate P1" in out
+    # The two ways work leaves this clone since issue 41. `grid project integrate` was the third and
+    # is DELETED (ADR 0034 D-d) — there is no bringing the trunk into your branch when the grid puts
+    # every finished turn on the trunk itself — so naming it here would be advice for a command that
+    # no longer parses.
+    assert "grid task create --project P1" in out, out
+    assert "grid project commit <conversation-id>" in out, out
+    assert "integrate" not in out, out
 
 
 def test_project_clone_refuses_to_reset_a_branch_over_somebody_elses_directory(
@@ -33953,9 +33585,8 @@ def test_project_clone_updates_a_clone_it_already_made_but_not_another_projects(
     assert "holds project P1" in str(caught.value), str(caught.value)
 
 
-@pytest.mark.parametrize("with_wip", [True, False], ids=["branch-exists", "started-from-trunk"])
 def test_project_clone_refuses_to_re_clone_over_local_commits_it_would_discard(
-        monkeypatch, tmp_path, capsys, with_wip):
+        monkeypatch, tmp_path, capsys):
     """Re-cloning must never throw away work the grid has never seen.
 
     `git checkout -B` resets a branch to the given commit, and its only safety net is a DIRTY
@@ -33965,23 +33596,28 @@ def test_project_clone_refuses_to_re_clone_over_local_commits_it_would_discard(
     That is not a misuse case, it is the documented one. `git push` is refused by design, so a local
     commit is the only git-native way a member checkpoints between `grid project commit` calls, and
     `docs/cli.md` invites resolving a conflict by hand in the clone. Re-cloning is meanwhile how a
-    member picks up somebody else's promote. The two together are a data-loss path through the
+    member picks up everybody else's landed turns. The two together are a data-loss path through the
     happy flow.
 
     `_refuse_unusable_destination` cannot catch this: it asks whether the directory is ours, which
     it is. The check has to compare the local branch against what is about to be fetched.
+
+    ⚠️ **The `with_wip` parametrization is GONE with issue 41, and that is a real narrowing worth
+    stating rather than a tidy-up.** It used to run twice — the member's branch present, and absent
+    so the checkout started from the trunk — because the CLI asked to check out `wip/<key>` and
+    `clone_project` had to cope with the ref not existing. The CLI passes `branch == trunk` now
+    (ADR 0034 D-d), so the trunk is the only ref either arm can be about and both cases collapsed
+    into this one. `clone_project`'s `not has_wip` arm is no longer reachable from the CLI.
     """
     _seed_credential_grid(monkeypatch, tmp_path)
     state.set_mode("remote")
-    bare, _trunk, _wip = _relay_bare_repo(tmp_path, with_wip=with_wip)
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
     monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
     dest = tmp_path / "clone"
     assert cli.main(["project", "clone", "P1", str(dest)]) == 0
-    branch = f"wip/{_MEMBER_KEY}"
-    # What the checkout would have been reset TO — the member's own branch once the relay has made
-    # one, the trunk before that.
-    git_target = f"origin/{branch}" if with_wip else "origin/main"
+    branch = "main"
+    git_target = "origin/main"
 
     def git(*args):
         return subprocess.run(["git", "-C", str(dest), *args], capture_output=True,
@@ -34006,7 +33642,13 @@ def test_project_clone_refuses_to_re_clone_over_local_commits_it_would_discard(
     # And the member is told how to LOOK at what they have and how to LAND it — a refusal that only
     # says no leaves them with work they cannot push and no named way forward.
     assert f"log {git_target}..{branch}" in message, message
-    assert "grid project commit P1" in message, message
+    # ⚠️ The way to land it must name a CONVERSATION (ADR 0034 D-e, issue 41). `grid project commit`
+    # takes a conversation id since this slice, so the older `grid project commit <project-id>` form
+    # still PARSES and is the worse failure for it: the project id lands in the `conversation_id`
+    # slot and the member's files are posted to a conversation that does not exist. `project_refresh`
+    # already says `<conversation-id>` here; this hint comes from `remote/project_clone.py`, which
+    # was not re-keyed with it.
+    assert "grid project commit <conversation-id>" in message, message
     assert "branch my-work" in message, message
 
 
@@ -34083,22 +33725,28 @@ def _a_clone(monkeypatch, tmp_path, *, with_wip=True):
 
 def test_project_refresh_reports_the_commits_the_grid_has_and_the_clone_does_not(
         monkeypatch, tmp_path, capsys):
-    """The whole point: a task landed, and the clone is told — in oids it can act on.
+    """The whole point: a turn landed, and the clone is told — in oids it can act on.
 
-    `grid project integrate` and `grid task get` both print commit ids, so a member comparing "what
-    the grid said happened" with "what my clone holds" is comparing ids. A bare `behind 2` cannot be
+    `grid project status` and `grid task get` both print commit ids, so a member comparing "what the
+    grid said happened" with "what my clone holds" is comparing ids. A bare `behind 2` cannot be
     checked against anything.
+
+    ⚠️ **The ref that moves is the TRUNK since ADR 0034 D-d (issue 41).** The grid applies every
+    finished turn to `main` itself, and a clone follows `main`, so "a turn landed" is a commit on the
+    trunk rather than on the member's own `wip/<key>` — which is what this used to push. Moving the
+    old ref here would leave the clone correctly reporting that nothing had changed, and the test
+    would be measuring the fixture rather than the command.
     """
     dest, bare = _a_clone(monkeypatch, tmp_path)
     before = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
     git = _grid_side_git(tmp_path)
-    git("checkout", "--quiet", f"wip/{_MEMBER_KEY}")
+    git("checkout", "--quiet", "main")
     (tmp_path / "relay-seed" / "landed.py").write_text("what the agent wrote\n")
     git("add", "-A")
-    git("commit", "--quiet", "-m", "a task landed")
+    git("commit", "--quiet", "-m", "a turn landed")
     after = git("rev-parse", "HEAD").strip()
-    git("push", "--quiet", str(bare), f"wip/{_MEMBER_KEY}")
+    git("push", "--quiet", str(bare), "main")
     capsys.readouterr()
 
     rc = cli.main(["project", "refresh", "P1", str(dest)])
@@ -34113,7 +33761,7 @@ def test_project_refresh_reports_the_commits_the_grid_has_and_the_clone_does_not
     assert subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
                           text=True).stdout.strip() == before
     # And it names the one command that lands it, which `git status` alone does not.
-    assert f"git merge --ff-only origin/wip/{_MEMBER_KEY}" in out, out
+    assert "git merge --ff-only origin/main" in out, out
     # The ORDINARY labelling, asserted here because the only other test of it is the rare
     # second-remote case. Without this, inverting that comparison would put a false "tracks a remote
     # this command does not fetch" caveat on every refresh anyone ever runs, and nothing would fail.
@@ -34170,7 +33818,9 @@ def test_project_refresh_with_local_commits_says_so_and_never_suggests_re_clonin
     assert rc == 0, out
     assert tip[:12] in out, out
     assert "up to date" not in out.lower(), f"a local commit was reported as being in step:\n{out}"
-    assert "grid project commit P1" in out, out
+    # The way to land it names a CONVERSATION since issue 41 (ADR 0034 D-e), not the project: the
+    # project id in that slot would parse and post the files to a conversation nobody has.
+    assert "grid project commit <conversation-id>" in out, out
     assert "grid project clone" not in out, f"re-cloning would discard exactly this work:\n{out}"
 
 
@@ -34181,22 +33831,26 @@ def test_project_refresh_on_a_diverged_branch_offers_no_fast_forward_and_names_t
     `git merge --ff-only` FAILS here, and `git pull` "works" by making a merge commit the member can
     never push — a member cannot push at all. So this state must not print the ff line.
 
-    It can name the cause, because there is only one on the grid's side: every other relay write to
-    a WIP branch produces a descendant — a task settling fast-forwards it, all three integration
-    tiers move it forward, `grid project commit` adds to it. `grid project wip reset` is the only
-    one that can move it anywhere else.
+    It can name the cause, because there is only one on the grid's side: every other relay write
+    produces a descendant — a turn settling fast-forwards the branch it lands on, the grid's apply
+    advances the trunk, `grid project commit` adds to it. `grid project wip reset` is the only one
+    that can move a ref anywhere else, and ADR 0034 D-m keeps it for exactly that reason while
+    deleting promote and integrate around it.
+
+    ⚠️ The ref this rewinds is the TRUNK, because a clone follows the trunk since D-d (issue 41).
+    The cause named in the advice is still `wip reset` — a reset of a conversation's branch is what
+    the grid's own apply then carries onto `main`, so it remains the one relay write that can put
+    the grid's copy somewhere the member's history does not reach.
     """
     dest, bare = _a_clone(monkeypatch, tmp_path)
     git = _grid_side_git(tmp_path)
-    # What a `grid project wip reset` looks like from the clone's side: the branch it was cut from
-    # is gone, and the grid has grown a different history in its place.
+    # What that looks like from the clone's side: the commit it was sitting on is gone, and the grid
+    # has grown a different history in its place.
     git("checkout", "--quiet", "main")
-    git("branch", "--quiet", "-f", f"wip/{_MEMBER_KEY}", "main")
-    git("checkout", "--quiet", f"wip/{_MEMBER_KEY}")
     (tmp_path / "relay-seed" / "elsewhere.py").write_text("a different history\n")
     git("add", "-A")
-    git("commit", "--quiet", "-m", "after the reset")
-    git("push", "--quiet", "--force", str(bare), f"wip/{_MEMBER_KEY}")
+    git("commit", "--quiet", "--amend", "-m", "after the reset")
+    git("push", "--quiet", "--force", str(bare), "main")
     _commit_locally(dest)
     capsys.readouterr()
 
@@ -34208,49 +33862,31 @@ def test_project_refresh_on_a_diverged_branch_offers_no_fast_forward_and_names_t
     assert "git pull" not in out, f"a pull here makes a merge commit that can never be pushed:\n{out}"
     assert "wip reset" in out, out
     # Look at it, and keep it safe — the same two ways out `grid project clone`'s refusal offers.
-    assert f"log --left-right --oneline wip/{_MEMBER_KEY}...origin/wip/{_MEMBER_KEY}" in out, out
+    assert "log --left-right --oneline main...origin/main" in out, out
     assert "branch my-work" in out, out
-
-
-def test_project_refresh_before_the_members_first_task_has_landed(monkeypatch, tmp_path, capsys):
-    """The DEFAULT state of everybody on day one, not an edge case.
-
-    The relay makes a member's WIP branch when one of their tasks settles or they commit — never
-    when the project is created or joined. So the clone has the branch locally, cut from the trunk,
-    with an upstream configured by hand that points at a ref which does not exist yet. Every count
-    here is a comparison against nothing, and reporting `0/0` would say "in step with the grid",
-    which is the one thing that is not true.
-
-    What this deliberately does NOT assert is a stated CAUSE. The identical state is reached by a
-    member standing on a `task/<id>` the relay has collected, where "not made yet" would be false —
-    see `test_project_refresh_on_a_collected_task_branch_does_not_claim_it_is_yet_to_appear`. An
-    earlier version of this test pinned that wording, which is how the false sentence survived.
-    """
-    dest, _bare = _a_clone(monkeypatch, tmp_path, with_wip=False)
-    capsys.readouterr()
-
-    rc = cli.main(["project", "refresh", "P1", str(dest)])
-
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "up to date" not in out.lower(), f"compared against a branch that is not there:\n{out}"
-    assert "git merge" not in out, out
-    assert f"does not have wip/{_MEMBER_KEY}" in out, out
 
 
 def test_project_refresh_on_a_collected_task_branch_does_not_claim_it_is_yet_to_appear(
         monkeypatch, tmp_path, capsys):
-    """"Not on the grid" has two causes, and only one of them is "not made yet".
+    """A branch whose upstream ref is not on the grid — reported as such, with no cause invented.
 
     Reachable straight through advice this CLI gives: `grid task fetch` refuses inside a clone and
     tells the member to check `task/<id>` out, and the relay's retention sweep later collects that
     branch. The member is then standing on a branch whose upstream is configured and whose ref is
-    gone — the same shape as a WIP branch the relay has not created yet, and the opposite history.
+    gone. Every count here is a comparison against nothing, and reporting `0/0` would say "in step
+    with the grid", which is the one thing that is not true.
 
     Telling somebody their finished task's branch "appears when your first task lands" is not a
     clumsy sentence, it is a false one. The fix is not to guess which cause it is from the ref's
     NAME — that would put the relay's naming rule on this side of the wire — but to stop claiming
     a cause the command cannot see.
+
+    ⚠️ **This absorbed `test_project_refresh_before_the_members_first_task_has_landed`, which issue
+    41 deleted.** That test reached the same state the other way round — a clone of a project whose
+    member had no WIP branch yet — and a clone follows the TRUNK now (ADR 0034 D-d), which exists
+    from the moment a project has one. There is no longer a first-task state for a clone to be in.
+    Its two assertions moved here rather than being dropped, so the coverage is unchanged: the
+    absence must not read as "up to date", and it must not offer a merge that would fail.
     """
     dest, bare = _a_clone(monkeypatch, tmp_path)
     git = _grid_side_git(tmp_path)
@@ -34270,6 +33906,10 @@ def test_project_refresh_on_a_collected_task_branch_does_not_claim_it_is_yet_to_
     assert "task/T1" in out, out
     assert "first task" not in out.lower(), f"this branch is not one that has yet to appear:\n{out}"
     assert "up to date" not in out.lower(), out
+    # Inherited from the deleted first-task test: the report has to SAY the grid does not have it,
+    # and must not offer a merge against a ref that is not there.
+    assert "does not have task/T1" in out, out
+    assert "git merge" not in out, out
 
 
 def test_project_refresh_says_so_when_the_branch_tracks_a_remote_it_did_not_fetch(
@@ -34285,7 +33925,7 @@ def test_project_refresh_says_so_when_the_branch_tracks_a_remote_it_did_not_fetc
     presenting it as news from the grid. It is fetching that is refused here, not reporting.
     """
     dest, _bare = _a_clone(monkeypatch, tmp_path)
-    branch = f"wip/{_MEMBER_KEY}"
+    branch = "main"  # what a clone stands on since ADR 0034 D-d (issue 41)
     for args in (["remote", "add", "backup", str(tmp_path / "relay.git")],
                  ["fetch", "--quiet", "backup"],
                  ["config", "branch." + branch + ".remote", "backup"]):
@@ -34436,11 +34076,17 @@ def test_project_refresh_counts_the_other_refs_that_moved_and_the_ones_collected
         monkeypatch, tmp_path, capsys):
     """The grid's refs churn under a clone, and silence about it is the wrong report.
 
-    Task branches accumulate in a clone with every task, and the relay's retention sweep collects
-    them on its side — so without `--prune` a clone keeps `origin/task/<id>` refs for tasks that no
+    Task branches accumulate in a clone with every turn, and the relay's retention sweep collects
+    them on its side — so without `--prune` a clone keeps `origin/task/<id>` refs for turns that no
     longer exist, and every later listing is wrong. They are COUNTED and never interpreted: reading
     `task/…` as "a finished task" would put the relay's ref-naming rule on this side of the wire,
     where it would be free to disagree with it.
+
+    ⚠️ **The ref that stands in for "another one moved" had to change with issue 41.** It used to be
+    the TRUNK — the clone sat on `wip/<key>`, so a promote moving `main` was news about a ref the
+    member was not on. A clone follows the trunk since ADR 0034 D-d, so `main` moving is now the
+    branch's OWN report and counts as no other ref at all: the assertion below read `1 other ref
+    updated` and got `0`. A second task branch is used instead, which is what actually churns here.
     """
     dest, bare = _a_clone(monkeypatch, tmp_path)
     git = _grid_side_git(tmp_path)
@@ -34451,11 +34097,11 @@ def test_project_refresh_counts_the_other_refs_that_moved_and_the_ones_collected
     assert subprocess.run(["git", "-C", str(dest), "rev-parse", "--verify", "--quiet",
                            "refs/remotes/origin/task/T1"], capture_output=True).returncode == 0
 
-    # The relay collected the finished task's branch, and somebody promoted, so the trunk moved.
+    # The relay collected the first turn's branch, and a second turn moved its own.
     git("push", "--quiet", str(bare), "--delete", "task/T1")
-    git("checkout", "--quiet", "main")
-    git("commit", "--quiet", "--allow-empty", "-m", "a promote")
-    git("push", "--quiet", str(bare), "main")
+    git("checkout", "--quiet", "-b", "task/T2", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "a second turn")
+    git("push", "--quiet", str(bare), "task/T2")
     capsys.readouterr()
 
     rc = cli.main(["project", "refresh", "P1", str(dest)])
@@ -34474,18 +34120,19 @@ def test_project_refresh_json_names_the_state_and_carries_full_oids(monkeypatch,
 
     Three of the seven states cannot be expressed as a pair of counts at all, so a caller deriving
     "am I in step" from `ahead == behind == 0` would read `no_upstream` and `detached` as up to
-    date. The relay makes the same choice with `can_promote` rather than letting a client derive it
-    from `behind`.
+    date.
 
     The oids are FULL here even though the printed ones are shortened: this is the half something
-    compares against `grid task get`'s `base_commit` or integrate's `commit`, and those are full.
+    compares against `grid task get`'s `base_commit` or `grid project status`'s `main_commit`, and
+    those are full. (The integrate this used to name went with issue 41; the trunk oid on `status`
+    is the comparison that replaces it, and it is the SAME ref this clone follows since D-d.)
     """
     dest, bare = _a_clone(monkeypatch, tmp_path)
     git = _grid_side_git(tmp_path)
-    git("checkout", "--quiet", f"wip/{_MEMBER_KEY}")
-    git("commit", "--quiet", "--allow-empty", "-m", "a task landed")
+    git("checkout", "--quiet", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "a turn landed")
     landed = git("rev-parse", "HEAD").strip()
-    git("push", "--quiet", str(bare), f"wip/{_MEMBER_KEY}")
+    git("push", "--quiet", str(bare), "main")
     capsys.readouterr()
 
     rc = cli.main(["project", "refresh", "P1", str(dest), "--json"])
@@ -34496,8 +34143,8 @@ def test_project_refresh_json_names_the_state_and_carries_full_oids(monkeypatch,
     assert payload["remote_commit"] == landed, "the oid is abbreviated, so it cannot be compared"
     assert len(payload["local_commit"]) == 40, payload["local_commit"]
     assert payload["behind"] == 1 and payload["ahead"] == 0, payload
-    assert payload["branch"] == f"wip/{_MEMBER_KEY}", payload
-    assert payload["upstream"] == f"origin/wip/{_MEMBER_KEY}", payload
+    assert payload["branch"] == "main", payload
+    assert payload["upstream"] == "origin/main", payload
     assert payload["project_id"] == "P1", payload
     # Everything the printed report can say has to be here too, or `--json` is a lossy version of
     # the same command and an application has to scrape stdout for the rest.
@@ -34506,9 +34153,16 @@ def test_project_refresh_json_names_the_state_and_carries_full_oids(monkeypatch,
 
 
 @pytest.mark.parametrize("state,arrange", [
-    ("no_remote_branch", None),
-    ("no_upstream", ["checkout", "--quiet", "-b", "an-experiment"]),
-    ("detached", ["checkout", "--quiet", "--detach", "HEAD"]),
+    # ⚠️ `no_remote_branch` is ARRANGED since issue 41, where it used to fall out of cloning a
+    # project whose member had no WIP branch yet. A clone follows the TRUNK now (ADR 0034 D-d) and
+    # the trunk always exists, so the state has to be built: a local branch with an upstream
+    # configured by hand at a ref the grid does not have — which is exactly the shape a member
+    # reaches by standing on a `task/<id>` the relay has since collected.
+    ("no_remote_branch", [["checkout", "--quiet", "-b", "gone"],
+                          ["config", "branch.gone.remote", "origin"],
+                          ["config", "branch.gone.merge", "refs/heads/gone"]]),
+    ("no_upstream", [["checkout", "--quiet", "-b", "an-experiment"]]),
+    ("detached", [["checkout", "--quiet", "--detach", "HEAD"]]),
 ])
 def test_project_refresh_json_reports_no_comparison_as_absent_never_as_zero(
         monkeypatch, tmp_path, capsys, state, arrange):
@@ -34516,16 +34170,14 @@ def test_project_refresh_json_reports_no_comparison_as_absent_never_as_zero(
 
     The three states here made no comparison at all — there is no second tip to compare against —
     and a consumer reading the two fields whose entire purpose is "how far apart am I" would take a
-    fabricated pair of zeroes as "nothing outstanding". `no_remote_branch` is not an edge case
-    either: it is the state of every member of every project on day one.
+    fabricated pair of zeroes as "nothing outstanding".
 
-    `grid project status` already gets this right against the relay's numbers ("Absent, not zero.
-    `0/0` would read as 'up to date with main', and the next thing somebody does on that belief is
-    promote"). This is the same fact measured locally, so it answers the same way.
+    `grid project status` already gets this right against the relay's own numbers, and this is the
+    same fact measured locally, so it answers the same way.
     """
-    dest, _bare = _a_clone(monkeypatch, tmp_path, with_wip=(state != "no_remote_branch"))
-    if arrange:
-        subprocess.run(["git", "-C", str(dest), *arrange], check=True, capture_output=True)
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    for args in arrange:
+        subprocess.run(["git", "-C", str(dest), *args], check=True, capture_output=True)
     capsys.readouterr()
 
     rc = cli.main(["project", "refresh", "P1", str(dest), "--json"])
@@ -34582,7 +34234,9 @@ def test_project_refresh_defaults_to_the_directory_you_are_standing_in(
 
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert f"wip/{_MEMBER_KEY}" in out, out
+    # The branch a clone stands on since ADR 0034 D-d (issue 41) — asserted so "it exited 0" cannot
+    # pass for "it found the clone it was standing in".
+    assert "main" in out and str(dest) in out, out
 
 
 # --- ADR 0033 D-p / issue 33: `grid project archive | unarchive | delete` ---
@@ -34875,8 +34529,7 @@ def test_project_status_says_when_the_project_is_archived(monkeypatch, tmp_path,
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
         "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
-        "branch": "wip/abc", "wip_commit": "b" * 40, "ahead": 1, "behind": 0,
-        "can_promote": True, "archived": True}))
+        "archived": True}))
     assert cli.main(["project", "status", "P1"]) == 0
 
     out = capsys.readouterr().out
@@ -34891,9 +34544,7 @@ def test_project_status_says_nothing_about_archiving_when_the_relay_omits_the_ke
     state.set_mode("remote")
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
-        "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
-        "branch": "wip/abc", "wip_commit": "b" * 40, "ahead": 1, "behind": 0,
-        "can_promote": True}))
+        "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40}))
     assert cli.main(["project", "status", "P1"]) == 0
 
     assert "archived" not in capsys.readouterr().out.lower()
@@ -34943,30 +34594,22 @@ def test_a_missing_project_id_is_refused_in_our_words_not_argparses():
     assert "the following arguments are required" not in message, message
 
 
-def test_promote_takes_the_project_and_the_member_as_flags():
-    """The three two-positional commands cannot make both optional and still tell
-    `promote <member-key>` from `promote <project-id>`, so they gain a full-flag form."""
-    settled = _settled(["project", "promote", "--project", "P1", "--member", "abc"])
-    assert (settled.project_id, settled.member_key) == ("P1", "abc")
-
-
-def test_promote_still_takes_both_positionally():
-    settled = _settled(["project", "promote", "P1", "abc"])
-    assert (settled.project_id, settled.member_key) == ("P1", "abc")
-
-
 def test_one_positional_beside_the_project_flag_is_never_read_as_the_project():
     """The hazard this pins: measured, argparse hands a lone positional to `project_id` whatever the
-    caller meant, so `promote --project P1 abc` would promote a project called `abc` and silently
-    ignore `P1`.
+    caller meant, so `member remove --project P1 abc` would act on a project called `abc` and
+    silently ignore `P1`.
 
     It used to be pinned as a REFUSAL. Review pointed out that a named `--project` settles the
     question rather than leaving it open — `abc` can only be the member key — so the positional is
     now placed there. The hazard is closed either way; what changed is that the reading is taken
     instead of thrown away. A bogus value still fails loudly downstream, where a member key is
     checked for shape.
+
+    Written against `member remove` since issue 41, which deleted the `promote` these two-value
+    tests were written against. It is the only two-positional command left, and the shape is the
+    machinery's rather than any one command's — `_place_a_lone_positional` keys on the SHAPE.
     """
-    settled = _settled(["project", "promote", "--project", "P1", "abc"])
+    settled = _settled(["project", "member", "remove", "--project", "P1", "abc"])
     assert settled.project_id == "P1", "the named project must survive a stray positional"
     assert settled.member_key == "abc"
 
@@ -35042,14 +34685,13 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
      ["project", "member", "add", "--project", "P1", "--email", "a@b.c"]),
     (["project", "member", "remove", "P1", "KEY"],
      ["project", "member", "remove", "--project", "P1", "--member", "KEY"]),
-    (["project", "wip", "reset", "P1", "KEY", "--commit", "c" * 40],
-     ["project", "wip", "reset", "--project", "P1", "--member", "KEY", "--commit", "c" * 40]),
-    (["project", "promote", "P1", "KEY"],
-     ["project", "promote", "--project", "P1", "--member", "KEY"]),
-    (["project", "integrate", "P1"], ["project", "integrate", "--project", "P1"]),
+    # ⚠️ `wip reset`'s second value is a CONVERSATION id since ADR 0034 D-e (issue 41), and it is a
+    # bare positional with no flag of its own — so the flag form names only the project. `promote`,
+    # `integrate` and `check` left this table with the commands themselves (D-d/D-m), and `commit`
+    # left it because it no longer takes a project id at all: it is addressed by conversation.
+    (["project", "wip", "reset", "P1", "C1", "--commit", "c" * 40],
+     ["project", "wip", "reset", "--project", "P1", "C1", "--commit", "c" * 40]),
     (["project", "status", "P1"], ["project", "status", "--project", "P1"]),
-    (["project", "check", "P1"], ["project", "check", "--project", "P1"]),
-    (["project", "commit", "P1", "-m", "msg"], ["project", "commit", "--project", "P1", "-m", "msg"]),
     (["project", "import", "./repo", "P1"], ["project", "import", "./repo", "--project", "P1"]),
     (["project", "clone", "P1"], ["project", "clone", "--project", "P1"]),
     (["project", "refresh", "P1"], ["project", "refresh", "--project", "P1"]),
@@ -35075,9 +34717,7 @@ def test_the_flag_form_reaches_the_relay_end_to_end(monkeypatch, tmp_path, capsy
     def handler(request):
         seen["path"] = request.url.path
         return httpx.Response(200, json={
-            "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
-            "branch": "wip/abc", "wip_commit": "b" * 40, "ahead": 0, "behind": 0,
-            "can_promote": True})
+            "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40})
 
     _mock_relay(monkeypatch, handler)
     assert cli.main(["project", "status", "--project", "P1"]) == 0
@@ -35141,13 +34781,18 @@ def test_a_command_that_takes_no_project_is_untouched_by_the_merge():
 
 def test_a_missing_member_key_offers_a_form_that_exists_and_the_command_that_prints_keys():
     """The project id and the member key are both two-spelling values, but they are not
-    interchangeable in a message: `grid project promote <member-key>` is not a form, and it is
-    `grid project member list` — not `grid project list` — that prints a key."""
+    interchangeable in a message: `grid project member remove <member-key>` is not a form, and it is
+    `grid project member list` — not `grid project list` — that prints a key.
+
+    Written against `member remove` since issue 41 deleted `promote`; it is the last command of this
+    shape, and the rule is the shape's rather than the command's.
+    """
     with pytest.raises(SystemExit) as caught:
-        _settled(["project", "promote", "--project", "P1"])
+        _settled(["project", "member", "remove", "--project", "P1"])
     message = str(caught.value)
-    assert "grid project promote <member-key>" not in message, message
-    assert "grid project promote --project <project-id> --member <member-key>" in message, message
+    assert "grid project member remove <member-key>" not in message, message
+    assert ("grid project member remove --project <project-id> --member <member-key>"
+            in message), message
     assert "grid project member list" in message, message
 
 
@@ -35158,20 +34803,26 @@ def test_naming_one_of_the_two_values_places_the_other_positionally():
 
     Found in review. The refusal that used to fire here said `'P1' on its own could be either the
     project id or the member key`, which was not true once `--member` had been given.
+
+    ⚠️ `wip reset` LEFT this test with issue 41 and is not merely re-spelled. Its second value is a
+    conversation id now (ADR 0034 D-e) and has no flag, so it is never one of two things a lone
+    positional could be — there is nothing to place. It is covered as a plain-shaped command by
+    `_BOTH_SPELLINGS` instead. `member remove` is the only two-value command left.
     """
-    from_member = _settled(["project", "promote", "P1", "--member", "KEY"])
+    from_member = _settled(["project", "member", "remove", "P1", "--member", "KEY"])
     assert (from_member.project_id, from_member.member_key) == ("P1", "KEY")
-    from_project = _settled(["project", "promote", "--project", "P1", "KEY"])
+    from_project = _settled(["project", "member", "remove", "--project", "P1", "KEY"])
     assert (from_project.project_id, from_project.member_key) == ("P1", "KEY")
-    reset = _settled(["project", "wip", "reset", "P1", "--member", "KEY", "--commit", "c" * 40])
-    assert (reset.project_id, reset.member_key) == ("P1", "KEY")
 
 
 def test_a_lone_positional_with_NO_flag_is_still_ambiguous_and_still_refused():
     """The half of the shape limitation that is real: with nothing named, argparse cannot tell
-    `promote <member-key>` from `promote <project-id>` and neither can we."""
+    `member remove <member-key>` from `member remove <project-id>` and neither can we.
+
+    Written against `member remove` since issue 41 deleted `promote`.
+    """
     with pytest.raises(SystemExit) as caught:
-        _settled(["project", "promote", "P1"])
+        _settled(["project", "member", "remove", "P1"])
     message = str(caught.value)
     assert "could be either" in message, message
     assert "--project" in message and "--member" in message, message
@@ -35190,13 +34841,16 @@ def test_refresh_with_the_project_id_said_twice_leaves_the_directory_alone():
 def test_a_stray_positional_with_both_values_already_named_is_refused():
     """The third arm of the two-positional shape, and the one no test reached before: with both
     values named there is no free slot, so a positional is a stray. It goes to `project_id` (that is
-    what argparse does), and the conflict refusal names both values rather than promoting `STRAY`."""
+    what argparse does), and the conflict refusal names both values rather than acting on `STRAY`.
+
+    Written against `member remove` since issue 41 deleted `promote`.
+    """
     with pytest.raises(SystemExit) as caught:
-        _settled(["project", "promote", "--project", "P1", "--member", "KEY", "STRAY"])
+        _settled(["project", "member", "remove", "--project", "P1", "--member", "KEY", "STRAY"])
     message = str(caught.value)
     assert "STRAY" in message and "P1" in message, message
     # Restating a value that agrees is still fine, here as everywhere else.
-    settled = _settled(["project", "promote", "--project", "P1", "--member", "KEY", "P1"])
+    settled = _settled(["project", "member", "remove", "--project", "P1", "--member", "KEY", "P1"])
     assert (settled.project_id, settled.member_key) == ("P1", "KEY")
 
 
@@ -35231,11 +34885,54 @@ _FORM_CASES = [
     (["project", "status"], []),
     (["project", "clone"], []),
     (["project", "import", "./repo"], []),
-    (["project", "promote", "--member", "KEY"], []),
     (["project", "member", "remove", "--member", "KEY"], []),
-    (["project", "wip", "reset", "--member", "KEY"], ["--commit", "c" * 40]),
+    # ⚠️ `wip reset` gained a REQUIRED second positional in issue 41 (the conversation id, ADR 0034
+    # D-e) and it was registered with a bare `add_argument`, so `project_arg` never learned about
+    # it. Supplying it here is what makes the refusal ours rather than argparse's — and the forms
+    # that refusal then offers are the thing under test.
+    (["project", "wip", "reset", "C1"], ["--commit", "c" * 40]),
     (["task", "list"], []),
 ]
+
+
+# Commands this CLI used to have and no longer does (ADR 0034 D-d/D-m, issue 41). Prose that still
+# tells somebody to run one of these is not a stale comment — it is an instruction that ends in
+# argparse's `invalid choice`, in the one place a person looks when they are already stuck.
+_DELETED_COMMANDS = ("grid project promote", "grid project integrate", "grid project check")
+
+
+def test_no_help_text_tells_anybody_to_run_a_command_that_was_deleted():
+    """Every subparser's `--help`, swept for the commands this slice removed.
+
+    ⚠️ **Written because this class bit three times in one slice.** `grid project clone`'s
+    description told the reader to run `grid project integrate`; `grid project import`'s said the
+    trunk moves when somebody promotes; `grid task cancel`'s named an integrate as the usual reason
+    to cancel. The long-form `docs/cli.md` was updated for all three and the argparse text was not,
+    because nothing reads it — `--help` is the only user-facing prose in this repository with no
+    test over it at all, which is exactly why it rots first.
+
+    Swept rather than listed, so a command added later is covered without anybody remembering to
+    add it here. `_DELETED_COMMANDS` is the thing to extend when the next verb goes.
+    """
+    import argparse as _argparse
+
+    from cli.parser import build_parser
+
+    def descriptions(parser, prog="grid"):
+        yield prog, (parser.description or ""), (parser.format_help() or "")
+        for action in parser._actions:
+            if isinstance(action, _argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    yield from descriptions(sub, f"{prog} {name}")
+
+    offences = []
+    for prog, description, rendered in descriptions(build_parser()):
+        for gone in _DELETED_COMMANDS:
+            if gone in description or gone in rendered:
+                offences.append(f"{prog} --help names `{gone}`")
+    assert not offences, (
+        "help text tells a reader to run a command that no longer exists, so following it ends in "
+        "argparse's `invalid choice`: " + "; ".join(sorted(set(offences))))
 
 
 @pytest.mark.parametrize("argv, extra", _FORM_CASES, ids=[" ".join(a[:3]) for a, _ in _FORM_CASES])
@@ -35303,7 +35000,7 @@ def test_an_empty_project_on_task_create_still_says_it_may_be_left_off():
 
 def test_an_empty_member_key_is_refused_as_a_member_key():
     with pytest.raises(SystemExit) as caught:
-        _settled(["project", "promote", "--project", "P1", "--member", "  "])
+        _settled(["project", "member", "remove", "--project", "P1", "--member", "  "])
     message = str(caught.value)
     assert "member key" in message and "empty" in message, message
     assert "grid project member list" in message, message
@@ -35496,8 +35193,7 @@ def test_project_status_announces_private_and_stays_quiet_about_grid(monkeypatch
     state.set_mode("remote")
     body = {
         "project_id": "P1", "member_key": "a" * 32, "trunk": "main",
-        "main_commit": "c" * 40, "branch": "wip/" + "a" * 32, "wip_commit": "c" * 40,
-        "ahead": 0, "behind": 0, "archived": False, "can_promote": True,
+        "main_commit": "c" * 40, "archived": False,
     }
 
     _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={**body, "visibility": "private"}))

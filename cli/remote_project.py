@@ -53,14 +53,8 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         if args.wip_action != "reset":
             raise SystemExit(f"Unknown project wip action: {args.wip_action!r}")
         return _wip_reset(args)
-    if args.subcommand == "promote":
-        return _project_promote(args)
-    if args.subcommand == "integrate":
-        return _project_integrate(args)
     if args.subcommand == "status":
         return _project_status(args)
-    if args.subcommand == "check":
-        return _project_check(args)
     if args.subcommand == "commit":
         return _project_commit(args)
     if args.subcommand == "import":
@@ -325,29 +319,34 @@ def _member_add(args: argparse.Namespace) -> int:
 
 
 def _wip_reset(args: argparse.Namespace) -> int:
-    """Move a member's WIP branch back to a named commit (ADR 0033 D-c).
+    """Move a conversation's branch back to a named commit (ADR 0033 D-c, re-keyed by 0034 D-e).
 
     The recovery path for a settle that was interrupted between its git write and its terminal
-    transaction: the WIP branch is then ahead of a task branch the relay has reset, every later
-    attempt is a non-fast-forward, and — worse — that member's next task is cut from the lost
-    attempt's work.
+    transaction: the conversation's branch is then ahead of a turn branch the relay has reset, every
+    later attempt is a non-fast-forward, and — worse — that conversation's next turn is cut from the
+    lost attempt's work.
 
-    Any project member may reset any member's branch, matching promote: the moment somebody leaves
-    the team nobody else could move `wip/<departed>`, and there is no adopt or transfer operation.
+    ⚠️ **It survives the clean break that deletes promote and integrate** (ADR 0034 D-m), because the
+    relay's own apply can still leave a branch ahead of a turn's input and nothing else moves one
+    backwards.
 
-    Refused by the relay while that member has an active task, because a reset landing mid-task
-    would move the base out from under an attempt in flight.
+    Any project member may reset any conversation's branch: the moment somebody leaves the team
+    nobody else could move theirs, and there is no adopt or transfer operation.
+
+    Refused by the relay while that CONVERSATION has a turn in flight — narrower than the rule it
+    replaces, and the re-key doing its job — because a reset landing mid-turn would move the base out
+    from under an attempt in flight.
     """
     from remote import relay
 
     base, token, _label = _resolve(args)
     answer = relay.reset_project_wip(base, token, args.project_id,
-                                     member_key=args.member_key, commit=args.commit)
+                                     conversation_id=args.conversation_id, commit=args.commit)
 
     if _emit(args, answer):
         return 0
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    print(f"{answer.get('branch') or 'the WIP branch'} is now at "
+    print(f"{answer.get('branch') or 'the conversation branch'} is now at "
           f"{answer.get('commit') or args.commit}")
     previous = answer.get("previous_commit")
     if previous:
@@ -385,16 +384,20 @@ def _project_clone(args: argparse.Namespace) -> int:
         raise SystemExit(f"Cannot clone project {args.project_id}: {exc}")
 
     status = relay.project_status(base, token, args.project_id)
-    branch = status.get("branch")
-    if not branch:
+    trunk = status.get("trunk")
+    if not trunk:
         # A reply this command cannot read is not a project — the same rule `_project_status`,
-        # promote, integrate, commit and import all follow. Guessing `wip/<key>` here would put the
-        # relay's ref-naming rule in a second place, free to disagree with it.
+        # `commit` and `import` all follow. Guessing `main` here would put the relay's ref-naming
+        # rule in a second place, free to disagree with it.
         raise SystemExit(
-            f"The relay's answer for project {args.project_id} did not say which branch is yours, "
-            f"so there is nothing to clone. "
+            f"The relay's answer for project {args.project_id} did not name its trunk, so there is "
+            f"nothing to clone. "
             f"`grid project status {args.project_id} --json` shows what it sent.")
-    trunk = status.get("trunk") or "main"
+    # ⚠️ **A clone is of the TRUNK since ADR 0034 D-d (issue 41)**, and that is the whole shape of
+    # the change here. It used to check out the member's own WIP branch, because work stopped there
+    # until somebody promoted; the relay applies every finished turn to the trunk itself now, so the
+    # trunk IS everybody's work and a per-member branch would be a stale copy of part of it.
+    branch = trunk
 
     dest = Path(args.directory) if getattr(args, "directory", None) else Path(args.project_id)
     _refuse_unusable_destination(dest, args.project_id)
@@ -412,22 +415,15 @@ def _project_clone(args: argparse.Namespace) -> int:
         return 0
 
     print(f"project {args.project_id} cloned into {cloned.path}")
-    print(f"on {cloned.branch} (your branch); {cloned.trunk} is here too")
-    if cloned.started_from_trunk:
-        # Said out loud because the clone otherwise looks like somebody else's repository: the
-        # relay creates a member's WIP branch when their first task settles, so until then `git log`
-        # here shows only the trunk.
-        print(f"Your branch has nothing on it yet, so it starts at {cloned.trunk}. It appears on "
-              f"the grid when your first task lands.")
+    print(f"on {cloned.trunk}")
     print("\nNo credential was written: git asks grid for one each time, so a refreshed token is "
           "used automatically.")
     # Said here because it is the obvious next action inside a real clone, and because the relay's
     # refusal on its own would read as a permissions bug (ADR 0033 D-h).
-    print("\n`git push` is refused. Your branch is written by the grid alone, so that a task "
-          "running right now cannot have the ground moved under it. To land work from this clone:")
-    print(f"  grid project commit {args.project_id} -m '<message>' --file <path>   # no agent")
-    print(f"  grid project integrate {args.project_id}              # bring {cloned.trunk} in")
+    print("\n`git push` is refused. The project is written by the grid alone, so that work running "
+          "right now cannot have the ground moved under it. To land work from this clone:")
     print(f"  grid task create --project {args.project_id} --prompt '…'")
+    print("  grid project commit <conversation-id> -m '<message>' --file <path>   # no agent")
     return 0
 
 
@@ -599,154 +595,19 @@ def _emit_quietly(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "json", False))
 
 
-def _project_promote(args: argparse.Namespace) -> int:
-    """Fast-forward the project's `main` from a member's WIP branch (ADR 0033 D-b).
-
-    `main` is the release branch: no task touches it, and this is the one thing that moves it. It
-    goes through the relay rather than a push because the relay being `main`'s only writer is what
-    makes a provider unable to announce its own success.
-
-    The source is NAMED. Any member may promote any member's branch — including a departed one's,
-    which is the whole reason it is not "your own": nothing else can ever move `wip/<departed>`.
-
-    Fast-forward only, so a branch that is behind is refused and integration is the fix. The
-    refusal carries how far behind, and the relay's own sentence is what is shown.
-    """
-    from remote import relay
-
-    base, token, _label = _resolve(args)
-    answer = relay.promote_project(base, token, args.project_id, member_key=args.member_key)
-
-    if _emit(args, answer):
-        return 0
-    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    branch = answer.get("branch") or "main"
-    commit = answer.get("commit") or ""
-    advanced = answer.get("advanced")
-    if advanced is False:
-        # Said plainly rather than printed as a move. A team reading "main is now at <oid>" after a
-        # no-op has been told something shipped when nothing did.
-        print(f"{branch} is already at {commit}; nothing to promote")
-        return 0
-    if advanced is not True or not commit:
-        # Anything that is not one of the two answers this command knows how to report is a reply it
-        # cannot read, NOT a release. Defaulting to the success line here printed `main is now at `
-        # — with no commit — and exited 0 for a body a proxy had stripped, telling a human and a
-        # script alike that work had shipped. There is no relay old enough to be a reason to be
-        # lenient: promote is a new route, so every relay that has it sends both keys.
-        raise SystemExit(
-            f"The relay's answer to promoting {args.member_key} in project {args.project_id} did "
-            f"not say whether {branch} moved, so this cannot be reported as a release. "
-            f"`grid project promote {args.project_id} {args.member_key} --json` shows what it sent.")
-    print(f"{branch} is now at {commit}")
-    previous = answer.get("previous_commit")
-    if previous:
-        # A fast-forward leaves no merge commit, so this line is the only place the release it
-        # replaced is named — and there is no revert command, so somebody undoing this needs it.
-        print(f"was={previous}")
-    if answer.get("promotion_id") is None:
-        # The trunk moved and the row naming who released it did not get written — the relay says so
-        # here and nowhere else a person will look. Left unsaid, it is discoverable only by grepping
-        # the relay's log, or by somebody later finding a hole in the project's release history.
-        # Not an error: the release happened, and calling it a failure would invite a second promote
-        # that records nothing either.
-        print("warning: the relay could not record who promoted this; "
-              "it will be missing from the project's release history")
-    return 0
-
-
-# What the relay can say happened, and how to say it to a person. A dict rather than a chain of
-# `if`s so the one thing this command must never do — print a line for a `status` it does not know —
-# is a lookup that misses rather than an `else` that guesses.
-_INTEGRATED = {
-    "up_to_date": "{branch} already has everything on main; nothing to integrate",
-    "fast_forward": "{branch} moved onto main at {commit}",
-    "merged": "main was merged into {branch}; the merge commit is {commit}",
-    # Tier 3 (ADR 0033 D-e, issue 15). Nothing has moved yet — an agent is about to.
-    "merge_task": "main and {branch} changed the same lines, so task {task_id} will merge them",
-}
-
-# The statuses whose report needs a COMMIT to be meaningful, and the one that needs a task id
-# instead. A reply missing the field its own status is about is a reply this command cannot read —
-# not an integration that succeeded — and saying so is the difference between a person waiting for a
-# task that exists and a person believing work landed that did not.
-_NEEDS_COMMIT = ("fast_forward", "merged")
-
-
-def _project_integrate(args: argparse.Namespace) -> int:
-    """Bring the project's `main` into the caller's own WIP branch (ADR 0033 D-d/D-e).
-
-    The counterpart to promote. Because `main` moves only on a promote, the first one leaves every
-    other member unable to promote at all — their branch was cut from a trunk that is now history —
-    and this is the only way back.
-
-    **Your own branch, so there is no member key to name.** The relay holds your one task slot while
-    it works, by inserting a task row: that INSERT is what stops an integration moving the branch a
-    task of yours is running on. So integrating is refused while you have a task in flight, and the
-    refusal names it.
-
-    Four outcomes, and they are deliberately different sentences: already up to date, a
-    fast-forward, a real merge commit, and — when you and somebody else changed the same lines — a
-    **merge task** an agent runs to resolve it. That last one costs a slot and an agent run, and
-    nothing has moved when this command returns.
-    """
-    from remote import relay
-
-    base, token, _label = _resolve(args)
-    answer = relay.integrate_project(base, token, args.project_id)
-
-    if _emit(args, answer):
-        return 0
-    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    status = answer.get("status")
-    branch = answer.get("branch") or "your WIP branch"
-    commit = answer.get("commit") or ""
-    task_id = answer.get("task_id") or ""
-    line = _INTEGRATED.get(status)
-    if line is None or (status in _NEEDS_COMMIT and not commit) or (
-            status == "merge_task" and not task_id):
-        # A reply this command cannot read is NOT an integration that succeeded. Printing the
-        # success line by default is how promote once reported work as landed for a body a proxy
-        # had stripped — and the next thing somebody does on that belief is promote. There is no
-        # relay old enough to be a reason for leniency: integrate is a new route, so every relay
-        # that has it sends `status`.
-        #
-        # The per-status field check is what makes that guard mean anything for tier 3: a merge-task
-        # reply's whole payload IS the id, so one without it leaves nothing to watch or wait on.
-        raise SystemExit(
-            f"The relay's answer to integrating project {args.project_id} did not say what it did, "
-            f"so this cannot be reported as an integration. "
-            f"`grid project integrate {args.project_id} --json` shows what it sent.")
-    print(line.format(branch=branch, commit=commit, task_id=task_id))
-    if status == "merge_task":
-        files = answer.get("files") or []
-        if files:
-            # What the agent is about to change. The relay sends them as DATA precisely so this does
-            # not have to be dug out of a sentence.
-            print(f"conflicts: {', '.join(str(path) for path in files)}")
-        print(f"\nNothing has moved yet. Watch it with: grid task follow {task_id}")
-        print(f"When it finishes, promote with: grid project promote {args.project_id} "
-              f"{answer.get('member_key') or '<member-key>'}")
-        return 0
-    previous = answer.get("previous_commit")
-    if answer.get("advanced") and previous:
-        # Where the branch was before. There is no revert, so somebody putting it back needs it —
-        # and `grid project wip reset` is the command that takes it.
-        print(f"was={previous}")
-    return 0
-
 
 def _project_status(args: argparse.Namespace) -> int:
-    """Where the project is, from your side (ADR 0033 D-l, issue 19a).
+    """Where the project is (ADR 0033 D-l, issue 19a; narrowed by ADR 0034 D-d/D-e, issue 41).
 
-    Two of these were answerable before only by performing a write. "How far behind am I" meant
-    attempting a promote and reading the refusal — a call that either releases work or refuses it,
-    used as a query. "What holds my slot" meant attempting a create and reading the 409.
+    "What holds my slot" was answerable before only by attempting a create and reading the 409.
 
-    It is also the change signal: `main_commit` moves on a promote or an import, and every member's
-    tip moves when their work settles, when a tier-1/2 integration lands, or when they commit — so
-    an application watches this instead of polling `git fetch`. A CONFLICTING integration moves no
-    ref at all and shows up as a held slot instead, which is why both are printed.
+    It is also the change signal, and a simpler one than it used to be: the relay applies every
+    finished turn itself, so `main_commit` moves whenever ANYBODY's work lands — one oid to watch
+    instead of one per member, and an application watches this instead of polling `git fetch`.
+
+    ⚠️ **`branch`, `wip_commit`, `ahead`, `behind` and `can_promote` are gone from the reply**, with
+    the promote they were about. A member has one branch per conversation now, so there was no
+    member-level ref left to name, and "may I promote" is a question with no verb behind it.
     """
     from remote import relay
 
@@ -756,17 +617,19 @@ def _project_status(args: argparse.Namespace) -> int:
     if _emit(args, answer):
         return 0
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    branch = answer.get("branch")
-    if not branch:
-        # A reply this command cannot read is NOT a status — the same rule promote, integrate,
-        # commit and import all follow. Printing the template with blanks in it would read as "you
-        # have no work", which is the one answer nobody should get from a body a proxy mangled.
+    trunk = answer.get("trunk")
+    if not trunk:
+        # A reply this command cannot read is NOT a status — the same rule `commit`, `create` and
+        # `import` all follow. Printing the template with blanks in it would read as "this project
+        # is empty", which is the one answer nobody should get from a body a proxy mangled.
+        #
+        # Keyed on `trunk` since ADR 0034 issue 41, which deleted the `branch` this used to check.
+        # It is the right replacement rather than the nearest one: every relay that answers this
+        # route names the trunk, and the trunk is what the rest of the output is about.
         raise SystemExit(
-            f"The relay's answer for project {args.project_id} did not say which branch is yours, "
-            f"so this cannot be reported as a status. "
+            f"The relay's answer for project {args.project_id} did not name its trunk, so this "
+            f"cannot be reported as a status. "
             f"`grid project status {args.project_id} --json` shows what it sent.")
-
-    trunk = answer.get("trunk") or "main"
     print(f"project {args.project_id}")
     # ⚠️ `is True`, never truthiness (ADR 0033 D-p, issue 33). *Absent ⇒ not archived*, which is
     # every relay predating this slice — the rule `serves_you` follows. Printed FIRST because it
@@ -787,37 +650,6 @@ def _project_status(args: argparse.Namespace) -> int:
         print("PRIVATE — only its members can reach it.")
         print(f"Share it with: grid project share {args.project_id}")
     print(f"{trunk}={answer.get('main_commit') or '(none yet)'}")
-    print(f"{branch}={answer.get('wip_commit') or '(nothing yet)'}")
-
-    ahead, behind = answer.get("ahead"), answer.get("behind")
-    if ahead is None or behind is None:
-        # Absent, not zero. `0/0` would read as "up to date with main", and the next thing somebody
-        # does on that belief is promote a branch that does not exist.
-        print(f"\nNothing to compare yet — run a task, or "
-              f"`grid project commit {args.project_id} -m '<message>' --file <path>`.")
-    else:
-        can_promote = answer.get("can_promote")
-        if can_promote is not True and can_promote is not False:
-            # TRI-STATE, exactly as `_project_promote` treats `advanced` and for the same measured
-            # reason: a silently-defaulted "no" is how promote once reported a release for a body a
-            # proxy had stripped. Here it would print a self-contradiction — the relay defines
-            # `can_promote` as exactly `behind == 0`, so a reply keeping the distances and dropping
-            # it says "ahead=3 behind=0" and then "Behind main, so a promote would be refused".
-            #
-            # Deliberately NOT derived from `behind == 0` on this side: that would put the relay's
-            # rule in a second place, and the two would then be free to disagree about a fact only
-            # one of them can see.
-            raise SystemExit(
-                f"The relay's answer for project {args.project_id} did not say whether "
-                f"{branch} can be promoted, so this cannot be reported as a status. "
-                f"`grid project status {args.project_id} --json` shows what it sent.")
-        print(f"\nahead={ahead}  behind={behind}")
-        if can_promote:
-            print(f"Ready to release: grid project promote {args.project_id} "
-                  f"{answer.get('member_key') or '<member-key>'}")
-        else:
-            print(f"Behind {trunk}, so a promote would be refused. "
-                  f"Fix it with: grid project integrate {args.project_id}")
 
     # `active_turns`, a LIST, since ADR 0034 D-b (issue 40): a member holds one turn per
     # conversation, so the singular `active_task` this used to read could only ever show one of
@@ -857,61 +689,6 @@ def _project_status(args: argparse.Namespace) -> int:
     return 0
 
 
-# What the relay says integrating WOULD do, and how to say that to a person. A dict rather than a
-# chain of `if`s for `_INTEGRATED`'s reason: the one thing this must never do is print a line for a
-# `status` it does not know, so an unknown one is a lookup that misses rather than an `else` that
-# guesses. Every line is in the CONDITIONAL, because nothing has happened.
-_WOULD_INTEGRATE = {
-    "up_to_date": "{branch} already has everything on main; integrating would do nothing",
-    "fast_forward": "{branch} would move straight onto main — no merge commit, nothing to review",
-    "merged": "main would be merged into {branch} cleanly, leaving a merge commit",
-    "merge_task": "main and {branch} both changed the same lines, so integrating would queue a "
-                  "merge task for an agent to resolve",
-}
-
-
-def _project_check(args: argparse.Namespace) -> int:
-    """Would integrating conflict? (ADR 0033 D-l, issue 19a.)
-
-    Integration **is** the conflict check without this: asking costs your one task slot and, when
-    the answer is "they conflict", queues a paid agent run to resolve them. This spends neither, and
-    for the same reason it answers while you already have a task in flight — which is exactly when
-    `grid project integrate` refuses you.
-
-    Nothing here moves a ref or creates a task, so every line is written in the conditional.
-    """
-    from remote import relay
-
-    base, token, _label = _resolve(args)
-    answer = relay.preview_integration(base, token, args.project_id)
-
-    if _emit(args, answer):
-        return 0
-    # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    status = answer.get("status")
-    branch = answer.get("branch") or "your WIP branch"
-    line = _WOULD_INTEGRATE.get(status)
-    if line is None:
-        # A reply this command cannot read is not a check that ran. The same rule promote and
-        # integrate follow, and it matters more here: somebody acts on this by deciding NOT to
-        # integrate, and a silent default would make that decision for them.
-        raise SystemExit(
-            f"The relay's answer for project {args.project_id} did not say what integrating would "
-            f"do, so this cannot be reported as a check. "
-            f"`grid project check {args.project_id} --json` shows what it sent.")
-
-    print(line.format(branch=branch))
-    ahead, behind = answer.get("ahead"), answer.get("behind")
-    if ahead is not None and behind is not None:
-        print(f"ahead={ahead}  behind={behind}")
-    files = answer.get("files") or []
-    if files:
-        # The relay sends them as DATA precisely so this does not have to be dug out of a sentence.
-        print(f"conflicts: {', '.join(str(path) for path in files)}")
-    print(f"\nNothing has changed. Do it with: grid project integrate {args.project_id}")
-    return 0
-
-
 def _project_commit(args: argparse.Namespace) -> int:
     """Put a change into the project without running an agent (ADR 0033 D-j).
 
@@ -919,10 +696,15 @@ def _project_commit(args: argparse.Namespace) -> int:
     most frequent action of a working day, and which the rest of this design otherwise answers with a
     whole agent run that may change the very line being fixed.
 
-    **Your own branch, so there is no member key to name**, exactly like integrate. The relay holds
-    your one task slot while it commits, which is what stops a commit landing under a task of yours
-    that is already running — so this is refused while you have one in flight, and the refusal names
-    it.
+    **Into a conversation you name** (ADR 0034 D-e, issue 41): the branch this writes is the
+    conversation's, so the next message you send there starts from what you committed. The relay
+    holds that conversation's slot while it commits, which is what stops a commit landing under a
+    turn of its own that is already running — so this is refused while that conversation has one in
+    flight, and the refusal names it.
+
+    **And it reaches the project by itself** (ADR 0034 D-d): the relay applies it exactly as it
+    applies a finished turn. Under ADR 0033 this printed a `grid project promote` line; that command
+    no longer exists, and neither does the step.
 
     An executable bit is **kept** without being asked for: a file already in the project as
     executable stays executable when you edit it, and a local file that is executable makes the
@@ -945,24 +727,24 @@ def _project_commit(args: argparse.Namespace) -> int:
             "remove one, or any combination.")
 
     base, token, _label = _resolve(args)
-    answer = relay.commit_project(base, token, args.project_id,
+    answer = relay.commit_project(base, token, args.conversation_id,
                                   message=args.message, files=files, deletes=deletes)
 
     if _emit(args, answer):
         return 0
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
     commit = answer.get("commit")
-    branch = answer.get("branch") or "your WIP branch"
+    branch = answer.get("branch") or "the conversation's branch"
     if not commit:
-        # A reply this command cannot read is NOT a commit — the same rule promote, integrate and
-        # import follow. Printing the success line by default is how promote once reported work as
-        # landed for a body a proxy had stripped, and the next thing somebody does on that belief is
-        # promote. There is no relay old enough to be a reason for leniency: commit is a new route,
-        # so every relay that has it sends the commit.
+        # A reply this command cannot read is NOT a commit — the same rule `project status`,
+        # `create` and `import` follow. Printing the success line by default is how a promote once
+        # reported work as landed for a body a proxy had stripped, and here the next thing that
+        # happens is the grid applying it to the project. There is no relay old enough to be a
+        # reason for leniency: every relay with this route sends the commit.
         raise SystemExit(
-            f"The relay's answer to committing in project {args.project_id} did not say what it "
-            f"wrote, so this cannot be reported as a commit. "
-            f"`grid project commit {args.project_id} … --json` shows what it sent.")
+            f"The relay's answer to committing into conversation {args.conversation_id} did not "
+            f"say what it wrote, so this cannot be reported as a commit. "
+            f"`grid project commit {args.conversation_id} … --json` shows what it sent.")
     print(f"{branch} is now at {commit}")
     previous = answer.get("previous_commit")
     if previous:
@@ -975,8 +757,8 @@ def _project_commit(args: argparse.Namespace) -> int:
         print(f"wrote: {', '.join(str(path) for path in wrote)}")
     if removed:
         print(f"deleted: {', '.join(str(path) for path in removed)}")
-    print(f"\nRelease it with: grid project promote {args.project_id} "
-          f"{answer.get('member_key') or '<member-key>'}")
+    # No next step to name, and that is the feature (ADR 0034 D-d). This used to end by telling
+    # somebody to promote; the grid does it now, so saying nothing is the honest report.
     return 0
 
 

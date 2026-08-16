@@ -889,12 +889,9 @@ grid project private       <project-id> [--grid <grid>] [--json]
 grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
-grid project wip reset     <project-id> <member-key> --commit <oid> [--grid <grid>] [--json]
-grid project promote       <project-id> <member-key> [--grid <grid>] [--json]
-grid project integrate     <project-id> [--grid <grid>] [--json]
+grid project wip reset     <project-id> <conversation-id> --commit <oid> [--grid <grid>] [--json]
 grid project status        <project-id> [--grid <grid>] [--json]
-grid project check         <project-id> [--grid <grid>] [--json]
-grid project commit        <project-id> -m <message> [--file <local[:dest]>]… [--dir <local[:dest]>]…
+grid project commit        <conversation-id> -m <message> [--file <local[:dest]>]… [--dir <local[:dest]>]…
                                         [--delete <path>]… [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
 grid project clone         <project-id> [<directory>] [--grid <grid>] [--json]
@@ -915,18 +912,23 @@ grid project status abc123              grid project status --project abc123
 grid task list      abc123              grid task list      --project abc123
 ```
 
-This page shows the positional form throughout. Three commands take a member key as well, and with
-both given positionally there is no way to tell one from the other — so they also accept a full-flag
-form, and refuse a single positional beside `--project`:
+This page shows the positional form throughout. One command — `grid project member remove` — takes a
+member key as well, and with both given positionally there is no way to tell one from the other, so
+it also accepts a full-flag form and refuses a single positional beside `--project`:
 
 ```
-grid project promote      <project-id> <member-key>
-grid project promote      --project <project-id> --member <member-key>
-grid project member remove … and grid project wip reset … take the same two forms
+grid project member remove <project-id> <member-key>
+grid project member remove --project <project-id> --member <member-key>
 ```
 
 Giving both spellings with **different** values is refused, naming both — there is no silent
 preference. Giving both with the same value is fine.
+
+`grid project wip reset <project-id> <conversation-id>` takes two positionals as well and needs no
+such rule, because the conversation id is required: a lone positional can only be that one, and the
+missing project is then refused by name. `--project` works there as it does everywhere else.
+`grid project commit` takes **no project id at all** — it is addressed by a conversation, which
+belongs to a project already.
 
 A name is unique **per owner**, so it is not an address someone else can use: two people can both
 have a project called `acme` and they are different projects. That is why the wire carries an id and
@@ -944,18 +946,26 @@ Someone who is not a member of a project gets **404** from every one of its endp
 git plane — not 403, because the id is the only thing standing between one team's source and
 another's, and a 403 would confirm the project exists.
 
-### Each member has a WIP branch, and `main` is the release branch
+### Each conversation has a branch, and the trunk is where work lands
 
-A task is cut from — and, on success, fast-forwards — **`wip/<member-key>`**, the asking member's own
-branch. `main` is not touched by a task at all. That is what lets several people work in one project
-without their results racing for one ref.
+A turn is cut from — and settles back onto — **`wip/<conversation-id>`**, the branch of the
+conversation it belongs to. A member does not have a branch; each of their conversations has one.
+That is what lets several conversations of one person run at the same time without their results
+racing for a single ref, and it is why `grid project commit` and `grid project wip reset` are
+addressed by a conversation rather than by a member.
+
+**A turn settles onto that branch whether it succeeded or failed**, which is the part worth knowing.
+A failed turn is not thrown away: the next message you send in that conversation starts from where
+the last one broke, which is the state the conversation's own transcript remembers. The trunk is the
+ref that is success-only — a turn reaches it by succeeding, and by nothing else.
 
 A project's `main` therefore has to **exist before its first task**: a project created with no
 commits refuses task creation with a message saying so. Three things give it one — `grid project
 create --empty`, which does it in the same request; `grid project init`, for a project that already
 exists; and `grid project import`, for a repository that already exists. **The relay is `main`'s
 only writer** — a `git push` of `main` is refused whatever state the project is in — so those three
-create it, `promote` moves it afterwards, and nothing else touches it.
+create it, the relay's own apply of each finished turn moves it afterwards, and nothing else touches
+it.
 
 ### Cloning a project onto your own machine
 
@@ -970,19 +980,20 @@ untouched. Because git asks each time, a **refreshed token is used automatically
 written into `.git/config` once would expire in place. The helper reads only your local credential
 store: `git pull` keeps working when the control plane is unreachable.
 
-You are put on **your own WIP branch**, not the trunk. `main` moves only when somebody promotes, so
-it may hold none of your work. If none of your tasks has landed yet your branch does not exist on the
-grid at all, and the clone starts it at the trunk and tells you so.
+You are put on **the project's trunk**, which is everybody's work: the grid applies every successful
+turn to it, so a clone that follows it holds what the whole team has done, including your own. It
+used to check out `wip/<your key>` instead, because under the old release model work stopped on each
+member's branch until somebody promoted it and the trunk could hold none of yours. The trunk is now
+the answer to "give me the project", which is what this command is for.
 
-**`git push` is refused**, and that is the design rather than a permission to ask for. Your branch is
-written by the grid alone — a task settling, or an integrate — both of which the grid serializes
-against your running work. A push holds nothing, so it could fast-forward your branch while a task of
-yours is running and break that task's result. To land work from a clone: `grid project commit` for files, `grid project
-integrate` to bring the trunk in, or `grid task create` for an agent. Resolving a conflict by hand in
-your clone and handing the result to an integration is the intended path.
+**`git push` is refused**, and that is the design rather than a permission to ask for. The project is
+written by the grid alone, which is what stops work running right now having the ground moved under
+it: a push holds nothing, so it could fast-forward a branch while a turn cut from it is still going.
+To land work from a clone: `grid project commit <conversation-id>` for files, or `grid task create`
+for an agent.
 
-Re-running `grid project clone` on the same directory **updates** it, which is how you pick up
-somebody else's promote. If you have made local commits the grid has not seen, it **refuses** rather
+Re-running `grid project clone` on the same directory **updates** it, which is how you pick up what
+colleagues have landed. If you have made local commits the grid has not seen, it **refuses** rather
 than updating: your branch would be reset to the fetched tip and those commits would be gone. The
 refusal names the commits, and `grid project commit` is how you land them.
 
@@ -1009,19 +1020,21 @@ with a dirty tree, and while a task of yours is running. What it prints instead 
 that would move your files, when moving them is possible at all.
 
 It reports on **the branch you are standing on**, whichever that is. Inside a clone that is usually
-your own WIP branch, but `grid task fetch`'s own advice puts you on `task/<id>`, and those move and
-are collected too. Seven answers, and the command says which: up to date; the grid has commits you do
+the trunk, but `grid task fetch`'s own advice puts you on `task/<id>`, and those move and are
+collected too. Seven answers, and the command says which: up to date; the grid has commits you do
 not; you have commits the grid does not; the two have diverged; the grid does not have this branch;
 the branch tracks nothing; HEAD is detached.
 
 "The grid does not have this branch" has two opposite histories, and the command does not guess
-between them: a WIP branch is not there until work lands on it, and a `task/<id>` branch is collected
-again once its task is over. From inside a clone the two look identical.
+between them: a conversation's branch is not there until work lands on it, and a `task/<id>` branch
+is collected again once its turn is over. From inside a clone the two look identical.
 
 Diverging deserves a note, because it is the only one where the obvious next step is wrong. `git
 pull` there "works" by making a merge commit you can never push — members do not push — so refresh
-does not offer one. Only one thing on the grid's side can put your branch and its copy on different
-histories: somebody ran `grid project wip reset`. Every other write produces a descendant.
+does not offer one. A clone follows the trunk, and the grid only ever advances the trunk, so only one
+relay write can put a branch and its copy on different histories at all: somebody ran
+`grid project wip reset` on a conversation's branch. Every other write produces a descendant, which
+leaves rewriting your own history here as the other explanation.
 
 It only ever fetches `origin`, which is the remote the clone was made with. A clone is an ordinary
 git repository, so you can add others — and if you point a branch's upstream at one of them, refresh
@@ -1034,11 +1047,13 @@ Stale `origin/task/<id>` refs are pruned as it goes, because the grid collects f
 on its side and a clone would otherwise keep listing tasks that no longer exist. The report counts
 what changed and what went; it does not interpret which refs they were.
 
-**This is not `grid project status`, and the two "behind"s are different.** Refresh compares your
-clone with the grid, on your machine. `grid project status` compares your branch with `main`, on the
-relay. Refresh asks the relay nothing at all — which is why it has no `--grid` flag, why it keeps
-working when the control plane is unreachable, and why it cannot tell you anything about the trunk.
-It does need the relay itself reachable: it is a fetch.
+**This is not `grid project status`, and only one of the two prints a "behind" at all.** Refresh
+compares your clone with the grid, on your machine. `grid project status` says where the project is,
+on the relay — it no longer measures a distance, because the distance it used to report was how far a
+branch was from being promotable, and there is nothing to promote. Refresh asks the relay nothing at
+all — which is why it has no `--grid` flag, why it keeps working when the control plane is
+unreachable, and why it cannot tell you anything the relay knows. It does need the relay itself
+reachable: it is a fetch.
 
 ### Starting a project with an empty trunk
 
@@ -1060,12 +1075,12 @@ grid project create --name acme             # leave it empty; an import is comin
 
 **Pick `--empty` when the work starts here; leave it off when the code already exists somewhere
 else.** A project that has a trunk can never be imported into, because a second trunk would move
-`main` out from under every member's branch and nothing could integrate back. Nothing undoes it —
-not `grid project delete`, which refuses a project that has a trunk.
+`main` out from under every conversation's branch and nothing they produced could reach it again.
+Nothing undoes it — not `grid project delete`, which refuses a project that has a trunk.
 
 `grid project init <project-id>` is the same operation for a project that is already there, and it
 is what to run if `--empty` was not passed and no import is coming. Both make **one empty root
-commit** and hold **no files**: work reaches `main` by promoting a branch — a task, or `grid project
+commit** and hold **no files**: work reaches `main` by being applied there — a turn, or `grid project
 commit` — and never by a bootstrap, so a request carrying files is refused rather than quietly
 ignored.
 
@@ -1103,7 +1118,8 @@ A refused import leaves the project with **no trunk**, deliberately — half a t
 because `main` is the one ref nothing here rewrites. Fix what the message names and import again.
 
 A project that already has a `main` is refused. A second import would move the trunk out from under
-every member's WIP branch and nothing could integrate back, so the answer is a new project.
+every conversation's branch, and nothing any of them produced could reach it again, so the answer is
+a new project.
 
 ⚠️ Two things an imported repository does not get inside a task: **tags** are hidden from providers,
 so `git describe` and version stamping do not work there; and the repository's own `CLAUDE.md` is on
@@ -1111,76 +1127,40 @@ disk and readable but is **not** loaded into the agent's context, because the fl
 committed `.claude/settings.json` executing also turns off project-memory discovery. A prompt that
 depends on a repository's conventions has to say so.
 
-### Promoting
+### Your work appears by itself
 
-`grid project promote` advances the project's `main` to a member's WIP branch. It is what releases
-work, and it is deliberately a decision somebody makes rather than something a task does.
+There is nothing to run after a turn finishes. **The grid applies every successful turn to the
+project itself** — fast-forward when it can, a merge commit when git can combine the two, and (from
+issue 42) a merge step in the conversation that caused the collision when it cannot.
 
-You name **whose** branch, not "mine". Any member may promote any member's branch, including the
-branch of somebody who has left the team — once they are gone nothing else can move `wip/<theirs>`,
-and there is no way to adopt, transfer or rename it.
+`grid project promote` and `grid project integrate` are **deleted**, along with `grid project check`,
+which previewed the integrate. They were built for a developer holding a release: `main` was a branch
+somebody decided to move, and once one person had moved it everybody else had to integrate before
+they could. Nothing in that loop can be done by somebody who does not read diffs, and the visible
+symptom was work that finished and then never appeared.
 
-**It is fast-forward only.** A branch that is behind `main` — because somebody else promoted first —
-is refused, and the refusal says how far behind it is. Integrating `main` into it is the fix;
-retrying is not, and never becomes one. Two people promoting at the same moment is safe: one wins and
-the other is refused, and neither one's commits are lost.
+Two consequences worth knowing:
 
-Two things worth knowing before you run it:
+- **The trunk has no known-good property left.** Nothing asserts it builds or runs — and nothing did
+  before either, except a person's judgement at promote time.
+- **A conversation of five turns puts four intermediate states into the project.** Colleagues used to
+  see each other's work when somebody thought it was ready; they now see it at every turn.
 
-- code an agent wrote reaches `main` if you promote without reading it. Nothing reviews it for you;
-- **a promote cannot be undone by pushing**, and there is no revert command in this release. The
-  command prints the commit `main` was at before it moved, which is the value putting it back needs.
+The apply runs **outside** the request that reports a turn finished, so "done" and "in the project"
+are a moment apart rather than the same instant. That is deliberate: the provider stops renewing its
+lease before it reports, so anything the relay did inside that request would be spending a budget
+nobody is watching.
 
-### Integrating
-
-`grid project integrate` brings the project's `main` back into your WIP branch. It is the
-counterpart to `promote`, and it is what makes `promote` survivable: because `main` moves only when
-somebody promotes, the *first* promote leaves everyone else unable to promote at all — their branch
-was cut from a trunk that is now history, and fast-forward-only means no amount of retrying helps.
-
-It is always **your own** branch, so there is no member key to give. That is not a simplification:
-the relay checks that you have nothing in flight before it starts — which is exactly what stops an
-integration from moving the branch a task of yours is running on — so the branch it moves has to be
-your own. Integrating is therefore **refused while you have any task in flight**, and the refusal
-names one of them so you can wait on it.
-
-Four things can happen, and the command says which:
-
-- your branch already contains everything on `main` — nothing moves, and that is a success;
-- your branch moves straight onto `main`, because it had nothing of its own yet;
-- `main` and your branch are merged, and a **merge commit** is made on your branch. No agent and no
-  model are involved — it is git's own three-way merge, run on the relay;
-- you and somebody else changed the same lines, so git cannot decide: the grid queues a **merge
-  task** and an agent resolves it. The command prints the task id and the conflicting files, and
-  **nothing has moved yet** — watch it with `grid task follow <id>`, then promote.
-
-A merge task is an ordinary task in every other respect: it has its own event log, and it is retried
-if its provider dies. You **can** start other conversations while it runs — since ADR 0034 D-b a
-create never fails — but you cannot integrate again until it finishes, and that refusal names it.
-
-**What the grid checks is that the merge happened, not that it is right.** When the task settles, the
-relay requires the result to actually contain the `main` it was asked to merge — an agent that
-resolved by discarding the other side, or that changed nothing at all, is recorded as a **failed
-integration** and your branch is left alone. What no check can catch is a merge that is complete and
-*wrong*, which is the same class as an agent writing wrong code: read it before you promote.
-
-The `main` a merge task merges is **pinned when you run `integrate`**. If somebody else promotes
-while your agent is working, your merge still succeeds — you simply integrate again to pick up their
-release. That is a second round, not lost work.
 
 ### Asking before you spend anything
 
-Two commands answer questions that previously needed a write.
-
 ```
 grid project status <project-id>
-grid project check  <project-id>
 ```
 
-`grid project status` shows where `main` is, where your WIP branch is, how far ahead and behind it
-is, whether a promote would be accepted, which of your turns are in flight and since when, and how
-deep the project's queue is. Before it, "how far behind am I" meant attempting a promote and reading
-the refusal — a call that either releases work or refuses it, used as a question.
+`grid project status` shows where the project's trunk is, which of your turns are in flight and since
+when, and how deep the project's queue is. Before it, "what is holding my slot" meant attempting a
+create and reading the refusal — a write, used as a question.
 
 When there is a queue it also says **who could be working on it**: how many providers are online, how
 many have withdrawn because their own Claude subscription is out of headroom, and when the first of
@@ -1188,44 +1168,43 @@ those starts claiming again. A queue depth on its own cannot tell a busy grid fr
 from a withdrawn one, and those need three different actions — wait, run `grid join`, or wait until a
 named time. Nothing is printed when the whole fleet is serving.
 
-`grid project check` is the **dry run of `integrate`**. Integration *is* the conflict check without
-it: asking is refused while you have work in flight, and when the answer is that you and somebody
-else changed the same lines it queues a merge task — a paid agent run. `check` costs neither. It reports the same
-four answers `integrate` does (already up to date, a straight fast-forward, a clean merge, or a
-conflict), names the files a conflict would touch, and changes nothing.
-
-Because it holds no slot, `check` answers **while you already have a task in flight** — which is
-exactly when `integrate` refuses you.
-
 `grid project status` is also how an application notices the project changed without running
-`git fetch`: `main` moves on a promote or an import, and each member's branch moves when their work
-settles, when an integration lands, or when they commit — so a changed commit id is the signal.
+`git fetch`, and it got simpler when the grid started applying turns itself: **the trunk's commit
+moves whenever anybody's work lands**, so one id is the whole signal. It used to take one id per
+member, because work stopped on each member's own branch until somebody promoted.
 
-One case is not a moved commit, and it is the one that runs longest: an integration that
-**conflicts** moves no ref at all, because it queues a merge task instead. That shows up as a held
-turn — `active_turns`, and the member's `active_task_ids`, both **lists** since ADR 0034 D-b — so an
-application watching only the commit ids would see nothing for the whole hour somebody is waiting on
-it.
+One case is not a moved commit, and it is the one that runs longest: a turn whose result collides
+with somebody else's moves no ref, because a person has to be asked (issue 42). That shows up as a
+held turn — `active_turns`, and the member's `active_task_ids`, both **lists** since ADR 0034 D-b —
+so an application watching only the commit id would see nothing for the whole time somebody is
+waiting on it.
 
 ### Committing without an agent
 
 `grid project commit` puts files into the project with **no agent, no provider and no model**. It is
 the answer to "the agent got it 90% right, let me fix the last line" — which, on a team, is the most
-frequent thing anyone does. The alternative is `grid task create --file`, which spends your one task
-slot and then runs an agent that may change the very line you are fixing.
+frequent thing anyone does. The alternative is `grid task create --file`, which spends a slot and
+then runs an agent that may change the very line you are fixing.
 
 ```
-grid project commit <project-id> -m "fix the loop bound" --file ./worker.py:src/worker.py
-grid project commit <project-id> -m "drop the dead module" --delete src/legacy.py
+grid project commit <conversation-id> -m "fix the loop bound" --file ./worker.py:src/worker.py
+grid project commit <conversation-id> -m "drop the dead module" --delete src/legacy.py
 ```
 
-**It is not a way to push.** The write still goes through the grid, still lands on exactly one ref —
-your own WIP branch — and the grid still serializes it against your running work. So it is refused
-while you have any task in flight, and the refusal names one of them. `main` is untouched: `promote` is
-still what releases work.
+**It commits into a conversation**, not into a project — so it takes a conversation id and no
+project id at all, and the branch it writes is that conversation's. That is what makes it the fix for
+the answer you just read: the next message you send there starts from what you committed. The id is
+printed by `grid task create` and `grid task send`, and `grid task get <turn-id> --json` reports the
+conversation a turn belongs to.
 
-It is always **your own** branch, so there is no member key to give, exactly as with `integrate` and
-for the same reason.
+**Its change reaches the project by itself**, exactly as a finished turn's does — the grid applies
+it, and there is nothing to run afterwards. Under the old release model this command ended by telling
+you to promote.
+
+**It is not a way to push.** The write still goes through the grid, still lands on exactly one ref,
+and the grid still serializes it against work that is running. So it is refused while that
+conversation has a turn in flight, and the refusal names the turn. Your other conversations are
+unaffected — the lock is the conversation's, not yours.
 
 **Executable bits look after themselves.** Editing a file the project already holds as executable
 keeps it executable — before this, re-uploading a shell script silently turned it into a plain file —
@@ -1233,8 +1212,8 @@ and a local file that is executable is committed that way. Removing an executabl
 expressible from the CLI; nothing on the wire can name a file *mode*, which is what makes it
 impossible to create a symlink or a submodule through this route.
 
-**`--delete` is checked.** The path must already be in your branch; one that is not there is
-**refused**, and nothing is committed. That is deliberate: git's own answer to deleting a file that
+**`--delete` is checked.** The path must already be in that conversation's branch; one that is not
+there is **refused**, and nothing is committed. That is deliberate: git's own answer to deleting a file that
 does not exist is to report success and do nothing, so a typed path would otherwise leave you
 believing a file was gone. Deletes go through the same validator as uploads, so `.git/`, `.grid/`,
 `.claude/` and `.mcp.json` are as unreachable to a delete as they are to an upload.
@@ -1242,23 +1221,37 @@ believing a file was gone. Deletes go through the same validator as uploads, so 
 A path named as both a `--file` and a `--delete` is refused rather than resolved one way or the
 other, and a request naming neither never leaves the machine.
 
-`wip reset` moves a member's WIP branch back to a commit you name — the way out of the one state
-nothing else can undo. If a task's result is written into git but its completion is then interrupted,
-that member's branch is left ahead of the task branch, every retry is refused as a non-fast-forward,
-and their *next* task would be cut from the lost attempt's work. `grid task get <id>` prints the
-`base_commit` a task was cut from, which is usually the commit to reset to.
+### Rewinding a conversation's branch
 
-Any member may reset any member's branch — someone who leaves the team otherwise strands everything
-they never merged, since nothing can adopt or transfer their branch. It is refused while that member
-has a task running, because moving the base out from under an attempt in flight would fail its
-result for a reason nobody caused.
+```
+grid project wip reset <project-id> <conversation-id> --commit <oid>
+```
+
+`wip reset` moves a **conversation's** branch back to a commit you name — the way out of the one
+state nothing else can undo. If a turn's result is written into git but its completion is then
+interrupted, that conversation's branch is left ahead of the turn branch, every retry is refused as a
+non-fast-forward, and the conversation's *next* turn would be cut from the lost attempt's work.
+`grid task get <id> --json` reports the `base_commit` a turn was cut from, which is usually the commit
+to reset to.
+
+**It survives the release commands that were deleted, and that is deliberate.** The grid applying
+turns for you does not put this state out of reach: the apply moves the trunk, never a conversation's
+branch, so a settle interrupted halfway still leaves one ahead. It remains the documented recovery
+because nothing else moves a branch backwards — members do not push, the apply writes only the trunk,
+and there is no revert.
+
+Any member may reset any conversation's branch — someone who leaves the team otherwise strands
+everything their conversations were holding, since nothing can adopt or transfer one. It is refused
+while **that conversation** has a turn running, because moving the base out from under an attempt in
+flight would fail its result for a reason nobody caused. That is narrower than the rule it replaces,
+which refused while the *member* had anything running at all.
 
 ### Archiving and deleting a project
 
 Two operations, and they are deliberately not symmetrical.
 
 `grid project archive <id>` puts a project out of the way. It stops accepting new work — no task,
-commit, integrate, promote, import, init or WIP-branch reset — and leaves `grid project list` unless you pass `--all`,
+commit, import, init or branch reset — and leaves `grid project list` unless you pass `--all`,
 which shows it marked `(archived)`. **Nothing is destroyed**: the repository is kept exactly as it
 is, and every read still works — `grid project status`, `grid project clone`, `grid task list`,
 `grid task get`, `grid task fetch`. `grid project unarchive <id>` reverses it completely, and the
@@ -1270,8 +1263,8 @@ has already started, use `grid task cancel`.
 
 `grid project delete <id>` removes the project, its members and its repository, and **cannot be
 undone**. It is refused unless the project has never had a trunk and has never had a task — in that
-state there is provably nothing in it to lose, because WIP branches are only created by pointing at
-`main` and task branches only exist for tasks. Anything else is refused, naming `archive`. It asks
+state there is provably nothing in it to lose, because a conversation's branch is only ever created
+by pointing at `main` and a turn branch only exists for a turn. Anything else is refused, naming `archive`. It asks
 before it acts; `--yes` skips the prompt, and is required from a script because a non-terminal stdin
 counts as declining.
 
@@ -1302,9 +1295,9 @@ standing between one team's source and another's, so a refusal that told them th
 would turn every project route into a way to test ids.
 
 Writes are included, not just reads: someone reaching a project this way can create tasks, commit
-files, integrate, promote and reset a WIP branch in it, exactly as a member added by hand can. That
-is what "works in any project" means — the grid, not an invitation, is the boundary. Mark a project
-private if that is not what you want for it.
+files and reset a conversation's branch in it, exactly as a member added by hand can. That is what
+"works in any project" means — the grid, not an invitation, is the boundary. Mark a project private
+if that is not what you want for it.
 
 ⚠️ **On any other grid this rule does not apply at all** and a project is reachable by its members
 alone, exactly as before. The relay decides that from its own configuration — it must be running
@@ -1440,34 +1433,33 @@ requires the id one way or the other.
 `--init-project` gives the project an empty trunk first, then runs the task — the one-call form of
 `grid project init` followed by `grid task create`, for work that starts from nothing. It is
 **one-way**: a project that has a trunk can never import an existing repository, so reach for
-`grid project import` instead if you have one. Your uploaded files go on your own branch and reach
-`main` by promote, exactly as on any other task — the trunk it creates is empty and stays that way.
-Passing it at a project that already has a trunk is not an error; there is simply nothing to
-initialize and the task runs.
+`grid project import` instead if you have one. Your uploaded files go on the new conversation's
+branch and reach the trunk when the turn succeeds, exactly as on any other task — the trunk it
+creates is empty until then. Passing it at a project that already has a trunk is not an error; there
+is simply nothing to initialize and the task runs.
 
 A project with no trunk refuses tasks, and the refusal names both ways forward with your own prompt
 and `--file` arguments already in them, so the fix is one paste rather than a retype.
 
-**One task runs per person per project at a time** — creating a second one while your first is still
-`preparing`, `queued` or `running` is refused, so *your* tasks in a project are strictly sequential
-and each starts from the last one's result. Other members are unaffected: a project with five people
-in it runs five tasks at once, one each. Use different projects to run your own tasks in parallel.
+**One turn of a conversation runs at a time**, and that is the only sequencing there is: turns of one
+conversation are strictly ordered, each starting from the last one's result, while your other
+conversations run alongside it and so does everybody else's work. **Creating work never fails for want
+of capacity**: a turn that cannot start yet waits in the project's queue rather than being refused,
+and `grid project status` is where you see how deep that queue is.
 
-`grid task cancel <task-id>` ends a task that has not finished. Its **conversation survives**: the
+`grid task cancel <task-id>` ends a turn that has not finished. Its **conversation survives**: the
 next message you send continues where it left off, because cancelling stops a run and a conversation
 has no state to end.
-Before it existed the only way out of a task nobody wanted any more was to wait for its deadline —
-an hour if it was running, and up to four if it was still waiting for a provider — and the usual
-reason to reach for it is a conflict-resolution task queued by
-`grid project integrate`. **Any member may cancel any task in the project**, which is the point on a
-shared one: the colleague whose merge has been stuck all afternoon is often the person who needs to
-stop it, and the event log records who did.
+Before it existed the only way out of a run nobody wanted any more was to wait for its deadline —
+an hour if it was running, and up to four if it was still waiting for a provider. **Any member may
+cancel any turn in the project**, which is the point on a shared one: the colleague whose run has
+been stuck all afternoon is often the person who needs to stop it, and the event log records who did.
 
-The slot is free immediately; the agent itself stops within about half a minute, on the provider's
-next lease renewal. Against a provider that has not been updated yet it simply runs to completion
+The conversation is free to take its next turn immediately; the agent itself stops within about half
+a minute, on the provider's next lease renewal. Against a provider that has not been updated yet it simply runs to completion
 with nothing waiting on it — harmless, and the reason this needs no particular rollout order.
-**Nothing is rewound**: the task's branch is left exactly where the agent got to, so
-`grid task fetch` still works on a cancelled task.
+**Nothing is rewound**: the turn's branch is left exactly where the agent got to, so
+`grid task fetch` still works on a cancelled turn.
 
 ### Sending files with a task
 
@@ -1507,8 +1499,8 @@ An empty folder is refused by name, and so is one every file of which is ignored
 `.gitignore`, because reporting a visibly-full directory as empty reads as a bug.
 
 The files travel in the **same request** as the prompt, and that ordering is the guarantee, not a
-convenience: each project is a git repository the relay owns, and creating a task cuts `task/<id>`
-from your `wip/<member-key>` branch, commits the input, and only *then* makes the task claimable.
+convenience: each project is a git repository the relay owns, and creating a turn cuts `task/<id>`
+from its conversation's branch, commits the input, and only *then* makes the turn claimable.
 "The task exists" and "its input is in git" are one event, so a provider can never claim a task and
 check out before the files arrive — which would run the agent against missing input with nothing to
 say why the answer is wrong. `get --json` reports the `input_commit` the files landed on.
@@ -1544,12 +1536,12 @@ confidently. It also refuses `--into` a directory that already has files in it a
 a marker the command writes itself, not the presence of a `.git`, because your own repositories have
 one of those too.
 
-**On success the result lands on your own `wip/<member-key>` branch; on failure it does not.** That
-is what makes your WIP branch a known-good state and the base your next task is cut from. `main` is
-not touched either way — it moves only when somebody runs `grid project promote`. A failed attempt
-still commits and still pushes its own `task/<id>` branch, so you can fetch it, read what the agent
-did before it broke, and cherry-pick what was right — `get --json` reports the `result_commit` for
-both outcomes.
+**The result lands on the conversation's branch either way — success or failure — and reaches the
+project only on success.** The branch is the conversation's memory, so a failed turn stays on it and
+the next message continues from there rather than from before it; the trunk is what a turn has to
+succeed to reach, and the grid applies it there without being asked. A failed attempt still commits
+and still pushes its own `task/<id>` branch, so you can fetch it, read what the agent did before it
+broke, and cherry-pick what was right — `get --json` reports the `result_commit` for both outcomes.
 
 **What a provider may see and write is decided by the lease, not by trust.** A provider running one
 of your tasks is shown that task's branch and the project's `main` — not the branches of your other
@@ -1633,20 +1625,23 @@ normal while a build or a test suite runs, so nothing infers a hang from quiet.
 If the renewals stop — the provider was killed, lost power, or its agent died and it could not
 report — the lease lapses and the relay **reclaims** the task: it goes back to the queue, its branch
 is reset to exactly the input you uploaded, and the next provider to claim it starts from there. You
-see this in `grid task follow` as a retry line, and it says what the reset does and does not cover:
-**changes the lost attempt made in git are undone; anything it did outside git is not.** The event
-log keeps one sequence across the whole task, so a client attached across a retry loses nothing and
-never sees its cursor come to mean something else.
+see this in `grid task follow` as a retry line, and it is careful about what the reset does and does
+not cover: **the turn's own branch is reset; anything the lost attempt did outside git is not.** The
+one case it cannot undo is a settle interrupted between its git write and its terminal record —
+that work is already on the conversation's branch and stays there — so the line names the recovery
+too, `grid project wip reset <project-id> <conversation-id> --commit <base>`. The event log keeps one
+sequence across the whole turn, so a client attached across a retry loses nothing and never sees its
+cursor come to mean something else.
 
-Retries are capped (3 attempts by default). A task that exhausts them fails with
-`retries_exhausted`, and its slot unlocks so you can create the next task. A retried task goes back
+Retries are capped (3 attempts by default). A turn that exhausts them fails with
+`retries_exhausted`, and its conversation is free to take the next one. A retried turn goes back
 onto the *queue* clock, so time spent waiting for a second provider is not charged to the run budget
 the first one was using — and if nobody picks it up, it ends as `queue_expired` rather than being
 blamed for running too long.
 
-Separately, any task that outlives whichever budget applies to it — including one sitting `queued` on
+Separately, any turn that outlives whichever budget applies to it — including one sitting `queued` on
 a grid with no provider at all, which is given the longer of the two — is ended as `timed_out`, so a
-slot can never be held indefinitely by work nothing is doing.
+conversation can never be held indefinitely by work nothing is doing.
 
 One case worth knowing: if the agent clones another repository into the workspace, git records it as
 a submodule reference whose objects the relay does not have, and the push fails with git's own
@@ -1679,9 +1674,9 @@ keeps the workers it did start.
 > ⚠️ **Anything above 1 is unverified.** No value greater than 1 has been run against a real relay,
 > and the specific unknown is **two Claude Code children sharing one `CLAUDE_CONFIG_DIR`** — the
 > issue-01 spike listed it as an open question and never measured it. The parts that can be reasoned
-> about hold: a workspace belongs to a (project, member) pair, and the relay allows only one active
-> task per project, so two concurrent tasks are always in different directories. What has not been
-> observed is the agent itself under concurrency. Raise this only on a provider you can watch, and
+> about hold: a workspace belongs to a (project, member, conversation) triple, and only one turn of a
+> conversation ever runs at a time, so two concurrent turns are always in different directories. What
+> has not been observed is the agent itself under concurrency. Raise this only on a provider you can watch, and
 > expect to be the first to find out.
 
 The other bound is the subscription itself, and nobody configures it. Every agent child a provider

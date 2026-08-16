@@ -644,145 +644,81 @@ def _add_project(sub) -> None:
     member_remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     member_remove.set_defaults(handler=cmd_remote_project)
 
-    # `wip reset` — the one way out of a WIP branch left ahead of the task branch it settled from
-    # (ADR 0033 D-c). Nothing else moves one backwards: members never push it, promote writes only
-    # `main`, and there is no revert — so without this the member's NEXT task is silently cut from
-    # a lost attempt's work.
+    # `wip reset` — the one way out of a conversation's branch left ahead of the turn that settled
+    # onto it (ADR 0033 D-c, re-keyed by ADR 0034 D-e). It SURVIVES the clean break that deletes
+    # promote and integrate (ADR 0034 D-m), because the relay's own apply can still leave a branch
+    # ahead and this is the documented recovery. Nothing else moves one backwards: members never
+    # push, the apply writes only `main`, and there is no revert — so without this the
+    # conversation's NEXT turn is silently cut from a lost attempt's work.
     wip = project_sub.add_parser(
-        "wip", help="Work on a member's WIP branch — the ref their tasks are cut from")
+        "wip", help="Work on a conversation's branch — the ref its turns are cut from")
     wip_sub = wip.add_subparsers(dest="wip_action", required=True)
 
     wip_reset = wip_sub.add_parser(
-        "reset", help="Move a member's WIP branch back to a commit (recovers a lost attempt)")
+        "reset", help="Move a conversation's branch back to a commit (recovers a lost attempt)")
     project_arg.add_project(wip_reset)
-    project_arg.add_member(wip_reset)
+    # Through `project_arg`, never a bare `add_argument`: every refusal in that module offers forms
+    # DERIVED from what was registered, so a second positional added behind its back makes each of
+    # them name a command that no longer parses. Caught by
+    # `test_a_refusal_only_ever_offers_a_command_that_really_works`, which is what that test is for.
+    project_arg.add_conversation(
+        wip_reset,
+        help="Which conversation's branch to move. `grid task get <turn-id>` prints the "
+             "conversation a turn belongs to.")
     wip_reset.add_argument(
         "--commit", required=True,
-        help="Where to put the branch. `grid task get <id>` prints the `base_commit` a task was "
+        help="Where to put the branch. `grid task get <id>` prints the `base_commit` a turn was "
              "cut from, which is usually the commit you want.")
     wip_reset.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     wip_reset.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     wip_reset.set_defaults(handler=cmd_remote_project)
 
-    # `promote` — the only thing that moves `main` (ADR 0033 D-b). Its two consequences are in the
-    # help text and not only in the ADR, because the person typing this is the last one who can
-    # decide they are acceptable, and they can only decide it if they are told.
-    promote = project_sub.add_parser(
-        "promote",
-        help="Advance the project's main to a member's WIP branch (fast-forward only)",
-        description=(
-            "Advance the project's `main` to a member's WIP branch, fast-forward only.\n\n"
-            "`main` is the release branch: no task ever moves it, and this is the one thing that "
-            "does. Any member may promote any member's branch, including someone who has left the "
-            "team — nothing else can move their branch once they are gone.\n\n"
-            "Two things to know before you run it. Code an agent wrote reaches `main` if you "
-            "promote without reviewing it. And a promote cannot be undone by pushing, so there is "
-            "no revert for it in this release — the commit it replaced is printed, and putting it "
-            "back is an operation on the relay itself.\n\n"
-            "A branch that is behind `main` is refused, saying how far behind: integrate `main` "
-            "into it first, then promote."),
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    project_arg.add_project(promote)
-    project_arg.add_member(
-        promote,
-        help="Whose WIP branch to promote. Member key from `grid project member list`.")
-    promote.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
-    promote.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    promote.set_defaults(handler=cmd_remote_project)
-
-    # `integrate` — the counterpart to promote, and what makes promote survivable at all (ADR 0033
-    # D-d/D-e). It takes NO member key: the relay holds the caller's own task slot while it works,
-    # so the branch it moves has to be the caller's own.
-    integrate = project_sub.add_parser(
-        "integrate",
-        help="Bring the project's main into your own WIP branch",
-        description=(
-            "Bring the project's `main` into your own WIP branch.\n\n"
-            "`main` moves only when somebody promotes, so the first promote leaves everyone else "
-            "unable to promote at all — their branch was cut from a trunk that is now history. "
-            "Integrating is the way back, and it is what you run before promoting again.\n\n"
-            "It is always YOUR branch, so there is no member key to give. The relay holds your one "
-            "task slot while it works, which is what stops an integration moving the branch a task "
-            "of yours is running on — so it is refused while you have a task in flight, and the "
-            "refusal names that task.\n\n"
-            "Four things can happen: your branch already has everything on `main`; it moves "
-            "straight onto `main`; the two are merged and a merge commit is made on your branch; "
-            "or — if you and somebody else changed the same lines, which git cannot merge on its "
-            "own — the grid queues a MERGE TASK whose agent resolves the conflict.\n\n"
-            "A merge task costs an agent run and holds your one task slot while it works, so "
-            "nothing has moved when this command returns. Watch it with `grid task follow`, then "
-            "promote.\n\n"
-            "What the grid checks is that the merge HAPPENED — the result really contains `main`. "
-            "It cannot check that the resolution is right, so read it before you promote."),
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    project_arg.add_project(integrate)
-    integrate.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
-    integrate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    integrate.set_defaults(handler=cmd_remote_project)
-
-    # `status` and `check` — the two questions that used to need a WRITE to answer (ADR 0033 D-l,
-    # issue 19a). Both are pure reads: neither moves a ref, neither takes the caller's task slot.
+    # `status` — the question that used to need a WRITE to answer (ADR 0033 D-l, issue 19a). A pure
+    # read: it moves no ref and takes nobody's slot. Its `check` sibling went with the integrate it
+    # previewed (ADR 0034 D-d, issue 41).
     status = project_sub.add_parser(
         "status",
-        help="Where the project is: your branch, how far it is from main, what holds your slot",
+        help="Where the project is: what it holds, what is running, and who can serve it",
         description=(
-            "Where the project is, from your side.\n\n"
-            "Two of these were answerable before only by attempting something: how far behind your "
-            "branch is (attempt a promote and read the refusal) and what is holding your one task "
-            "slot (attempt a create and read the refusal). Both are reads now, and neither costs "
-            "anything.\n\n"
+            "Where the project is.\n\n"
+            "What is holding your turns was answerable before only by attempting a create and "
+            "reading the refusal. It is a read now, and it costs nothing.\n\n"
             "It is also how an application notices the project changed without running `git fetch`: "
-            "`main` moves on a promote or an import, and each member's branch moves when their work "
-            "settles, when an integration lands, or when they commit. An integration that "
-            "conflicts moves nothing — it shows up as a held task slot instead."),
+            "the grid applies every finished turn to the project itself, so the project's own "
+            "commit moves whenever anybody's work lands."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     project_arg.add_project(status)
     status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     status.set_defaults(handler=cmd_remote_project)
 
-    check = project_sub.add_parser(
-        "check",
-        help="Ask whether integrating would conflict, without integrating",
-        description=(
-            "Ask what `grid project integrate` would do, without doing it.\n\n"
-            "Integration IS the conflict check without this command: asking costs your one task "
-            "slot, and when the answer is that you and somebody else changed the same lines it "
-            "queues a merge task — a paid agent run.\n\n"
-            "This spends neither. It moves no ref, creates no task, and holds no slot — so it "
-            "answers even while you already have a task in flight, which is exactly when "
-            "`grid project integrate` refuses you.\n\n"
-            "It reports one of four answers, the same four integrate itself reports: already up to "
-            "date, a straight fast-forward, a clean merge, or a conflict that would need an agent."),
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    project_arg.add_project(check)
-    check.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
-    check.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    check.set_defaults(handler=cmd_remote_project)
-
-    # `commit` — a change goes in without an agent (ADR 0033 D-j, issue 20). Like integrate it takes
-    # NO member key: the relay holds the caller's own task slot while it writes.
+    # `commit` — a change goes in without an agent (ADR 0033 D-j, issue 20), onto the branch of a
+    # CONVERSATION named on the command line (ADR 0034 D-e, issue 41).
     committer = project_sub.add_parser(
         "commit",
         help="Put files into the project without running an agent",
         description=(
-            "Commit files onto your own WIP branch, with no agent and no provider.\n\n"
+            "Commit files into a conversation, with no agent and no provider.\n\n"
             "This is the answer to 'the agent got it 90% right, let me fix the last line'. The "
-            "alternative is `grid task create --file`, which spends your one task slot and then "
-            "runs an agent that may change the very line you are fixing.\n\n"
-            "It is always YOUR branch, so there is no member key to give. You still cannot push to "
-            "the project — the write goes through the grid, lands on exactly one ref, and holds "
-            "your one task slot while it does. So it is refused while you have a task in flight, "
-            "and the refusal names that task.\n\n"
+            "alternative is `grid task create --file`, which spends a slot and then runs an agent "
+            "that may change the very line you are fixing.\n\n"
+            "It goes into a conversation you already started, so the next message you send there "
+            "starts from it. You still cannot push to the project — the write goes through the "
+            "grid, lands on exactly one ref, and holds that conversation's slot while it does. So "
+            "it is refused while that conversation has a turn running, and the refusal names it.\n\n"
             "Executable bits look after themselves. Editing a file the project already has as "
             "executable keeps it executable, and a local file that is executable is committed that "
             "way. (Removing an executable bit is not expressible here.)\n\n"
             "--delete takes a path already in your branch. A path that is not there is REFUSED "
             "rather than quietly ignored, because git's own answer to deleting a file that does "
             "not exist is to report success and do nothing.\n\n"
-            "Nothing reaches `main`: promote is still what releases work."),
+            "It appears in the project by itself, exactly as a finished turn does — the grid "
+            "applies it. There is nothing else to run afterwards."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    project_arg.add_project(committer)
+    committer.add_argument(
+        "conversation_id",
+        help="Which conversation to commit into. `grid task create` prints one, and "
+             "`grid task get <turn-id>` prints the conversation a turn belongs to.")
     committer.add_argument(
         "-m", "--message", required=True, metavar="MSG",
         help="What this commit did. Required, like git's own.")
@@ -797,7 +733,8 @@ def _add_project(sub) -> None:
              "symlinks are skipped and reported. Executable bits are kept, like --file.")
     committer.add_argument(
         "--delete", action="append", metavar="PATH", default=None,
-        help="A path in your branch to remove, repeatable. Refused if it is not there.")
+        help="A path in the conversation's branch to remove, repeatable. Refused if it is not "
+             "there.")
     committer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     committer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     committer.set_defaults(handler=cmd_remote_project)
@@ -813,8 +750,9 @@ def _add_project(sub) -> None:
             "yet.\n\n"
             "One of the two ways a project gets a trunk — `grid project init` is the other, and "
             "makes an empty one for work that starts from nothing. The relay is `main`'s sole "
-            "writer — those two create it and promote moves it afterwards, and nothing else does — "
-            "so a first `git push` of `main` is refused.\n\n"
+            "writer — those two create it and the grid moves it afterwards, applying every turn "
+            "that succeeds, and nothing else does — so a first `git push` of `main` is refused."
+            "\n\n"
             "What happens: the repository is pushed to a staging ref only you can see, the relay "
             "reads EVERY tree its history reaches, and only then does it become `main`. The "
             "reading is the slow part and it is why this command waits — on a 29,000-commit "
@@ -845,17 +783,18 @@ def _add_project(sub) -> None:
         "clone",
         help="Clone a project's repository, configured to ask grid for a credential each time",
         description=(
-            "Clone a project into a directory you name, on YOUR branch.\n\n"
+            "Clone a project into a directory you name.\n\n"
             "No token is written anywhere. The clone is configured to run `grid credential` when\n"
             "git needs one, scoped to this grid's relay and to this clone alone — your global git\n"
             "config is untouched. Because git asks each time, a refreshed token is picked up\n"
             "automatically, where a token written into `.git/config` would expire in place.\n\n"
-            "You are put on your own WIP branch, not on the trunk: `main` moves only when somebody\n"
-            "promotes, so it may hold none of your work yet. The trunk is fetched too.\n\n"
+            "You are put on the project's trunk, which holds everybody's finished work: the grid\n"
+            "applies every turn that succeeds, so there is no separate branch of yours to be on.\n\n"
             "`git push` is REFUSED, and that is the design rather than a permission to request.\n"
-            "Your branch is written by the grid alone — task settle and integrate, both of which\n"
-            "hold your task slot — so a push could move the ground under a task that is running.\n"
-            "Land work with `grid project commit`, `grid project integrate`, or a task.\n\n"
+            "The project is written by the grid alone, so a push could move the ground under work\n"
+            "that is running right now.\n"
+            "Land work with `grid task create`, or `grid project commit <conversation-id>` for\n"
+            "files with no agent.\n\n"
             "Needs a git that reports `authtype` from `git credential capability`; the relay\n"
             "accepts no credential scheme an older git can send."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1100,7 +1039,7 @@ def _add_task(sub) -> None:
             "Stop a task that has not finished.\n\n"
             "Until this existed the only way out of a task nobody wanted any more was to wait for "
             "its deadline — an hour if it was running, and up to four if it was still waiting for "
-            "a provider. A conflict-resolution task queued by `grid project integrate` is the "
+            "a provider. A turn the grid queued to resolve a collision — one nobody typed — is the "
             "usual reason to reach for it.\n\n"
             "The CONVERSATION survives. Cancelling stops this run and nothing else, so the next "
             "message you send continues where it left off — there is no way to end a conversation, "
