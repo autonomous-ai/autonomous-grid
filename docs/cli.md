@@ -1316,6 +1316,8 @@ anything a client sends. `grid project status` reports which, so you never have 
 ```
 grid task create [<project-id>] --prompt <text> [--file <local>[:<dest>]]… [--dir <local>[:<dest>]]…
                  [--init-project] [--follow] [--grid <grid>] [--json]
+grid task send   <conversation-id> --prompt <text> [--file <local>[:<dest>]]…
+                 [--dir <local>[:<dest>]]… [--follow] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task list   <project-id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
@@ -1328,6 +1330,23 @@ grid task cancel <task-id> [--grid <grid>] [--json]
 a task **outlives the command that created it**: `create` returns immediately with an id, a provider
 claims the task from the grid's durable queue and runs it, and `get` reports where it got to. You can
 close your laptop in between.
+
+### Continuing a conversation
+
+`create` starts a **conversation** and sends its first message; `send` sends the next one into a
+conversation that already exists, so the agent still knows what you were talking about. The
+conversation id is printed by `create` and appears on every turn `get` and `list` report — it is a
+different id from the turn's, which is what `get`, `follow`, `fetch` and `cancel` address.
+
+Messages inside one conversation run **in the order you sent them, one at a time**, so you can type
+ahead without waiting; conversations of yours run alongside each other. Only the person who started
+a conversation can send into it — a colleague can read its turns, and works alongside you by
+starting their own with `create`.
+
+> ⚠️ A message sent **while an earlier one is still running** is accepted and queued, but it starts
+> from the project as it stood before that earlier turn, so the two do not yet combine and the
+> second may end `retries_exhausted`. Until that is fixed, reply after the previous answer comes
+> back.
 
 `follow` watches the task's progress as it happens, rather than polling `get`. The provider publishes
 events while it works and the relay keeps them in one **append-only log per task**, so `follow` is

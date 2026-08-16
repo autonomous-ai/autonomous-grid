@@ -537,8 +537,8 @@ def test_the_two_refusal_codes_this_cli_branches_on_are_the_ones_the_relay_sends
     """
     from cli import remote_task
 
-    assert remote_task._NO_TRUNK in _relay_function_strings("_wip_base_ref", module="tasks.py"), (
-        "grid-src's `_wip_base_ref` no longer refuses a trunkless project with the code "
+    assert remote_task._NO_TRUNK in _relay_function_strings("wip_base_ref", module="tasks.py"), (
+        "grid-src's `wip_base_ref` no longer refuses a trunkless project with the code "
         "`grid task create` offers `--init-project` for")
     assert remote_task._TRUNK_EXISTS in _relay_function_strings(
         "refuse_if_trunk_exists", module="project_trunk.py"), (
@@ -694,6 +694,135 @@ def _relay_claim_keys():
             "only partly read")
         keys.append(key.value)
     return frozenset(keys)
+
+
+def _relay_return_keys(function, module):
+    """The key set of the LAST dict a named grid-src function returns.
+
+    `_relay_claim_keys` generalised — that one searches two functions for the claim payload; this
+    one reads a single named function, which is what `task_view` is. Split rather than widened
+    because the claim's "either of these two may hold it" is a property of the claim's own split
+    (ADR 0034 D-b) and not something a caller here should have to state.
+
+    Everything it refuses, it refuses the way `_relay_claim_keys` does, for the same reason: a
+    function that is gone, a return that is no longer a dict literal, and a computed key are all
+    ERRORS rather than skips — each is exactly what a rename on the other side looks like, and
+    skipping would turn the check off in silence.
+    """
+    import ast
+
+    source = _relay_module(module)
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    dicts = []
+    found = False
+    for node in ast.walk(ast.parse(source.read_text())):
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == function):
+            continue
+        found = True
+        dicts += [child.value for child in ast.walk(node)
+                  if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict)]
+    assert found, (
+        f"{function} is no longer defined in grid-src's {module} — it was renamed, so teach this "
+        f"check the new name rather than deleting it")
+    assert dicts, (
+        f"grid-src's {function} no longer returns a dict literal, so this check cannot read its "
+        f"shape — teach it the new one rather than deleting the check")
+    keys = []
+    for key in dicts[-1].keys:
+        assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+            f"grid-src's {function} has a computed key, so this check would compare a shape it has "
+            f"only partly read")
+        keys.append(key.value)
+    return frozenset(keys)
+
+
+def _relay_route_paths(module):
+    """Every path string a grid-src module's `@router.<method>(...)` decorators declare."""
+    import ast
+
+    source = _relay_module(module)
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    paths = []
+    for node in ast.walk(ast.parse(source.read_text())):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not (isinstance(decorator, ast.Call) and decorator.args):
+                continue
+            target = decorator.func
+            if getattr(getattr(target, "value", None), "id", None) != "router":
+                continue
+            first = decorator.args[0]
+            assert isinstance(first, ast.Constant) and isinstance(first.value, str), (
+                f"a route in grid-src's {module} no longer declares a literal path, so this check "
+                f"would compare a shape it has only partly read")
+            paths.append(first.value)
+    assert paths, (
+        f"grid-src's {module} declares no routes, so this check proves nothing — it was renamed or "
+        f"emptied, and that is what this assertion is for")
+    return paths
+
+
+def test_the_follow_up_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0034 D-n (issue 47): `POST /relay/v1/tasks/{conversation_id}/turns`.
+
+    The path is the whole of the contract here — there is no body key to disagree about — and a
+    drift is SILENT in the worst direction: this CLI would post to a path the relay does not serve,
+    get FastAPI's bare 404, and `missing_route_hint` would turn it into "ask your operator to
+    update the relay" about a relay that is perfectly up to date. The member is then told to chase
+    an operator over a typo in this repository.
+
+    The CLI's half is read out of `send_turn`'s own f-string rather than restated, so the thing
+    compared is what the request is actually built from.
+    """
+    import ast
+    import inspect
+
+    from remote import relay
+
+    sent = [
+        "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
+        for node in ast.walk(ast.parse(inspect.getsource(relay.send_turn)))
+        if isinstance(node, ast.JoinedStr)
+    ]
+    assert sent, "send_turn no longer builds its path from an f-string; teach this check the new one"
+
+    # The relay's routers carry the `/relay/v1` prefix on the `APIRouter`, not on each decorator,
+    # so it is added back here rather than stripped off the client's — the prefix is a third copy
+    # (grid-apis has one too) and asserting the CLIENT still spells it is part of the point.
+    served = {"/relay/v1" + path.replace("{conversation_id}", "{}")
+              for path in _relay_route_paths("task_turns.py")}
+
+    assert set(sent) <= served, (
+        f"this CLI posts a follow-up to {sorted(set(sent) - served)}, which grid-src's "
+        f"task_turns.py does not serve — every send would get a bare 404 and be reported as "
+        f"'your relay is too old'")
+
+
+def test_the_task_view_names_the_conversation_a_follow_up_is_addressed_to():
+    """ADR 0034 D-n (issue 47): `conversation_id` on `tasks.task_view`.
+
+    ⚠️ **It is the ONLY way a person can learn the id `grid task send` takes.** Before this slice
+    `conversation_id` reached exactly one payload — the provider's CLAIM — so nothing a member can
+    call had ever said what conversation their turn is in. Drop it from the view and the command
+    still parses, still posts, and has no address anybody can obtain; `grid task create`'s output
+    silently loses the line that makes the feature discoverable, and nothing else goes red.
+
+    ⚠️ And `id` must stay beside it. They are two objects (D-a) — `id` is the TURN, which `/lease`,
+    `/result`, `/events` and `/cancel` address — and a view that reported one of them for both is
+    how a client cancels the wrong thing.
+    """
+    keys = _relay_return_keys("task_view", module="tasks.py")
+
+    assert "conversation_id" in keys, (
+        "grid-src's task_view no longer reports conversation_id, so `grid task send` has no "
+        "address a person could get — the command is unreachable and nothing else fails")
+    assert "id" in keys, (
+        "the turn's own id left the view, so a client has the conversation and nothing to follow, "
+        "cancel or fetch")
 
 
 def test_the_owner_role_this_cli_filters_on_is_the_one_the_relay_writes():
@@ -1648,6 +1777,17 @@ def test_the_help_for_a_task_slot_does_not_claim_it_is_per_project():
     the same time — measured live. A user who believes the old sentence reads a colleague's
     concurrent task as a bug in the grid, and reads their OWN refusal as the grid being busy rather
     than as their own task still running.
+
+    ⚠️ **The claim moved AGAIN at ADR 0034 D-b (issue 40) and the help lagged a second time**, which
+    is what this test exists to catch and did not: the index re-keyed to the CONVERSATION, so one
+    member holds as many as they like at once and `create_task` no longer refuses on capacity at
+    all. The sentence still said "one task in flight per project at a time" — wrong on both halves.
+    Corrected at issue 47, where `grid task send`'s own help sits one screen away and would
+    otherwise have contradicted it.
+
+    What is pinned is the CLAIM, not the wording: the old sentence must be gone, and the positional
+    must still describe what concurrency a member actually gets. `--help` is the only place a person
+    reads it.
     """
     from cli import parser as cli_parser
 
@@ -1663,7 +1803,13 @@ def test_the_help_for_a_task_slot_does_not_claim_it_is_per_project():
         "`grid task create --project` no longer exists"
     for action in create._actions:
         if action.dest == "project_id":
-            assert "one task in flight per project" in (action.help or "")
+            help_text = action.help or ""
+            assert "one task in flight" not in help_text, (
+                "the positional still claims a member gets one task at a time; since ADR 0034 D-b "
+                "they hold as many conversations as they like and create never refuses on capacity")
+            assert "conversations" in help_text, (
+                "the positional no longer says what concurrency a member gets, which is the one "
+                "thing `--help` is the only place to read")
             break
     else:
         raise AssertionError("`grid task create <project-id>` no longer exists to describe")

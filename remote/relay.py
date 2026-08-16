@@ -1229,6 +1229,50 @@ def cancel_task(signaling_url: str, access_token: str, task_id: str) -> dict[str
         missing_route_hint=_OLD_RELAY_NO_CANCEL)
 
 
+# A relay that predates ADR 0034 D-n (issue 47) has no follow-up route and answers the bare
+# framework 404. Its own sentence rather than `_OLD_RELAY`, for `_OLD_RELAY_NO_CANCEL`'s reason —
+# that one says the relay has no projects, which is plainly false of a relay that has been serving
+# `grid task create` — and it says what did NOT happen, as all four of its siblings do.
+_OLD_RELAY_NO_SEND = (
+    "This grid's relay cannot continue a conversation — every message it accepts starts a new one. "
+    "Ask its operator to update it. Nothing was sent; the conversation is unchanged."
+)
+
+
+def send_turn(
+    signaling_url: str,
+    access_token: str,
+    conversation_id: str,
+    *,
+    prompt: str,
+    files: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Send another message into a conversation (``POST /relay/v1/tasks/{id}/turns``).
+
+    The counterpart to :func:`create_task`, which opens a conversation and sends its FIRST message.
+    Same body, minus the project: the conversation already names one, and the relay **refuses** a
+    `project_id` here rather than dropping it — so sending one "just in case" is a 422, not a
+    courtesy.
+
+    ⚠️ **No echo-back check, unlike `create_task`, and the difference is the whole reason that one
+    needs its.** `/relay/v1/tasks` exists on relays that predate project membership, so an old one
+    answers 201 and silently runs the task somewhere else; there is nothing to notice but the
+    project id coming back wrong. This is a NEW route, so an old relay answers the bare framework
+    404 that `missing_route_hint` turns into a sentence — loud, before anything is created. **Roll
+    the relay out before this CLI**, the same order, for the opposite reason.
+
+    `files` is omitted entirely when empty, exactly as `create_task` omits it.
+    """
+    body: dict[str, Any] = {"prompt": prompt}
+    if files:
+        body["files"] = files
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        # The id is user input going into a path.
+        f"/relay/v1/tasks/{quote(conversation_id, safe='')}/turns",
+        json=body, missing_route_hint=_OLD_RELAY_NO_SEND)
+
+
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
     """Read one task back (``GET /relay/v1/tasks/{id}``)."""
     return _task_oneshot(

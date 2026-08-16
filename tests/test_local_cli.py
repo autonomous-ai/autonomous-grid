@@ -25680,6 +25680,311 @@ def test_task_unknown_subcommand_errors(monkeypatch, tmp_path):
         cli.cmd_remote_task(SimpleNamespace(subcommand="explode", grid=None, json=False))
 
 
+# `grid task send` — the second message into a conversation (ADR 0034 D-n, issue 47)
+#
+# Until this verb existed every `grid task create` minted a fresh conversation, so a person could
+# not continue one at all. `create` opens a conversation and sends its first message; `send` sends
+# the next one, into a conversation named by id.
+
+
+def test_task_send_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
+    """The byte-for-byte body pin, the same one `task create` carries.
+
+    The body is the create's TURN half and nothing else: **no `project_id`**, because the
+    conversation already names its project and the relay refuses the key rather than dropping it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={
+            "id": "T2", "conversation_id": "C1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "send", "C1", "--prompt", "actually make it green"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"], seen["auth"]) == (
+        "POST", "/relay/v1/tasks/C1/turns", "Bearer AT")
+    assert seen["body"] == {"prompt": "actually make it green"}
+    assert "T2" in capsys.readouterr().out
+
+
+def test_task_send_json_names_the_turn_and_the_conversation(monkeypatch, tmp_path, capsys):
+    """An application branches on both ids, and they are two different objects.
+
+    `id` is the TURN — what `follow`, `get` and `cancel` address. `conversation_id` is what the
+    NEXT message is sent to. One spelling for both is how a client addresses the wrong one.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T2", "conversation_id": "C1", "state": "queued", "project_id": "P1"}))
+
+    rc = cli.main(["task", "send", "C1", "--prompt", "next", "--json"])
+
+    assert rc == 0
+    document = json.loads(capsys.readouterr().out)
+    assert (document["id"], document["conversation_id"]) == ("T2", "C1")
+
+
+def test_task_create_tells_you_the_conversation_to_reply_in(monkeypatch, tmp_path, capsys):
+    """⚠️ Where a person GETS a conversation id, and before this slice there was nowhere.
+
+    `conversation_id` reached exactly one payload — the provider's claim — so `task send` would
+    have had no address anybody could obtain. `create` is where a conversation begins, so it is
+    where its id has to be said.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T1", "conversation_id": "C1", "state": "queued", "project_id": "P1"}))
+
+    cli.main(["task", "create", "--prompt", "hi", "--project", "P1"])
+
+    out = capsys.readouterr().out
+    assert "conversation=C1" in out, out
+    assert "grid task send C1" in out, out
+
+
+def test_task_create_against_an_older_relay_advertises_no_conversation(
+        monkeypatch, tmp_path, capsys):
+    """*Absent ⇒ an old relay*, so the line is SKIPPED rather than printed as `unknown`.
+
+    A relay with no `conversation_id` has no follow-up route either, so naming an id it never sent
+    would advertise a command that answers 404.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T1", "state": "queued", "project_id": "P1"}))
+
+    cli.main(["task", "create", "--prompt", "hi", "--project", "P1"])
+
+    out = capsys.readouterr().out
+    assert "conversation" not in out, out
+    assert "T1" in out, out
+
+
+def _sent_then_streamed(*blocks, task_id="T2", requests=None):
+    """A relay that accepts a follow-up and then streams the turn's events."""
+    def handler(request):
+        if requests is not None:
+            requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, text=_sse(*blocks),
+                                  headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(201, json={
+            "id": task_id, "conversation_id": "C1", "state": "queued", "project_id": "p1"})
+    return handler
+
+
+@pytest.mark.parametrize("final,expected", [("completed", 0), ("failed", 1), ("timed_out", 1)])
+def test_task_send_follow_exits_with_the_turns_outcome(
+        monkeypatch, tmp_path, capsys, final, expected):
+    """The same two-way rule `create --follow` and `follow` report, through the same watcher.
+
+    `send --follow` is not a second implementation: it hands `_follow_created` the id it already
+    has, so the cursor, the reconnect budget and the exit code are the ones already pinned.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, _sent_then_streamed(
+        _block(1, {"type": "task.output", "text": "working"}),
+        _block(2, {"type": "task.terminal", "state": final})))
+
+    rc = cli.main(["task", "send", "C1", "--prompt", "next", "--follow"])
+
+    assert rc == expected
+
+
+def test_task_send_follow_watches_the_turn_it_just_sent(monkeypatch, tmp_path, capsys):
+    """Two requests and nothing between them — no re-resolve, no project lookup."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    requests = []
+    _mock_relay(monkeypatch, _sent_then_streamed(
+        _block(1, {"type": "task.terminal", "state": "completed"}), requests=requests))
+
+    cli.main(["task", "send", "C1", "--prompt", "next", "--follow"])
+
+    assert requests == [
+        ("POST", "/relay/v1/tasks/C1/turns"), ("GET", "/relay/v1/tasks/T2/events")], requests
+
+
+def test_task_send_follow_json_is_one_json_document_per_line(monkeypatch, tmp_path, capsys):
+    """`--json` stays machine-readable when following, exactly as `create --follow` does."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, _sent_then_streamed(
+        _block(1, {"type": "task.output", "text": "working"}),
+        _block(2, {"type": "task.terminal", "state": "completed"})))
+
+    cli.main(["task", "send", "C1", "--prompt", "next", "--follow", "--json"])
+
+    documents = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert documents[0]["id"] == "T2"
+    assert [d["event"]["type"] for d in documents[1:]] == ["task.output", "task.terminal"]
+
+
+def test_task_send_refuses_a_reply_it_cannot_attach_to(monkeypatch, tmp_path):
+    """Accepted, but with nothing to address it by. `_task_create`'s guard, and its reason: saying 0
+    for a send-and-watch that only sent is the lie the exit codes exist to remove."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={"state": "queued"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next", "--follow"])
+
+    assert "--follow" in str(caught.value)
+
+
+def test_task_send_against_a_relay_without_the_route_names_the_relay(monkeypatch, tmp_path):
+    """A bare framework 404 becomes a sentence. **Roll the relay out before this CLI.**
+
+    Its OWN sentence, not `_OLD_RELAY`: that one says the relay has no projects, which is plainly
+    false of a relay that has been serving `grid task create`, and it would send somebody to check
+    a feature that works. The `_OLD_RELAY_NO_CANCEL` reasoning.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next"])
+
+    message = str(caught.value)
+    assert "relay" in message.lower(), message
+    assert "Not Found" not in message, message
+    # It says what did NOT happen, as all four of its siblings do.
+    assert "nothing was sent" in message.lower(), message
+
+
+def test_a_real_404_from_the_send_route_is_not_masked(monkeypatch, tmp_path):
+    """The other half, and the one that rots silently.
+
+    The hint is keyed on the bare `"Not Found"` body — a string FastAPI owns, not us — so a relay
+    that HAS this route and is refusing a conversation id must still show its own words. Without
+    this, an unknown conversation would be reported as "your relay is too old".
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next"])
+
+    assert str(caught.value) == "No such project", str(caught.value)
+
+
+def test_task_send_shows_the_relays_own_words_when_it_is_not_your_conversation(
+        monkeypatch, tmp_path):
+    """`not_your_conversation` is DISPLAYED, never compared.
+
+    The relay's message already names the command that goes forward (`grid task create`), so a
+    branch here would add nothing and would be a third parsed `detail` in this CLI — each one a
+    thing a reworded relay could break. The `task.retry` rule.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(403, json={
+        "detail": {"code": "not_your_conversation",
+                   "message": "That conversation belongs to another project member."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next"])
+
+    assert "another project member" in str(caught.value)
+
+
+def test_a_conversation_id_that_is_not_a_string_is_not_printed_as_advice(
+        monkeypatch, tmp_path, capsys):
+    """The `isinstance`-never-truthiness rule `relay.refusal_code` states, applied here.
+
+    The value is the RELAY's, and this one is interpolated into a command the person is told to
+    run. A truthy non-string — a dict from a mangling proxy, a number — would be printed as
+    `grid task send {'a': 1} --prompt <your message>`, which is advice that cannot work and reads
+    as the CLI being broken. Silence is the honest answer: it is the same reading an older relay
+    gets, and the turn id is still reported.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T1", "conversation_id": {"not": "an id"}, "state": "queued", "project_id": "P1"}))
+
+    cli.main(["task", "create", "--prompt", "hi", "--project", "P1"])
+
+    out = capsys.readouterr().out
+    assert "grid task send" not in out, out
+    assert "conversation=" not in out, out
+    assert "T1" in out, out
+
+
+def test_task_send_is_wired_to_the_handler():
+    args = cli.build_parser().parse_args(["task", "send", "C1", "--prompt", "x"])
+    assert args.subcommand == "send"
+    assert args.conversation_id == "C1"
+    assert args.handler is cli.cmd_remote_task
+
+
+def test_task_send_takes_no_project(capsys):
+    """The subtraction IS the command: a conversation already names its project.
+
+    Absent rather than accepted-and-ignored, matching the relay, which refuses a `project_id` on
+    this route rather than dropping it. A flag that parsed and did nothing would be the same silent
+    no-op one layer up.
+    """
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["task", "send", "C1", "--prompt", "x", "--project", "P1"])
+
+
+def test_task_send_requires_a_conversation_and_a_prompt():
+    for argv in (["task", "send", "--prompt", "x"], ["task", "send", "C1"]):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(argv)
+
+
+def test_task_send_is_refused_in_local_mode(monkeypatch, tmp_path):
+    """Inherited from the top-level `task` word being in `REMOTE_ONLY` — asserted, not assumed."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "send", "C1", "--prompt", "x"])
+    assert "remote" in str(exc.value).lower()
+
+
+def test_task_send_uploads_files_the_same_way_create_does(monkeypatch, tmp_path):
+    """The body's file half is the create's, byte for byte — `_collect_files` is shared.
+
+    ⚠️ And it must NOT carry `executable`: `task_files.parse_files` refuses unknown keys, so a key
+    this route sent that `task create` does not would be a 422 on every relay that has the route
+    but predates the key. The constraint `task create` already lives under.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "build.sh"
+    source.write_bytes(b"#!/bin/sh\n")
+    source.chmod(0o755)
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "T2", "conversation_id": "C1", "state": "queued"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "send", "C1", "--prompt", "x", "--file", str(source)])
+
+    assert seen["body"]["files"] == [
+        {"path": "build.sh", "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], seen["body"]
+
+
 def test_price_set_end_to_end_through_cli_main(monkeypatch, tmp_path):
     """Full remote-mode round trip: parser -> dispatch -> cmd_remote_price -> relay PUT.
     A signed-in user with a running grid runs `grid price set` and we capture the wire body."""

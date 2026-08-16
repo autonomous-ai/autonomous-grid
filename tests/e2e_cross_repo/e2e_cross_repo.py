@@ -818,10 +818,10 @@ def test_17_a_second_conversation_of_one_member_starts_fresh_on_one_provider(
     fast-forwarded, so it legitimately sees the first conversation's files. What must not be shared
     is the Claude Code session, and that is what the workspace path decides.
 
-    ⚠️ What is NOT here, and is not an omission: a SECOND TURN of one conversation resuming its own
-    session. Every `POST /tasks` mints a conversation and the route that posts a turn into an
-    existing one is issue 47, so until it ships nothing can resume anything. The paid
-    `e2e_live_agent.py` carries the half that needs the real binary.
+    ⚠️ What is NOT here: a SECOND TURN of one conversation resuming its own session. That is
+    `test_21`'s, over the route ADR 0034 D-n (issue 47) added — this test predates it and is left
+    addressing what it was written for, two conversations rather than two turns. The paid
+    `e2e_live_agent.py` still carries the half that needs the real binary.
     """
     from remote import relay as relay_client
 
@@ -1070,6 +1070,79 @@ def test_20_two_conversations_of_one_member_run_across_two_providers(
         f"the previous test did not.\n  holders={holders!r}\n"
         f"  provider A={a.node_id!r} log:\n{a.output()}\n"
         f"  provider B={b.node_id!r} log:\n{b.output()}")
+
+
+def test_21_a_follow_up_message_runs_in_the_conversation_it_was_sent_to(
+        relay, owner_token, spawn_provider, workspace_root):
+    """ADR 0034 D-n / issue 47 — the door, at the one seam where both repositories are on the wire.
+
+    Until this route existed every `POST /tasks` minted a conversation, so nothing in either suite
+    could reach one twice: the relay's write of `ConversationRow.claude_session_id` and its read
+    back on the claim were each tested against a row the OTHER half never wrote. `test_17`'s
+    docstring says so in as many words. This is what joins them, through a real settle and a real
+    claim, with nothing doctored.
+
+    ⚠️ **Sequential on purpose, and that is a limitation rather than a convenience.** A follow-up
+    posted while its sibling is still RUNNING is cut from the branch as it stood before that
+    sibling — `input_commit` is written once, at create — so it would not compose and its settle
+    would be refused `wip_not_fast_forward`. Issue 43 owns moving that computation to eligibility
+    and issue 41 owns `wip/<conversation_id>`; the relay-side pin is
+    `test_follow_up_turn.TestWhatAFollowUpDoesNotYetCompose`, which flips when they land. What this
+    slice delivers, and what this test covers, is the case a person actually hits: reply after the
+    last answer came back.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-follow-up",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE note.txt MAGPIE-4417; SAY started")
+    first_done = H.await_state(
+        relay, owner_token, first["id"], {"completed", "failed"}, timeout=120)
+    assert first_done["state"] == "completed", first_done
+
+    # 1. The id a person is given is the id the route takes. `create_task`'s reply is the only
+    #    surface that has ever carried it, so a relay that stopped sending it fails right here —
+    #    which is the point of reading it off the reply rather than out of the database.
+    conversation_id = first["conversation_id"]
+    assert conversation_id and conversation_id != first["id"], (
+        f"the create did not name a conversation distinct from its turn: {first!r}")
+
+    second = relay_client.send_turn(
+        relay, owner_token, conversation_id, prompt="READ note.txt; SAY continued")
+    second_done = H.await_state(
+        relay, owner_token, second["id"], {"completed", "failed"}, timeout=120)
+
+    # 2. It ran, and it ran in the conversation it was addressed to.
+    assert second_done["state"] == "completed", (
+        f"the follow-up did not complete: {second_done}")
+    assert second["conversation_id"] == conversation_id, (
+        f"the follow-up opened a conversation of its own: {second!r}")
+
+    # 3. It composed: the follow-up's workspace holds what the first turn wrote. Sequential, so
+    #    this is the case that works today — see the docstring.
+    assert "MAGPIE-4417" in (second_done.get("result_text") or ""), (
+        f"the follow-up could not see the file its own conversation's first turn wrote: "
+        f"{second_done}")
+
+    # 4. The SAME Claude Code session, which is the whole reason a conversation exists.
+    #    `fake_claude.py` echoes back whatever it was told to `--resume` and mints a fresh id
+    #    otherwise, so two different ids here means the second turn started cold — the failure a
+    #    person would experience as the agent having forgotten the conversation.
+    assert first_done.get("claude_session_id"), first_done
+    assert second_done["claude_session_id"] == first_done["claude_session_id"], (
+        f"the follow-up did not resume its own conversation's session — it started a fresh one in "
+        f"a workspace that remembers everything: {second_done}")
+    assert not second_done.get("session_reset_reason"), second_done
+
+    # 5. ONE workspace on disk, not two. The provider keys it by conversation, so a second directory
+    #    would mean the follow-up ran somewhere the session's transcript is not — the exact failure
+    #    `conversation_id`'s fail-closed refusal exists to prevent, arriving by a different door.
+    assert _one_conversation_dir(workspace_root, project) == conversation_id
 
 
 def _one_conversation_dir(workspace_root, project):

@@ -921,8 +921,9 @@ def _add_task(sub) -> None:
     project_arg.add_project(
         create, required=False,
         help="Project id to run in, from `grid project list` (default: your own project named "
-             "'default', created on first use). You may have one task in flight per project at a "
-             "time; a colleague's task in the same project does not block yours.")
+             "'default', created on first use). You may run as many conversations in a project as "
+             "you like and they run alongside each other; the messages inside one conversation run "
+             "in the order you sent them. A colleague's work never blocks yours.")
     create.add_argument(
         "--file", action="append", default=None, metavar="LOCAL[:DEST]",
         help="File to upload with the task; repeatable. Committed with the task before any "
@@ -957,6 +958,50 @@ def _add_task(sub) -> None:
     create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_task)
+
+    # ADR 0034 D-n / issue 47 — the door the queue was built for. `create` opens a conversation and
+    # sends its FIRST message; this sends the next one. Until it existed every `create` minted a
+    # fresh conversation, so there was no way to continue one at all.
+    #
+    # A separate verb rather than `create --conversation <id>`, for the reason `follow` is separate
+    # from `get --follow`: they differ in what they ADDRESS. `create` names a project and may resolve
+    # one; this names a conversation, which already answers that — so `--project` and
+    # `--init-project` are absent rather than ignored, and the relay refuses a `project_id` on the
+    # wire for the same reason.
+    send = task_sub.add_parser(
+        "send", help="Send another message into a conversation you already started",
+        description=(
+            "Send a follow-up message into a conversation. It runs after whatever that "
+            "conversation is already doing — your messages inside one conversation run in the "
+            "order you sent them, and you can type ahead without waiting.\n\n"
+            "The conversation id is printed by `grid task create`, and is on every turn that "
+            "`grid task get` and `grid task list` report.\n\n"
+            "Only the person who started a conversation can send into it. A colleague can read "
+            "its turns; to work alongside them, start your own with `grid task create`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    send.add_argument(
+        "conversation_id",
+        help="Conversation to send into, from `grid task create` or `grid task get`.")
+    send.add_argument("--prompt", required=True, help="What the agent should do next.")
+    send.add_argument(
+        "--file", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="File to upload with the message; repeatable. Committed before any provider can claim "
+             "the turn, so the agent always finds it. Placed at the file's own name unless you give "
+             "a destination (e.g. ./conf.toml:config/conf.toml).")
+    send.add_argument(
+        "--dir", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="Folder to upload with the message; repeatable. Placed under the folder's own name "
+             "unless you give a destination. Inside a git work tree your .gitignore is honoured; "
+             "`.git/`, `.grid/`, `.claude/`, `.mcp.json` and symlinks are skipped and reported.")
+    send.add_argument(
+        "--follow", action="store_true",
+        help="Watch the turn after sending it, and exit with its outcome — 0 completed, non-zero "
+             "otherwise, exactly as `grid task follow` does. Ctrl-C stops the watching, not the "
+             "turn. A message waiting for an earlier one in the same conversation simply shows "
+             "nothing until its turn comes.")
+    send.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    send.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    send.set_defaults(handler=cmd_remote_task)
 
     # `get` exits with the task's OUTCOME (ADR 0032, issue 32) — the same contract `follow` has
     # always had, on the command a script is far more likely to reach for, because it is the

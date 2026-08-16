@@ -87,6 +87,8 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
     args = project_arg.resolve(args)
     if args.subcommand == "create":
         return _task_create(args)
+    if args.subcommand == "send":
+        return _task_send(args)
     if args.subcommand == "follow":
         return _task_follow(args)
     if args.subcommand == "fetch":
@@ -514,7 +516,7 @@ def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
         f"    grid project import . {project_id}")
 
 
-# The relay's refusal code for "this project has no `main`" — grid-src `tasks._wip_base_ref`, a 422.
+# The relay's refusal code for "this project has no `main`" — grid-src `tasks.wip_base_ref`, a 422.
 # One of the TWO parsed `detail` codes this CLI reads (the other is `_TRUNK_EXISTS` below); the
 # provider still reads exactly one, `remote/task_lease.CANCELLED_CODE`.
 #
@@ -573,8 +575,52 @@ def _task_create(args: argparse.Namespace) -> int:
     return _follow_created(base, token, task_id, as_json=as_json)
 
 
-def _report_created(task: dict, label: str, *, following: bool, as_json: bool) -> None:
-    """What `task create` says about the task it just made, in the caller's chosen shape.
+def _task_send(args: argparse.Namespace) -> int:
+    """Send another message into a conversation that already exists (ADR 0034 D-n, issue 47).
+
+    `_task_create` minus the project half, and the subtraction IS the command: a conversation
+    already names its project, so there is no `--project` to resolve, no `default` to look up and
+    no `--init-project` — a conversation cannot exist in a project with no trunk.
+
+    That also means **no `GET /relay/v1/projects` round trip**, which `create` needs only to answer
+    "which project did you mean". One request, and its refusals are the relay's own.
+    """
+    from remote import relay
+
+    # Before the grid is resolved, for `_task_create`'s reason: a typo in a filename should not
+    # first cost a credential lookup and a control-plane round trip to discover.
+    files = _collect_files(getattr(args, "file", None), dirs=getattr(args, "dir", None))
+
+    base, token, label = _resolve(args)
+    task = relay.send_turn(
+        base, token, args.conversation_id, prompt=args.prompt, files=files)
+
+    as_json = bool(getattr(args, "json", False))
+    following = bool(getattr(args, "follow", False))
+    task_id = task.get("id")
+    _report_created(task, label, following=following, as_json=as_json, verb="sent to")
+
+    if not following:
+        return 0
+
+    if not task_id:
+        # `_task_create`'s guard verbatim, and for its reason: the turn exists, so reporting 0 for a
+        # send-and-watch that only sent would be the lie the exit codes exist to remove.
+        raise SystemExit(
+            f"The relay accepted the message but did not say what its turn id is, so --follow has "
+            f"nothing to attach to. See what landed with `grid task list "
+            f"{task.get('project_id') or '<project-id>'}`")
+
+    return _follow_created(base, token, task_id, as_json=as_json)
+
+
+def _report_created(task: dict, label: str, *, following: bool, as_json: bool,
+                    verb: str = "created on") -> None:
+    """What `task create` and `task send` say about the turn they just made, in the chosen shape.
+
+    ONE function with a `verb` rather than two that drift — the reasoning
+    `project_writable.refuse_if_archived` records for taking one: the two commands report the same
+    row and the only honest difference is which of them the person ran.
 
     `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
 
@@ -592,9 +638,27 @@ def _report_created(task: dict, label: str, *, following: bool, as_json: bool) -
         print(json.dumps(task, indent=None if following else 2))
         return
 
-    print(f"task {task_id or '(no id)'} created on {label}")
+    print(f"task {task_id or '(no id)'} {verb} {label}")
     print(f"state={task.get('state') or 'unknown'}")
     print(f"project={task.get('project_id') or 'unknown'}")
+    # The id the NEXT message is addressed by (ADR 0034 D-n, issue 47), and the only place a person
+    # is ever told it: `conversation_id` reaches no other surface a member can call. Printed for
+    # `create` as well as `send`, because create is where a conversation begins and therefore where
+    # somebody needs its id.
+    #
+    # ⚠️ Skipped rather than printed as `unknown` when the relay does not send it — that is an older
+    # relay with no follow-up route, so a line naming an id it does not have would advertise a
+    # command that answers 404.
+    # `isinstance`, never a bare truthiness test — the rule `relay.refusal_code` states, and it
+    # matters here because this id is interpolated into a command the person is told to RUN. A
+    # truthy non-string from a mangling proxy would print `grid task send {'a': 1} --prompt …`,
+    # advice that cannot work and reads as this CLI being broken. Falling silent is the honest
+    # answer and is the reading an older relay already gets; the turn id is still reported.
+    conversation_id = task.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        conversation_id = None
+    if conversation_id:
+        print(f"conversation={conversation_id}")
     if following:
         return
     # `follow` and not `get` (issue 32). The verb said "watch" and the command named the one-shot —
@@ -603,6 +667,14 @@ def _report_created(task: dict, label: str, *, following: bool, as_json: bool) -
     print(f"\nWatch it with:   grid task follow {task_id or '<id>'}"
           f"\nOr ask once:     grid task get {task_id or '<id>'}"
           f"\n(or pass --follow to create and watch in one command)")
+    if conversation_id:
+        # Last on its line, because `test_every_command_this_cli_tells_you_to_run_actually_parses`
+        # retypes the first `grid …` match on a line as argv — and the argument is spelled
+        # `<your message>` rather than `'...'` for the same reason: that scanner strips quotes, so
+        # a quoted ellipsis leaves `--prompt` with nothing after it and the retyped line is a usage
+        # error. `<…>` becomes a placeholder token instead. Caught by that test while writing this.
+        print(f"Reply in this conversation with:  "
+              f"grid task send {conversation_id} --prompt <your message>")
 
 
 def _follow_created(base: str, token: str, task_id: str, *, as_json: bool) -> int:
