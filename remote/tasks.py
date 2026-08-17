@@ -30,7 +30,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from . import relay, task_agent, task_capacity, task_repo, task_stream
+from . import relay, task_agent, task_capacity, task_evict, task_repo, task_stream
 
 # Queue sentinels. Plain `object()`s rather than None or "" — a task's output legitimately contains
 # blank lines, and both would be indistinguishable from one. `_EOF` is posted once per pipe.
@@ -609,6 +609,9 @@ def run_task(job: dict[str, Any],
         # task root is unwritable fails here — as "could not create …" on a task that cost nothing —
         # rather than three minutes later as an `EROFS` inside somebody's `npm install`.
         task_agent.ensure_cache(workspace)
+        # And this conversation is the most recently used one from now on, so the next sweep offers
+        # somebody else's cold checkout before it offers this one.
+        task_evict.touch(workspace)
         # Resolved HERE rather than with the argv below, which is now built after the checkout: a
         # provider with no Claude Code installed must fail before it fetches anything, not after.
         binary = task_agent.resolve_binary()
@@ -622,6 +625,24 @@ def run_task(job: dict[str, Any],
         # Nothing was spawned, so there is no session id and no output — only a reason, and it is
         # one an operator can act on ("Claude Code isn't installed", "/var/grid is not writable").
         return failed(f"could not start the agent: {exc}")
+
+    # BOUND THE DISK (ADR 0034 D-c, issue 50), here and nowhere else. This is the last moment before
+    # a working tree is fetched, and a provider that never claims again is spending nothing — so
+    # there is no start-up sweep and no background thread to keep alive.
+    #
+    # ⚠️ **AFTER `ensure_workspace`, and that ordering is the bound.** The sweep counts what is on
+    # disk, so run before this conversation's directory exists it under-counts by one and a cap of N
+    # keeps N+1 workspaces — off by exactly the one that matters, silently, on every provider.
+    # Nothing expensive has happened yet: the directories are empty until `materialize` below.
+    #
+    # Eviction takes the SAME reservation a worker takes rather than reading a second registry, so
+    # "in use" stays one fact with one owner. `keep` covers this call, which in production already
+    # holds that reservation (`_run_and_report`) but need not — a direct `run_task` does not.
+    task_evict.sweep(
+        task_agent.workspace_root(),
+        keep=(str(job.get("project_id") or ""), member_key, conversation_id),
+        reserve=lambda triple: _reserve_workspace(*triple),
+        release=lambda triple: _release_workspace(*triple))
 
     # BEFORE the spawn, and fatal if it fails. An agent run against input that never arrived
     # produces a confidently wrong result with nothing anywhere indicating why — the precise

@@ -149,12 +149,17 @@ def spawn_provider(relay, provider_nodes, fake_agent_bin, workspace_root, tmp_pa
     started: list[H.Provider] = []
     logs: list = []
 
-    def _spawn(label="A", workers=1):
+    def _spawn(label="A", workers=1, extra_env=None):
         """`workers` is how many turns this provider runs AT ONCE (ADR 0034 D-b, issue 40).
 
         **Default 1, and every existing test depends on it.** `test_09` proves a cancel really
         stopped an agent by watching a second task become claimable, which is evidence only while
         this provider has one worker — so concurrency is opt-in per spawn rather than a new default.
+
+        `extra_env` is for the provider-side knobs a test needs to drive from outside the process —
+        `GRID_TASK_MAX_WORKSPACES` (ADR 0034 D-c, issue 50) is the first. Applied LAST so a test's
+        value wins over the defaults below, and per spawn rather than through `monkeypatch.setenv`,
+        which would reach every provider in a two-provider test.
         """
         node_id, node_token = provider_nodes[label]
         env = {
@@ -171,6 +176,7 @@ def spawn_provider(relay, provider_nodes, fake_agent_bin, workspace_root, tmp_pa
             # `e2e_live_agent.py` is the one place that cannot do this, and it cleans up after itself.
             "GRID_TASK_CLAUDE_CONFIG_DIR": str(tmp_path_factory.mktemp(f"claude-config-{label}")),
             "GRID_TASK_TIMEOUT_SECONDS": "120",
+            **(extra_env or {}),
         }
         # ⚠️ **A FILE, not an undrained `subprocess.PIPE`.** This used to be a pipe nobody read, and
         # that is not merely untidy: a pipe's buffer is 64 KB, and a provider that fills it blocks

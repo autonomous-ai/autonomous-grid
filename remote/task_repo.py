@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import task_worktree
+
 # The one directory `git clean` must not touch. LOCKSTEP with the relay's upload validator, which
 # refuses any path inside it — the two halves of one rule: nothing may be uploaded here, and nothing
 # here may be deleted.
@@ -504,15 +506,26 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
         raise CheckoutError(
             f"the claim's transcript_commit {transcript_commit!r} is not an object id")
 
-    _ensure_repo(workspace)
+    # THE OBJECT STORE, and the fetch goes into it rather than into the workspace (ADR 0034 D-c,
+    # issue 50). The order is forced: a worktree cannot be cut at a commit the store does not hold
+    # yet, so the store is created, then filled, and only then is this conversation's working tree
+    # cut from it. Everything below `ensure_worktree` runs in the workspace exactly as before.
+    store = task_worktree.store_for(workspace)
     try:
-        _run(workspace, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
+        # INSIDE the retryable block, beside the fetch, and that placement is a decision. This is
+        # provider-LOCAL git housekeeping — `init --bare`, `config`, `worktree prune` — so its
+        # failures are about this provider's disk and not about the task: an ENOSPC here is exactly
+        # the "about this attempt rather than about the task" case the fetch's own comment below
+        # describes, and reported terminally it burns the turn on one machine's full disk with
+        # nothing to retry it. Found in review.
+        task_worktree.ensure_store(store)
+        _run(store, "fetch", "--quiet", url, f"+refs/heads/{branch}:refs/heads/{branch}",
              token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if merge_ref:
             # Its own invocation rather than a second refspec on the one above: a relay that has
             # collected this ref early answers with a failure naming the ref, and combining them
             # would lose the input fetch's success to the merge ref's failure.
-            _run(workspace, "fetch", "--quiet", url, f"+{merge_ref}:{merge_ref}",
+            _run(store, "fetch", "--quiet", url, f"+{merge_ref}:{merge_ref}",
                  token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
         if transcript_commit:
             # THE CONVERSATION (ADR 0034 D-j, issue 39), and only when the relay pinned one. An
@@ -530,13 +543,22 @@ def materialize(workspace: Path, *, url: str, token: str, branch: str,
             # Its own invocation, for the merge ref's reason: this failure has to be
             # distinguishable, because "the relay says a transcript exists and I could not get it"
             # must NOT become a silent fresh session.
-            _run(workspace, "fetch", "--quiet", url, f"+{transcript_ref}:{transcript_ref}",
+            _run(store, "fetch", "--quiet", url, f"+{transcript_ref}:{transcript_ref}",
                  token=token, timeout=_GIT_NETWORK_TIMEOUT_SECONDS)
+
+        # This conversation's working tree, cut from the store the fetch just filled. Cheap on every
+        # turn after the first — the worktree is already there and this is a probe.
+        #
+        # Retryable for `ensure_store`'s reason, and more so: `worktree add` is a full checkout of
+        # the whole repository, so it is far more exposed to a disk filling up than the `git init`
+        # it replaced.
+        task_worktree.ensure_worktree(store, workspace, input_commit)
     except CheckoutError as exc:
-        # The ONLY lines in this function that talk to the relay, and so the only ones whose failure
-        # another provider might not repeat. Re-raised as the retryable subclass — see
-        # `InputFetchError`. Everything above is validation and everything below is local, and both
-        # stay terminal on purpose.
+        # The lines that talk to the relay, and — since issue 50 — the provider-local git
+        # housekeeping either side of them: everything whose failure is about THIS ATTEMPT rather
+        # than about the task, and which another provider might therefore not repeat. Re-raised as
+        # the retryable subclass; see `InputFetchError`. The VALIDATION above stays terminal, because
+        # a malformed claim finds the same answer on every provider.
         raise InputFetchError(str(exc)) from None
 
     # `symbolic-ref` rather than `checkout -B`: the workspace may hold a previous task's modified

@@ -32,6 +32,11 @@ from pathlib import Path
 
 from shared import paths
 
+# For `store_for` alone — the layout, spelled in one place (ADR 0034 D-c, issue 50). Safe as a
+# top-level import where `task_agent` is not: `task_worktree` reaches `task_repo` and `task_agent`
+# lazily, from inside its functions, precisely so importing it closes no ring.
+from . import task_worktree
+
 # Named rather than imported from `task_agent`, which imports THIS module — the variable an operator
 # actually sets when a workspace path needs to move.
 WORKSPACE_ROOT_HINT = "GRID_TASK_ROOT"
@@ -430,6 +435,31 @@ def policy(workspace: Path, config_dir: Path) -> dict:
     cache = _resolved(cache_dir(Path(workspace_path)))
     allowed.append(cache)
     writable.append(cache)
+    # THE OBJECT STORE this conversation's worktree hangs off (ADR 0034 D-c, issue 50), on both axes
+    # for the cache tree's reason and then some.
+    #
+    # ⚠️ **Without this the layout does not work at all, rather than working slowly.** A linked
+    # worktree's `.git` is a FILE pointing into `<store>/worktrees/<conversation>/`, so the git state
+    # the agent's own commands write is no longer inside the workspace: `git status` refreshes the
+    # index there, `git commit` writes loose objects into `<store>/objects/`, and ADR 0033 D-e's
+    # merge turn asks the agent for `git add`/`git rm` by name. Read-only fails every one of them.
+    #
+    # ⚠️ **This is the one place the agent is given something shared between two of its owner's
+    # conversations, and the bound on it is `member_key`.** The store is under the MEMBER directory,
+    # so what widens is one person's own project — never a colleague's, which is the channel ADR 0033
+    # D-g exists to close. The member directory ITSELF is deliberately not granted: it holds the
+    # other conversations' working trees, and an agent that could write those would be editing a
+    # sibling turn's files while it ran.
+    #
+    # ⚠️ **It is still wider than "that member's history", and the difference is live state.** A bare
+    # common directory holds `refs/heads/task/<turn_id>` for all of that member's conversations and
+    # `worktrees/<conversation_id>/{HEAD,index,…}` for the ones RUNNING — so an agent here can reach
+    # a sibling turn's ref or index while it is in flight, which nothing could do before the store
+    # was shared. Accepted, because closing it means not sharing; see `task_worktree`'s module
+    # docstring for the full statement.
+    store = _resolved(task_worktree.store_for(Path(workspace_path)))
+    allowed.append(store)
+    writable.append(store)
     # `temp_base()`, NOT `os.getenv("TMPDIR")`. The child's temp directory is the variable *or*
     # `/tmp` when it is unset — that is what `temp_base` answers, what `child_env` lets through, and
     # what `_prove_the_sandbox_can_bind_its_sockets` certifies. Unset is the ORDINARY case, not the

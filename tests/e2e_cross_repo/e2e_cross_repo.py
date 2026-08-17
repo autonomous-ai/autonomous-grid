@@ -936,6 +936,17 @@ def test_17_a_second_conversation_of_one_member_starts_fresh_on_one_provider(
     assert len(conversations) == 2, (
         f"expected one workspace per conversation under {members[0]}, found {conversations!r}")
 
+    # 5. And the two working trees share ONE object store (ADR 0034 D-c, issue 50). Measured on the
+    #    directory rather than read off the code, and over the wire rather than in a unit fixture:
+    #    what the provider builds here is what a real claim produced.
+    stores = sorted(p for p in members[0].iterdir() if (p / "objects").is_dir())
+    assert len(stores) == 1, (
+        f"expected the member's two conversations to share one object store, found {stores!r} — a "
+        f"second conversation is costing a second copy of the project's whole history")
+    for conversation in conversations:
+        assert (conversation / "workspace" / ".git").is_file(), (
+            f"{conversation}'s workspace is a repository of its own, not a linked worktree")
+
 
 def test_18_a_conversations_transcript_leaves_the_projects_history(
         relay, relay_home, owner_token, spawn_provider, workspace_root):
@@ -1577,6 +1588,86 @@ def test_23_a_member_cannot_take_the_whole_fleet(
     assert any(state == "running" for state in mine_states), (
         f"the surplus was queued while none of the member's own turns were running, so something "
         f"other than the cap was holding it: {mine_states}")
+
+
+def test_24_a_conversation_whose_workspace_was_evicted_carries_on_where_it_left_off(
+        relay, owner_token, spawn_provider, workspace_root):
+    """ADR 0034 D-c / issue 50's fourth criterion, and the one no unit test can reach.
+
+    A provider's workspaces are bounded, and the bound is enforced by deleting the least recently
+    used — which deletes the only local copy of a conversation, its Claude Code session included.
+    That is survivable for exactly one reason: since issue 39 the transcript lives on
+    `refs/grid/agent/<conversation_id>`, and the relay pins the commit a turn should resume on the
+    claim. So the proof has to run both halves against a real relay: the eviction is this
+    repository's, the pin is grid-src's, and a provider that evicted while the relay stopped sending
+    `transcript_commit` would leave both unit suites green and every conversation starting cold.
+
+    The provider is spawned with a cap of ONE, so the colleague conversation's turn in the middle is
+    what performs the eviction — the real path, driven by the bound, rather than an `rmtree` standing
+    in for it.
+
+    ⚠️ **`GRID_MAX_TASKS` stays at 1.** Two workers against a cap of one workspace would have each
+    turn evicting the other's working tree mid-run, which is a fault this design accepts by keying
+    eviction on the reservation — and pointing this test at it would make it about the reservation
+    instead of about resuming.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A", extra_env={"GRID_TASK_MAX_WORKSPACES": "1"})
+    project = relay_client.create_project(
+        relay, owner_token, name="p-evicted",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE ledger.txt OSPREY-8823; SAY started")
+    first_done = H.await_state(
+        relay, owner_token, first["id"], {"completed", "failed"}, timeout=120)
+    assert first_done["state"] == "completed", first_done
+    conversation_id = first["conversation_id"]
+
+    members = sorted((workspace_root / "A" / "projects" / project).iterdir())
+    assert len(members) == 1, members
+    evicted = members[0] / conversation_id
+    assert (evicted / "workspace").is_dir(), (
+        f"the first turn left no workspace at {evicted}, so there is nothing for the bound to evict")
+
+    # A SECOND conversation, which is what puts this provider over its cap of one.
+    second = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="WRITE other.txt ignored; SAY done")
+    second_done = H.await_state(
+        relay, owner_token, second["id"], {"completed", "failed"}, timeout=120)
+    assert second_done["state"] == "completed", second_done
+    assert second["conversation_id"] != conversation_id
+
+    # 1. The bound was enforced by EVICTION, and the second turn was not refused for disk.
+    assert not evicted.exists(), (
+        f"{evicted} survived a provider capped at one workspace — the bound is not being enforced, "
+        f"so a provider accumulates a directory per conversation exactly as it did before")
+
+    # 2. And now the first conversation is spoken to again. Its workspace, its checkout and its
+    #    Claude Code session all have to come back from the relay alone.
+    H.wait_for(
+        lambda: first_done["result_commit"] in H.git_ls_remote(
+            relay_client.git_remote_url(relay, project), "refs/heads/main", bearer=owner_token),
+        timeout=30.0)
+    third = relay_client.send_turn(
+        relay, owner_token, conversation_id, prompt="READ ledger.txt; SAY continued")
+    third_done = H.await_state(
+        relay, owner_token, third["id"], {"completed", "failed"}, timeout=120)
+
+    assert third_done["state"] == "completed", (
+        f"the evicted conversation could not run again: {third_done}")
+    # THE SAME SESSION. `fake_claude.py` echoes back whatever it was told to `--resume` and mints a
+    # fresh id otherwise, so a different id here is a person whose agent forgot the conversation —
+    # which is exactly what eviction would cost if the transcript did not travel on its own ref.
+    assert third_done["claude_session_id"] == first_done["claude_session_id"], (
+        f"the evicted conversation started a cold session rather than resuming: "
+        f"first={first_done.get('claude_session_id')}, third={third_done.get('claude_session_id')}")
+    assert not third_done.get("session_reset_reason"), third_done
+    # And the same FILES: the checkout was rebuilt from the trunk the first turn's work reached.
+    assert "OSPREY-8823" in (third_done.get("result_text") or ""), (
+        f"the rebuilt workspace does not hold what this conversation wrote: {third_done}")
 
 
 def _refusal(call):

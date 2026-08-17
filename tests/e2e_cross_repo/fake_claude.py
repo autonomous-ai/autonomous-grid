@@ -240,6 +240,39 @@ def _resolve_the_merge(ref: str) -> list[str]:
     return [f"combined {len(unmerged)} file(s)" if unmerged else "nothing to combine"]
 
 
+def _script(prompt: str) -> str:
+    """The part of `prompt` this fake is meant to execute, with any DELTA BLOCK dropped.
+
+    Since ADR 0034 D-f (issue 43) the relay composes a short paragraph onto the FRONT of a turn's
+    prompt when the project moved under that conversation — file names and a stat, in English. It is
+    never stored, so what a person reads back is still what they typed; but it is what reaches an
+    agent, and this fake treats the whole prompt as a script. Meeting it, the parser splits on the
+    first `;`, finds a verb like `The`, and exits 2 — a broken AGENT, in a test about something else.
+
+    CLAUDE.md predicted this exactly and said the first E2E to send a follow-up after a colleague's
+    change lands would need it. That test is now `test_24`, and it flaked 2 runs in 3 before this:
+    whether a block is composed depends on whether the sibling conversation's work had reached the
+    trunk in time, which is a race the test does not control and should not have to.
+
+    ⚠️ **Recognised STRUCTURALLY, duplicating no literal of the relay's wording** — the rule
+    CLAUDE.md gives, and the reason it gives it: a copy of `turn_delta`'s prose here would be a
+    cross-repo lockstep value that nothing checks, so a reworded block would go straight back to
+    failing as `unknown directive`, and both suites would stay green.
+
+    The structure it keys on is the one thing a script always has and prose never does: every
+    directive this fake knows is an ALL-CAPS word (`WRITE`, `READ`, `SLEEP`, `SAY`, `FAIL`). So if
+    the prompt does not START with one and it has a blank line, the script is what follows the last
+    blank line. `.isupper()` rather than a list of the verbs, because a list here would be a second
+    copy of the dispatcher below and could drift from it; what matters is not WHICH verb it is but
+    that the opening token is shaped like one at all — `"The".isupper()` is False, and so is
+    `"3".isupper()` for a block that opens with a count.
+    """
+    if prompt.strip().partition(" ")[0].isupper():
+        return prompt  # starts with something shaped like a directive: an ordinary script.
+    _, separator, tail = prompt.rpartition("\n\n")
+    return tail if separator and tail.strip() else prompt
+
+
 def main() -> int:
     if sys.argv[1:2] == ["--version"]:
         # Answered before anything else, and without the argv check: this is how the provider's
@@ -269,7 +302,7 @@ def main() -> int:
 
     said: list[str] = []
     turns = 0
-    for directive in [d.strip() for d in prompt.split(";") if d.strip()]:
+    for directive in [d.strip() for d in _script(prompt).split(";") if d.strip()]:
         verb, _, rest = directive.partition(" ")
         turns += 1
         if verb == "WRITE":

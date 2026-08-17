@@ -474,6 +474,63 @@ def test_the_SHARED_home_caches_stay_read_only(tmp_path, config_dir):
             f"{cache} is shared between members; writable makes it a contamination channel")
 
 
+# --- The object store the worktree hangs off (ADR 0034 D-c, issue 50) -----------------------------
+#
+# A linked worktree's `.git` is a FILE pointing into `<store>/worktrees/<conversation>/`, so the
+# workspace no longer contains the git state the agent's own git commands write. `git status`
+# refreshes the index there, `git commit` writes loose objects into `<store>/objects/`, and issue
+# 15's merge turn asks the agent for `git add`/`git rm` by name. All of that lands outside the
+# workspace, so the store has to be granted or the layout does not work at all.
+
+
+def test_the_object_store_is_writable_so_the_agent_can_run_git_at_all(tmp_path, config_dir):
+    """The regression this grant exists to prevent, and it is total rather than partial.
+
+    Read-only is not a degraded worktree — it is one where every `git` command that touches the
+    index or writes an object fails, which is most of them. A merge turn (ADR 0033 D-e) cannot
+    complete at all, and an ordinary turn's agent cannot commit its own work in progress.
+    """
+    from remote import task_sandbox, task_worktree
+
+    workspace = tmp_path / "projects" / "p" / "m" / "c" / "workspace"
+
+    filesystem = task_sandbox.policy(workspace, config_dir)["sandbox"]["filesystem"]
+
+    store = str(task_worktree.store_for(workspace).resolve())
+    assert store in filesystem["allowRead"], (
+        "the agent cannot even READ the store, so `git log` fails; `GRID_TASK_ROOT` under a denied "
+        "home is the ordinary case on a dev box, which is why this is not free")
+    assert store in filesystem["allowWrite"], (
+        "a read-only object store fails every git command that writes the index or an object, which "
+        "is most of them — including the `git add` a merge turn is told to run")
+
+
+def test_the_object_store_of_ANOTHER_MEMBER_is_never_granted(tmp_path, config_dir):
+    """The bound on what that grant widened, and the reason `member_key` is in the path.
+
+    ADR 0034 D-c puts the store under the member directory precisely so this stays true. Sharing
+    within one member's own conversations is what the layout buys; reaching another member's history
+    is the cross-member channel ADR 0033 D-g exists to close, and it would arrive here silently — a
+    store granted one level up looks identical in every other test.
+    """
+    from remote import task_sandbox, task_worktree
+
+    workspace = tmp_path / "projects" / "p" / "m" / "c" / "workspace"
+    theirs = tmp_path / "projects" / "p" / "other-member" / "c" / "workspace"
+
+    filesystem = task_sandbox.policy(workspace, config_dir)["sandbox"]["filesystem"]
+
+    other_store = str(task_worktree.store_for(theirs).resolve())
+    assert other_store not in filesystem["allowRead"]
+    assert other_store not in filesystem["allowWrite"]
+    # And the grant is the store itself, not the member directory that holds every conversation's
+    # workspace beside it — which would hand the agent its sibling conversations' working trees.
+    member_dir = str(task_worktree.store_for(workspace).parent.resolve())
+    assert member_dir not in filesystem["allowWrite"], (
+        "the whole member directory is writable, so this conversation's agent can rewrite the "
+        "working tree of every other conversation of the same member while their turns run")
+
+
 # --- preflight proves the sandbox can actually start (F-04) ---------------------------------------
 #
 # The vendor's `failIfUnavailable` covers MISSING PACKAGES — that exits 1 before any model call and

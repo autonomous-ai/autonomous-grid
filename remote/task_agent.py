@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import task_repo, task_sandbox
+from . import task_repo, task_sandbox, task_worktree
 
 # LOCKSTEP (PRD `.scratch/distributed-tasks/PRD.md`): **every provider must use the identical
 # absolute path**, because Claude Code derives a session's transcript directory from the working
@@ -216,6 +216,13 @@ def _safe_segment(kind: str, value: str) -> str:
     places — a project id the relay minted, a `member_key` it derived, and a `conversation_id` it
     minted — so "not a safe path segment" on its own would leave an operator with three things to
     check and no way to tell which.
+
+    ⚠️ **One NAME is refused as well as one shape** (ADR 0034 D-c, issue 50). The object store lives
+    at `<member_key>/store.git`, and `_SAFE_PROJECT_ID` admits a dot — so a conversation id spelled
+    exactly that is legal by every other rule here and would put a workspace on top of the member's
+    entire history. Refused in all three positions rather than only the one where the collision is
+    reachable: one rule is checkable, and "which levels does the store sit between" is the kind of
+    thing a later layout change moves.
     """
     if not isinstance(value, str):
         raise ValueError(f"{kind} must be a string, got {type(value).__name__}")
@@ -223,6 +230,10 @@ def _safe_segment(kind: str, value: str) -> str:
         raise ValueError(f"{kind} must be 1-{_MAX_PROJECT_ID_CHARS} characters, got {len(value)}")
     if value in (".", "..") or not _SAFE_PROJECT_ID.match(value):
         raise ValueError(f"{kind} {value!r} is not a single safe path segment")
+    if value == task_worktree.STORE_DIR_NAME:
+        raise ValueError(
+            f"{kind} {value!r} is the object store's own directory name, so a workspace built from "
+            f"it would sit on top of this member's whole git history")
     return value
 
 

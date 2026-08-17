@@ -1608,6 +1608,27 @@ either **refuses to run the turn**, terminally and with a message saying which k
 rather than building a shorter path — a guess would put the conversation somewhere the next turn
 never looks, and every other signal would read healthy while it happened.
 
+**A member's conversations share one copy of the project's history.** Each workspace is a git
+*working tree* cut from a single repository at `<root>/projects/<project_id>/<member>/store.git`, so
+a second conversation costs a checkout rather than a second clone. Measured on a 792 MiB,
+34,159-commit repository: an extra working tree is **306 MiB** where an extra clone is **1,043 MiB**,
+so three conversations take 1.6 GB instead of 3.3 GB. The store is per *member* rather than per
+project, deliberately — it is the boundary that keeps one person's history out of another's
+workspace, and it is the one thing a task's agent can reach outside its own directory.
+
+**Workspaces are evicted, not accumulated.** A provider keeps `GRID_TASK_MAX_WORKSPACES` of them
+(8 by default) and deletes the least recently used to stay under that; set `GRID_TASK_MIN_FREE_GB`
+and it will also keep deleting while free space is below that line. When a member's last workspace
+goes, so does their copy of the history. Two things are worth knowing:
+
+- **A turn is never refused for disk.** A provider over its bound makes room and runs; it does not
+  decline work, because a declined turn is somebody's message left unanswered for a reason nothing
+  can report to them.
+- **An evicted conversation loses nothing.** Its transcript is on the relay
+  (`refs/grid/agent/<conversation>`) and its files are in the project, so the next turn rebuilds the
+  workspace and carries on in the same session. What it costs is one fetch. A workspace a worker is
+  actually using is never touched — it is skipped, never waited for.
+
 ⚠️ **Keep `GRID_TASK_ROOT` short.** The whole path is flattened into a single directory name by
 Claude Code, which stops using such a name verbatim past roughly 200 characters — it keeps a prefix
 and appends a hash grid cannot reproduce, and the conversation is then written outside the
@@ -1671,7 +1692,8 @@ and not with the requesting user's. Nothing about the grid is put into its envir
 
 ### How much a provider takes on
 
-Two things bound it, and whichever runs out first is the one that stops a provider claiming.
+Three things bound it. Two of them decide whether a provider claims at all, and whichever runs out
+first is the one that stops it; the third bounds its disk and never stops it claiming anything.
 
 `GRID_MAX_TASKS` is how many tasks that provider runs at once — **1 by default**, so turning task
 serving on does not also change how much of the operator's subscription it spends. There is no upper
@@ -1706,6 +1728,15 @@ Three properties of that are worth knowing:
 - **Task capacity and inference capacity are independent.** A provider with no task headroom left is
   still a perfectly good provider of inference, and nothing about this reaches the heartbeat or the
   relay's routing. A provider saturated with inference can still take a task.
+
+The third bound is **disk**, and it behaves differently from the other two on purpose: it never stops
+a provider claiming. `GRID_TASK_MAX_WORKSPACES` (8) is how many conversations keep a working
+directory on this machine, and `GRID_TASK_MIN_FREE_GB` (off) is a floor under free space. A provider
+over either one deletes the least recently used workspaces at the start of the next turn and then
+runs it. Nothing is lost by that — see [What a provider actually
+runs](#what-a-provider-actually-runs) — and a workspace in use is never touched. Sizing it is
+arithmetic an operator can do: on the repository these figures were measured against, each extra
+conversation is about 306 MiB and each member's copy of the history about 1 GB.
 
 ### Watching the workspace change
 
@@ -1880,6 +1911,8 @@ The environment variables that tune a provider, all optional:
 | `GRID_TASKS` | off | `1` to claim tasks at all |
 | `GRID_MAX_TASKS` | `1` | how many tasks this provider runs at once. **Anything above 1 is unverified** — two Claude Code children sharing one config directory has never been measured (see [How much a provider takes on](#how-much-a-provider-takes-on)). No upper limit is imposed: the ceiling that actually binds is the provider's own Claude subscription, which is read at runtime rather than guessed at. A value that is not a positive whole number falls back to `1` and says so |
 | `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree (`<root>/projects/<project_id>/<member>/<conversation>/workspace`). **Keep it short** — the whole path becomes one directory name and grid adds ~126 characters below the root. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
+| `GRID_TASK_MAX_WORKSPACES` | `8` | how many conversations keep a working directory on this provider. Past this, the least recently used are deleted at the start of the next turn — never by refusing work, and never one a worker is using. An evicted conversation rebuilds itself on its next turn at the cost of one fetch. A value that is not a positive whole number falls back to `8` and says so |
+| `GRID_TASK_MIN_FREE_GB` | off | a floor under free space on the filesystem holding `GRID_TASK_ROOT`. Set it and the provider keeps evicting workspaces while free space is below it. Off by default because it is a promise about a disk the provider does not own alone: a machine already below the line for reasons of its own would evict everything on every turn and re-fetch it |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
 | `GRID_TASK_PERMISSION_MODE` | `acceptEdits` | any mode `claude --permission-mode` accepts, **except `bypassPermissions` while the sandbox is on** — the provider refuses that combination. Measured: with that mode the agent reads files outside its workspace even with the whole policy in force, because the `Read` tool runs inside Claude Code, which the sandbox does not confine |
 | `GRID_TASK_SANDBOX` | on | `0` runs agents **unconfined** — no filesystem or network confinement, and the Claude Code version check is skipped with it |

@@ -419,7 +419,9 @@ grid join <grid> --api claude       # a provider must join an engine; the task l
 |---|---|---|
 | `GRID_TASKS` | off | `1`/`true`/`yes`/`on` to claim tasks |
 | `GRID_MAX_TASKS` | `1` | concurrent turns |
-| `GRID_TASK_ROOT` | `/var/grid` | workspace root — `<root>/projects/<project>/<member>/<conversation>/workspace`. **Keep it short**: the whole path becomes one directory name for the agent's transcript, and grid adds ~126 characters below the root. A provider refuses a workspace whose name would exceed the limit rather than losing the conversation silently |
+| `GRID_TASK_ROOT` | `/var/grid` | workspace root — `<root>/projects/<project>/<member>/<conversation>/workspace`, with the member's one copy of the project's history beside it at `<member>/store.git`. **Keep it short**: the whole path becomes one directory name for the agent's transcript, and grid adds ~126 characters below the root. A provider refuses a workspace whose name would exceed the limit rather than losing the conversation silently |
+| `GRID_TASK_MAX_WORKSPACES` | `8` | how many conversations keep a working directory here. Past this the least recently used are deleted before the next turn — a turn is never refused for disk, and a workspace in use is never touched. An evicted conversation comes back on its next turn, same session and same files, at the cost of one fetch |
+| `GRID_TASK_MIN_FREE_GB` | off | keep evicting while free space on the task root's filesystem is below this |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | budget for one run |
 | `GRID_TASK_SANDBOX` | on | `0` disables confinement — for debugging only |
 | `GRID_TASK_ALLOWED_DOMAINS` | — | hosts a task's own commands may reach |

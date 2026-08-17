@@ -114,7 +114,25 @@ _HOSTILE_SEGMENTS = [
     ".",
     "..",
     "x" * 4096,            # longer than any filesystem accepts, so `mkdir` fails obscurely
+    # The object store's own directory name (ADR 0034 D-c, issue 50). `_SAFE_PROJECT_ID` admits a
+    # dot, so this is a legal segment by every other rule in the validator — and a conversation
+    # spelled it would have its workspace built ON TOP of the member's shared history. Its literal,
+    # not the constant, because nothing from `remote/` is imported at this module's scope; the two
+    # are pinned to each other by the test below.
+    "store.git",
 ]
+
+
+def test_the_reserved_segment_is_the_object_stores_own_directory_name():
+    """The literal in the table above and the constant the layout uses are one rule.
+
+    Drift is silent in the direction that matters: rename the store's directory and the validator
+    goes on refusing a name nothing uses, while the new name becomes a legal conversation id whose
+    workspace lands on top of a member's whole history.
+    """
+    from remote import task_worktree
+
+    assert task_worktree.STORE_DIR_NAME in _HOSTILE_SEGMENTS
 
 
 @pytest.mark.parametrize("hostile", _HOSTILE_SEGMENTS)
@@ -636,6 +654,24 @@ def test_the_git_safety_floor_outranks_an_operators_passthrough_list(monkeypatch
     assert settings == dict(task_repo.GIT_SAFETY_CONFIG)
 
 
+def _loose_workspace(tmp_path, conversation=_CONVERSATION):
+    """A workspace at the LAYOUT's shape, for a test that drives `task_repo` directly.
+
+    ⚠️ `tmp_path / "ws"` used to do here, and cannot since ADR 0034 D-c's layout landed (issue 50).
+    `task_worktree.store_for` is `workspace.parent.parent / "store.git"`, so a workspace one level
+    under `tmp_path` puts the object store OUTSIDE the test's own directory — in pytest's per-run
+    root, shared by every test in the session. The symptom is order-dependent failures in tests that
+    never mention each other, which is exactly the pollution `conftest.py` is otherwise careful
+    about.
+
+    The layout is part of `materialize`'s contract now, not a convention: the store is where the
+    workspace path says it is, the same way `task_sandbox.cache_dir` has always been.
+    """
+    workspace = tmp_path / "projects" / "proj-1" / _MEMBER / conversation / "workspace"
+    workspace.mkdir(parents=True)
+    return workspace
+
+
 def _bare_repo_holding_a_symlink(tmp_path, branch):
     """A real bare repo whose `branch` carries `docs/README -> ../README.md`. `(url, commit)`.
 
@@ -694,8 +730,7 @@ def test_an_imported_symlink_does_not_materialize_under_the_agents_own_git(tmp_p
     from remote import task_agent, task_repo
 
     url, commit = _bare_repo_holding_a_symlink(tmp_path, "task/T1")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     task_repo.materialize(workspace, url=url, token="", branch="task/T1", input_commit=commit)
 
     link = workspace / "docs" / "README"
@@ -743,8 +778,7 @@ def test_the_workspaces_own_config_holds_for_a_git_that_gets_none_of_grids_envir
     from remote import task_repo
 
     url, commit = _bare_repo_holding_a_symlink(tmp_path, "task/T1")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     task_repo.materialize(workspace, url=url, token="", branch="task/T1", input_commit=commit)
 
     link = workspace / "docs" / "README"
@@ -1834,17 +1868,23 @@ def test_a_second_task_on_a_project_fetches_only_the_delta(agent, tmp_path):
 
     Asserted on OBJECTS rather than on wall clock: a timing assertion on a repository small enough
     to build in a fixture would be noise, and the object store is the thing that actually moved.
+
+    ⚠️ **The object store moved OUT of the workspace at issue 50** and is now shared by every
+    conversation of this member (`task_worktree.store_for`). Re-aimed rather than deleted: the
+    property is unchanged and still the one that regresses silently — what changed is where the
+    objects live. Its own positive control below is what caught the move, which is what that control
+    is for.
     """
-    from remote import task_agent, task_repo, tasks
+    from remote import task_agent, task_repo, task_worktree, tasks
 
     remote, first_commit = _remote_for(tmp_path, "task/T1", {"a.txt": "one\n"})
     agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
     workspace = task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION)
+    store = task_worktree.store_for(workspace)
 
     assert tasks.run_task(
         _job(input_commit=first_commit, branch="task/T1"), remote=remote).state == "completed"
-    objects_after_first = {p.name for p in (workspace / ".git" / "objects").rglob("*")
-                           if p.is_file()}
+    objects_after_first = {p.name for p in (store / "objects").rglob("*") if p.is_file()}
     assert objects_after_first, "the first task fetched nothing, so this proves nothing"
 
     # A second task branch on the SAME repository, sharing the first's history.
@@ -1854,14 +1894,14 @@ def test_a_second_task_on_a_project_fetches_only_the_delta(agent, tmp_path):
     assert tasks.run_task(
         _job(input_commit=second_commit, branch="task/T2"), remote=remote).state == "completed"
 
-    objects_after_second = {p.name for p in (workspace / ".git" / "objects").rglob("*")
-                            if p.is_file()}
+    objects_after_second = {p.name for p in (store / "objects").rglob("*") if p.is_file()}
     assert objects_after_first <= objects_after_second, (
-        "the workspace's object store was rebuilt rather than added to — the project is being "
+        "the member's object store was rebuilt rather than added to — the project is being "
         "re-cloned per task")
     # And it really is the same directory, which is what makes the comparison above meaningful at
     # all: two clones into two paths would each look like a clean superset of nothing.
     assert task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION) == workspace
+    assert task_worktree.store_for(workspace) == store
     assert task_repo.fetched_project(workspace) is None, (
         "the provider's workspace was turned into a `grid task fetch` destination")
 
@@ -1994,20 +2034,23 @@ def test_a_network_git_call_is_bounded_in_time_not_left_to_the_tasks_whole_deadl
 
     The local ceiling must stay separate and smaller: reusing it for the network would turn an
     ordinary slow push into a lost result.
+
+    ⚠️ The fetch runs in the STORE since issue 50 and the reset in the workspace, so the two are no
+    longer indexed by one path. Keyed off `-C` itself instead, which is the thing that was always
+    being relied on — the previous spelling only worked because both happened to be the same
+    directory.
     """
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     seen = _spy_on_git(monkeypatch)
 
     task_repo.materialize(workspace, url=remote.url, token=remote.token,
                           branch="task/T1", input_commit=commit)
 
-    # `-C <workspace>` always immediately precedes the subcommand.
-    by_subcommand = {argv[argv.index(str(workspace)) + 1]: kw.get("timeout")
-                     for argv, kw in seen}
+    # `-C <dir>` always immediately precedes the subcommand.
+    by_subcommand = {argv[argv.index("-C") + 2]: kw.get("timeout") for argv, kw in seen}
     assert by_subcommand["fetch"] == task_repo._GIT_NETWORK_TIMEOUT_SECONDS
     assert by_subcommand["reset"] == task_repo._GIT_TIMEOUT_SECONDS
     assert task_repo._GIT_NETWORK_TIMEOUT_SECONDS > task_repo._GIT_TIMEOUT_SECONDS
@@ -2160,8 +2203,7 @@ def test_the_grid_token_reaches_git_through_the_environment_not_the_command_line
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     seen = _spy_on_git(monkeypatch)
 
     task_repo.materialize(workspace, url=remote.url, token="SEKRIT",
@@ -2185,8 +2227,7 @@ def test_the_credential_is_not_replayed_to_a_redirect_target(tmp_path, monkeypat
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     seen = _spy_on_git(monkeypatch)
 
     task_repo.materialize(workspace, url=remote.url, token="SEKRIT",
@@ -2225,8 +2266,7 @@ def test_a_merge_task_fetches_the_ref_it_must_merge_onto_the_same_name(tmp_path,
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
     ref = _publish_merge_target(remote, "T1")
     pinned = _git(remote.url, "rev-parse", ref).stdout.strip()
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
 
     task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
                           input_commit=commit, merge_ref=ref)
@@ -2241,8 +2281,7 @@ def test_a_claim_with_no_merge_ref_fetches_nothing_extra(tmp_path, monkeypatch):
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     seen = _spy_on_git(monkeypatch)
 
     task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
@@ -2265,8 +2304,7 @@ def test_a_merge_ref_that_is_not_one_is_refused_before_any_git_runs(tmp_path, mo
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
 
     for bad in ("--upload-pack=touch /tmp/pwned", "refs/heads/main", "-x", "refs/integrate/a b",
                 "refs/integrate/../heads/main", "refs/integrate/"):
@@ -2289,8 +2327,7 @@ def test_a_merge_ref_that_cannot_be_fetched_is_retryable_like_the_input(tmp_path
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
 
     with pytest.raises(task_repo.InputFetchError):
         task_repo.materialize(workspace, url=remote.url, token="tok", branch="task/T1",
@@ -2383,8 +2420,7 @@ def test_a_resolved_merge_is_committed_with_both_parents(tmp_path):
     from remote import task_repo
 
     remote, input_commit, merge_ref, pinned = _conflicted_remote(tmp_path)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
     # What the agent is told to do: resolve, `git add` to record that it decided, and leave the
     # commit to the grid.
@@ -2418,8 +2454,7 @@ def test_conflict_markers_the_agent_never_resolved_are_reported(tmp_path):
     from remote import task_repo
 
     remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
 
     pushed = task_repo.commit_and_push(
@@ -2452,8 +2487,7 @@ def test_a_resolution_the_agent_left_unstaged_is_still_unresolved(tmp_path):
     from remote import task_repo
 
     remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
     assert "<<<<<<< " in (workspace / "shared.txt").read_text(), "the fixture never conflicted"
     # Resolved in the worktree, deliberately NOT staged and NOT committed.
@@ -2472,8 +2506,7 @@ def test_a_conflict_the_agent_staged_is_resolved_however_it_chose_to_resolve_it(
     from remote import task_repo
 
     remote, input_commit, merge_ref, _pinned = _conflicted_remote(tmp_path)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
     _git(workspace, "rm", "-q", "-f", "shared.txt")
 
@@ -2528,8 +2561,7 @@ def test_a_conflict_with_no_markers_at_all_is_still_caught(tmp_path):
     from remote import task_repo
 
     remote, input_commit, merge_ref = _modify_delete_remote(tmp_path)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref)
     # The evidence that a marker test is not enough: there is nothing to find.
     assert "<<<<<<< " not in (workspace / "shared.txt").read_text()
@@ -2546,8 +2578,7 @@ def test_an_ordinary_task_reports_nothing_unresolved(tmp_path):
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     task_repo.materialize(workspace, url=remote.url, token=remote.token, branch="task/T1",
                           input_commit=commit)
     (workspace / "a.txt").write_text("edited\n")
@@ -3215,8 +3246,7 @@ def test_the_reserved_directory_exclude_is_one_uniform_line_and_this_slice_did_n
     """
     from remote import task_repo
 
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     task_repo._ensure_repo(workspace)
 
     exclude = (workspace / ".git" / "info" / "exclude").read_text()
@@ -3444,8 +3474,7 @@ def test_a_refused_push_raises_push_error_and_not_checkout_error(tmp_path):
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     task_repo.materialize(workspace, url=remote.url, token="tok",
                           branch="task/T1", input_commit=commit)
     (workspace / "fix.py").write_text("print(1)\n")
@@ -3470,8 +3499,7 @@ def test_a_push_that_is_refused_leaves_the_result_committed_locally(tmp_path):
     from remote import task_repo
 
     remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
     task_repo.materialize(workspace, url=remote.url, token="tok",
                           branch="task/T1", input_commit=commit)
     (workspace / "fix.py").write_text("print(1)\n")
@@ -3534,8 +3562,7 @@ def test_a_fetch_that_fails_is_a_different_error_from_a_task_that_cannot_be_chec
     """
     from remote import task_repo
 
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
+    workspace = _loose_workspace(tmp_path)
 
     with pytest.raises(task_repo.InputFetchError):
         task_repo.materialize(workspace, url=f"file://{tmp_path / 'no-such-repo.git'}",
@@ -4310,6 +4337,102 @@ def test_a_second_provider_resumes_the_conversation_having_only_cloned_the_repos
     assert (rebuilt / "sess-1.jsonl").exists()
     assert (rebuilt / "memory" / "note.md").read_text() == "remembered\n"
     assert (rebuilt / "memory" / "note.md").read_text(encoding="utf-8") == "remembered\n"
+
+
+# --- the workspace bound, on the path a turn actually takes (ADR 0034 D-c, issue 50) --------------
+
+
+def test_a_turn_over_the_workspace_bound_evicts_a_cold_conversation_and_runs(
+        agent, tmp_path, monkeypatch):
+    """The bound is enforced where the disk is about to be spent, and it never declines a turn.
+
+    `task_evict.sweep` has its own suite; this is the wiring, which is the half that can be absent
+    while every test in that suite passes. Nothing else calls it — there is no start-up sweep and no
+    background thread, deliberately: a provider that never claims again is spending nothing, and the
+    moment a turn begins is the only moment reclaiming disk is worth anything.
+    """
+    from remote import task_agent, task_evict, tasks
+
+    monkeypatch.setenv(task_evict.MAX_WORKSPACES_ENV, "1")
+    remote, commit = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    agent("printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    cold = task_agent.workspace_for("proj-1", _MEMBER, _OTHER_CONVERSATION)
+    assert tasks.run_task(
+        _job(conversation_id=_OTHER_CONVERSATION, input_commit=commit, branch="task/T1"),
+        remote=remote).state == "completed"
+    assert cold.is_dir(), "the first conversation never got a workspace, so this proves nothing"
+
+    _git(remote.url, "branch", "task/T2", "task/T1")
+    second = tasks.run_task(
+        _job(task_id="T2", input_commit=commit, branch="task/T2"), remote=remote)
+
+    assert second.state == "completed", (
+        f"the turn was refused rather than making room for itself: {second.error}")
+    assert not cold.exists(), (
+        f"{cold} survived a cap of one — the bound is not wired into the turn, so a provider "
+        f"accumulates a workspace per conversation exactly as it did before")
+    assert task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION).is_dir()
+
+
+def test_a_conversation_whose_workspace_was_evicted_resumes_on_its_next_turn(
+        agent, tmp_path, monkeypatch):
+    """Criterion 4, and the reason eviction is safe at all.
+
+    Evicting a workspace deletes the only local copy of a conversation. That is survivable for
+    exactly one reason, and it is why this issue lands after issue 39: the transcript lives on
+    `refs/grid/agent/<conversation_id>`, so a re-materialized workspace fetches it back. Before that
+    slice this test could not have been written — eviction would have destroyed the conversation.
+
+    The eviction here is the REAL one, driven by the cap through a colleague conversation's turn,
+    rather than an `rmtree` standing in for it. A hand-deleted directory would not exercise
+    `remove_worktree`, and a worktree removed by hand is precisely the state that used to make the
+    next `worktree add` fail.
+    """
+    from remote import task_agent, task_evict, tasks
+
+    monkeypatch.setenv(task_evict.MAX_WORKSPACES_ENV, "1")
+    workspace = task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION)
+    link = (task_agent.claude_config_dir() / "projects"
+            / task_agent.transcript_dir_name(workspace))
+    remote, first_input = _remote_for(tmp_path, "task/T1", {"a.txt": "x\n"})
+    agent(f'mkdir -p "{link}"\n'
+          f'printf \'{{"type":"summary"}}\\n\' > "{link}/sess-1.jsonl"\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+
+    assert tasks.run_task(
+        _job(input_commit=first_input, branch="task/T1"), remote=remote).state == "completed"
+    pushed = task_repo_commit_and_push(workspace, remote, "task/T1")
+    pinned = task_repo_push_transcript(workspace, remote)
+    assert pinned, "nothing was published, so there is nothing for the next turn to come back to"
+
+    # A DIFFERENT conversation's turn, which is what pushes this one over the cap of one.
+    _git(remote.url, "branch", "task/T2", pushed)
+    seen = tmp_path / "argv.txt"
+    agent(f'printf "%s" "$*" > {seen}\n'
+          "printf '{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}\\n'\n")
+    assert tasks.run_task(
+        _job(task_id="T2", conversation_id=_OTHER_CONVERSATION, input_commit=pushed,
+             branch="task/T2"), remote=remote).state == "completed"
+    assert not workspace.exists(), "the conversation under test was not evicted"
+
+    # And now it is spoken to again.
+    _git(remote.url, "branch", "task/T3", pushed)
+    third = tasks.run_task(
+        _job(task_id="T3", input_commit=pushed, branch="task/T3",
+             resume_session_id="sess-1", transcript_commit=pinned),
+        remote=remote)
+
+    assert third.state == "completed", third.error
+    assert "--resume sess-1" in seen.read_text(encoding="utf-8"), (
+        "the turn started a fresh session, so eviction cost the person their conversation")
+    assert not third.session_reset_reason, (
+        f"the conversation was reported as unresumable after an eviction: "
+        f"{third.session_reset_reason}")
+    rebuilt = task_agent.transcript_dir(workspace, _MEMBER)
+    assert (rebuilt / "sess-1.jsonl").exists(), (
+        "the transcript did not come back from the side ref, so eviction is destructive after all")
+    assert (workspace / "a.txt").read_text() == "x\n", "the files did not come back"
 
 
 def test_publishing_a_transcript_twice_from_one_workspace_fast_forwards(agent, tmp_path):
