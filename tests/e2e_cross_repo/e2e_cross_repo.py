@@ -1780,3 +1780,88 @@ def _refusal(call):
     except SystemExit as exc:
         return str(exc)
     raise AssertionError("the call was expected to be refused and was not")
+
+
+def test_26_undoing_a_change_leaves_every_later_turn_alone(
+        relay, relay_home, owner_token, spawn_provider):
+    """ADR 0034 D-l (issue 44), end to end through both repositories' real code.
+
+    Undo is the counterweight to issue 41: auto-apply removed the moment a person could decline, so
+    the only way back has to be something they press afterwards. The criterion that makes it hard is
+    the second half — *leaves every later turn's work intact* — because the obvious implementation,
+    resetting the trunk, destroys exactly that and is why D-l names it as refused.
+
+    ⚠️ **The only seam where this CLI's request and the relay's git meet.** grid-src's own suite
+    proves the reversal and this repository's proves the path; neither can see the two DISAGREEING,
+    because every unit test on this side answers from a body this repository wrote down.
+    """
+    import subprocess
+
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-undo", bootstrap="empty")["id"]
+    url = relay_client.git_remote_url(relay, project)
+    repo = relay_home / "projects" / f"{project}.git"
+
+    def landed():
+        return sorted(subprocess.run(
+            ["git", "--git-dir", str(repo), "ls-tree", "-r", "--name-only", "refs/heads/main"],
+            capture_output=True, text=True, check=True).stdout.split())
+
+    def run(prompt):
+        turn = relay_client.create_task(relay, owner_token, project_id=project, prompt=prompt)
+        done = H.await_state(relay, owner_token, turn["id"], {"completed", "failed"}, timeout=120)
+        assert done["state"] == "completed", done
+        return turn
+
+    regretted = run("WRITE regretted.txt oops; SAY done")
+    H.wait_for(lambda: "regretted.txt" in landed(), timeout=45.0)
+    # A SECOND turn, sent only once the first has LANDED, so it is genuinely later work built on a
+    # trunk that already holds the change about to be taken out.
+    run("WRITE kept.txt keep-me; SAY done")
+    H.wait_for(lambda: "kept.txt" in landed(), timeout=45.0)
+
+    def trunk_oid():
+        """The trunk's commit, as an OID rather than as the `ls-remote` LINE.
+
+        ⚠️ `H.git_ls_remote` answers `<oid>\\trefs/heads/main\\n`. Its other callers here only ask
+        whether a commit they already have appears in it, so a substring test is all they need; this
+        one hands the value to `merge-base`, where a whole line is `Not a valid object name` and
+        fails as *"the trunk moved backwards"* — an assertion about the one thing that had not
+        happened.
+        """
+        oid = H.git_ls_remote(url, "refs/heads/main", bearer=owner_token).split()[0]
+        assert len(oid) == 40, f"expected an oid and got {oid!r}"
+        return oid
+
+    trunk_before = trunk_oid()
+
+    answer = relay_client.undo_task(relay, owner_token, regretted["id"])
+
+    # 1. The change is out, and the later turn's work is untouched.
+    assert answer["undone"] is True, answer
+    assert landed() == ["kept.txt"], (
+        f"the project holds {landed()} — undo either missed its own change or took away a later "
+        f"turn's work, which is the failure D-l refuses a trunk reset to avoid")
+
+    # 2. And the trunk moved FORWARD to get there. A reset satisfies the assertion above while
+    #    handing every clone on the team a commit the grid no longer has.
+    trunk_after = trunk_oid()
+    assert trunk_after != trunk_before
+    assert subprocess.run(
+        ["git", "--git-dir", str(repo), "merge-base", "--is-ancestor", trunk_before, trunk_after],
+        capture_output=True).returncode == 0, "the trunk moved backwards"
+
+    # 3. A second undo is refused rather than answered with another reversal — which against a trunk
+    #    that no longer holds the change would be an empty commit reported as an undo.
+    said = _refusal(lambda: relay_client.undo_task(relay, owner_token, regretted["id"]))
+    assert "already been undone" in said, said
+    assert landed() == ["kept.txt"], "a refused second undo still moved the project"
+
+    # 4. Nothing a person reads names a branch (ADR 0034 D-m) — this is the one command in the plane
+    #    whose entire subject is a git operation.
+    surface = " ".join(str(value) for value in answer.values()).lower() + " " + said.lower()
+    leaked = [word for word in _BRANCH_VOCABULARY if word in surface]
+    assert not leaked, f"undo showed a person {leaked}: {surface}"

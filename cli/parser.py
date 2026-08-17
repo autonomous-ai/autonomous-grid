@@ -1070,6 +1070,30 @@ def _add_task(sub) -> None:
     cancel.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     cancel.set_defaults(handler=cmd_remote_task)
 
+    undo = task_sub.add_parser(
+        "undo",
+        help="Take one finished task's change back out of the project",
+        description=(
+            "Undo a change you did not want.\n\n"
+            "Finished work reaches the project by itself, with nobody asked to approve it — so this "
+            "is how you decline afterwards. It takes out exactly what that one task changed, "
+            "including any files you sent with it.\n\n"
+            "Everything done since then stays. Your colleagues' work, and your own later tasks, are "
+            "untouched — the project is not rewound to how it looked before, it simply no longer "
+            "contains this one change.\n\n"
+            "If somebody has since built on the same files, the grid cannot take the change out "
+            "cleanly and will say so, naming them. Ask for what you want in a new message instead.\n\n"
+            "Only the person who asked for the task, and whoever owns the project, can undo it. A "
+            "task that failed, or one whose result has not appeared in the project yet, has nothing "
+            "to undo.\n\n"
+            "This is not the same as `grid task cancel`, which stops a task that is still running "
+            "and changes nothing."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    undo.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    undo.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    undo.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    undo.set_defaults(handler=cmd_remote_task)
+
 
 def _add_price(sub) -> None:
     """Remote-only `grid price set|rm|show` — this engine's authoritative model price (grid_chat_pricing).

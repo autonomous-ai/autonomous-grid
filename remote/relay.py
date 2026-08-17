@@ -1275,6 +1275,47 @@ _OLD_RELAY_NO_SEND = (
 )
 
 
+# A relay that predates ADR 0034 D-l (issue 44) has no undo route and answers the bare framework
+# 404. Its own sentence rather than `_OLD_RELAY`, for `_OLD_RELAY_NO_CANCEL`'s reason — that one says
+# the relay has no projects, which is plainly false of a relay that has been serving `grid task
+# create`.
+#
+# ⚠️ It says what did NOT happen, as all five of its siblings do, and here that sentence is doing
+# more work than usual: undo's whole subject is a change that is already in the project, so somebody
+# told only "this did not work" would reasonably go and look for a half-undone one. There is no half.
+_OLD_RELAY_NO_UNDO = (
+    "This grid's relay cannot undo a change — it predates the undo route. Ask its operator to "
+    "update it. Nothing was changed; the project is exactly as it was."
+)
+
+
+def undo_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
+    """Take one TURN's change back out of the project (``POST /relay/v1/tasks/{id}/undo``).
+
+    It addresses the turn, not the conversation — `task_id` on the wire has always meant the turn,
+    and a conversation is a series of changes of which only one is the one somebody regrets. The
+    same `/tasks/{id}/…` prefix means a conversation for `turns`, `commit` and `stream`, which is
+    exactly why this docstring says which.
+
+    No body. The route is addressed by the turn id and fenced on the caller's own identity, so
+    anything sent here would be a second way of saying who is undoing what — `cancel_task`'s rule.
+
+    ⚠️ **The relay reverts the PATCH that turn produced, never the commit**, so a colleague's later
+    work survives and a change that landed inside a combined result undoes exactly as one that
+    landed on its own does. Nothing in this client knows that, and nothing here should: the whole of
+    what it sends is a turn id.
+
+    Fenced relay-side on the turn's OWNER and the project's owner, and on nobody else — unlike
+    `cancel_task`, which any project member may call. Stopping a colleague's run helps them; undoing
+    their change decides for them.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        # The id is user input going into a path.
+        f"/relay/v1/tasks/{quote(task_id, safe='')}/undo",
+        missing_route_hint=_OLD_RELAY_NO_UNDO)
+
+
 def send_turn(
     signaling_url: str,
     access_token: str,

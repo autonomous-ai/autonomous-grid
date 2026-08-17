@@ -132,6 +132,12 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
         return _task_list(args)
     if args.subcommand == "cancel":
         return _task_cancel(args)
+    if args.subcommand == "undo":
+        # ADR 0034 D-l (issue 44). Its handler lives in its own module — this one is past the
+        # repository's size ceiling — and dispatch stays here so `cli/parser.py` needs no new import.
+        from .task_undo import task_undo
+
+        return task_undo(args)
     # argparse (required=True + choices) guarantees the rest is `get`; guard explicitly anyway, so
     # direct misuse of the handler fails loudly rather than falling through to the wrong verb.
     if args.subcommand != "get":

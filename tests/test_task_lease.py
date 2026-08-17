@@ -2196,3 +2196,70 @@ def test_a_project_you_are_not_a_member_of_can_never_read_as_yours():
     assert remote_task._OWNER_ROLE == owner, (
         "this CLI's owner filter no longer matches the role grid-src writes")
     assert remote_task._OWNER_ROLE != grid
+
+
+def test_the_undo_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0034 D-l (issue 44): `POST /relay/v1/tasks/{task_id}/undo`.
+
+    The path is the whole of the contract — there is no body at all — and a drift is SILENT in the
+    worst direction, exactly as `send_turn`'s is: this CLI would post to a path the relay does not
+    serve, get FastAPI's bare 404, and `missing_route_hint` would turn it into "ask your operator to
+    update the relay" about a relay that is perfectly up to date. The member is then sent to chase an
+    operator over a typo in this repository, about a change still sitting in their project.
+
+    ⚠️ **`{task_id}`, not `{conversation_id}`.** The same `/tasks/{id}/…` prefix addresses a TURN for
+    `undo`, `cancel`, `lease`, `result` and `events`, and a CONVERSATION for `turns`, `commit` and
+    `stream`. Both spellings are literals in one relay module apiece, so this comparison is what
+    stops the two being fused by a rename.
+    """
+    import ast
+    import inspect
+
+    from remote import relay
+
+    sent = [
+        "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
+        for node in ast.walk(ast.parse(inspect.getsource(relay.undo_task)))
+        if isinstance(node, ast.JoinedStr)
+    ]
+    assert sent, "undo_task no longer builds its path from an f-string; teach this check the new one"
+
+    served = {"/relay/v1" + path.replace("{task_id}", "{}")
+              for path in _relay_route_paths("task_undo.py")}
+
+    assert set(sent) <= served, (
+        f"this CLI posts an undo to {sorted(set(sent) - served)}, which grid-src's task_undo.py "
+        f"does not serve — every undo would get a bare 404 and be reported as 'your relay is too "
+        f"old', about a change that is still in the project")
+
+
+def test_the_relay_still_refuses_an_undo_from_anybody_but_the_two_owners():
+    """ADR 0034 D-l's authorization, asserted from THIS side because it is what the CLI's surface
+    promises: `grid task undo --help` tells a member only they and the project's owner can do it.
+
+    Parsed out of grid-src's route rather than restated, so the sentence in this repository's help
+    text and the rule in the other cannot drift apart silently. Since ADR 0034 D-k opened every
+    non-private project to every caller on the grid, a relay that dropped this check would let any
+    of them rewrite any team's trunk — and nothing on this side would notice.
+    """
+    import ast
+
+    source = _relay_module("task_undo.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+
+    tree = ast.parse(source.read_text())
+    route = next((n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == "undo_turn"), None)
+    assert route is not None, (
+        "grid-src's task_undo.py no longer has an `undo_turn` route, so this check reads nothing")
+
+    body = ast.unparse(route)
+    assert "turn.owner_id" in body and "project.owner_id" in body, (
+        "the undo route no longer compares the caller against BOTH the turn's owner and the "
+        "project's owner. Under ADR 0034 D-k every authenticated caller on the grid can reach a "
+        "non-private project, so without this any of them can undo any turn in it")
+    assert "not_yours_to_undo" in body, (
+        "the refusal code changed; `grid task undo --help` in this repository still promises the "
+        "rule it named")

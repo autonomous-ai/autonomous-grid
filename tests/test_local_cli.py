@@ -35799,3 +35799,152 @@ def test_project_share_claims_the_widening_when_the_relay_does_serve_it(
     out = capsys.readouterr().out
     assert "Anyone signed in to this grid can now work in it" in out, out
     assert "does not share projects grid-wide" not in out, out
+
+
+# ---------------------------------------------------------------------------
+# ADR 0034 D-l / issue 44 — undoing the last change.
+#
+# The counterweight to issue 41: auto-apply removed the moment a person could decline, so the only
+# way back has to be something they can press afterwards. `grid task undo <turn-id>` names the TURN,
+# never a commit, and no git vocabulary reaches its surface.
+# ---------------------------------------------------------------------------
+
+
+def test_task_undo_posts_to_the_undo_route_and_says_what_happened(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "task_id": "t-1", "project_id": "P1", "undone": True,
+            "undone_at": "2026-08-17T10:00:00+00:00", "trunk_commit": "a" * 40})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "undo", "t-1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/t-1/undo")
+    assert seen["auth"] == "Bearer AT"
+    # No body. The route is addressed by the turn id and fenced on the caller's own identity, so
+    # anything sent here would be a second way of saying who is undoing what — `cancel_task`'s rule.
+    assert seen["body"] == b""
+    out = capsys.readouterr().out
+    assert "t-1" in out
+
+
+def test_task_undo_says_nothing_about_git_on_its_own_surface(monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-m. The person this exists for does not know what a branch is, and undo is the one
+    command in the plane whose whole subject is a git operation."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "task_id": "t-1", "project_id": "P1", "undone": True,
+        "undone_at": "2026-08-17T10:00:00+00:00", "trunk_commit": "a" * 40}))
+
+    cli.main(["task", "undo", "t-1"])
+
+    out = capsys.readouterr().out.lower()
+    for word in ("branch", "merge", "commit", "revert", "conflict", "rebase", "head", "trunk",
+                 "wip", "sha", "oid", "fast-forward"):
+        assert word not in out, f"{word!r} reached a person's screen"
+
+
+def test_task_undo_emits_the_relays_document_verbatim_under_json(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    answer = {"task_id": "t-1", "project_id": "P1", "undone": True,
+              "undone_at": "2026-08-17T10:00:00+00:00", "trunk_commit": "a" * 40}
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=answer))
+
+    rc = cli.main(["task", "undo", "t-1", "--json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == answer
+
+
+def test_task_undo_refuses_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    """The rule every sibling in this plane follows since issue 19a's review: an answer this command
+    cannot read is NOT a successful undo. Reporting one would tell somebody the change they regret
+    had been taken out of the project when nothing had happened.
+
+    ⚠️ Keyed on an explicit `undone is True`, never on truthiness — the `serves_you` / `archived` /
+    `visibility` rule. A relay that stopped sending the key must not be read as having done it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"task_id": "t-1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    assert "t-1" in str(caught.value)
+
+
+def test_task_undo_against_a_relay_that_has_never_heard_of_it_says_so(monkeypatch, tmp_path):
+    """A bare framework 404 is an old relay, not a missing turn, and the two need opposite actions.
+
+    Its own sentence rather than the project routes' `_OLD_RELAY`, which says the relay has no
+    projects — plainly false of one that has been serving `grid task create`.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    message = str(caught.value).lower()
+    assert "relay" in message
+    assert "undo" in message
+    # It must say what the silence MEANS — nothing was changed — or somebody goes looking in the
+    # project for a change that is still exactly where it was.
+    assert "nothing" in message
+
+
+def test_task_undo_shows_a_real_refusal_in_the_relays_own_words(monkeypatch, tmp_path):
+    """The other side of that gate: a 404 ABOUT the turn must not be reported as an old relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    assert str(caught.value) == "No such project"
+
+
+@pytest.mark.parametrize("code,message", [
+    ("not_yours_to_undo", "That change was asked for by another project member."),
+    ("already_undone", "That change has already been undone."),
+    ("cannot_undo_a_merge_step", "That step combined your work with a colleague's."),
+    ("undo_conflicts", "That change cannot be undone on its own."),
+    ("nothing_to_undo", "That step did not change anything in the project."),
+    # The relay's seventh route-owned refusal, and the one this table first left out — it had been
+    # swapped for `project_archived` below, which comes from the SHARED guard rather than from the
+    # undo route. Every code the route can send is exercised here now.
+    ("trunk_moved_during_undo", "Other work landed in this project while the change was being "
+                                "undone. Nothing was changed — try again."),
+    ("project_archived", "This project is archived. Run `grid project unarchive` first."),
+])
+def test_task_undo_passes_every_refusal_through_in_the_relays_own_words(
+        monkeypatch, tmp_path, code, message):
+    """Six coded refusals and this CLI branches on NONE of them.
+
+    Each relay message already names what to do, so a branch here would be a second copy of wording
+    the relay owns — the `project_archived` / `project_not_empty` rule from issue 33, which is why
+    this CLI parses exactly two codes and issue 33 deliberately did not make it three.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={
+        "detail": {"code": code, "message": message}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    assert str(caught.value) == message

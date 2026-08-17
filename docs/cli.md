@@ -1152,6 +1152,41 @@ lease before it reports, so anything the relay did inside that request would be 
 nobody is watching.
 
 
+### Undoing a change
+
+```
+grid task undo <task-id> [--json]
+```
+
+Because work now appears without anybody approving it, **undo is where you decline** — afterwards
+instead of before. It takes out exactly what that one task changed, including any files you sent with
+it, and leaves everything done since then alone: your colleagues' work and your own later tasks stay
+exactly where they are. The project is not rewound to how it looked before; it simply no longer
+contains that one change.
+
+That distinction is the whole design. Rewinding is the obvious thing to do and it would silently
+destroy every change made in between — on a project several people share, that is most of them.
+
+Four things it will not do:
+
+- **Undo somebody else's change.** Only the person who asked for the task, and whoever owns the
+  project, can undo it. Anyone else is refused by name.
+- **Undo a change nothing has appeared from.** A task that failed, or one whose result has not
+  reached the project yet, has nothing to take out.
+- **Undo the same thing twice.** The second attempt is refused rather than quietly doing nothing.
+- **Undo a step the grid added.** When two people's work collides the grid adds a step that combines
+  them; undoing that would take away the other person's half too, so it is refused and points you at
+  your own change instead.
+
+If somebody has since built on the same files, the change cannot be taken out on its own. You are
+told which files, and the way forward is to ask for what you want in a new message — the agent that
+knows the work is a better place to settle it than an automatic reversal.
+
+> `undo` and `cancel` are opposites and easy to confuse. `cancel` stops a task that is still running
+> and changes nothing in the project; `undo` changes the project and only works on a task that has
+> already finished and appeared.
+
+
 ### Asking before you spend anything
 
 ```
@@ -1325,6 +1360,7 @@ grid task follow <task-id> | --conversation <conversation-id>
                  [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
 grid task cancel <task-id> [--grid <grid>] [--json]
+grid task undo   <task-id> [--grid <grid>] [--json]
 ```
 
 **Remote-only.** Hand the grid a coding task and read the result back later. Unlike a chat request,
