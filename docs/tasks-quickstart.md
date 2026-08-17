@@ -151,6 +151,16 @@ grid task cancel <task-id>
 `<task-id>` is a **turn's** id, which is what these five commands address — it is a different id from
 the conversation's, and both are printed when a turn is created.
 
+To watch the **whole conversation** rather than one turn — every turn's output in order, including
+steps the grid adds itself when your work collides with a colleague's:
+
+```bash
+grid task follow --conversation <conversation-id>
+```
+
+It ends when the conversation goes quiet, and exits `0` for having watched it to that end. It does
+not report a turn's outcome; a conversation does not have one.
+
 **Create and watch in one command**, and act on how it went:
 
 ```bash

@@ -984,11 +984,22 @@ def _add_task(sub) -> None:
     # A separate verb rather than `get --follow`: `get` answers "where did it get to" in one shot,
     # `follow` holds a stream open and owns a cursor. One flag flipping between those two would
     # change the output shape wholesale.
+    #
+    # ONE verb for a turn and for a whole conversation (ADR 0034 D-m, issue 51), because the two are
+    # the same watching: one cursor, one reconnect budget, one renderer. A second command would be a
+    # synonym of this one, which `CONTEXT-MAP.md` bans, and two copies of the cursor to keep in step.
     follow = task_sub.add_parser("follow", help="Watch a task's output as it runs")
-    follow.add_argument("task_id", help="Task id returned by `grid task create`.")
+    what = follow.add_mutually_exclusive_group()
+    what.add_argument("task_id", nargs="?", default=None,
+                      help="Turn id, as reported by `grid task get` and `grid task list`.")
+    what.add_argument(
+        "--conversation", default=None, metavar="<conversation-id>",
+        help="Watch a whole conversation instead of one turn — every turn's output in order, "
+             "including steps the grid added itself. Ends when the conversation goes quiet.")
     follow.add_argument(
         "--after-seq", type=int, default=-1, dest="after_seq",
-        help="Resume after this event sequence number (default: -1, from the start).")
+        help="Resume after this event sequence number (default: -1, from the start). "
+             "A conversation's sequence is its own and is not a turn's.")
     follow.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     follow.add_argument("--json", action="store_true", help="Emit one JSON event per line.")
     follow.set_defaults(handler=cmd_remote_task)

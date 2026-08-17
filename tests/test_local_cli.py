@@ -22485,7 +22485,10 @@ def test_task_follow_stops_when_reattaching_keeps_yielding_nothing(monkeypatch, 
 
     assert rc == 1
     assert 1 < attempts["n"] <= remote_task._RECONNECT_ATTEMPTS + 1
-    assert "without a terminal event" in capsys.readouterr().err
+    # ⚠️ The wording changed with ADR 0034 D-m (issue 51) and the change is deliberate: this line is
+    # now printed about a conversation too, which has no "terminal event" — and "terminal event" was
+    # this system's vocabulary rather than the reader's either way.
+    assert "ended without saying it had finished" in capsys.readouterr().err
 
 
 def test_task_follow_keeps_following_while_a_severed_stream_still_makes_progress(
@@ -23023,6 +23026,251 @@ def test_task_follow_is_refused_in_local_mode(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["task", "follow", "T1"])
     assert "remote" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# `grid task follow --conversation` — one stream for a whole conversation (ADR 0034 D-m, issue 51)
+# ---------------------------------------------------------------------------
+
+def _conv_block(seq, task_id, payload):
+    """One block of the CONVERSATION stream: the envelope that says which turn an event is from."""
+    return f"id: {seq}\ndata: {json.dumps({'task_id': task_id, 'event': payload})}\n\n"
+
+
+_IDLE = {"type": "conversation.idle"}
+
+
+def test_task_follow_takes_a_conversation_instead_of_a_turn():
+    """One verb, not two. `follow` already owns the cursor and the reconnect budget, and a second
+    command watching the same shape of stream is how the two drift."""
+    args = cli.build_parser().parse_args(["task", "follow", "--conversation", "C1"])
+    assert (args.subcommand, args.conversation, args.task_id) == ("follow", "C1", None)
+
+
+def test_task_follow_refuses_a_turn_and_a_conversation_at_once():
+    """They address different objects, so one of the two would have to be silently ignored."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["task", "follow", "T1", "--conversation", "C1"])
+
+
+def test_task_follow_with_neither_says_which_it_needs(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["task", "follow"])
+
+
+def test_task_follow_conversation_reads_the_conversation_stream(monkeypatch, tmp_path, capsys):
+    """The tracer bullet: a whole conversation, rendered as one thing, ending when it goes idle."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    asked = []
+
+    def handler(request):
+        asked.append((request.url.path, dict(request.url.params)))
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(0, "T1", {"type": "task.output", "text": "first"}),
+                      _conv_block(1, "T1", {"type": "task.terminal", "state": "completed"}),
+                      _conv_block(2, "T2", {"type": "task.output", "text": "second"}),
+                      _conv_block(2, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    out = capsys.readouterr().out
+
+    assert asked[0] == ("/relay/v1/tasks/C1/stream", {"after_seq": "-1"})
+    assert "first" in out and "second" in out, (
+        "a turn ending must not end the stream — the next turn of the same conversation follows it")
+    assert rc == 0, "the conversation reached its end; nothing went wrong"
+
+
+def test_task_follow_conversation_reattaches_across_a_turn_boundary(monkeypatch, tmp_path, capsys):
+    """The cursor is one integer over the whole conversation, and it survives a dropped stream at
+    the exact place a per-turn cursor stops meaning anything."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    cursors = []
+    attempts = {"n": 0}
+
+    def handler(request):
+        cursors.append(dict(request.url.params).get("after_seq"))
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(
+                200,
+                text=_sse(_conv_block(0, "T1", {"type": "task.output", "text": "first"}),
+                          _conv_block(1, "T1", {"type": "task.terminal", "state": "completed"})),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(2, "T2", {"type": "task.output", "text": "second"}),
+                      _conv_block(2, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert cursors == ["-1", "1"], "the reattach resumed at the last seq actually seen"
+    assert out.count("first") == 1 and "second" in out
+
+
+def test_task_follow_conversation_json_says_which_turn_each_event_is_from(
+        monkeypatch, tmp_path, capsys):
+    """An application groups a conversation's events by turn, so the turn id has to be on the line.
+
+    The per-turn stream's `{"seq", "event"}` is unambiguous only while a stream is one turn.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(0, "T1", {"type": "task.output", "text": "first"}),
+                      _conv_block(1, "T2", {"type": "task.output", "text": "second"}),
+                      _conv_block(1, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "follow", "--conversation", "C1", "--json"])
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert [(ln["seq"], ln["task_id"]) for ln in lines[:2]] == [(0, "T1"), (1, "T2")]
+    assert lines[-1]["event"] == _IDLE and lines[-1]["task_id"] is None
+
+
+def test_task_follow_conversation_exits_non_zero_when_the_stream_is_lost(
+        monkeypatch, tmp_path, capsys):
+    """A conversation has no outcome to borrow, so 0 means "watched it to its end" and nothing
+    else. A stream that stopped without saying so is not an end."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(200, text="", headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+
+    assert rc == 1
+
+
+def test_task_follow_conversation_against_an_older_relay_names_the_relay(
+        monkeypatch, tmp_path, capsys):
+    """A bare framework 404 reads as "the thing I asked for is gone". It means the opposite: the
+    relay has never heard of this route."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert "relay" in err.lower()
+    assert "grid task follow" in err, "it must name what still works on that relay"
+
+
+def test_task_follow_conversation_shows_a_real_refusals_own_words(monkeypatch, tmp_path, capsys):
+    """A relay that HAS the route and refuses for its own reason must not be reported as too old —
+    the same distinction `_task_oneshot`'s missing-route hint makes, keyed on the bare body."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(404, json={"detail": {"code": "no_such_task",
+                                                    "message": "Task not found"}})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert "Task not found" in err
+    assert "too old" not in err.lower()
+
+
+def test_task_follow_conversation_ignores_an_idle_block_that_belongs_to_a_turn(
+        monkeypatch, tmp_path, capsys):
+    """The second of two locks on the one event a client ACTS ON.
+
+    A provider is authenticated, not trusted, and until this slice no event type was ever compared —
+    only rendered. `conversation.idle` stops this loop and reports 0, so a lease holder publishing
+    one on its own turn's log would end every watcher of that conversation with a success nobody
+    earned, while its turn ran on. The relay refuses such a publish; this is what makes the lie need
+    two failures rather than one, and the relay's own block is the only one with no turn id.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(0, "T1", {"type": "conversation.idle", "sneaky": True}),
+                      _conv_block(1, "T1", {"type": "task.output", "text": "still working"}),
+                      _conv_block(1, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "still working" in out, (
+        "the follower stopped at a forged ending and never saw what came after it")
+
+
+def test_task_follow_of_a_turn_is_unchanged_by_the_conversation_stream(
+        monkeypatch, tmp_path, capsys):
+    """Issue 32's exit-code contract is built on the per-turn stream, and it does not move."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.path)
+        return httpx.Response(
+            200,
+            text=_sse(_block(0, {"type": "task.terminal", "state": "failed"})),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert asked == ["/relay/v1/tasks/T1/events"]
+    assert rc == 1
 
 
 def test_task_selects_its_grid_with_a_flag_not_a_positional():

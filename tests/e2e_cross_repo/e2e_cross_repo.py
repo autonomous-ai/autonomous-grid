@@ -1670,6 +1670,109 @@ def test_24_a_conversation_whose_workspace_was_evicted_carries_on_where_it_left_
         f"the rebuilt workspace does not hold what this conversation wrote: {third_done}")
 
 
+class _ConversationReader:
+    """A conversation's stream, followed on a daemon thread until it says it is idle.
+
+    A thread rather than the generator inline, because the stream's whole contract is that it HOLDS
+    while work is running: `_TASK_FOLLOW_TIMEOUT` sets `read=None` deliberately (silence is not
+    death), so a conversation that never goes idle would HANG this suite rather than fail it — and a
+    hung suite reads as a passing one, since it prints no summary and therefore no FAILED lines.
+    """
+
+    def __init__(self, relay, token, conversation_id, *, after_seq=-1):
+        import threading
+
+        self.blocks: list = []
+        self.error: list = []
+        self._worker = threading.Thread(target=self._follow, daemon=True)
+        self._args = (relay, token, conversation_id, after_seq)
+
+    def _follow(self):
+        from remote import relay as relay_client
+
+        relay_url, token, conversation_id, after_seq = self._args
+        try:
+            for seq, task_id, event in relay_client.stream_conversation_events(
+                    relay_url, token, conversation_id, after_seq=after_seq):
+                self.blocks.append((seq, task_id, event))
+                if event.get("type") == "conversation.idle":
+                    return
+        except Exception as exc:                       # noqa: BLE001 - reported, never swallowed
+            self.error.append(exc)
+
+    def start(self):
+        self._worker.start()
+        # Attached means "has received something", and the first block always arrives: the relay
+        # backfills before it parks, and an empty conversation is answered with the idle block.
+        H.wait_for(lambda: bool(self.blocks) or bool(self.error), timeout=60.0)
+        assert not self.error, f"the conversation stream failed to attach: {self.error[0]!r}"
+        return self
+
+    def finish(self, timeout=180.0):
+        self._worker.join(timeout)
+        assert not self.error, f"the conversation stream failed: {self.error[0]!r}"
+        assert not self._worker.is_alive(), (
+            f"the stream never reached conversation.idle within {timeout}s; "
+            f"got {len(self.blocks)} blocks")
+        return self.blocks
+
+
+def test_25_one_stream_carries_a_whole_conversation(
+        relay, owner_token, spawn_provider):
+    """ADR 0034 D-m / issue 51, at the seam where both repositories are on the wire.
+
+    Every unit test on this side reads an SSE body this repository wrote down. What only a real
+    relay can show is the two halves agreeing about the WIRE: the route, the `conv_seq` cursor, the
+    `{"task_id", "event"}` envelope, and the ending block. A relay that shaped any of them
+    differently leaves both suites green and every conversation unfollowable.
+
+    Attached BEFORE the second message is sent, so the criterion under test is the one a client-side
+    fan-out cannot meet: the stream follows into a turn that did not exist when the reader attached.
+    """
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-one-stream",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    first = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE ledger.txt HERON-2291; SAY first turn")
+    first_done = H.await_state(
+        relay, owner_token, first["id"], {"completed", "failed"}, timeout=120)
+    assert first_done["state"] == "completed", first_done
+    conversation_id = first["conversation_id"]
+
+    # Attached FIRST, then spoken to. The reader learns about the second turn from the stream.
+    reader = _ConversationReader(relay, owner_token, conversation_id).start()
+    second = relay_client.send_turn(
+        relay, owner_token, conversation_id, prompt="READ ledger.txt; SAY second turn")
+    seen = reader.finish()
+
+    second_done = H.await_state(
+        relay, owner_token, second["id"], {"completed", "failed"}, timeout=120)
+    assert second_done["state"] == "completed", second_done
+
+    # 1. ONE cursor over the whole conversation, in order and never repeated. The ending block
+    #    re-states the last cursor deliberately, so it is excluded rather than counted as a repeat.
+    seqs = [seq for seq, _t, _e in seen[:-1]]
+    assert seqs == sorted(seqs), f"the conversation's events arrived out of order: {seqs}"
+    assert len(seqs) == len(set(seqs)), f"an event was repeated: {seqs}"
+
+    # 2. BOTH turns are on it — the second having been sent after the reader attached, which is the
+    #    criterion a client fanning out per turn cannot meet.
+    turns = {task_id for _s, task_id, _e in seen if task_id}
+    assert {first["id"], second["id"]} <= turns, (
+        f"the stream did not carry both turns of the conversation; it carried {turns}")
+
+    # 3. It ended by saying so, that block belongs to no turn, and it moved no cursor.
+    assert seen[-1][2] == {"type": "conversation.idle"}, seen[-1]
+    assert seen[-1][1] is None, seen[-1]
+    assert seen[-1][0] == seen[-2][0], (
+        f"the ending block claimed a cursor of its own: {seen[-2:]}")
+
+
 def _refusal(call):
     """What a refused call SAYS, as a comparable value. Anything else is a test failure."""
     try:

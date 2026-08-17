@@ -1321,7 +1321,8 @@ grid task send   <conversation-id> --prompt <text> [--file <local>[:<dest>]]…
 grid task get    <task-id> [--grid <grid>] [--json]
 grid task list   <project-id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
-grid task follow <task-id> [--after-seq <n>] [--grid <grid>] [--json]
+grid task follow <task-id> | --conversation <conversation-id>
+                 [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
 grid task cancel <task-id> [--grid <grid>] [--json]
 ```
@@ -1354,6 +1355,32 @@ resumable: every event carries a sequence number, and a stream that drops is rea
 one seen — nothing is lost and nothing is repeated. `--after-seq <n>` attaches at a cursor by hand
 (the default, `-1`, means from the very start); `--json` emits one `{"seq": …, "event": {…}}` object
 per line for a script to consume.
+
+### Watching a whole conversation
+
+`grid task follow <task-id>` watches **one turn** and ends when that turn does. `grid task follow
+--conversation <conversation-id>` watches the **whole conversation** instead — message, agent
+working, result, next message — as one continuous thing, with one sequence and one cursor.
+
+It is not the same as watching each turn in turn, and the difference is what it is for: it carries
+turns that did not exist when you attached. When your work collides with a colleague's, the grid
+adds a step to your conversation to combine the two — nobody asks for it — and it simply appears in
+this stream. Watching turn by turn, you would be looking at a finished screen while that step ran.
+
+The stream **ends when the conversation goes quiet**: no turn running, and nothing left for the grid
+to do by itself. Send the next message and follow again — your cursor still means what it meant, so
+nothing is replayed. It exits `0` when it was watched to that end and non-zero if the connection was
+lost or the grid refused; it does **not** report a turn's outcome, because a conversation does not
+have one. `grid task get` and `grid task follow <turn-id>` are what answer that.
+
+`--after-seq` applies to whichever you are following, but the two numbers are **not the same
+number** — a turn's sequence starts again at `0` for every turn, and a conversation's runs across
+all of them. Do not pass one to the other.
+
+With `--json`, each line is `{"seq": …, "task_id": …, "event": {…}}` — `task_id` says which turn the
+event came from, so an application can group them, and it is `null` on the final
+`{"type": "conversation.idle"}` line, which belongs to no turn. The per-turn stream's `--json` shape
+is unchanged.
 
 `list` shows a project's tasks, oldest first. By default it shows **your own**; `--all` widens it to
 every member's, because a project is shared and a team wants to see what the team ran. `--state` is

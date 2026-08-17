@@ -52,6 +52,16 @@ _TERMINAL_STATES = frozenset({"completed", "failed", "timed_out"})
 # *Absent ⇒ an old relay sends `deadline_exceeded` as it always did*, so nothing here changes; a
 # newer relay against an older CLI prints the new slug with no sentence. No rollout order.
 QUEUE_EXPIRED = "queue_expired"
+
+# The block that ENDS a conversation's stream (ADR 0034 D-m, issue 51). LOCKSTEP with grid-src's
+# `task_events.CONVERSATION_IDLE_EVENT`, kept in step by editing both repos;
+# `tests/test_task_lease.py` parses that module rather than restating the string.
+#
+# ⚠️ **It is to a conversation what `task.terminal` is to a turn, and it has to be, because a
+# conversation has no terminal state** (ADR 0034 D-a). Drifted, this follower would never recognise
+# the end: it would fall into its empty-reattach budget and report a healthy conversation as a lost
+# stream, exiting non-zero. Loud enough to be found, unlike `_MERGE_KIND`'s silent degrade.
+_CONVERSATION_IDLE = "conversation.idle"
 # Phrased about the BUDGET, not about the attempt count, because `queue_expired` does not mean
 # `attempt == 0`. A task whose provider died is put back on the queue clock, so one that nobody
 # picks up again ends this way having already run once — and "no provider ever claimed it" would be
@@ -761,11 +771,24 @@ def _task_follow(args: argparse.Namespace) -> int:
     has watched a stream to its end, so "not started yet" is not one of the answers available to it.
     """
     base, token, _label = _resolve(args)
-    terminal = _follow_stream(
-        base, token, args.task_id,
+    conversation_id = getattr(args, "conversation", None)
+    if not conversation_id and not getattr(args, "task_id", None):
+        # argparse cannot express "one of these two" for an optional positional and a flag, so the
+        # refusal is here — and it names both, because somebody who typed neither does not yet know
+        # a conversation is a thing they can follow.
+        raise SystemExit(
+            "Say what to follow: a turn id, or a whole conversation.\n"
+            "  grid task follow <turn-id>\n"
+            "  grid task follow --conversation <conversation-id>")
+
+    stop = _follow_stream(
+        base, token, conversation_id or args.task_id,
         after_seq=int(getattr(args, "after_seq", -1) or -1),
-        as_json=bool(getattr(args, "json", False)))
-    return _follow_exit_code(terminal)
+        as_json=bool(getattr(args, "json", False)),
+        conversation=bool(conversation_id))
+    if conversation_id:
+        return _conversation_exit_code(stop)
+    return _follow_exit_code(stop)
 
 
 def _follow_exit_code(terminal: dict | None) -> int:
@@ -779,13 +802,50 @@ def _follow_exit_code(terminal: dict | None) -> int:
     return 0 if terminal is not None and terminal.get("state") == "completed" else 1
 
 
+def _conversation_exit_code(idle: dict | None) -> int:
+    """A conversation's two-way rule — and it says something different from a turn's.
+
+    ⚠️ **It deliberately does NOT borrow the last turn's outcome.** A conversation has no terminal
+    state (ADR 0034 D-a): "is this conversation finished" is not a fact the grid owns, so an exit
+    code claiming one would be this CLI inventing it. What 0 means here is exactly what was
+    observed — the stream was watched to its end — and 1 means it was not, which covers a lost
+    connection, a refusal and a credential that stopped working. Someone who wants a turn's outcome
+    has `grid task get` and `grid task follow <turn-id>`, both of which answer it honestly.
+    """
+    return 0 if idle is not None else 1
+
+
+def _blocks(base: str, token: str, target_id: str, *, after_seq: int, conversation: bool):
+    """`(seq, turn_id, event)` off whichever stream is being followed.
+
+    The one place the two wire functions differ is flattened here rather than in `_follow_stream`'s
+    loop, so the cursor, the reconnect budget and the renderer see one shape. `turn_id` is `None`
+    for a turn's own stream, where the question does not arise.
+    """
+    from remote import relay
+
+    if conversation:
+        yield from relay.stream_conversation_events(
+            base, token, target_id, after_seq=after_seq)
+        return
+    for seq, event in relay.stream_task_events(base, token, target_id, after_seq=after_seq):
+        yield seq, None, event
+
+
 def _follow_stream(base: str, token: str, task_id: str, *,
-                   after_seq: int, as_json: bool) -> dict | None:
+                   after_seq: int, as_json: bool, conversation: bool = False) -> dict | None:
     """Render a task's events until it ends, reattaching at the cursor. The terminal event, or None.
 
-    The ONE implementation of the cursor and the reconnect budget — `grid task follow` and
-    `grid task create --follow` are the same watching, differing only in who resolved the grid and
-    what is printed before it starts.
+    The ONE implementation of the cursor and the reconnect budget — `grid task follow`,
+    `grid task create --follow` and (since ADR 0034 D-m, issue 51) `grid task follow --conversation`
+    are the same watching, differing only in who resolved the grid, what is printed before it
+    starts, and which stream it reads.
+
+    `conversation=True` follows a whole conversation rather than one turn. Everything that makes
+    this function worth having is unchanged by that: the cursor is still one integer, still advanced
+    to every yielded `seq`, still what a reattach resumes from. What differs is the route, the
+    ending event, and that each block says which turn it came from — none of which the loop below
+    has to know twice.
 
     `None` means no terminal event was ever seen, and it covers FOUR different endings, each of which
     has already said which on stderr: a refused credential, an answered refusal, an outage that
@@ -809,16 +869,29 @@ def _follow_stream(base: str, token: str, task_id: str, *,
     # Outlives the reconnect loop deliberately: a reattach resumes at the cursor, so the tree the
     # follower already showed is still the tree the user is looking at.
     tree = _TreeView()
+    # Which stream, and what ends it. `task.terminal` ends a TURN; a conversation has no terminal
+    # state (ADR 0034 D-a), so what ends its stream is the relay saying nothing more will arrive.
+    #
+    # ⚠️ On a conversation the block must ALSO belong to no turn, and that is defence in depth rather
+    # than belt-and-braces. `conversation.idle` is the first event type a client ACTS ON: this loop
+    # stops at it and `_conversation_exit_code` reports 0. The relay refuses a provider that tries to
+    # publish one (`task_events.RESERVED_EVENT_PREFIX`), but a provider is authenticated and not
+    # trusted, so two independent things now have to fail before a watcher is told a conversation
+    # finished while its turn is still running. The relay's own block is the only one with no
+    # `task_id`; a forged one wears the forger's.
+    ends_on = _CONVERSATION_IDLE if conversation else "task.terminal"
+    noun = "conversation" if conversation else "task"
 
     while terminal is None:
         made_progress = False
         try:
-            for seq, event in relay.stream_task_events(
-                    base, token, task_id, after_seq=cursor):
+            for seq, turn_id, event in _blocks(
+                    base, token, task_id, after_seq=cursor, conversation=conversation):
                 cursor = seq
                 made_progress = True
-                _render(seq, event, as_json=as_json, tree=tree)
-                if event.get("type") == "task.terminal":
+                _render(seq, event, as_json=as_json, tree=tree,
+                        turn_id=turn_id, conversation=conversation)
+                if event.get("type") == ends_on and (turn_id is None or not conversation):
                     terminal = event
                     break
         except SystemExit:
@@ -827,17 +900,17 @@ def _follow_stream(base: str, token: str, task_id: str, *,
             # Named explicitly because it is NOT a `RelayError` — see the docstring. Nothing here can
             # refresh a grid access token, so this says which credential and which command renews it
             # rather than reconnecting into the same 401 five times.
-            print(f"Cannot follow task {task_id}: the relay refused this grid's access token. "
+            print(f"Cannot follow {noun} {task_id}: the relay refused this grid's access token. "
                   f"Refresh it with `grid login`", file=sys.stderr)
             return None
         except relay.RelayError as exc:
             if _is_answer_not_blip(getattr(exc, "status", None)):
-                print(f"Cannot follow task {task_id}: {exc}", file=sys.stderr)
+                print(f"Cannot follow {noun} {task_id}: {exc}", file=sys.stderr)
                 return None
             if made_progress:
                 attempts_left = _RECONNECT_ATTEMPTS
             elif attempts_left <= 0:
-                print(f"Lost the connection following task {task_id} and could not "
+                print(f"Lost the connection following {noun} {task_id} and could not "
                       f"reattach: {exc}", file=sys.stderr)
                 return None
             else:
@@ -858,7 +931,7 @@ def _follow_stream(base: str, token: str, task_id: str, *,
         if made_progress:
             attempts_left = _RECONNECT_ATTEMPTS
         elif attempts_left <= 0:
-            print(f"The stream for task {task_id} ended without a terminal event.",
+            print(f"The stream for {noun} {task_id} ended without saying it had finished.",
                   file=sys.stderr)
             return None
         else:
@@ -1016,17 +1089,29 @@ def _result_note(event: dict) -> str:
     return head + (f" ({', '.join(parts)})" if parts else "")
 
 
-def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = None) -> None:
+def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = None,
+            turn_id: str | None = None, conversation: bool = False) -> None:
     """One event, printed. Unknown types are shown rather than dropped.
 
     Event types grow, and a follower that rendered only the types it knew would show a user nothing
     while the relay faithfully streamed them what they asked for.
+
+    `conversation` says which stream this event came off, and it is a separate flag from `turn_id`
+    being set rather than derived from it: the conversation stream's own ending block belongs to no
+    turn, so "no turn id" and "not a conversation" are different facts. The per-turn stream's
+    `--json` line is byte-identical to what it has always been — issue 32's contract is built on it.
     """
     if as_json:
-        print(json.dumps({"seq": seq, "event": event}))
+        line = {"seq": seq, "event": event}
+        if conversation:
+            line = {"seq": seq, "task_id": turn_id, "event": event}
+        print(json.dumps(line))
         return
 
     kind = event.get("type") or "event"
+    if kind == _CONVERSATION_IDLE:
+        print("\n(nothing more is running in this conversation)")
+        return
     if kind == "task.tree":
         # The only live view of a running task's working directory: the provider commits at terminal
         # boundaries only (ADR 0032 D-e), so between claim and terminal the repository holds nothing

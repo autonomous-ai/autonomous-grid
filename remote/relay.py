@@ -539,6 +539,83 @@ def stream_task_events(
         raise RelayError(f"stream_task_events transport error: {exc}") from None
 
 
+# A relay that predates ADR 0034 D-m (issue 51) has no conversation stream and answers the bare
+# framework 404. Its own sentence rather than `_OLD_RELAY`, for `_OLD_RELAY_NO_CANCEL`'s reason, and
+# it names what still works — following one turn at a time is the whole of what that relay can do.
+_OLD_RELAY_NO_STREAM = (
+    "This grid's relay cannot follow a whole conversation — it only knows how to follow one turn at "
+    "a time. Ask its operator to update it. In the meantime, watch a single turn with:\n"
+    "  grid task follow <turn-id>"
+)
+
+
+def stream_conversation_events(
+    signaling_url: str,
+    access_token: str,
+    conversation_id: str,
+    *,
+    after_seq: int = -1,
+) -> Iterator[tuple[int, str | None, dict[str, Any]]]:
+    """Follow a whole conversation's log as SSE (``GET /relay/v1/tasks/{id}/stream?after_seq=N``).
+
+    Yields ``(seq, task_id, payload)``. The ``seq`` is the CONVERSATION's own sequence — one integer
+    over every turn, in arrival order — and it is the caller's resume cursor exactly as the per-turn
+    stream's is. It is **not** the same number: a turn's ``seq`` restarts at 0 for every turn, so
+    neither is a valid cursor for the other's stream.
+
+    ``task_id`` is which turn the event came from, or ``None`` for the ``conversation.idle`` block
+    that ends the stream — that one belongs to no turn.
+
+    ⚠️ **The old-relay hint is applied HERE rather than by `_task_oneshot`**, which this path does not
+    go through: a streamed request has no `.text` until it is drained, and the one-shot helper's
+    bare-404 gate is on a body. Keyed on the same bare `"Not Found"` string, so a relay that HAS the
+    route and refuses for its own reason still shows its own sentence.
+    """
+    import json as _json
+
+    try:
+        with _client(signaling_url, access_token, timeout=_TASK_FOLLOW_TIMEOUT) as client:
+            with client.stream(
+                "GET",
+                f"/relay/v1/tasks/{quote(conversation_id, safe='')}/stream",
+                params={"after_seq": after_seq},
+            ) as resp:
+                if resp.status_code >= 400:
+                    resp.read()  # a streamed response has no `.text` until it is drained
+                    if resp.status_code == 401:
+                        raise RelayUnauthorized()
+                    message = _task_error_message(resp)
+                    if (resp.status_code == 404
+                            and message.strip().lower() == _BARE_FRAMEWORK_404):
+                        raise RelayError(_OLD_RELAY_NO_STREAM, status=resp.status_code)
+                    raise RelayError(message, status=resp.status_code)
+                seq: int | None = None
+                for line in resp.iter_lines():
+                    if line.startswith("id:"):
+                        try:
+                            seq = int(line[3:].strip())
+                        except ValueError:
+                            seq = None
+                    elif line.startswith("data:"):
+                        try:
+                            block = _json.loads(line[5:].strip())
+                        except (ValueError, RecursionError):
+                            continue  # unreadable block — skip it, don't end the stream
+                        if not isinstance(block, dict) or seq is None:
+                            continue
+                        payload = block.get("event")
+                        if not isinstance(payload, dict):
+                            # Every block on this stream carries the envelope. One that does not is
+                            # a relay speaking a shape this build has never been told about, and
+                            # rendering the wrapper as if it were an event would put `task_id` and
+                            # `event` on screen as though the agent had said them.
+                            continue
+                        task_id = block.get("task_id")
+                        yield seq, task_id if isinstance(task_id, str) else None, payload
+    except httpx.HTTPError as exc:
+        raise RelayError(f"stream_conversation_events transport error: {exc}") from None
+
+
 def submit_response(
     signaling_url: str,
     access_token: str,

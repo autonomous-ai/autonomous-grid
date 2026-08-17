@@ -802,6 +802,57 @@ def test_the_follow_up_route_this_cli_posts_to_is_the_one_the_relay_serves():
         f"'your relay is too old'")
 
 
+def test_the_conversation_stream_this_cli_reads_is_the_one_the_relay_serves():
+    """ADR 0034 D-m (issue 51): `GET /relay/v1/tasks/{conversation_id}/stream`.
+
+    Its own route rather than a parameter on `/events`, because `/tasks/{id}/events` addresses a
+    TURN and `task_id` on the wire has always meant the turn. So the path is the whole contract, and
+    a drift is silent in the worst direction — exactly `send_turn`'s: this CLI would ask for a path
+    the relay does not serve, get the bare framework 404, and report a perfectly up-to-date relay as
+    too old.
+
+    Read out of `stream_conversation_events`' own f-string rather than restated.
+    """
+    import ast
+    import inspect
+
+    from remote import relay
+
+    # Filtered to the f-strings that are PATHS. Unlike `send_turn`, this function also builds its
+    # transport-error message with one, and a check that swept both would fail on a sentence.
+    sent = [
+        text for text in (
+            "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
+            for node in ast.walk(ast.parse(inspect.getsource(relay.stream_conversation_events)))
+            if isinstance(node, ast.JoinedStr))
+        if text.startswith("/relay/")
+    ]
+    assert sent, ("stream_conversation_events no longer builds its path from an f-string; teach "
+                  "this check the new one")
+
+    served = {"/relay/v1" + path.replace("{conversation_id}", "{}")
+              for path in _relay_route_paths("conversation_stream.py")}
+
+    assert set(sent) <= served, (
+        f"this CLI follows a conversation at {sorted(set(sent) - served)}, which grid-src's "
+        f"conversation_stream.py does not serve — every follow would get a bare 404 and be "
+        f"reported as 'your relay is too old'")
+
+
+def test_the_block_that_ends_a_conversation_stream_is_the_one_the_relay_sends():
+    """ADR 0034 D-m (issue 51). `conversation.idle` is to a conversation what `task.terminal` is to
+    a turn, and a conversation has no terminal state to fall back on (D-a).
+
+    Drifted, this follower never recognises the end: it falls into its empty-reattach budget and
+    reports a healthy idle conversation as a lost stream, exiting non-zero. Loud rather than silent,
+    unlike `kind`'s degrade — but wrong on every single follow, so it is pinned.
+    """
+    from cli import remote_task
+
+    assert remote_task._CONVERSATION_IDLE == _relay_string_constant(
+        "CONVERSATION_IDLE_EVENT", "task_events.py")
+
+
 def _client_paths(function):
     """Every path a relay-client function builds from an f-string, with its holes blanked.
 
