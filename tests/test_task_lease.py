@@ -934,6 +934,35 @@ def test_the_task_view_names_the_conversation_a_follow_up_is_addressed_to():
         "cancel or fetch")
 
 
+def test_the_status_view_reports_where_a_member_stands_against_their_running_cap():
+    """ADR 0034 D-i (issue 49): `member_running_turns` / `member_running_cap` on the status view.
+
+    ⚠️ **A rename on the relay side is SILENT on this one**, which is the whole reason it is pinned
+    here rather than left to either suite. `cli/remote_project._print_your_running_cap` requires both
+    keys to be present integers and prints NOTHING when they are not — the correct degrade for a
+    relay predating this slice, and indistinguishable from a relay that renamed them. So a drift does
+    not raise, does not warn and fails no request: the line simply stops appearing, and the one state
+    where the queue and provider block below it is not the explanation goes back to being
+    unexplainable.
+
+    The MECHANISM has no half to duplicate — the cap is `turn_eligibility.is_under_the_member_cap`
+    and `TASK_MEMBER_RUNNING_CAP` is the relay's alone. These two keys are the only wire values in
+    the slice, and they inherit the project routes' **relay before CLI**.
+    """
+    keys = _relay_return_keys("project_status", module="project_status.py")
+
+    for key in ("member_running_turns", "member_running_cap"):
+        assert key in keys, (
+            f"grid-src's status view no longer reports `{key}`, so `grid project status` silently "
+            f"stops saying why a member's own work is holding their next message — the CLI treats a "
+            f"missing key as 'an old relay' and prints nothing at all")
+    # Beside them, and deliberately DIFFERENT: `active_turns` is this PROJECT's, the two above are
+    # grid-wide. If that one ever went away the CLI's turn listing would go quiet the same way.
+    assert "active_turns" in keys, (
+        "`active_turns` left the status view; `member_running_turns` is grid-wide and is not a "
+        "replacement for it")
+
+
 def test_the_merge_turn_marker_this_cli_reads_is_the_one_the_relay_writes():
     """ADR 0034 D-g (issue 42): `kind` on the task view.
 

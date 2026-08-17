@@ -1162,6 +1162,13 @@ grid project status <project-id>
 when, and how deep the project's queue is. Before it, "what is holding my slot" meant attempting a
 create and reading the refusal — a write, used as a question.
 
+It also says **how many of your turns are running, and how many may** — the grid caps how much of the
+fleet one person can hold at once, so your colleague's single message is never stuck behind twenty of
+yours. Nothing is ever refused because of it: a turn over the cap simply waits for one of your own to
+finish, and starts by itself. At the cap the status says so in as many words, because that is the one
+state where the queue and provider numbers below it are **not** the explanation — the fleet may be
+completely idle, and adding a provider to it would change nothing.
+
 When there is a queue it also says **who could be working on it**: how many providers are online, how
 many have withdrawn because their own Claude subscription is out of headroom, and when the first of
 those starts claiming again. A queue depth on its own cannot tell a busy grid from an empty one or

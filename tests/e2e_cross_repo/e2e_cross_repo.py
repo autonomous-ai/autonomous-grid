@@ -435,9 +435,22 @@ def test_11_a_task_nobody_serves_waits_on_its_own_clock_and_says_so(
     # seconds too, so an ignored `TASK_QUEUE_DEADLINE_SECONDS` would leave every assertion here
     # passing for the wrong reason. The window is readable on the wire — `deadline_at` at create is
     # `created_at + queue budget` — so the test can check it instead of trusting the fixture.
+    #
+    # ⚠️ **A RANGE, not equality, since ADR 0034 D-f (issue 43).** `deadline_at` is no longer written
+    # once at create: `turn_promote._stamp` re-anchors it to `now + queue budget` at the moment the
+    # turn is PREPARED, milliseconds later, so this difference is the budget PLUS however long the
+    # preparation took. Equality here has been failing on that ever since — measured at 12.14s and
+    # 12.15s against a 12s budget — and nothing noticed, because this file is run by hand and the
+    # last recorded green run predates that slice.
+    #
+    # The check the assertion exists for is unharmed and is what the bound keeps: with the
+    # PRODUCTION budgets this window would be four hours, so anything near the fixture's figure
+    # proves the scaled budgets reached the process. The upper bound stays tight enough to catch
+    # that, and the lower bound is exact because no path shortens the window.
     window = (datetime.fromisoformat(created["deadline_at"])
               - datetime.fromisoformat(created["created_at"]))
-    assert window == timedelta(seconds=H.QUEUE_BUDGET_SECONDS), (
+    assert timedelta(seconds=H.QUEUE_BUDGET_SECONDS) <= window < timedelta(
+            seconds=H.QUEUE_BUDGET_SECONDS + 5), (
         f"this relay is queueing on a {window} window, not the {H.QUEUE_BUDGET_SECONDS}s one the "
         f"fixture asked for — the scaled budgets are not reaching the process")
 
@@ -1447,6 +1460,123 @@ def _one_conversation_dir(workspace_root, project):
     conversations = sorted(p.name for p in members[0].iterdir() if (p / "workspace").is_dir())
     assert len(conversations) == 1, f"expected one conversation, found {conversations!r}"
     return conversations[0]
+
+
+def test_23_a_member_cannot_take_the_whole_fleet(
+        relay, relay_db, owner_token, spawn_provider):
+    """ADR 0034 D-i / issue 49, at the one seam where a real relay, a real fleet and two real people
+    are on the wire together.
+
+    The unit suites prove the predicate; what only this can prove is that a provider with FREE
+    WORKERS is offered the colleague's turn and not the capped member's. A relay whose cap was
+    applied to the claim's result instead of inside its SELECT passes every SQL-level assertion and
+    fails here, because the candidate list is truncated before the colleague's row is reached.
+
+    ⚠️ **A real colleague, unlike `test_22`'s two conversations**, and it costs a seeded `users` row:
+    `_harness.start_relay` runs `GRID_MODE=false`, so nothing writes one and `POST …/members` cannot
+    look anybody up by email. `test_04` established the seeding, and here it is load-bearing rather
+    than incidental — the criterion is about two PEOPLE sharing a fleet, and one person's two
+    conversations cannot express it.
+
+    ⚠️ **The cap is READ from the status view rather than restated.** Hard-coding 3 would make this
+    test disagree with the relay the day somebody changes the default, and disagree silently: it
+    would create too few turns, never reach the cap, and pass while proving nothing.
+
+    ⚠️ **Load-sensitive, like `test_19` and `test_20` and for their reason.** It needs the member's
+    turns genuinely running at one moment, inside `H.LEASE_SECONDS`; a machine busy enough to stretch
+    five concurrent fake agents past that will reclaim one and the observation never lands. Run it
+    alone before believing a failure.
+    """
+    import sqlite3
+
+    from remote import relay as relay_client
+
+    colleague = H.token("bob", "bob-node")
+    with sqlite3.connect(relay_db) as db:
+        db.execute(
+            "INSERT OR REPLACE INTO users (user_id, email, name, google_sub, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            ("bob", "bob@example.com", "Bob Tran", "sub-bob"))
+
+    project = relay_client.create_project(
+        relay, owner_token, name="p-fairness", bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+    relay_client.add_project_member(relay, owner_token, project, email="bob@example.com")
+
+    cap = relay_client.project_status(relay, owner_token, project)["member_running_cap"]
+    assert isinstance(cap, int) and cap >= 1, cap
+
+    mine = [relay_client.create_task(relay, owner_token, project_id=project,
+                                     prompt=f"SLEEP 3; SAY mine-{i}")
+            for i in range(cap)]
+    # Created BEFORE the colleague's, so global-FIFO alone would hand this one out first. That
+    # ordering is the whole test: what must be claimed ahead of it is the NEWER turn.
+    surplus = relay_client.create_task(
+        relay, owner_token, project_id=project, prompt="SLEEP 1; SAY surplus")
+    theirs = relay_client.create_task(
+        relay, colleague, project_id=project, prompt="SLEEP 1; SAY theirs")
+
+    # ⚠️ **The fleet arrives AFTER the queue, and that is what makes this deterministic rather than
+    # a race against a stopwatch.** Started first, the member's early turns run — and can FINISH —
+    # while the later creates are still doing their git work, so the moment this test is about may
+    # be over before there is anything to poll. Measured: the first draft failed exactly that way,
+    # with every one of the five `completed` and the assertion unable to say whether the cap had
+    # ever held. With the queue already full, claim order is `created_at` and nothing depends on how
+    # fast a create returns.
+    #
+    # More workers than the cap, so an idle worker exists at the moment the capped turn is passed
+    # over. With exactly `cap` workers the fleet would be full and this would prove nothing.
+    spawn_provider("A", workers=5)
+
+    # What the poll last saw, so a timeout says WHICH half never happened. A bare "it never
+    # happened" here would leave the reader unable to tell a broken cap from a slow machine.
+    last = {}
+
+    def observation():
+        """The first moment the colleague's turn has been PICKED UP, with the surplus read alongside.
+
+        ⚠️ **Deliberately NOT "all of the member's turns are running at once".** That was the first
+        draft and it is a race against a stopwatch rather than a test of the rule: the member's turns
+        are `SLEEP 3`, so on a busy machine the poll's first read already finds them `completed` and
+        the assertion cannot say whether the cap ever held. Measured twice, exactly that way.
+
+        What the criterion asks is an ORDERING — the colleague's NEWER turn is served while the
+        member's OLDER surplus is not — and an ordering is observable from one side. Everything is
+        read in a single pass for `_both_running`'s reason: re-reading afterwards races the
+        harness's deliberately short lease.
+        """
+        theirs_view = H.get(relay, colleague, theirs["id"])
+        surplus_view = H.get(relay, owner_token, surplus["id"])
+        mine_states = [H.get(relay, owner_token, turn["id"]).get("state") for turn in mine]
+
+        def seen(view):
+            """State AND error: a turn that FAILED is a different problem from one that is late,
+            and a diagnostic that cannot tell them apart sends the reader to the wrong place."""
+            return view.get("state") + (f"({view['error']})" if view.get("error") else "")
+
+        last.update(mine=mine_states, theirs=seen(theirs_view), surplus=seen(surplus_view))
+        if theirs_view.get("state") == "queued":
+            return None
+        return surplus_view, mine_states
+
+    got = H.wait_for(observation, timeout=90.0, interval=0.2)
+    assert got, (
+        f"the colleague's turn was never picked up at all, so this says nothing about fairness. "
+        f"last seen: {last}")
+    surplus_view, mine_states = got
+
+    # THE CRITERION. The colleague's turn is NEWER than the surplus, so global-FIFO alone would have
+    # served the surplus first; the member being at their cap is the only thing that reorders them.
+    assert surplus_view["state"] == "queued", (
+        f"a member at their cap was handed a {cap + 1}th turn before a colleague's newer one: "
+        f"surplus={surplus_view['state']}, mine={mine_states}")
+    assert surplus_view.get("provider_id") is None and surplus_view.get("attempt", 0) == 0, (
+        f"the capped turn was claimed and put back, spending an attempt on a refusal that has "
+        f"nothing to do with it: {surplus_view}")
+    # ...and the fleet was demonstrably not the constraint: the member's OWN turns were holding the
+    # slots. Without this, the assertion above is also satisfied by a grid that served nobody.
+    assert any(state == "running" for state in mine_states), (
+        f"the surplus was queued while none of the member's own turns were running, so something "
+        f"other than the cap was holding it: {mine_states}")
 
 
 def _refusal(call):

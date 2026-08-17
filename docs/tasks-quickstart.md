@@ -463,7 +463,11 @@ wrote before it reaches the trunk — so treat it as the agreement a team makes 
    `grid project member add` for the project.
 3. Everyone runs `grid project clone` and keeps that working copy.
 4. Decide who runs providers. One provider serves the whole team, and `GRID_MAX_TASKS` is how many
-   turns the team can run at once — not how many each person gets.
+   turns the team can run at once — not how many each person gets. What each person gets is the
+   grid's own **running cap** (`TASK_MEMBER_RUNNING_CAP`, 3 by default, set on the relay): the most
+   turns one member may have running at a time, so somebody working quickly cannot put twenty turns
+   in front of a colleague's one. Nothing is ever refused because of it — a turn over the cap waits
+   for one of that person's own to finish, and `grid project status` shows where they stand.
 
 ### Every day
 

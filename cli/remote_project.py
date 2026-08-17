@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from . import project_arg, project_providers, project_visibility
 
@@ -670,6 +671,8 @@ def _project_status(args: argparse.Namespace) -> int:
         # Printing one per turn would bury the queue block below it on a busy project.
         print(f"Watch the oldest with: grid task follow {running[0]['id']}")
 
+    _print_your_running_cap(answer)
+
     queue = answer.get("queue") or {}
     providers = answer.get("providers")
     if queue.get("queued") or queue.get("running"):
@@ -687,6 +690,67 @@ def _project_status(args: argparse.Namespace) -> int:
         # branch above, so the two can never answer differently.
         project_providers.print_unserved(providers)
     return 0
+
+
+def _print_your_running_cap(answer: dict) -> None:
+    """Where this member stands against the per-member running cap (ADR 0034 D-i, issue 49).
+
+    Printed BETWEEN the caller's own turns and the fleet report, and the position is the argument:
+    at the cap, the reason the member's next message has not started is directly above the two
+    blocks that would otherwise be read as the explanation. A turn held by its owner's cap is
+    invisible at the claim — the provider is answered 204, byte-identical to an empty queue — so
+    without this line the only story left on the page is "the grid is busy", and the action it
+    suggests is to add a provider that will not be offered the work.
+
+    ⚠️ **Both keys must be PRESENT, and a missing one is never read as 0** — the
+    `serves_you` / `archived` / `visibility` rule. *Absent ⇒ a relay predating this slice*, where
+    there is no cap to report; treating absent as zero prints "0 of 0 turns running" on every one of
+    them. **Roll the relay out before the CLI.**
+
+    `isinstance(..., int)` rather than a truthiness test, for the same reason twice over: a
+    legitimate `0` running turns is falsy, and a string or null from a mangled body must not be
+    formatted into a sentence about somebody's capacity. `bool` is excluded because it is an `int`
+    in Python and `True of True` is not a status line.
+
+    ⚠️ **`running` may legitimately EXCEED `limit`, so "4 of 3" is a real reading and not a bug to
+    be clamped.** A merge turn the grid added is exempt from being held back by the cap — otherwise
+    a member at their cap who hits a collision would deadlock — but it is a real agent on a real
+    provider and counts toward the number. `>=` rather than `==` below for exactly that reason, and
+    the sentence stays true: their other messages are waiting on their own work either way.
+    """
+    keys = ("member_running_turns", "member_running_cap")
+    running, limit = (answer.get(key) for key in keys)
+    unusable = [key for key, value in zip(keys, (running, limit))
+                if not isinstance(value, int) or isinstance(value, bool)]
+    if unusable:
+        # ⚠️ **BOTH missing is an old relay; ONE missing is a broken one, and the two must not read
+        # the same** (found in review). No relay ever shipped half this pair, so that shape is a
+        # mangled body or a half-finished rename — and staying silent about it is exactly what this
+        # function does for a relay that simply predates the slice. On the one field whose whole job
+        # is to explain why somebody's message is not running, those two must be tellable apart.
+        #
+        # stderr rather than a refusal: the rest of the status is readable, and this command is how
+        # a member follows up `queue_expired`'s advice. Losing the trunk and the queue over one
+        # missing integer would be the worse answer.
+        if len(unusable) < len(keys):
+            print(f"warning: this relay sent {', '.join(unusable)} in a form this CLI cannot read, "
+                  f"so how much of the fleet you are using is not shown below.", file=sys.stderr)
+        return
+    if limit < 1:
+        # ⚠️ **Present-and-zero is not absent, and it reaches the same forbidden sentence by another
+        # door** (found in review). A `0` passes every guard above, so without this the output is
+        # "0 of 0" and "At your limit" — a member told their own limit is holding their work, about
+        # a body no healthy relay can produce: `config.validate_task_budgets` refuses to boot below
+        # 1. Saying nothing is the right answer for a reply that contradicts its own server.
+        return
+    print(f"\nyour running turns: {running} of {limit}")
+    if running >= limit:
+        # The one sentence that is worth printing, and it exists to STOP a reading. Everything below
+        # this line is about the fleet, and at the cap the fleet is not what the member is waiting
+        # for — their own work is. Says what happens next rather than what to do, because there is
+        # nothing to do.
+        print("At your limit — your other messages are waiting for one of these to finish, "
+              "not for a provider.")
 
 
 def _project_commit(args: argparse.Namespace) -> int:

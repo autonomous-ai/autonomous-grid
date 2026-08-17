@@ -32411,6 +32411,133 @@ def test_project_status_reports_the_trunk_and_every_turn_in_flight(
     assert "promote" not in out and "integrate" not in out, out
 
 
+def _status_reply(**extra):
+    """A `GET /projects/{id}/status` body shaped like a relay on this slice sends it."""
+    body = {"project_id": "P1", "member_key": "def456", "trunk": "main",
+            "main_commit": "a" * 40, "active_turns": [], "members": [],
+            "queue": {"queued": 0, "running": 0, "oldest_queued_at": None}}
+    body.update(extra)
+    return body
+
+
+def test_project_status_says_where_you_stand_against_your_own_running_cap(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-i, issue 49. The two numbers exist so an application — and this CLI — can say
+    *"3 of your turns are running, this one is next"*, which is TRUE, instead of leaving the member
+    to read the queue and provider block below and conclude the fleet is too small.
+
+    A turn held by its owner's cap is invisible at the claim: the provider is answered 204, exactly
+    as for an empty queue. Nothing else on this payload distinguishes the two.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=3, member_running_cap=3)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "3 of 3" in out, out
+    # ⚠️ The sentence, not just the numbers. At the cap, "why is my next message not starting" has an
+    # answer that is NOT about the fleet, and the queue/provider block printed below says nothing
+    # about it. A member who reads only those adds a provider that will not be offered their work.
+    assert "provider" in out.lower(), (
+        "being at your own cap is reported as bare numbers, so the member is left to read the fleet "
+        "report below as the explanation")
+
+
+def test_project_status_says_nothing_about_a_cap_a_relay_never_mentioned(
+        monkeypatch, tmp_path, capsys):
+    """⚠️ *Absent ⇒ say nothing*, and never `0` — the `serves_you` / `archived` / `visibility` rule
+    for the fifth time.
+
+    A missing key read as a number renders as *"0 of 0 turns running"*, which is a sentence about
+    nothing, on every relay predating this slice. **Roll the relay out before the CLI.**
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 of 0" not in out, out
+    assert "cap" not in out.lower(), (
+        f"a relay that never mentioned a cap had one reported for it: {out}")
+
+
+def test_project_status_says_so_when_only_half_the_cap_pair_arrives(monkeypatch, tmp_path, capsys):
+    """⚠️ **A HALF-present pair cannot be an old relay, so silence is the wrong answer.** Found in
+    review.
+
+    Absent-means-say-nothing is right for both keys missing: that is every relay predating this
+    slice, and there is no cap to report. One key present and the other missing or unusable is a
+    different fact — no relay ever shipped that shape — so it is a mangled body or a half-finished
+    rename, and printing nothing makes it indistinguishable from the benign case on the one field
+    whose whole job is to explain why somebody's message is not running.
+
+    A note on stderr rather than a refusal: the rest of the status is readable and useful, and this
+    command is how a member follows up `queue_expired`'s advice. Losing the trunk and the queue over
+    one missing integer would be a worse answer than saying which part could not be read.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=2)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "main" in captured.out, "the rest of the status was thrown away over one missing key"
+    assert "member_running_cap" in captured.err, (
+        f"a relay sent half the cap pair and the CLI said nothing, which is exactly what it says "
+        f"for a relay that is simply too old: {captured.err!r}")
+
+
+def test_project_status_will_not_report_a_cap_of_zero(monkeypatch, tmp_path, capsys):
+    """⚠️ **The same forbidden sentence, reached by a different door.** Found in review.
+
+    `test_project_status_says_nothing_about_a_cap_a_relay_never_mentioned` covers the ABSENT case.
+    A body carrying `member_running_cap: 0` is not absent — it is present, an `int`, and not a
+    `bool`, so it passes every guard and prints *"0 of 0"* followed by *"At your limit"*: a member
+    told their own limit is holding work back, when what they are actually looking at is a body no
+    healthy relay can produce. `config.validate_task_budgets` refuses to boot below 1, so this is a
+    mangled or hand-rolled reply rather than a real server — which is exactly the case where saying
+    nothing beats saying something confident and wrong.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=0, member_running_cap=0)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 of 0" not in out, out
+    assert "at your limit" not in out.lower(), out
+
+
+def test_project_status_reports_a_member_under_their_cap_without_alarming_them(
+        monkeypatch, tmp_path, capsys):
+    """The positive control for the sentence above: under the cap there is nothing to explain, and
+    saying "your own limit is holding this" would be false."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=1, member_running_cap=3)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 of 3" in out, out
+    assert "at your limit" not in out.lower(), out
+
+
 def test_project_status_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):
     """The same rule promote, integrate, commit and import all follow. A reply with no `branch` is
     not a status — printing the template with blanks in it reads as "you have no work"."""
