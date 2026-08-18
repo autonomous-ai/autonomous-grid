@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 573" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1100" height="573" fill="#fff"/>
+  <rect x="70" y="307" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="110" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="340" y="307" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="410" y="349" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M160 340 C180 340, 310 340, 330 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="268" y="288" text-anchor="middle" fill="#2b2b29" font-size="24">one try</text>
+  <rect x="490" y="307" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="560" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M490 340 C510 340, 460 340, 480 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="493" y="288" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <rect x="336" y="447" width="148" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="410" y="489" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">backup</text>
+  <path d="M410 373 L410 447" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="410" y="392" text-anchor="middle" fill="#2b2b29" font-size="24">over budget → spawn</text>
+  <path d="M484 480 C524 480, 450 340, 490 340" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="434" y="428" text-anchor="start" fill="#2b2b29" font-size="24">first to finish</text>
+</svg>

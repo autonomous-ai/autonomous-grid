@@ -1,0 +1,653 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 12770" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1480" height="12770" fill="#fff"/>
+  <text x="64" y="253" text-anchor="start" fill="#2b2b29" font-size="24">Mate-in-One</text>
+  <text x="64" y="281" text-anchor="start" fill="#2b2b29" font-size="24">pick the best fit</text>
+  <rect x="390" y="226" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="268" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="708" y="226" width="105" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="760" y="268" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">rank</text>
+  <rect x="840" y="226" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="910" y="268" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="990" y="226" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1060" y="268" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M480 259 C500 259, 678 259, 698 259" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="603" y="207" text-anchor="middle" fill="#2b2b29" font-size="24">one prompt</text>
+  <path d="M822 259 C842 259, 810 259, 830 259" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="843" y="207" text-anchor="middle" fill="#2b2b29" font-size="24">best fit</text>
+  <path d="M990 259 C1010 259, 960 259, 980 259" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="993" y="207" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="723" text-anchor="start" fill="#2b2b29" font-size="24">Fan-Out</text>
+  <text x="64" y="751" text-anchor="start" fill="#2b2b29" font-size="24">same prompt, N answers, a vote</text>
+  <rect x="390" y="696" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="738" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="660" y="566" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="608" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="696" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="738" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="826" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="868" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <circle cx="486" cy="729" r="9" fill="#2b2b29"/>
+  <path d="M486 729 C506 729, 640 599, 660 599" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 729 C506 729, 640 729, 660 729" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 729 C506 729, 640 859, 660 859" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="547" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
+  <rect x="828" y="696" width="105" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="738" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">vote</text>
+  <path d="M800 599 C877 599, 751 729, 828 729" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 729 C920 729, 708 729, 828 729" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 859 C877 859, 751 729, 828 729" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="806" y="866" width="148" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="908" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">expand</text>
+  <path d="M932 729 C992 729, 746 899, 806 899" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="940" y="773" text-anchor="start" fill="#2b2b29" font-size="24">ties → expand</text>
+  <rect x="960" y="866" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="908" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M954 899 C974 899, 940 899, 960 899" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="963" y="847" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="1193" text-anchor="start" fill="#2b2b29" font-size="24">Master / Slave</text>
+  <text x="64" y="1221" text-anchor="start" fill="#2b2b29" font-size="24">a planner splits the job</text>
+  <rect x="390" y="1166" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="1208" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="686" y="1166" width="149" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="760" y="1208" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">planner</text>
+  <path d="M480 1199 C500 1199, 656 1199, 676 1199" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="603" y="1147" text-anchor="middle" fill="#2b2b29" font-size="24">plan + split</text>
+  <rect x="938" y="1036" width="124" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1000" y="1078" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">writer</text>
+  <path d="M834 1199 C1004 1199, 768 1069, 938 1069" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1062 1069 C922 1069, 1264 1199, 1124 1199" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="930" y="1296" width="140" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1000" y="1338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">thinker</text>
+  <path d="M834 1199 C1004 1199, 760 1329, 930 1329" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1070 1329 C1210 1329, 984 1199, 1124 1199" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1000" y="1017" text-anchor="middle" fill="#2b2b29" font-size="24">specialists</text>
+  <rect x="1124" y="1166" width="132" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1190" y="1208" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">merge</text>
+  <rect x="1240" y="1166" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1310" y="1208" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1266 1199 C1286 1199, 1210 1199, 1230 1199" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1258" y="1147" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="1663" text-anchor="start" fill="#2b2b29" font-size="24">Adversarial</text>
+  <text x="64" y="1691" text-anchor="start" fill="#2b2b29" font-size="24">two careful reads, a judge</text>
+  <rect x="390" y="1636" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="1678" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="1669" r="9" fill="#2b2b29"/>
+  <rect x="664" y="1506" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="1548" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
+  <rect x="664" y="1766" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="1808" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
+  <path d="M486 1669 C506 1669, 644 1539, 664 1539" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M796 1539 C946 1539, 859 1669, 1009 1669" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 1669 C506 1669, 644 1799, 664 1799" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M796 1799 C946 1799, 859 1669, 1009 1669" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="1487" text-anchor="middle" fill="#2b2b29" font-size="24">careful disagreement</text>
+  <rect x="1009" y="1636" width="122" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1070" y="1678" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
+  <rect x="1134" y="1636" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1205" y="1678" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1141 1669 C1161 1669, 1104 1669, 1124 1669" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1146" y="1617" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="2133" text-anchor="start" fill="#2b2b29" font-size="24">Strategy</text>
+  <text x="64" y="2161" text-anchor="start" fill="#2b2b29" font-size="24">each request chooses a pattern</text>
+  <rect x="390" y="2106" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="2148" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="621" y="2106" width="218" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="2148" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">choose plan</text>
+  <path d="M480 2139 C500 2139, 591 2139, 611 2139" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="2087" text-anchor="middle" fill="#2b2b29" font-size="24">each request</text>
+  <rect x="955" y="1976" width="150" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1030" y="2018" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">1 model</text>
+  <path d="M839 2139 C989 2139, 805 2009, 955 2009" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="942" y="2106" width="176" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1030" y="2148" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">N models</text>
+  <path d="M839 2139 C989 2139, 792 2139, 942 2139" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="960" y="2236" width="140" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1030" y="2278" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">debate</text>
+  <path d="M839 2139 C989 2139, 810 2269, 960 2269" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="890" y="1957" text-anchor="middle" fill="#2b2b29" font-size="24">cost × speed × needs</text>
+  <rect x="1110" y="2106" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="2148" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1105 2009 C965 2009, 1250 2139, 1110 2139" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1118 2139 C1258 2139, 970 2139, 1110 2139" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1100 2269 C1240 2269, 970 2139, 1110 2139" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="64" y="2603" text-anchor="start" fill="#2b2b29" font-size="24">Brute-Force</text>
+  <text x="64" y="2631" text-anchor="start" fill="#2b2b29" font-size="24">many identical tries, keep the best</text>
+  <rect x="390" y="2576" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="2618" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="2609" r="9" fill="#2b2b29"/>
+  <rect x="704" y="2531" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="696" y="2540" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="686" y="2549" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="678" y="2558" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="668" y="2567" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="660" y="2576" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="2618" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M486 2609 C506 2609, 640 2609, 660 2609" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="2557" text-anchor="middle" fill="#2b2b29" font-size="24">same rough draft</text>
+  <rect x="868" y="2576" width="105" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="920" y="2618" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">best</text>
+  <path d="M814 2609 C834 2609, 838 2609, 858 2609" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="841" y="2557" text-anchor="middle" fill="#2b2b29" font-size="24">best of N</text>
+  <rect x="1000" y="2576" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1070" y="2618" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M982 2609 C1002 2609, 970 2609, 990 2609" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1003" y="2557" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="3073" text-anchor="start" fill="#2b2b29" font-size="24">Ensemble</text>
+  <text x="64" y="3101" text-anchor="start" fill="#2b2b29" font-size="24">same prompt, keep the average</text>
+  <rect x="390" y="3046" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="3088" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="3079" r="9" fill="#2b2b29"/>
+  <rect x="675" y="2916" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="2958" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="675" y="3046" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="3088" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="675" y="3176" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="3218" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M486 3079 C506 3079, 640 2949, 660 2949" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 3079 C506 3079, 640 3079, 660 3079" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 3079 C506 3079, 640 3209, 660 3209" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="2897" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
+  <rect x="818" y="3046" width="123" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="3088" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">mean</text>
+  <path d="M800 2949 C920 2949, 698 3079, 818 3079" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 3079 C920 3079, 698 3079, 818 3079" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 3209 C920 3209, 698 3079, 818 3079" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="3253" text-anchor="middle" fill="#2b2b29" font-size="24">average the answers</text>
+  <rect x="960" y="3046" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="3088" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M952 3079 C972 3079, 930 3079, 950 3079" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="963" y="3027" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="3543" text-anchor="start" fill="#2b2b29" font-size="24">Verifier Gate</text>
+  <text x="64" y="3571" text-anchor="start" fill="#2b2b29" font-size="24">one draft, a check, retry on fail</text>
+  <rect x="390" y="3516" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="3558" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="677" y="3516" width="106" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="3558" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">draft</text>
+  <rect x="814" y="3516" width="131" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="3558" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">check</text>
+  <path d="M480 3549 C500 3549, 647 3549, 667 3549" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="3497" text-anchor="middle" fill="#2b2b29" font-size="24">one try</text>
+  <path d="M793 3549 C813 3549, 784 3549, 804 3549" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="960" y="3516" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="3558" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M956 3549 C976 3549, 930 3549, 950 3549" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="963" y="3497" text-anchor="middle" fill="#2b2b29" font-size="24">ok</text>
+  <path d="M820 3582 L820 3685 L671 3685 L671 3582" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="746" y="3707" text-anchor="middle" fill="#2b2b29" font-size="24">fail → retry</text>
+  <text x="64" y="4013" text-anchor="start" fill="#2b2b29" font-size="24">Debate</text>
+  <text x="64" y="4041" text-anchor="start" fill="#2b2b29" font-size="24">two reads that loop until agreement</text>
+  <rect x="390" y="3986" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="4028" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="4019" r="9" fill="#2b2b29"/>
+  <rect x="664" y="3856" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="3898" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
+  <rect x="664" y="4116" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="4158" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
+  <path d="M486 4019 C506 4019, 644 3889, 664 3889" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M796 3889 C946 3889, 859 4019, 1009 4019" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 4019 C506 4019, 644 4149, 664 4149" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M796 4149 C946 4149, 859 4019, 1009 4019" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="3837" text-anchor="middle" fill="#2b2b29" font-size="24">careful disagreement</text>
+  <rect x="1009" y="3986" width="122" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1070" y="4028" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
+  <path d="M1015 4052 L1015 4155 L658 4155 L658 3922" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="837" y="4177" text-anchor="middle" fill="#2b2b29" font-size="24">disagree → again</text>
+  <rect x="1134" y="3986" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1205" y="4028" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1141 4019 C1161 4019, 1104 4019, 1124 4019" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1146" y="3967" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="4483" text-anchor="start" fill="#2b2b29" font-size="24">Pipeline</text>
+  <text x="64" y="4511" text-anchor="start" fill="#2b2b29" font-size="24">each step consumes the last</text>
+  <rect x="390" y="4456" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="4498" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="541" y="4456" width="122" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="602" y="4498" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">scout</text>
+  <rect x="732" y="4456" width="84" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="774" y="4498" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">manifest</text>
+  <rect x="888" y="4456" width="115" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="946" y="4498" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">write</text>
+  <rect x="1052" y="4456" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1118" y="4498" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">check</text>
+  <path d="M480 4489 C500 4489, 511 4489, 531 4489" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M673 4489 C693 4489, 656 4489, 676 4489" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M872 4489 C892 4489, 858 4489, 878 4489" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1014 4489 C1034 4489, 1022 4489, 1042 4489" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="860" y="4437" text-anchor="middle" fill="#2b2b29" font-size="24">each step consumes the last</text>
+  <rect x="1182" y="4456" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1253" y="4498" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1194 4489 C1214 4489, 1152 4489, 1172 4489" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1194" y="4437" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="4953" text-anchor="start" fill="#2b2b29" font-size="24">Negative Selection</text>
+  <text x="64" y="4981" text-anchor="start" fill="#2b2b29" font-size="24">force divergence before you judge</text>
+  <rect x="390" y="4926" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="4968" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="4959" r="9" fill="#2b2b29"/>
+  <rect x="660" y="4796" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="4838" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="4926" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="4968" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="5056" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="5098" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M486 4959 C506 4959, 640 4829, 660 4829" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 4959 C506 4959, 640 4959, 660 4959" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 4959 C506 4959, 640 5089, 660 5089" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="4777" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
+  <rect x="758" y="4926" width="245" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="4968" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">select diverse</text>
+  <path d="M800 4829 C877 4829, 681 4959, 758 4959" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 4959 C920 4959, 638 4959, 758 4959" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 5089 C877 5089, 681 4959, 758 4959" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="5133" text-anchor="middle" fill="#2b2b29" font-size="24">drop clones, force divergence</text>
+  <rect x="978" y="4926" width="105" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1030" y="4968" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">vote</text>
+  <path d="M1012 4959 C1032 4959, 948 4959, 968 4959" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="1110" y="4926" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="4968" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1092 4959 C1112 4959, 1080 4959, 1100 4959" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1113" y="4907" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="5423" text-anchor="start" fill="#2b2b29" font-size="24">Markowitz Ensemble</text>
+  <text x="64" y="5451" text-anchor="start" fill="#2b2b29" font-size="24">correlation-weighted, not just averaged</text>
+  <rect x="390" y="5396" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="5438" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="5429" r="9" fill="#2b2b29"/>
+  <rect x="675" y="5266" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="5308" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="675" y="5396" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="5438" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="675" y="5526" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="5568" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M486 5429 C506 5429, 640 5299, 660 5299" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 5429 C506 5429, 640 5429, 660 5429" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 5429 C506 5429, 640 5559, 660 5559" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="5247" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
+  <rect x="748" y="5396" width="264" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="5438" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">weighted mean</text>
+  <path d="M800 5299 C920 5299, 628 5429, 748 5429" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 5429 C920 5429, 628 5429, 748 5429" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 5559 C920 5559, 628 5429, 748 5429" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="5603" text-anchor="middle" fill="#2b2b29" font-size="24">correlation-weighted</text>
+  <rect x="960" y="5396" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="5438" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1022 5429 C1042 5429, 930 5429, 950 5429" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="963" y="5377" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="5893" text-anchor="start" fill="#2b2b29" font-size="24">PID Confidence Loop</text>
+  <text x="64" y="5921" text-anchor="start" fill="#2b2b29" font-size="24">a budget that tracks error, history, trend</text>
+  <rect x="390" y="5866" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="5908" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="638" y="5866" width="183" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="5908" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">set spend</text>
+  <path d="M480 5899 C500 5899, 608 5899, 628 5899" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="5847" text-anchor="middle" fill="#2b2b29" font-size="24">setpoint</text>
+  <rect x="796" y="5866" width="167" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="880" y="5908" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">samples</text>
+  <path d="M832 5899 C852 5899, 766 5899, 786 5899" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="964" y="5866" width="131" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1030" y="5908" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">check</text>
+  <path d="M974 5899 C994 5899, 934 5899, 954 5899" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="963" y="5847" text-anchor="middle" fill="#2b2b29" font-size="24">confidence gap</text>
+  <rect x="1110" y="5866" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="5908" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1106 5899 C1126 5899, 1080 5899, 1100 5899" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M970 5932 L970 6035 L632 6035 L632 5932" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="802" y="6057" text-anchor="middle" fill="#2b2b29" font-size="24">P·I·D re-command</text>
+  <text x="64" y="6363" text-anchor="start" fill="#2b2b29" font-size="24">Pheromone Router</text>
+  <text x="64" y="6391" text-anchor="start" fill="#2b2b29" font-size="24">learn which shape wins, with decay</text>
+  <rect x="390" y="6336" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="6378" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="656" y="6336" width="148" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="6378" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">choose</text>
+  <path d="M480 6369 C500 6369, 626 6369, 646 6369" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="6317" text-anchor="middle" fill="#2b2b29" font-size="24">learned weights</text>
+  <rect x="955" y="6206" width="150" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1030" y="6248" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">1 model</text>
+  <path d="M804 6369 C954 6369, 805 6239, 955 6239" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="942" y="6336" width="176" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1030" y="6378" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">N models</text>
+  <path d="M804 6369 C954 6369, 792 6369, 942 6369" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="960" y="6466" width="140" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1030" y="6508" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">debate</text>
+  <path d="M804 6369 C954 6369, 810 6499, 960 6499" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="1110" y="6336" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="6378" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1105 6239 C965 6239, 1250 6369, 1110 6369" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1118 6369 C1258 6369, 970 6369, 1110 6369" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1100 6499 C1240 6499, 970 6369, 1110 6369" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1116 6409 L1116 6555 L650 6555 L650 6409" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="883" y="6585" text-anchor="middle" fill="#2b2b29" font-size="24">verified → reinforce, others decay</text>
+  <text x="64" y="6833" text-anchor="start" fill="#2b2b29" font-size="24">Byzantine Adjudicator</text>
+  <text x="64" y="6861" text-anchor="start" fill="#2b2b29" font-size="24">spend more when the split is systematic</text>
+  <rect x="390" y="6806" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="6848" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="6839" r="9" fill="#2b2b29"/>
+  <rect x="660" y="6676" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="6718" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="6806" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="6848" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="6936" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="6978" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M486 6839 C506 6839, 640 6709, 660 6709" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 6839 C506 6839, 640 6839, 660 6839" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 6839 C506 6839, 640 6969, 660 6969" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="6657" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
+  <rect x="801" y="6806" width="158" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="6848" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">classify</text>
+  <path d="M800 6709 C877 6709, 724 6839, 801 6839" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 6839 C920 6839, 681 6839, 801 6839" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 6969 C877 6969, 724 6839, 801 6839" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="7013" text-anchor="middle" fill="#2b2b29" font-size="24">noise vs byzantine split</text>
+  <rect x="960" y="6806" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="6848" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M969 6839 C989 6839, 930 6839, 950 6839" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="64" y="7303" text-anchor="start" fill="#2b2b29" font-size="24">Straggler Backup</text>
+  <text x="64" y="7331" text-anchor="start" fill="#2b2b29" font-size="24">spawn a duplicate only on the overdue worker</text>
+  <rect x="390" y="7276" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="7318" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="660" y="7276" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="7318" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M480 7309 C500 7309, 630 7309, 650 7309" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="7257" text-anchor="middle" fill="#2b2b29" font-size="24">one try</text>
+  <rect x="810" y="7276" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="880" y="7318" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M810 7309 C830 7309, 780 7309, 800 7309" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="813" y="7257" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <rect x="656" y="7416" width="148" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="7458" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">backup</text>
+  <path d="M730 7342 L730 7416" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="730" y="7361" text-anchor="middle" fill="#2b2b29" font-size="24">over budget → spawn</text>
+  <path d="M804 7449 C844 7449, 770 7309, 810 7309" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="754" y="7397" text-anchor="start" fill="#2b2b29" font-size="24">first to finish</text>
+  <text x="64" y="7773" text-anchor="start" fill="#2b2b29" font-size="24">Materialized Answer</text>
+  <text x="64" y="7801" text-anchor="start" fill="#2b2b29" font-size="24">cache the verified answer, serve hits at #1 speed</text>
+  <rect x="390" y="7746" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="7788" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="674" y="7746" width="113" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="7788" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">hash</text>
+  <path d="M480 7779 C500 7779, 644 7779, 664 7779" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="7727" text-anchor="middle" fill="#2b2b29" font-size="24">semantic key</text>
+  <rect x="1000" y="7746" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1070" y="7788" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="810" y="7746" width="140" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="880" y="7788" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">pattern</text>
+  <path d="M796 7779 C816 7779, 780 7779, 800 7779" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M960 7779 C980 7779, 970 7779, 990 7779" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M792 7812 L792 7935 L668 7935 L668 7812" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="730" y="7957" text-anchor="middle" fill="#2b2b29" font-size="24">verified → cache</text>
+  <text x="900" y="7953" text-anchor="middle" fill="#2b2b29" font-size="24">hit short-circuits, miss computes</text>
+  <text x="64" y="8243" text-anchor="start" fill="#2b2b29" font-size="24">Canary Trust</text>
+  <text x="64" y="8271" text-anchor="start" fill="#2b2b29" font-size="24">a new model earns a vote by shadowing the incumbent</text>
+  <rect x="390" y="8216" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="8258" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="8249" r="9" fill="#2b2b29"/>
+  <rect x="634" y="8086" width="193" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="8128" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">incumbent</text>
+  <rect x="675" y="8346" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="8388" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">canary</text>
+  <path d="M486 8249 C506 8249, 614 8119, 634 8119" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 8249 C506 8249, 640 8379, 660 8379" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="8087" text-anchor="middle" fill="#2b2b29" font-size="24">same request</text>
+  <rect x="796" y="8086" width="167" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="8128" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">compare</text>
+  <path d="M826 8119 C846 8119, 776 8119, 796 8119" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="978" y="8086" width="105" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1030" y="8128" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">gate</text>
+  <path d="M972 8119 C992 8119, 950 8119, 970 8119" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 8379 C460 8379, 1318 8119, 978 8119" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="910" y="8425" text-anchor="middle" fill="#2b2b29" font-size="24">observation only, until it earns a vote</text>
+  <rect x="1110" y="8086" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="8128" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1090 8119 C1110 8119, 1082 8119, 1102 8119" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1113" y="8067" text-anchor="middle" fill="#2b2b29" font-size="24">shadow → compare → gate</text>
+  <text x="64" y="8713" text-anchor="start" fill="#2b2b29" font-size="24">CVaR Budgeting</text>
+  <text x="64" y="8741" text-anchor="start" fill="#2b2b29" font-size="24">pick the pattern that tames the worst-case tail</text>
+  <rect x="390" y="8686" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="8728" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="678" y="8686" width="105" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="8728" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">rank</text>
+  <path d="M480 8719 C500 8719, 648 8719, 668 8719" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="8667" text-anchor="middle" fill="#2b2b29" font-size="24">consequential?</text>
+  <rect x="828" y="8556" width="105" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="880" y="8598" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">vote</text>
+  <rect x="825" y="8816" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="880" y="8858" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">diverge</text>
+  <path d="M792 8719 C942 8719, 678 8589, 828 8589" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M792 8719 C642 8719, 956 8849, 806 8849" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="8545" text-anchor="middle" fill="#2b2b29" font-size="24">mean</text>
+  <text x="880" y="8901" text-anchor="middle" fill="#2b2b29" font-size="24">expected-shortfall</text>
+  <rect x="960" y="8686" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="8728" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M932 8589 C1072 8589, 812 8719, 952 8719" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M954 8849 C814 8849, 1092 8719, 952 8719" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="955" y="8661" text-anchor="middle" fill="#2b2b29" font-size="24">pick the tail-safe shape</text>
+  <text x="64" y="9183" text-anchor="start" fill="#2b2b29" font-size="24">Circuit Breaker</text>
+  <text x="64" y="9211" text-anchor="start" fill="#2b2b29" font-size="24">fast-fail a degrading model, quarantine a class</text>
+  <rect x="390" y="9156" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="9198" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="9189" r="9" fill="#2b2b29"/>
+  <rect x="660" y="9026" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="9068" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="9156" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="9198" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="660" y="9286" width="141" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="9328" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <path d="M486 9189 C506 9189, 640 9059, 660 9059" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 9189 C506 9189, 640 9189, 660 9189" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 9189 C506 9189, 640 9319, 660 9319" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="9007" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
+  <rect x="806" y="9156" width="149" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="9198" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">breaker</text>
+  <path d="M800 9059 C920 9059, 686 9189, 806 9189" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 9189 C920 9189, 686 9189, 806 9189" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M800 9319 C920 9319, 686 9189, 806 9189" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="9363" text-anchor="middle" fill="#2b2b29" font-size="24">open / half-open / closed</text>
+  <rect x="990" y="9156" width="110" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1045" y="9198" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pool</text>
+  <path d="M964 9189 C984 9189, 962 9189, 982 9189" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="962" y="9137" text-anchor="middle" fill="#2b2b29" font-size="24">quarantine the toxic class</text>
+  <rect x="1124" y="9156" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1195" y="9198" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1108 9189 C1128 9189, 1094 9189, 1114 9189" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1128" y="9137" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <text x="64" y="9653" text-anchor="start" fill="#2b2b29" font-size="24">Delphi Consensus</text>
+  <text x="64" y="9681" text-anchor="start" fill="#2b2b29" font-size="24">iterate anonymous estimates to a narrowed spread</text>
+  <rect x="390" y="9626" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="9668" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="9659" r="9" fill="#2b2b29"/>
+  <rect x="646" y="9496" width="167" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="9538" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">estimate</text>
+  <rect x="646" y="9626" width="167" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="9668" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">estimate</text>
+  <rect x="646" y="9756" width="167" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="9798" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">estimate</text>
+  <path d="M486 9659 C506 9659, 626 9529, 646 9529" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 9659 C506 9659, 626 9659, 646 9659" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 9659 C506 9659, 626 9789, 646 9789" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="9477" text-anchor="middle" fill="#2b2b29" font-size="24">anonymous, n models</text>
+  <rect x="788" y="9626" width="183" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="9668" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">aggregate</text>
+  <path d="M814 9529 C934 9529, 668 9659, 788 9659" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M814 9659 C934 9659, 668 9659, 788 9659" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M814 9789 C934 9789, 668 9659, 788 9659" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="9833" text-anchor="middle" fill="#2b2b29" font-size="24">median + rationales</text>
+  <path d="M794 9692 L794 9795 L640 9795 L640 9692" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="718" y="9817" text-anchor="middle" fill="#2b2b29" font-size="24">revise to R rounds</text>
+  <rect x="960" y="9626" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="9668" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M982 9659 C1002 9659, 930 9659, 950 9659" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="963" y="9607" text-anchor="middle" fill="#2b2b29" font-size="24">convergence</text>
+  <text x="64" y="10123" text-anchor="start" fill="#2b2b29" font-size="24">Trial Sequential Analysis</text>
+  <text x="64" y="10151" text-anchor="start" fill="#2b2b29" font-size="24">the learner may only win once N is met</text>
+  <rect x="390" y="10096" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="10138" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="10129" r="9" fill="#2b2b29"/>
+  <rect x="675" y="9966" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="10008" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">challenger</text>
+  <rect x="634" y="10226" width="193" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="10268" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">incumbent</text>
+  <path d="M486 10129 C506 10129, 614 9999, 634 9999" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 10129 C506 10129, 614 10259, 634 10259" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="596" y="9967" text-anchor="middle" fill="#2b2b29" font-size="24">same class</text>
+  <rect x="825" y="10096" width="110" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="10138" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">N verified</text>
+  <path d="M826 9999 C946 9999, 672 10129, 792 10129" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M826 10259 C706 10259, 912 10129, 792 10129" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="10309" text-anchor="middle" fill="#2b2b29" font-size="24">N set a priori, not by streak</text>
+  <rect x="942" y="10096" width="176" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1030" y="10138" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">promote?</text>
+  <path d="M976 10129 C996 10129, 914 10129, 934 10129" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="955" y="10077" text-anchor="middle" fill="#2b2b29" font-size="24">wider each look</text>
+  <rect x="1132" y="10096" width="97" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="10138" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">best</text>
+  <path d="M1126 10129 C1146 10129, 1104 10129, 1124 10129" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="1113" y="10077" text-anchor="middle" fill="#2b2b29" font-size="24">only at the threshold</text>
+  <text x="64" y="10593" text-anchor="start" fill="#2b2b29" font-size="24">Evidence-Bar Ladder</text>
+  <text x="64" y="10621" text-anchor="start" fill="#2b2b29" font-size="24">proof threshold scales with the cost of error</text>
+  <rect x="390" y="10566" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="10608" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="675" y="10566" width="110" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="10608" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">class of cost</text>
+  <path d="M480 10599 C500 10599, 586 10599, 606 10599" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="588" y="10547" text-anchor="middle" fill="#2b2b29" font-size="24">which error is worse?</text>
+  <rect x="824" y="10436" width="113" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="10478" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pass</text>
+  <path d="M844 10599 C964 10599, 704 10469, 824 10469" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="806" y="10566" width="148" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="10608" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">checks</text>
+  <path d="M844 10599 C964 10599, 686 10599, 806 10599" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="814" y="10696" width="131" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="10738" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">divide</text>
+  <path d="M844 10599 C964 10599, 694 10729, 814 10729" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="880" y="10417" text-anchor="middle" fill="#2b2b29" font-size="24">preponderance</text>
+  <text x="880" y="10599" text-anchor="middle" fill="#2b2b29" font-size="24">clear-and-convincing</text>
+  <text x="880" y="10781" text-anchor="middle" fill="#2b2b29" font-size="24">beyond-reasonable-doubt</text>
+  <rect x="960" y="10566" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1030" y="10608" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M944 10469 C1004 10469, 892 10599, 952 10599" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M962 10599 C1022 10599, 892 10599, 952 10599" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M954 10729 C1014 10729, 892 10599, 952 10599" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="64" y="11063" text-anchor="start" fill="#2b2b29" font-size="24">Type-Revelation Screening</text>
+  <text x="64" y="11091" text-anchor="start" fill="#2b2b29" font-size="24">probe a model's type in idle, before trust</text>
+  <rect x="390" y="11036" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="11078" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="630" y="10906" width="201" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="10948" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">probe bank</text>
+  <rect x="675" y="11166" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="11208" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">model</text>
+  <path d="M480 11069 C500 11069, 610 10939, 630 10939" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M838 10939 C638 10939, 864 11199, 664 11199" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="734" y="11069" text-anchor="middle" fill="#2b2b29" font-size="24">idle, off critical path</text>
+  <rect x="775" y="10906" width="210" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="10948" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">update prior</text>
+  <path d="M796 11199 C996 11199, 575 10939, 775 10939" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="805" y="11245" text-anchor="middle" fill="#2b2b29" font-size="24">hit rate → type bucket</text>
+  <rect x="951" y="10906" width="158" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1030" y="10948" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">allocate</text>
+  <path d="M993 10939 C1013 10939, 923 10939, 943 10939" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="955" y="10887" text-anchor="middle" fill="#2b2b29" font-size="24">sort before real work</text>
+  <rect x="1110" y="10906" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1180" y="10948" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M1117 10939 C1137 10939, 1082 10939, 1102 10939" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="64" y="11533" text-anchor="start" fill="#2b2b29" font-size="24">Condorcet Pairwise</text>
+  <text x="64" y="11561" text-anchor="start" fill="#2b2b29" font-size="24">head-to-head beats plurality on a 3-way split</text>
+  <rect x="390" y="11506" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="11548" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="486" cy="11539" r="9" fill="#2b2b29"/>
+  <rect x="656" y="11376" width="149" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="11418" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">answer</text>
+  <rect x="656" y="11506" width="149" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="11548" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">answer</text>
+  <rect x="656" y="11636" width="149" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="11678" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">answer</text>
+  <path d="M486 11539 C506 11539, 636 11409, 656 11409" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 11539 C506 11539, 636 11539, 656 11539" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M486 11539 C506 11539, 636 11669, 656 11669" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="11357" text-anchor="middle" fill="#2b2b29" font-size="24">3+ camps</text>
+  <rect x="826" y="11506" width="167" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="910" y="11548" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pairwise</text>
+  <path d="M804 11409 C924 11409, 706 11539, 826 11539" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M804 11539 C924 11539, 706 11539, 826 11539" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M804 11669 C924 11669, 706 11539, 826 11539" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="910" y="11713" text-anchor="middle" fill="#2b2b29" font-size="24">beats every rival</text>
+  <rect x="1012" y="11506" width="97" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1060" y="11548" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">best</text>
+  <path d="M1002 11539 C1022 11539, 984 11539, 1004 11539" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="993" y="11487" text-anchor="middle" fill="#2b2b29" font-size="24">Condorcet, not plurality</text>
+  <text x="64" y="12003" text-anchor="start" fill="#2b2b29" font-size="24">Slack-Stealing Scheduler</text>
+  <text x="64" y="12031" text-anchor="start" fill="#2b2b29" font-size="24">background only in preemptible idle</text>
+  <rect x="390" y="11976" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="12018" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="625" y="11846" width="210" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="730" y="11888" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">live request</text>
+  <path d="M486 12009 C606 12009, 513 11879, 633 11879" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="11827" text-anchor="middle" fill="#2b2b29" font-size="24">deadline-bearing</text>
+  <rect x="810" y="11846" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="880" y="11888" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M843 11879 C863 11879, 782 11879, 802 11879" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="796" y="12106" width="167" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="880" y="12148" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">idle task</text>
+  <path d="M486 12009 C366 12009, 924 12139, 804 12139" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="675" y="12191" text-anchor="middle" fill="#2b2b29" font-size="24">only in the slack</text>
+  <rect x="951" y="12106" width="158" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1030" y="12148" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">preempt</text>
+  <path d="M972 12139 C992 12139, 923 12139, 943 12139" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="1046" y="12087" text-anchor="middle" fill="#2b2b29" font-size="24">yields on arrival</text>
+  <text x="64" y="12473" text-anchor="start" fill="#2b2b29" font-size="24">Thompson Posterior Router</text>
+  <text x="64" y="12501" text-anchor="start" fill="#2b2b29" font-size="24">route by sampling, not by argmax</text>
+  <rect x="390" y="12446" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="430" y="12488" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="634" y="12316" width="193" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="12358" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">A posterior</text>
+  <path d="M486 12479 C526 12479, 602 12349, 642 12349" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="634" y="12446" width="193" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="12488" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">B posterior</text>
+  <path d="M486 12479 L642 12479" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="634" y="12576" width="193" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="730" y="12618" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">C posterior</text>
+  <path d="M486 12479 C446 12479, 682 12609, 642 12609" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="600" y="12297" text-anchor="middle" fill="#2b2b29" font-size="24">per-arm Beta</text>
+  <rect x="836" y="12446" width="149" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="910" y="12488" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">sample</text>
+  <path d="M834 12349 C994 12349, 668 12479, 828 12479" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M834 12479 L828 12479" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M834 12609 C674 12609, 988 12479, 828 12479" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <text x="910" y="12653" text-anchor="middle" fill="#2b2b29" font-size="24">highest sample wins</text>
+  <rect x="990" y="12446" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1060" y="12488" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <path d="M992 12479 C1012 12479, 962 12479, 982 12479" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="1148" y="12446" width="123" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1210" y="12488" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">ledger</text>
+  <path d="M1138 12479 C1158 12479, 1120 12479, 1140 12479" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M1280 12479 C980 12479, 934 12609, 634 12609" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <text x="970" y="12661" text-anchor="middle" fill="#2b2b29" font-size="24">verified wins feed back</text>
+</svg>
