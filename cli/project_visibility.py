@@ -52,9 +52,12 @@ def _set_visibility(args: argparse.Namespace, *, visibility: str) -> int:
     base, token, label = remote_project._resolve(args)
     answer = relay.set_project_visibility(base, token, args.project_id, visibility=visibility)
 
-    if remote_project._emit(args, answer):
-        return 0
-    if answer.get("visibility") != visibility:
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard below
+    # was unreachable under `--json`, which is the one mode an application drives: somebody walks
+    # away believing their project is private and their colleagues can still read it, which is the
+    # one failure this command exists to prevent.
+    emitted = remote_project._emit(args, answer)
+    if not isinstance(answer, dict) or answer.get("visibility") != visibility:
         # The house guard: a reply this command cannot read is not a state change it may report.
         # ⚠️ Compared against the value we ASKED for, never a truthiness test — a relay that omitted
         # the key, or answered `True`, would otherwise be reported as having done what was asked.
@@ -65,6 +68,8 @@ def _set_visibility(args: argparse.Namespace, *, visibility: str) -> int:
             f"{visibility}-visible, so this cannot be reported as one. "
             f"`grid project {'share' if visibility == VISIBILITY_GRID else 'private'} "
             f"{args.project_id} --json` shows what it sent.")
+    if emitted:
+        return 0
 
     # `changed is False` — explicit, not falsy — says a previous request had already done it. A
     # missing key means a relay that does not report the distinction, and "already" is the one thing

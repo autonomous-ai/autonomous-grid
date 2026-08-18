@@ -23789,7 +23789,9 @@ def test_init_project_runs_the_task_when_the_trunk_is_already_there(monkeypatch,
     assert calls == ["/relay/v1/projects/P1/init", "/relay/v1/tasks"], calls
     out = capsys.readouterr().out
     assert "T7" in out
-    assert "already has a trunk" in out, f"the skipped init was not reported: {out!r}"
+    # The wording lost its git word in issue 46 (ADR 0034 D-m); what it REPORTS is unchanged.
+    assert "already has something to start from" in out, (
+        f"the skipped init was not reported: {out!r}")
 
 
 def test_any_other_init_refusal_stops_before_the_task(monkeypatch, tmp_path):
@@ -32644,8 +32646,13 @@ def test_project_status_reports_the_trunk_and_every_turn_in_flight(
     assert rc == 0
     assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/status")
     out = capsys.readouterr().out
-    # The trunk and its tip: the one oid an application watches for change since D-d.
-    assert "main" in out and "a" * 40 in out, out
+    # ⚠️ **The tip WITHOUT the trunk's name** (ADR 0034 D-m, issue 46). This line used to read
+    # `main=<oid>`, which put a git word and a git object id on the application's home screen. The
+    # value stays because it is the project's change signal — an application diffs it against the one
+    # it holds to notice that anybody's work landed — and `--json` still carries `trunk` for a
+    # program that wants the name.
+    assert "a" * 40 in out, out
+    assert "main" not in out, f"the trunk's name is back on a person's screen:\n{out}"
     # EVERY turn in flight, by id — a person watching for a result needs to know what to wait for,
     # and since ADR 0034 D-b there may be several. A renderer that still read the singular
     # `active_task` shows neither; one that reads only the first shows `t-9` alone.
@@ -32739,7 +32746,8 @@ def test_project_status_says_so_when_only_half_the_cap_pair_arrives(monkeypatch,
 
     assert rc == 0
     captured = capsys.readouterr()
-    assert "main" in captured.out, "the rest of the status was thrown away over one missing key"
+    assert "version=" in captured.out, (
+        "the rest of the status was thrown away over one missing key")
     assert "member_running_cap" in captured.err, (
         f"a relay sent half the cap pair and the CLI said nothing, which is exactly what it says "
         f"for a relay that is simply too old: {captured.err!r}")
@@ -33174,7 +33182,7 @@ def test_project_status_from_a_relay_too_old_to_report_providers_still_works(
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "main=" + "a" * 40 in out, out
+    assert "version=" + "a" * 40 in out, out
     assert "paused" not in out.lower() and "no provider" not in out.lower()
 
 
@@ -35187,11 +35195,22 @@ def test_task_list_takes_a_positional_project_id():
     assert _settled(["task", "list", "abc123"]).project == "abc123"
 
 
-def test_task_list_still_requires_a_project_one_way_or_the_other():
-    """Issue 28 deliberately has no fallback to fall back to: there is nothing to default it to."""
+def test_task_list_takes_no_project_at_all_and_still_refuses_a_blank_one():
+    """⚠️ **OVERTURNS issue 28's rule for this one command** (ADR 0034 D-m, issue 46).
+
+    It used to refuse a missing project, because there was "nothing to default it to". There is now:
+    omitting it lists the caller's own tasks across every project they can reach, which is the
+    application's home screen. Both spellings still work when one IS given.
+
+    Issue 28's other half survives untouched, and that is what the second half of this test is for:
+    a project given as an EMPTY string is still refused. `--project ""` is somebody's shell handing
+    over an unset variable, and reading it as "every project" would answer a much wider question
+    than the one that was asked.
+    """
     assert _settled(["task", "list", "--project", "abc123"]).project == "abc123"
+    assert _settled(["task", "list"]).project is None
     with pytest.raises(SystemExit) as caught:
-        _settled(["task", "list"])
+        _settled(["task", "list", "--project", ""])
     assert "--project" in str(caught.value)
 
 
@@ -35423,19 +35442,31 @@ def _suggested_forms(argv: list[str]) -> list[list[str]]:
     return filled
 
 
-# The extra required flags each command needs before it can parse at all, so the check below is
-# about the FORM being complete and correctly ordered, not about unrelated missing flags.
+# `(argv, trigger, extra)` per command:
+#   * `argv`    — the command, up to but not including whatever makes it refuse;
+#   * `trigger` — what makes the refusal OURS rather than argparse's;
+#   * `extra`   — the other required flags a suggested form needs before it can parse at all.
+#
+# The two are separate because for one command the trigger is itself the thing being refused, and
+# carrying it into the completed form would refuse that too. They are the same list everywhere else,
+# which is what the shape looked like before issue 46.
 _FORM_CASES = [
-    (["project", "status"], []),
-    (["project", "clone"], []),
-    (["project", "import", "./repo"], []),
-    (["project", "member", "remove", "--member", "KEY"], []),
+    (["project", "status"], [], []),
+    (["project", "clone"], [], []),
+    (["project", "import", "./repo"], [], []),
+    (["project", "member", "remove", "--member", "KEY"], [], []),
     # ⚠️ `wip reset` gained a REQUIRED second positional in issue 41 (the conversation id, ADR 0034
     # D-e) and it was registered with a bare `add_argument`, so `project_arg` never learned about
     # it. Supplying it here is what makes the refusal ours rather than argparse's — and the forms
     # that refusal then offers are the thing under test.
-    (["project", "wip", "reset", "C1"], ["--commit", "c" * 40]),
-    (["task", "list"], []),
+    (["project", "wip", "reset", "C1"], ["--commit", "c" * 40], ["--commit", "c" * 40]),
+    # ⚠️ `--project ""` is the TRIGGER and not an extra: since ADR 0034 D-m (issue 46) omitting the
+    # project is a REQUEST — the caller's own tasks across every project — so the bare form no
+    # longer refuses and had nothing for this check to read. A blank value is still refused, by the
+    # same `project_arg` code offering the same forms. Carried into the completed form it would
+    # refuse `grid task list P1 --project ""` as well, which is the refusal working, not a broken
+    # suggestion.
+    (["task", "list"], ["--project", ""], []),
 ]
 
 
@@ -35479,17 +35510,19 @@ def test_no_help_text_tells_anybody_to_run_a_command_that_was_deleted():
         "argparse's `invalid choice`: " + "; ".join(sorted(set(offences))))
 
 
-@pytest.mark.parametrize("argv, extra", _FORM_CASES, ids=[" ".join(a[:3]) for a, _ in _FORM_CASES])
-def test_a_refusal_only_ever_offers_a_command_that_really_works(argv, extra):
+@pytest.mark.parametrize("argv, trigger, extra", _FORM_CASES,
+                         ids=[" ".join(a[:3]) for a, _t, _e in _FORM_CASES])
+def test_a_refusal_only_ever_offers_a_command_that_really_works(argv, trigger, extra):
     """A refusal that names a form which does not parse — or parses into the wrong slot — sends the
     reader round the loop again. Found in review for the member shape; `import` is worse, because
     `grid project import <project-id>` DOES parse and puts the id in the `<path>` slot.
 
     So the forms are checked by running them, not by reading them.
     """
-    # `extra` goes in BOTH: argparse rejects its own missing required flags before `resolve` runs,
-    # so without it there would be no refusal of ours to read.
-    for form in _suggested_forms([*argv, *extra]):
+    # The TRIGGER is what makes the refusal ours: argparse rejects its own missing required flags
+    # before `resolve` runs, so without it there would be nothing of ours to read. The EXTRA is what
+    # the suggested form then needs to parse, and the two are not always the same list.
+    for form in _suggested_forms([*argv, *trigger]):
         settled = _settled([*form, *extra])
         assert settled.project_id == "P1", f"{form} did not put the project id in the project slot"
         if "path" in vars(settled):
@@ -36343,6 +36376,25 @@ def test_a_download_to_an_unwritable_place_is_a_clean_refusal_not_a_traceback(
 @pytest.mark.parametrize("command,body", [
     (["project", "files", "P1"], {"project_id": "P1"}),
     (["task", "diff", "t-1"], {"task_id": "t-1"}),
+    # ADR 0034 D-m (issue 46) — the rest of the surface an application drives. Every one of these
+    # already refused an unreadable reply in a terminal and reported success under `--json`; the
+    # two that matter most are the state changes, where the client walks away believing a project
+    # was archived, made private, or had a change taken back out of it.
+    (["task", "list", "--project", "P1"], {"project_id": "P1"}),
+    (["task", "list"], {"whatever": True}),
+    (["task", "cancel", "t-1"], {"id": "t-1"}),
+    (["task", "undo", "t-1"], {"task_id": "t-1"}),
+    (["project", "status", "P1"], {"project_id": "P1"}),
+    (["project", "init", "P1"], {"project_id": "P1"}),
+    (["project", "archive", "P1"], {"project_id": "P1"}),
+    (["project", "unarchive", "P1"], {"project_id": "P1"}),
+    (["project", "delete", "P1", "--yes"], {"project_id": "P1"}),
+    (["project", "share", "P1"], {"project_id": "P1"}),
+    (["project", "private", "P1"], {"project_id": "P1"}),
+    # `--delete` and not `--file`: this command refuses locally when there is nothing to commit,
+    # before the relay is asked for anything, and a deletion needs no file on disk to name.
+    (["project", "commit", "C1", "-m", "a message", "--delete", "gone.txt"],
+     {"conversation_id": "C1"}),
 ])
 def test_an_unreadable_reply_exits_non_zero_in_BOTH_modes(monkeypatch, tmp_path, capsys,
                                                           command, body):
@@ -36395,3 +36447,376 @@ def test_a_download_that_cannot_be_moved_into_place_leaves_nothing_behind(monkey
 
     assert "could not put them at" in str(caught.value)
     assert list(tmp_path.glob(".p.zip.*")) == [], "a .part file survived a failed move"
+
+
+# ---------------------------------------------------------------------------
+# ADR 0034 D-m / issue 46 — the surface an application drives.
+#
+# The client is Flutter on desktop spawning this binary. Everything here is about what a PROGRAM can
+# read: one list across projects, a refusal it can branch on, and a `--json` mode whose guards are
+# the same guards a terminal gets.
+# ---------------------------------------------------------------------------
+
+
+def test_task_list_without_a_project_lists_across_projects(monkeypatch, tmp_path, capsys):
+    """The application's home screen is *your conversations*, which names no project (issue 46).
+
+    `--project` was required, so a client wanting a person's own history had to fan out over
+    `grid project list` — N requests, and no way to page the result, because one cursor per project
+    cannot be merged into one list.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"tasks": [
+            {"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "fix the parser",
+             "member_key": "def456"},
+            {"id": "t-2", "project_id": "P2", "state": "running", "prompt": "change the logo",
+             "member_key": "def456"},
+        ], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list"])
+
+    assert rc == 0
+    # Omitted, never sent empty: a blank `project_id` is a different request from no `project_id`
+    # against any relay that validates it.
+    assert "project_id" not in seen["query"], seen["query"]
+    out = capsys.readouterr().out
+    assert "P1" in out and "P2" in out, (
+        f"a list spanning projects does not say which project each row is in:\n{out}")
+    assert "t-1" in out and "t-2" in out
+
+
+def test_task_list_across_projects_offers_a_next_page_command_that_parses(
+        monkeypatch, tmp_path, capsys):
+    """The hint used to name `--project {args.project}` unconditionally, which across projects is
+    `--project None` — a command that parses into a project called "None" and lists nothing.
+
+    Pinned by running the offered command through the parser, the rule
+    `test_every_command_this_cli_tells_you_to_run_actually_parses` already applies to this module.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "tasks": [{"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "p"}],
+        "next_after": "t-1"}))
+
+    rc = cli.main(["task", "list"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    more = next(line for line in out.splitlines() if line.startswith("More:"))
+    assert "--project" not in more, f"the next-page command names a project nobody gave: {more!r}"
+    assert "--after t-1" in more, more
+    # And it really runs: the words after `More: ` are argv, through the same `project_arg.resolve`
+    # every handler sees rather than the raw parse.
+    parsed = _settled(more[len("More: "):].split()[1:])
+    assert (parsed.project, parsed.after) == (None, "t-1")
+
+
+def test_task_list_all_without_a_project_shows_the_relays_own_refusal(monkeypatch, tmp_path):
+    """"Every member's tasks in every project" is refused by the RELAY, and its sentence is shown
+    verbatim (issue 46).
+
+    Not re-implemented here as a local check. `remote/relay.py` records the standing rule: exactly
+    three refusal codes are parsed anywhere in this CLI, and keeping the count that low is the
+    contract — every other refusal is displayed, because the relay's message already names the way
+    forward and a fourth reader is a fourth thing a reworded relay could break.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "field": "mine", "code": "invalid_request",
+        "message": "mine=false needs a project_id — every member's tasks are listed one project "
+                   "at a time."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--all"])
+
+    assert "one project at a time" in str(caught.value), (
+        f"the relay's own sentence did not reach the user:\n{caught.value}")
+    assert caught.value.refusal_code == "invalid_request"
+
+
+def test_a_refusal_under_json_is_a_document_on_stderr_carrying_the_relays_code(
+        monkeypatch, tmp_path, capsys):
+    """The application has no other way to know what happened (ADR 0034 D-m, issue 46).
+
+    Every refusal in this plane is a sentence, and a sentence is the one thing a program must not
+    parse — reword it and the client breaks silently. `TaskRefusal` has carried the relay's code
+    since ADR 0033 D-l and exactly two branches read it; nothing put it where a caller could see it.
+
+    **stderr, not stdout**, so `--json`'s stdout stays exactly the documents the relay sent — the
+    rule `_note_an_unreadable_state` already follows for its own disclosure.
+
+    ⚠️ Driven through the ONE refusal this CLI replaces with a sentence of its own, because that is
+    where the code was being dropped: `_task_create` caught the relay's `TaskRefusal` and raised a
+    bare `SystemExit` carrying better prose and nothing machine-readable. An application branching on
+    `project_has_no_trunk` would have seen this single refusal, alone in the whole plane, arrive
+    indistinguishable from a local failure.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "project_has_no_trunk", "message": "project P1 has no trunk yet"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "go", "--json"])
+
+    captured = capsys.readouterr()
+    envelope = json.loads(captured.err.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "project_has_no_trunk"
+    assert envelope["error"]["status"] == 409
+    # The MESSAGE is this CLI's replacement, not the relay's, and that is the point: the sentence is
+    # ours to improve and the code is the relay's to be branched on. They travel together.
+    assert envelope["error"]["message"] == str(caught.value)
+    assert "grid project import" in envelope["error"]["message"], (
+        "the substituted sentence lost the way forward it exists to give")
+    # stdout carries no part of it.
+    assert captured.out.strip() == "", captured.out
+
+
+def test_without_json_a_refusal_is_exactly_what_it_always_was(monkeypatch, tmp_path, capsys):
+    """The control. Everything about the terminal path is unchanged — same type, same message, and
+    **nothing extra on stderr**, which is what somebody watching a `grid` command actually reads."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "project_has_no_trunk", "message": "project P1 has no trunk yet"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "go"])
+
+    err = capsys.readouterr().err
+    assert "{" not in err, f"a JSON envelope reached a command that never asked for one:\n{err!r}"
+    assert "grid project import" in str(caught.value)
+
+
+@pytest.mark.parametrize("code", [None, 0])
+def test_a_clean_early_exit_is_not_reported_to_an_application_as_a_failure(code, capsys):
+    """`SystemExit(None)` and `SystemExit(0)` are how a command stops early having SUCCEEDED.
+
+    Reported as an error they would tell a client its call failed while the interpreter exited 0 —
+    the two halves of one answer disagreeing, which is the exact shape `TaskRefusal`'s own warning is
+    about at the other end (`SystemExit.code` overwritten with a refusal code made a failed create
+    exit 0 with nothing printed).
+    """
+    from cli import json_error
+
+    json_error.refuse_as_json(argparse.Namespace(json=True), SystemExit(code))
+
+    assert capsys.readouterr().err == "", "a clean exit was written out as a refusal"
+
+
+@pytest.mark.parametrize("command,body", [
+    (["task", "list", "--project", "P1"], {"tasks": [], "next_after": None}),
+    (["task", "list"], {"tasks": [], "next_after": None}),
+    (["task", "cancel", "t-1"], {"id": "t-1", "state": "failed", "error": "cancelled"}),
+    (["task", "undo", "t-1"], {"task_id": "t-1", "undone": True}),
+    (["project", "status", "P1"], {"trunk": "main", "main_commit": "a" * 40}),
+    (["project", "init", "P1"], {"status": "initialized", "trunk": "main", "commit": "b" * 40}),
+    (["project", "archive", "P1"], {"archived": True}),
+    (["project", "unarchive", "P1"], {"archived": False}),
+    (["project", "delete", "P1", "--yes"], {"deleted": True}),
+    (["project", "share", "P1"], {"visibility": "grid"}),
+    (["project", "private", "P1"], {"visibility": "private"}),
+    (["project", "commit", "C1", "-m", "m", "--delete", "gone.txt"],
+     {"conversation_id": "C1", "commit": "c" * 40, "branch": "wip/C1"}),
+])
+def test_json_prints_one_document_and_no_prose_when_the_reply_is_good(
+        monkeypatch, tmp_path, capsys, command, body):
+    """The positive control for the emit-then-validate ordering (ADR 0034 D-m, issue 46).
+
+    ⚠️ **Written because the fix is exactly where the next bug of this class lands.** Moving the
+    `--json` return from BEFORE the guard to after it means every one of these functions now has a
+    `return 0` somebody has to place correctly, and placing it one line too late prints the human
+    report underneath the document — which no test in the previous phase can see, because they all
+    drive replies the guard rejects. `ruff` caught one of these (an `emitted` nobody read) and can
+    only ever catch that one shape.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    rc = cli.main(command + ["--json"])
+
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    # ONE document and nothing else: `json.loads` over the whole of stdout fails the moment a line
+    # of prose, or a second document, is printed after it.
+    assert json.loads(captured.out) == body, captured.out
+
+
+@pytest.mark.parametrize("raw,expected,offered", [
+    ("git fetch failed (128): fatal: couldn't find remote ref refs/heads/task/t-1",
+     "no longer kept", "grid task get t-1"),
+    ("git clone failed (128): fatal: Authentication failed for 'https://relay.example/'",
+     "sign-in", "grid login"),
+    ("git fetch timed out after 900s", "could not be reached", "grid task fetch t-1"),
+    ("git checkout failed (1): error: Your local changes would be overwritten",
+     "could not be put on disk", "--into"),
+])
+def test_a_raw_git_failure_is_turned_into_a_sentence(monkeypatch, tmp_path, raw, expected,
+                                                     offered):
+    """ADR 0034 D-m: *"no raw git error reaches the application's surface."*
+
+    `grid task fetch` is the one command in this CLI that runs git itself, and it re-raised whatever
+    git had said — `fatal: couldn't find remote ref refs/heads/task/t-1` — at somebody who has never
+    seen a ref. Worse, the four causes below call for four different actions and git's wording says
+    which for none of them.
+
+    ⚠️ **git's own text is KEPT, on its own line.** The rule issue 42 set for a failed merge turn:
+    the provider's diagnostic is right for whoever runs the grid and is the one message a
+    non-developer must not be left staring at, so it is followed rather than replaced. What is added
+    is the sentence that turns a dead end into a next step.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "state": "completed", "project_id": "P1", "branch": "task/t-1",
+        "result_commit": "a" * 40}))
+
+    def explode(*args, **kwargs):
+        raise task_repo.CheckoutError(raw)
+
+    monkeypatch.setattr(task_repo, "checkout_result", explode)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "t-1"])
+
+    said = str(caught.value)
+    assert expected in said, f"the cause was not named:\n{said}"
+    assert offered in said, f"nothing to do next:\n{said}"
+    assert raw in said, f"git's own words were thrown away, so nobody can diagnose it:\n{said}"
+
+
+def test_a_fetch_without_git_names_the_read_that_needs_none(monkeypatch, tmp_path):
+    """The one cause whose way forward is a different command, not a retry (issue 46).
+
+    `grid project files` / `file` / `download` were added by issue 45 precisely so that a person
+    with no git can still see their project, and this is the moment they need to be told so — being
+    handed `could not run git ([Errno 2] No such file or directory: 'git')` instead is the dead end
+    that whole slice exists to remove. The project id it offers is the PROJECT's, never the
+    directory the fetch was aimed at.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "state": "completed", "project_id": "P-real", "branch": "task/t-1",
+        "result_commit": "a" * 40}))
+
+    def no_git(*args, **kwargs):
+        raise task_repo.CheckoutError(
+            "could not run git ([Errno 2] No such file or directory: 'git'); "
+            "is git installed on this provider?")
+
+    monkeypatch.setattr(task_repo, "checkout_result", no_git)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "t-1", "--into", str(tmp_path / "somewhere-else")])
+
+    said = str(caught.value)
+    assert "grid project files P-real" in said, (
+        f"the read that needs no git is not offered, or names the wrong thing:\n{said}")
+
+
+def test_a_refusal_envelope_always_carries_a_message(capsys):
+    """An envelope with an empty `message` tells an application an error was described when nothing
+    was — worse than a clumsy sentence, because there is nothing to show a person.
+
+    ⚠️ The `int` case is UNREACHABLE today: every refusal in this CLI carries words, and the one
+    numeric exit (`grid task get`'s 2) is a `return` rather than a raise. Pinned anyway, because the
+    day somebody writes `raise SystemExit(2)` the hole opens in the mode nobody watches.
+    """
+    from cli import json_error
+
+    # `""` is what `raise SystemExit(some_variable)` produces when the variable is empty; `2` is a
+    # numeric exit carrying no sentence at all. Neither is raised in this CLI today.
+    for code in ("a refusal sentence", 2, ""):
+        json_error.refuse_as_json(argparse.Namespace(json=True), SystemExit(code))
+        envelope = json.loads(capsys.readouterr().err.strip())
+        assert envelope["error"]["message"], f"an empty message for SystemExit({code!r})"
+
+
+def test_project_delete_with_json_refuses_rather_than_declining_at_a_prompt(monkeypatch, tmp_path,
+                                                                            capsys):
+    """⚠️ **Found in review.** `grid project delete P1 --json` printed an interactive prompt to
+    stdout, read EOF from a closed stdin, said "Nothing was deleted." and exited **0**.
+
+    An application spawning this binary has no terminal to answer at, so it hit that path every
+    time — and read exit 0 as *the project was deleted*. `system.confirm` answering False on EOF is
+    right for a person who pressed Ctrl-D; it is the wrong shape entirely for a caller that cannot
+    press anything, because "declined" and "done" become the same status.
+
+    Refused with a sentence naming `--yes`, not silently confirmed: this is the one irreversible
+    verb in the plane, and the flag is how an application says it meant it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    asked = []
+    _mock_relay(monkeypatch, lambda r: asked.append(r) or httpx.Response(200, json={"deleted": True}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "delete", "P1", "--json"])
+
+    captured = capsys.readouterr()
+    assert "--yes" in str(caught.value), f"the flag that does this is not named:\n{caught.value}"
+    assert asked == [], "the relay was asked to delete a project nobody confirmed"
+    assert captured.out == "", f"prose reached an application's stdout:\n{captured.out!r}"
+    # And the envelope an application actually reads.
+    assert json.loads(captured.err.strip().splitlines()[-1])["error"]["message"] == str(caught.value)
+
+
+def test_project_delete_with_json_and_yes_still_works(monkeypatch, tmp_path, capsys):
+    """The control: `--yes` is the whole of what `--json` needs, and nothing else changed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"deleted": True}))
+
+    assert cli.main(["project", "delete", "P1", "--yes", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"deleted": True}
+
+
+def test_a_usage_error_under_json_is_still_a_document_an_application_can_read(monkeypatch, tmp_path,
+                                                                             capsys):
+    """⚠️ **Found in review.** argparse raises before `dispatch` is ever called, so the envelope
+    never fired for an argv that does not parse.
+
+    Worse than missing prose: argparse exits **2**, and `2` in this CLI means *not finished yet, ask
+    again* (issue 32). A client polling `grid task get "$id" --json` that had sent one flag this
+    build does not know would loop for ever on a usage error, seeing the code that means "keep
+    waiting". The way it gets there is version skew — the application and the binary shipped apart —
+    which is exactly the case a spawned-subprocess client cannot rule out.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--json", "--no-such-flag"])
+
+    assert caught.value.code == 2, "argparse's own status is preserved"
+    envelope = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert envelope["error"]["message"], "an application is left with argparse's prose and nothing else"
+    assert envelope["error"]["code"] is None, "a usage error is this CLI's, not the relay's"
+
+
+def test_a_usage_error_without_json_prints_no_envelope(monkeypatch, tmp_path, capsys):
+    """The control. `--json` has to be read out of the RAW argv here — the namespace does not exist
+    when argparse fails — so the risk is reading it as set for every caller."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    with pytest.raises(SystemExit):
+        cli.main(["task", "list", "--no-such-flag"])
+
+    assert "{" not in capsys.readouterr().err

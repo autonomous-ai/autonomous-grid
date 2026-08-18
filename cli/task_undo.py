@@ -15,7 +15,6 @@ none of that vocabulary belongs on the screen of somebody who does not know what
 from __future__ import annotations
 
 import argparse
-import json
 
 
 def task_undo(args: argparse.Namespace) -> int:
@@ -26,19 +25,24 @@ def task_undo(args: argparse.Namespace) -> int:
     base, token, _label = remote_task._resolve(args)
     answer = relay.undo_task(base, token, args.task_id)
 
-    if getattr(args, "json", False):
-        print(json.dumps(answer, indent=2))
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard below
+    # was unreachable under `--json`, which is the one mode an application drives: a reply that did
+    # not confirm the undo exited 0 there and 1 in a terminal, so a client was told a change had
+    # been taken back out of the project on the strength of a body that never said so. `task_diff`
+    # carries the same ordering and the same warning.
+    emitted = remote_task._emit(args, answer)
 
     # ⚠️ Keyed on an explicit `True`, never on truthiness, and this is the fifth time that rule is
     # applied in this CLI (`serves_you`, `archived`, `visibility`, `kind`). Here the misreading is
     # the expensive direction: a relay that answered without the key would have its silence reported
     # as a change taken out of the project, and the person would stop looking for it.
-    if answer.get("undone") is not True:
+    if not isinstance(answer, dict) or answer.get("undone") is not True:
         raise SystemExit(
             f"The relay's answer for {args.task_id} did not confirm that the change was undone, so "
             f"this cannot be reported as one. The project may be unchanged. "
             f"`grid task undo {args.task_id} --json` shows what it sent.")
+    if emitted:
+        return 0
 
     print(f"undone — {args.task_id}'s change is no longer in the project")
     # Said unconditionally rather than only when somebody has worked since, because this CLI cannot

@@ -138,12 +138,15 @@ before. Passing it at a project that already has a trunk does nothing and the ta
 
 With no project id at all, the task goes to your own project called `default` **if you already have
 one**. If you do not, nothing is created and the command tells you which project it needs.
-`task create` is the only command that may leave it out — `task list` has nothing to default to.
+`task create` and `task list` are the two commands that may leave it out, and they mean different
+things by it: `create` falls back to your `default` project, while `list` with no project shows your
+own turns **across every project you can reach** — one list, one cursor, which is what an
+application's home screen is.
 
 ```bash
 grid task follow <task-id>          # live: tool calls, output, terminal state
 grid task get    <task-id>          # one shot: state, provider, result
-grid task list   <project-id> [--all] [--state running] [--limit 50]
+grid task list   [<project-id>] [--all] [--state running] [--limit 50]
 grid task fetch  <task-id> --into /tmp/result
 grid task cancel <task-id>
 ```
@@ -193,7 +196,9 @@ covers a failed task *and* a command that could not reach the relay. Name the va
 `status`: in zsh `status` is a read-only alias for `$?`, so that loop would bail on its first poll
 and blame a running task.
 
-`--all` on `task list` shows every member's turns, not only yours.
+`--all` on `task list` shows every member's turns, not only yours. It needs a project id: the
+grid's work is listed one project at a time, and "everyone's, everywhere" is refused rather than
+quietly narrowed back to your own.
 
 **One turn of a conversation runs at a time, and that is the only queue there is.** Creating a
 conversation never fails for want of capacity, and your other conversations keep running while one of
@@ -384,8 +389,8 @@ Both update a clone. Only one can lose work.
 
 ### `grid task list` vs `grid list`
 
-`grid task list <project-id>` lists a project's turns. `grid list` (alias of `grid ls`) lists
-**grids**.
+`grid task list <project-id>` lists a project's turns, and `grid task list` with no id lists your
+own across every project. `grid list` (alias of `grid ls`) lists **grids**.
 
 ### `grid task cancel` vs `grid leave`
 

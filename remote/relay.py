@@ -1520,10 +1520,11 @@ def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, A
     )
 
 
-def list_tasks(signaling_url: str, access_token: str, project_id: str, *,
+def list_tasks(signaling_url: str, access_token: str, project_id: str | None, *,
                mine: bool = True, states: list[str] | None = None,
                limit: int | None = None, after: str | None = None) -> dict[str, Any]:
-    """The tasks in one project (``GET /relay/v1/tasks``). ADR 0033 D-l, issue 19a.
+    """Tasks — one project's, or the caller's own across all of them (``GET /relay/v1/tasks``).
+    ADR 0033 D-l, issue 19a; ADR 0034 D-m, issue 46.
 
     Nothing listed tasks before this: `get_task` answers one id at a time, and the id came from the
     create call — so an application that lost it, or a person asking "what has run today", had to
@@ -1531,11 +1532,20 @@ def list_tasks(signaling_url: str, access_token: str, project_id: str, *,
 
     `mine=False` widens it to every member's tasks in the project, which is issue 19a's decision on
     ADR 0033's own reading that fencing a shared project's reads on `owner_id` is the wrong default.
+    It needs a project: the relay refuses `mine=false` without one, because "every member's tasks in
+    every reachable project" is a different query from the one that flag was designed for.
 
     `states` is repeatable and the relay does not check the VALUES — a state nobody writes simply
     matches nothing, so a new one needs no client release.
+
+    ⚠️ **`project_id=None` OMITS the parameter rather than sending it empty**, and that matters: the
+    relay reads a blank one as absent today, but a relay that validated it would refuse, and "no
+    project" is a request rather than an unset field. **Roll the relay out before this CLI** — an
+    older one answers a 422 carrying `invalid_request`, which is loud and carries a code.
     """
-    params: dict[str, Any] = {"project_id": project_id}
+    params: dict[str, Any] = {}
+    if project_id is not None:
+        params["project_id"] = project_id
     # Sent as the strings the relay parses. Every query parameter on that route is declared as a
     # string there so its refusals carry a `code` like the rest of the plane, rather than falling to
     # FastAPI's list-shaped validation error.

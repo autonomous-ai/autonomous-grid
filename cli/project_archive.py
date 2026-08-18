@@ -39,9 +39,11 @@ def _set_archived(args: argparse.Namespace, *, archived: bool) -> int:
     call = relay.archive_project if archived else relay.unarchive_project
     answer = call(base, token, args.project_id)
 
-    if remote_project._emit(args, answer):
-        return 0
-    if answer.get("archived") is not archived:
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard below
+    # was unreachable under `--json`, which is the one mode an application drives: a body that never
+    # said so exited 0 there, and the member walks away believing their project takes no new work.
+    emitted = remote_project._emit(args, answer)
+    if not isinstance(answer, dict) or answer.get("archived") is not archived:
         # The house guard: a reply this command cannot read is not a state change it may report.
         # ⚠️ `is not archived`, never a truthiness test. `archived` is a boolean on this wire, and
         # a relay that answered `"true"` or omitted the key would otherwise be reported as having
@@ -52,6 +54,8 @@ def _set_archived(args: argparse.Namespace, *, archived: bool) -> int:
             f"{'archived' if archived else 'unarchived'}, so this cannot be reported as one. "
             f"`grid project {'archive' if archived else 'unarchive'} {args.project_id} --json` "
             f"shows what it sent.")
+    if emitted:
+        return 0
 
     verb = "archived" if archived else "unarchived"
     # `changed is False` — explicit, not falsy — says a previous request had already done it. A
@@ -80,24 +84,42 @@ def project_delete(args: argparse.Namespace) -> int:
 
     from . import remote_project
 
-    if not args.yes and not system.confirm(
-            f"Permanently delete project {args.project_id} and its repository?"):
-        # A clean refusal, not an error: the caller declined. `system.confirm` answers False for
-        # EOF and for Ctrl-C too, so a script that pipes nothing in is refused rather than being
-        # taken to have agreed — which is the direction that matters for an irreversible command.
-        print("Nothing was deleted.")
-        return 0
+    if not args.yes:
+        if remote_project._emit_quietly(args):
+            # ⚠️ **`--json` means there is nobody to ask** (ADR 0034 D-m, issue 46). Found in
+            # review, and it was the worst shape in the plane: an application spawning this binary
+            # has no terminal, so `input()` read EOF, `confirm` answered False, and the command
+            # printed an interactive prompt to stdout and exited **0** — which a client reading the
+            # status takes as *the project was deleted*. "Declined" and "done" were the same answer
+            # on the one irreversible verb here.
+            #
+            # Refused rather than confirmed: a flag that means "I meant it" cannot be inferred from
+            # the absence of a terminal. The exit code is non-zero and `cli/json_error.py` puts the
+            # sentence where a program can read it.
+            raise SystemExit(
+                f"Deleting project {args.project_id} cannot be confirmed with --json, because there "
+                f"is nobody to ask. Pass --yes to say you meant it: "
+                f"grid project delete {args.project_id} --yes --json")
+        if not system.confirm(
+                f"Permanently delete project {args.project_id} and its repository?"):
+            # A clean refusal, not an error: the caller declined. `system.confirm` answers False for
+            # EOF and for Ctrl-C too, so a person who hits Ctrl-D is refused rather than being taken
+            # to have agreed — which is the direction that matters for an irreversible command.
+            print("Nothing was deleted.")
+            return 0
 
     base, token, label = remote_project._resolve(args)
     answer = relay.delete_project(base, token, args.project_id)
 
-    if remote_project._emit(args, answer):
-        return 0
-    if answer.get("deleted") is not True:
+    # Emitted, then validated — see `_set_archived` above (ADR 0034 D-m, issue 46).
+    emitted = remote_project._emit(args, answer)
+    if not isinstance(answer, dict) or answer.get("deleted") is not True:
         raise SystemExit(
             f"The relay's answer for project {args.project_id} did not say the project was "
             f"deleted, so this cannot be reported as one. "
             f"`grid project delete {args.project_id} --yes --json` shows what it sent.")
+    if emitted:
+        return 0
 
     print(f"{args.project_id} is deleted on {label}")
     # ⚠️ `is False`, never falsiness. *Absent ⇒ nothing to report*, which is a relay that does not

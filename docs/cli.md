@@ -30,7 +30,8 @@ as a product noun. Those are implementation terms for architecture docs and code
 - The common path is one screen: `grid up`, `grid join`, `grid models`, `grid chat`.
 - `home` is the default grid. Users name a grid only when they have several.
 - `up` is idempotent: create if missing, start if stopped, print the same contract every time.
-- Default output is human-readable. Every state-reading command supports `--json`.
+- Default output is human-readable. Every state-reading command supports `--json` —
+  swept by `tests/test_application_surface.py`, so the claim is checked rather than asserted.
 - Use examples before exhaustive flags in help text.
 - `--name` names an engine; `[grid]` names a grid.
 - `--at <url>` always means an existing engine endpoint.
@@ -1155,6 +1156,69 @@ lease before it reports, so anything the relay did inside that request would be 
 nobody is watching.
 
 
+### The surface an application drives
+
+The desktop client is Flutter, and it drives this CLI as a **subprocess** — so everything it needs
+has to be readable by a program: a document on stdout, a code it can branch on, and an exit status.
+Mobile is out of scope by construction; iOS and Android sandboxes forbid executing a separate binary.
+
+`tests/e2e_cross_repo/app_flow.sh` is the worked example, run as a test on every change: it opens a
+conversation, sends two more messages into it, follows the whole conversation across the turn
+boundary, reads the outcome and branches on it — using only `--json` and exit codes.
+
+**Every command an application drives takes `--json`**, and each prints exactly one document on
+stdout with no prose beside it:
+
+```
+grid task create · send · get · follow · list · cancel · diff · undo
+grid project create · list · status · files · file · download
+grid project archive · unarchive · delete · share · private · member list|add|remove
+```
+
+The commands *not* on that list are for somebody who has git and a repository in front of them —
+`grid project clone`, `import`, `commit`, `refresh`, `init`, `wip reset` and `grid task fetch` — and
+they are the only place git vocabulary appears at all. A test sweeps every other command's output
+and help text for it (`tests/test_application_surface.py`).
+
+**Exit codes.** `0` completed · `1` ended badly, and any refusal · `2` not finished yet.
+`2` is the only code a poller may read as "ask again": `1` covers both a failed turn and a relay that
+could not be reached, and `0` would say "fine" about an outcome nobody has reached.
+
+```sh
+until grid task get "$id"; do
+  rc=$?                                  # NOT `status` — read-only in zsh, the default macOS shell
+  [ "$rc" -eq 2 ] || exit "$rc"          # it finished, and not well
+  sleep 30
+done
+```
+
+**Refusals.** With `--json`, every refusal also writes one document to **stderr**, so stdout stays
+exactly the documents the relay sent:
+
+```json
+{"error": {"code": "project_has_no_trunk", "message": "…", "status": 409}}
+```
+
+`code` is the relay's own machine-readable slug, and is `null` for a refusal this CLI raised itself
+or one from a relay too old to send one — which is ordinary, not an error: branch on `code` when it
+is there and show `message` when it is not. `status` is the HTTP status when the relay answered and
+`null` when it never did, which is the difference between a verdict and *we could not ask*.
+
+**"Nothing" is never "could not ask".** An empty project lists no tasks and exits `0`; a reply this
+CLI cannot read is refused and exits non-zero — in `--json` exactly as in a terminal. The document
+is still printed first, so a client can see what arrived.
+
+**Listing across projects.** `grid task list` with no project lists your own tasks in every project
+you can reach, newest page last, with one cursor that pages correctly across them:
+
+```
+grid task list                          # yours, everywhere
+grid task list --after <task-id>        # the next page
+grid task list --project abc123 --all   # every member's, in one project
+```
+
+`--all` needs a project: the grid's work is listed one project at a time.
+
 ### Looking at your project without git
 
 ```
@@ -1410,7 +1474,7 @@ grid task create [<project-id>] --prompt <text> [--file <local>[:<dest>]]… [--
 grid task send   <conversation-id> --prompt <text> [--file <local>[:<dest>]]…
                  [--dir <local>[:<dest>]]… [--follow] [--grid <grid>] [--json]
 grid task get    <task-id> [--grid <grid>] [--json]
-grid task list   <project-id> [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
+grid task list   [<project-id>] [--all] [--state <state>]… [--limit <n>] [--after <task-id>]
                  [--grid <grid>] [--json]
 grid task follow <task-id> | --conversation <conversation-id>
                  [--after-seq <n>] [--grid <grid>] [--json]
@@ -1475,10 +1539,15 @@ event came from, so an application can group them, and it is `null` on the final
 `{"type": "conversation.idle"}` line, which belongs to no turn. The per-turn stream's `--json` shape
 is unchanged.
 
-`list` shows a project's tasks, oldest first. By default it shows **your own**; `--all` widens it to
-every member's, because a project is shared and a team wants to see what the team ran. `--state` is
-repeatable, and paging is by cursor — the command prints the `--after` to continue with when there is
-more, rather than silently stopping at the limit.
+`list` shows tasks oldest first. Give it a project and it shows that project's; **give it none and
+it shows your own across every project you can reach**, which is what an application's home screen
+is — the row then names the project instead of the member, because every row is yours. `--all`
+widens one project to every member's, because a project is shared and a team wants to see what the
+team ran; it needs a project, since the grid's work is listed one project at a time.
+
+`--state` is repeatable, and paging is by cursor — the command prints the `--after` to continue with
+when there is more, rather than silently stopping at the limit. **The cursor pages across projects
+too**, so a client walking your whole history holds one of them rather than one per project.
 
 Reading a task is fenced on **project membership**, not on who created it: any member of a project
 can `get`, `list` and `follow` any task in it. That is deliberate — a member can already clone the
@@ -1554,8 +1623,10 @@ one command where leaving it out is not an error: the task then runs in your own
 `default` **if you already have one** — the name is resolved here, by the CLI, against projects you
 own, and only an id ever reaches the relay. If you do not have one, nothing is created and the
 command says which project it needs; a project you never asked for, discoverable only through the
-error line that followed it, was worse than being asked. `list` has nothing to default to, so it
-requires the id one way or the other.
+error line that followed it, was worse than being asked. `list` may also leave it out and means
+something different by it: your own turns across every project you can reach, which is the
+application's home screen — a **wider** answer, never a substituted one, so there is nothing to
+discover after the fact.
 
 `--init-project` gives the project an empty trunk first, then runs the task — the one-call form of
 `grid project init` followed by `grid task create`, for work that starts from nothing. It is

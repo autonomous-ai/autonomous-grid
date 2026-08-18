@@ -114,6 +114,23 @@ def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
     return base, token, label
 
 
+def _emit(args: argparse.Namespace, payload) -> bool:
+    """Print `payload` as JSON when `--json` was asked for. True if it did.
+
+    Delegated to `remote_project._emit` rather than re-implemented, so this command group's JSON is
+    byte-identical in shape to every other one an application drives — the reason `task_diff` gives
+    for doing the same.
+
+    ⚠️ **Its result is a flag to be checked LATER, never a `return`.** Every caller here emits, runs
+    its postcondition guard, and only then returns on it: a guard skipped under `--json` is a wrong
+    answer delivered to the one caller that cannot see the sentence a terminal would have got
+    (ADR 0034 D-m, issue 46).
+    """
+    from . import remote_project
+
+    return remote_project._emit(args, payload)
+
+
 def cmd_remote_task(args: argparse.Namespace) -> int:
     # See `cmd_remote_project` — the same merge, and the reason `args.project` still reads the way
     # `_task_create` and `_task_list` always read it (ADR 0033 D-a, issue 28).
@@ -493,14 +510,16 @@ def _ensure_trunk(base: str, token: str, project_id: str, *, quiet: bool) -> Non
     except relay.TaskRefusal as exc:
         if exc.refusal_code != _TRUNK_EXISTS:
             raise
-        print(f"{project_id} already has a trunk — nothing to initialize.", file=where)
+        print(f"{project_id} already has something to start from — nothing to set up.",
+              file=where)
         return
     # `.get()` and a fallback: the reply is the relay's, and the task is going ahead either way.
     # `grid project init` is the command that REPORTS an initialization and it guards its reply
     # properly; here the trunk is a precondition being met, not the thing being reported — and if it
     # was not really met, `create_task` refuses `project_has_no_trunk` one round trip later.
-    print(f"{answer.get('trunk') or 'main'} initialized at "
-          f"{answer.get('commit') or '(no commit reported)'} in project {project_id}", file=where)
+    # The trunk's NAME is not printed (ADR 0034 D-m, issue 46) — it comes off the wire as `main`.
+    print(f"{project_id} is ready to work in, at version "
+          f"{answer.get('commit') or '(nothing reported)'}", file=where)
 
 
 def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
@@ -534,7 +553,7 @@ def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
         # relay, not at the user, and re-running would change nothing.
         return (
             f"{head} The --init-project you passed reported success, so either the relay could not "
-            f"read this project's repository or its trunk went missing between the two calls — "
+            f"read this project's files or what it had set up went missing between the two calls — "
             f"neither is something re-running fixes.\n"
             f"\n"
             f"  Check what the relay thinks it has:\n"
@@ -601,7 +620,13 @@ def _task_create(args: argparse.Namespace) -> int:
         # the task row exists and before `commit_input`, so no state is written and no slot spent.
         if exc.refusal_code != _NO_TRUNK:
             raise
-        raise SystemExit(_no_trunk_message(args, project_id)) from None
+        # ⚠️ **The relay's CODE is carried onto the replacement** (ADR 0034 D-m, issue 46). Only the
+        # sentence is ours — the refusal is still the relay's, and an application branching on
+        # `project_has_no_trunk` would otherwise see this one refusal, alone in the whole plane,
+        # arrive with `code: null` and be indistinguishable from a local failure. A bare
+        # `SystemExit` is what this was, and it was invisible for exactly as long as nothing looked.
+        raise relay.TaskRefusal(_no_trunk_message(args, project_id),
+                                code=exc.refusal_code, status=exc.status) from None
 
     as_json = bool(getattr(args, "json", False))
     following = bool(getattr(args, "follow", False))
@@ -1373,7 +1398,10 @@ def _task_fetch(args: argparse.Namespace) -> int:
             dest, url=relay.git_remote_url(base, project_id), token=token,
             branch=branch, commit=commit, project_id=project_id)
     except Exception as exc:
-        raise SystemExit(f"Could not fetch task {args.task_id}: {exc}")
+        # Translated, never re-raised verbatim (ADR 0034 D-m, issue 46). `task_repo._git` builds its
+        # errors as `git <cmd> failed (N): <the last 500 bytes of git's stderr>`, and that string
+        # went straight to the screen — at somebody who has never seen a ref, naming one.
+        raise SystemExit(_fetch_failure_message(args.task_id, dest, project_id, exc))
 
     if getattr(args, "json", False):
         print(json.dumps(
@@ -1390,13 +1418,73 @@ def _task_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+# What a git failure during `grid task fetch` MEANS, and what to do about it (ADR 0034 D-m,
+# issue 46). Matched against git's own text, lowercased, first hit wins.
+#
+# ⚠️ **Matched on git's wording, which git is free to change — so every miss lands on the fallback,
+# never on a wrong answer.** That is the direction this table has to fail in: a cause named wrongly
+# sends somebody to fix a thing that is not broken, while the fallback still names git's own words
+# and the two commands that are right whatever happened. The alternative — parsing git's exit codes
+# — is worse: `128` covers every one of these.
+#
+# Ordered, and `couldn't find remote ref` comes FIRST deliberately: an expired branch on an
+# authenticated fetch also prints host and URL, so a substring test for the auth case alone would
+# claim a sign-in problem for a retention window doing its job.
+_FETCH_FAILURES = (
+    (("couldn't find remote ref", "not our ref", "reference is not a tree",
+      "did not send all necessary objects"),
+     "its files are no longer kept on the grid — they were collected after this project's "
+     "retention window.",
+     "What it did and why is still in: grid task get {task_id}"),
+    (("authentication failed", "403 forbidden", "401 unauthorized", "could not read username",
+      "terminal prompts disabled"),
+     "this grid did not accept your sign-in.",
+     "Refresh it with: grid login"),
+    (("timed out", "could not resolve host", "failed to connect", "connection reset",
+      "operation timed out", "early eof", "rpc failed"),
+     "the grid could not be reached while its files were arriving.",
+     "It is safe to run again: grid task fetch {task_id}"),
+    (("is git installed",),
+     "git is not installed on this machine, and this command needs it.",
+     "Everything else works without it — read the project with: grid project files {project}"),
+)
+
+_FETCH_FALLBACK = "its files could not be put on disk."
+_FETCH_FALLBACK_NEXT = ("Try somewhere else with --into, or see what it did with: "
+                        "grid task get {task_id}")
+
+
+def _fetch_failure_message(task_id: str, dest: Path, project_id: str, exc: Exception) -> str:
+    """One sentence saying what went wrong and what to do, with git's own words kept beneath it.
+
+    The rule issue 42 set for a failed merge turn, applied to the one command in this CLI that runs
+    git itself: the raw diagnostic is right for whoever runs the grid, and is the one message a
+    non-developer must not be left staring at — so it is FOLLOWED rather than replaced.
+
+    ⚠️ The command goes LAST on its line, because
+    `tests/test_task_lease.py::test_every_command_this_cli_tells_you_to_run_actually_parses` retypes
+    every `grid …` hint in this module through the real parser and reads to end of line.
+    """
+    raw = str(exc)
+    lowered = raw.lower()
+    for needles, because, next_step in _FETCH_FAILURES:
+        if any(needle in lowered for needle in needles):
+            break
+    else:
+        because, next_step = _FETCH_FALLBACK, _FETCH_FALLBACK_NEXT
+    return (f"Task {task_id} could not be fetched into {dest}: {because}\n"
+            f"{next_step.format(task_id=task_id, project=project_id)}\n"
+            # Kept verbatim, and last: an operator scrolls to it, a person stops before it.
+            f"Details: {raw}")
+
+
 # How much of a prompt a listed row shows. The prompt is up to 100 KB, and a table is unreadable
 # the moment one row wraps — `grid task get <id>` is where the whole thing lives.
 _PROMPT_COLUMN = 48
 
 
 def _task_list(args: argparse.Namespace) -> int:
-    """The tasks in a project (ADR 0033 D-l, issue 19a).
+    """Tasks — one project's, or the caller's own everywhere (ADR 0033 D-l 19a; D-m issue 46).
 
     Nothing listed tasks before this. `grid task get` answers one id at a time and the id came from
     `grid task create`, so somebody who closed their terminal had to clone the project and read
@@ -1404,36 +1492,56 @@ def _task_list(args: argparse.Namespace) -> int:
 
     `--all` widens it from the caller's own runs to every member's, which is the point on a shared
     project: a team wants to see what the team ran, and the relay fences the answer on membership.
+
+    **Without a project it lists the caller's own turns across every project they can reach**, which
+    is the application's home screen. The relay refuses `--all` there — see `relay.list_tasks` — so
+    every row on that page is the caller's own, which is why the MEMBER column becomes PROJECT
+    rather than being added beside it: a column whose every cell is the same value costs 36
+    characters to say nothing, and which project a conversation is in is the one thing a
+    cross-project list has to answer.
     """
     from remote import relay
 
     base, token, _label = _resolve(args)
-    answer = relay.list_tasks(base, token, args.project, mine=not args.all,
+    project = args.project
+    answer = relay.list_tasks(base, token, project, mine=not args.all,
                               states=list(args.state or ()), limit=args.limit,
                               after=args.after)
-    if getattr(args, "json", False):
-        print(json.dumps(answer, indent=2))
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on**, the ordering `task_diff` and
+    # `project_files` already carry (ADR 0034 D-m, issue 46). Returning here put the guard below out
+    # of reach of `--json`, which is the one mode an application drives: a body a proxy had stripped
+    # exited 0 with `{}` on stdout, and a client rendering "no conversations" from it is the exact
+    # wrong answer the guard exists to prevent — while a terminal running the same command refused.
+    emitted = _emit(args, answer)
 
-    tasks = answer.get("tasks")
+    tasks = answer.get("tasks") if isinstance(answer, dict) else None
     if not isinstance(tasks, list):
         # A reply this command cannot read is NOT an empty project — the same rule
-        # `grid project status`, `check`, `promote`, `integrate`, `commit` and `import` all follow.
-        # The two collapsed here until issue 19a's review: a body a proxy had stripped came back as
-        # `{}`, and somebody polling a shared project was told nobody was working. The check is on
-        # the PRESENCE of `tasks`, not its truthiness — an empty list is a real answer.
+        # `grid project status`, `commit` and `import` all follow. The two collapsed here until
+        # issue 19a's review: a body a proxy had stripped came back as `{}`, and somebody polling a
+        # shared project was told nobody was working. The check is on the PRESENCE of `tasks`, not
+        # its truthiness — an empty list is a real answer.
         raise SystemExit(
-            f"The relay's answer for project {args.project} did not contain a task list, so this "
-            f"cannot be reported as one. "
-            f"`grid task list --project {args.project} --json` shows what it sent.")
+            f"The relay's answer {_for_project(project)} did not contain a task list, "
+            f"so this cannot be reported as one. "
+            f"`{_list_command(project)} --json` shows what it sent.")
+    if emitted:
+        return 0
 
     if not tasks:
         # Said rather than printed as an empty table, which reads as a display bug.
-        print(f"No tasks in project {args.project}.")
-        print(f"\nCreate one with: grid task create --project {args.project} --prompt '<what to do>'")
+        if project is None:
+            print("You have no tasks in any project.")
+            print("\nCreate one with: grid task create --prompt '<what to do>'")
+        else:
+            print(f"No tasks in project {project}.")
+            print(f"\nCreate one with: grid task create --project {project} "
+                  f"--prompt '<what to do>'")
         return 0
 
-    print(f"{'TASK':38}  {'STATE':10}  {'MEMBER':34}  PROMPT")
+    # PROJECT where MEMBER would be, when there is no project to name — see the docstring.
+    second = "MEMBER" if project is not None else "PROJECT"
+    print(f"{'TASK':38}  {'STATE':10}  {second:34}  PROMPT")
     for task in tasks:
         # A merge turn's prompt is the RELAY's, not this member's (ADR 0034 D-g, issue 42). Printed
         # verbatim it puts `git merge`, a branch name and a `refs/integrate/…` ref in a column headed
@@ -1443,17 +1551,37 @@ def _task_list(args: argparse.Namespace) -> int:
                   else " ".join(str(task.get("prompt") or "").split()))
         if len(prompt) > _PROMPT_COLUMN:
             prompt = prompt[:_PROMPT_COLUMN - 1] + "…"
+        if project is not None:
+            # `member_key` and not `owner_id`: the key is what `grid project member list` speaks,
+            # and `grid:<network>:<sub>` is unreadable in a column. Absent when the author has since
+            # left the project.
+            column = str(task.get("member_key") or "(not a member)")
+        else:
+            column = str(task.get("project_id") or "?")
         print(f"{str(task.get('id') or '?'):38}  "
               f"{str(task.get('state') or '?'):10}  "
-              # `member_key` and not `owner_id`: the key is what `grid project promote` and
-              # `grid project member list` both speak, and `grid:<network>:<sub>` is unreadable in
-              # a column. Absent when the author has since left the project.
-              f"{str(task.get('member_key') or '(not a member)'):34}  {prompt}")
+              f"{column:34}  {prompt}")
     if answer.get("next_after"):
         # There is more. Said out loud, because a page that silently stops at the limit reads as the
         # whole history — and this is the flag that continues it.
-        print(f"\nMore: grid task list --project {args.project} --after {answer['next_after']}")
+        print(f"\nMore: {_list_command(project)} --after {answer['next_after']}")
     return 0
+
+
+def _list_command(project: str | None) -> str:
+    """`grid task list` with the project it was given, or without one.
+
+    ⚠️ The command LAST on its line wherever this is printed:
+    `tests/test_task_lease.py::test_every_command_this_cli_tells_you_to_run_actually_parses` walks
+    every `grid …` hint in this module through `build_parser()`, and a hint naming `--project None`
+    would fail there — which is what a bare f-string produced before this helper existed.
+    """
+    return "grid task list" + (f" --project {project}" if project is not None else "")
+
+
+def _for_project(project: str | None) -> str:
+    """How a refusal names what was asked about, when there may be no project to name."""
+    return f"for project {project}" if project is not None else "for your tasks"
 
 
 def _task_cancel(args: argparse.Namespace) -> int:
@@ -1475,11 +1603,13 @@ def _task_cancel(args: argparse.Namespace) -> int:
     base, token, _label = _resolve(args)
     answer = relay.cancel_task(base, token, args.task_id)
 
-    if getattr(args, "json", False):
-        print(json.dumps(answer, indent=2))
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard below
+    # was unreachable under `--json`, which is the one mode an application drives: a body that never
+    # said what state the task is in exited 0 there and 1 in a terminal, so a client was told a
+    # colleague's hour-long turn had been stopped when nothing had happened.
+    emitted = _emit(args, answer)
 
-    state = answer.get("state")
+    state = answer.get("state") if isinstance(answer, dict) else None
     if not state:
         # A reply this command cannot read is NOT a cancellation — the rule every sibling in this
         # plane follows. Reporting one would tell somebody their colleague's hour-long merge task
@@ -1488,15 +1618,18 @@ def _task_cancel(args: argparse.Namespace) -> int:
             f"The relay's answer for task {args.task_id} did not say what state the task is now in, "
             f"so this cannot be reported as a cancellation. "
             f"`grid task cancel {args.task_id} --json` shows what it sent.")
+    if emitted:
+        return 0
 
     # The state AND the reason. `failed` alone reads as "the agent broke", which is the one thing
     # that did not happen — and `error` is what tells a later `grid task get` the two apart.
     reason = answer.get("error")
     print(f"task {args.task_id} cancelled — it is now {state}"
           + (f" ({reason})" if reason else ""))
-    # The branch is deliberately not rewound, so whatever the agent had done is still fetchable.
-    # Said out loud, because "cancelled" reads as "undone" and here it is not.
-    print(f"Its branch is left where the agent got to: grid task fetch {args.task_id}")
+    # Nothing is rewound, so whatever the agent had done is still fetchable. Said out loud,
+    # because "cancelled" reads as "undone" and here it is not. No git word (ADR 0034 D-m,
+    # issue 46) — the parser's own description was reworded with it.
+    print(f"Whatever it had already done is kept: grid task fetch {args.task_id}")
     return 0
 
 

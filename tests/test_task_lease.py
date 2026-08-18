@@ -2403,3 +2403,54 @@ def test_the_download_bound_is_the_relays_alone_and_this_cli_states_no_second_on
         assert "task_download_max_bytes" not in text and "TASK_DOWNLOAD_MAX_BYTES" not in text, (
             f"{name} names the relay's download ceiling. It is the relay's alone — a copy here is a "
             f"second bound that disagrees the moment an operator raises theirs")
+
+
+def test_the_relay_still_accepts_a_task_list_with_no_project():
+    """ADR 0034 D-m (issue 46). `grid task list` with no `--project` OMITS the parameter, and the
+    relay has to read that as "every project you can reach" rather than refusing it.
+
+    ⚠️ **This is the one direction that fails LOUDLY, and the test exists to keep it that way.** An
+    older relay answers a 422 carrying `invalid_request`, which the CLI shows verbatim — never an
+    empty list, and never somebody's `default` project standing in for "everywhere". What would be
+    silent is the reverse drift: `_project_id` going back to raising on a missing value while this
+    CLI keeps omitting it, so a person's home screen refuses on a relay that has *already* been
+    rolled out. Nothing else in either repository compares the two halves.
+
+    Parsed rather than requested, like every other check in this module: the two repositories share
+    no code and there is no relay running here.
+    """
+    import ast
+    import inspect
+
+    from remote import relay
+
+    # This side: `list_tasks` must OMIT the parameter, never send it empty. A blank `project_id` is
+    # a different request from no `project_id` against any relay that validates it.
+    sending = ast.parse(inspect.getsource(relay.list_tasks))
+    guards = [node for node in ast.walk(sending)
+              if isinstance(node, ast.Compare) and isinstance(node.ops[0], ast.IsNot)]
+    assert guards, (
+        "`relay.list_tasks` no longer decides whether to send `project_id` at all, so a projectless "
+        "`grid task list` sends an empty one — which is a project id to any relay that checks")
+
+    # The relay's side: `_project_id` must have a path that RETURNS for a missing value rather than
+    # raising on it. `task_errors.invalid` is still reachable there — the length ceiling — so the
+    # test is about the early return, not about the absence of a refusal.
+    source = _relay_module("task_list.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    function = next(
+        (node for node in ast.walk(ast.parse(source.read_text()))
+         if isinstance(node, ast.FunctionDef) and node.name == "_project_id"), None)
+    assert function is not None, (
+        "grid-src's `task_list._project_id` was renamed; teach this check its new name")
+    returns_none = [node for node in ast.walk(function)
+                    if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant)
+                    and node.value.value is None]
+    assert returns_none, (
+        "grid-src's `task_list._project_id` no longer answers a MISSING project with `None`, so "
+        "`grid task list` with no --project is refused — a person's home screen, against a relay "
+        "that has already been rolled out")
+    assert "str | None" in ast.unparse(function.returns or ast.Constant(value="")), (
+        "grid-src's `task_list._project_id` no longer declares that it may answer None; the "
+        "cross-project listing is the only reason it does")

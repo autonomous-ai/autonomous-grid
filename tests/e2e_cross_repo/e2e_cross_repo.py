@@ -15,6 +15,7 @@ Run:  .venv/bin/python -m pytest tests/e2e_cross_repo/e2e_cross_repo.py -q
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -1940,3 +1941,190 @@ def test_27_a_project_is_readable_with_no_git_in_the_path(
         for key, value in payload.items() if key != "patch").lower()
     leaked = [word for word in _BRANCH_VOCABULARY if word in surface]
     assert not leaked, f"the read surface showed a person {leaked}: {surface[:600]}"
+
+
+def _app_home(root, relay_base, token):
+    """A real `~/.grid` a SPAWNED `grid` can sign in from, plus a `grid` on PATH. Issue 46.
+
+    Written with this repository's own `credentials.save_credentials`, never by hand: the format is
+    the CLI's, and a hand-rolled TOML that happened to parse would be testing a file nobody writes.
+
+    ⚠️ **`api_url` points at a port nothing listens on, and that is the mechanism rather than a
+    shortcut.** There is no control plane in this harness, so `resolve_relay_base` cannot ask it
+    whether the grid is running; it catches that failure and falls back to the `signaling_url` the
+    login bundle carries, which is the path a MEMBER (as opposed to a grid's creator) takes in the
+    field every day. A reachable-but-wrong control plane would take the other branch and test
+    nothing that happens in production.
+    """
+    import subprocess
+
+    home = root / "grid-home"
+    home.mkdir()
+    seed = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from remote import credentials\n"
+        "from shared import state\n"
+        "state.set_mode('remote')\n"
+        "credentials.save_credentials({\n"
+        "    'session_token': 'no-control-plane-here',\n"
+        "    'api_url': 'http://127.0.0.1:1',\n"
+        "    'user': {'email': 'alice@invalid'},\n"
+        "    'networks': [{'network_id': 'n-e2e', 'name': 'e2e',\n"
+        "                  'network_type': 'permissioned-public',\n"
+        "                  'access_token': %r, 'signaling_url': %r}],\n"
+        "})\n"
+        "state.set_active('remote', 'e2e')\n" % (str(H.GRID_REPO), token, relay_base)
+    )
+    subprocess.run([sys.executable, "-c", seed], check=True,
+                   env={**os.environ, "GRID_HOME": str(home)})
+
+    bindir = root / "bin"
+    bindir.mkdir()
+    launcher = bindir / "grid"
+    launcher.write_text(f'#!/bin/sh\nexec {sys.executable} -m cli "$@"\n')
+    launcher.chmod(0o755)
+    return {
+        **os.environ,
+        "GRID_HOME": str(home),
+        "PYTHONPATH": str(H.GRID_REPO),
+        "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+    }
+
+
+def test_28_an_application_drives_the_whole_flow(relay, owner_token, spawn_provider, tmp_path):
+    """ADR 0034 D-m / issue 46, driven the way the product actually is: a subprocess.
+
+    Every other test in this file calls `remote.relay` in-process, which proves the wire and proves
+    nothing about the BINARY — argv, exit codes, what lands on stdout versus stderr, and whether a
+    `--json` document is parseable at all are exactly the things a Flutter client depends on and
+    exactly the things an in-process call cannot see.
+
+    So the whole flow runs through `app_flow.sh`, which is also the worked example `docs/cli.md`
+    points an application author at. Its assertions are the criterion's: create a conversation, send
+    two messages, follow the conversation ACROSS a turn boundary, read the result, and branch on the
+    outcome using only `--json` and exit codes.
+    """
+    import subprocess
+
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-app-flow",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+    env = _app_home(tmp_path, relay, owner_token)
+    follow_log = tmp_path / "follow.jsonl"
+    result_json = tmp_path / "result.json"
+    files_json = tmp_path / "files.json"
+
+    finished = subprocess.run(
+        ["sh", str(Path(__file__).resolve().parent / "app_flow.sh"), project],
+        env={**env, "FOLLOW_LOG": str(follow_log), "RESULT_JSON": str(result_json),
+             "FILES_JSON": str(files_json)},
+        capture_output=True, text=True, timeout=600)
+
+    assert finished.returncode == 0, (
+        f"the script an application copies did not complete:\n"
+        f"--- stdout ---\n{finished.stdout}\n--- stderr ---\n{finished.stderr}")
+
+    # 1. Every line of the conversation stream is ONE JSON document, which is what makes
+    #    `while read` a legal way to consume it. A pretty-printed object anywhere in here would be
+    #    unreadable by the client and invisible to every in-process test.
+    lines = [line for line in follow_log.read_text().splitlines() if line.strip()]
+    events = [json.loads(line) for line in lines]
+    assert events, "the conversation stream carried nothing"
+
+    # 2. It crossed the turn boundary: three turns were sent and the stream saw more than one.
+    turns = {event.get("task_id") for event in events if event.get("task_id")}
+    assert len(turns) >= 2, (
+        f"the stream carried only {len(turns)} turn(s), so nothing proves it followed the "
+        f"conversation rather than one run: {turns}")
+
+    # 3. The outcome the script branched on says so itself.
+    outcome = json.loads(result_json.read_text())
+    assert outcome["state"] == "completed", outcome
+
+    # 4. And the project is readable with no git anywhere in the call path — the file the second
+    #    turn wrote reached it by itself (ADR 0034 D-d), which is what "the whole flow" means.
+    listing = json.loads(files_json.read_text())
+    names = {str(entry.get("name") or entry.get("path")) for entry in listing.get("entries") or ()}
+    assert {"one.txt", "two.txt"} <= names, (
+        f"the work never reached the project: {sorted(names)}")
+
+
+def test_29_a_whole_session_reaches_a_person_without_one_git_word(
+        relay, owner_token, spawn_provider, tmp_path):
+    """ADR 0034 D-m, the half a static scan cannot reach (issues 41 and 46).
+
+    `tests/test_application_surface.py` sweeps every help string and every sentence these handlers are
+    written to print. What it cannot see is text that arrives from somewhere ELSE at run time — the
+    relay's refusals, a provider's error, a prompt the grid wrote itself — and that is most of what
+    a person reads on a bad day.
+
+    So the same commands are run again WITHOUT `--json`, against a real relay and a real provider,
+    and everything they print is swept with the shared word list. Human mode deliberately: under
+    `--json` the wire's own field NAMES (`branch`, `commit`) are in the document, correctly, and
+    scanning them would force the two words that matter most onto an exemption list.
+    """
+    import subprocess
+
+    from remote import relay as relay_client
+
+    sys.path.insert(0, str(H.GRID_REPO / "tests"))
+    import test_application_surface as vocabulary
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-no-git-words",
+        bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+    env = _app_home(tmp_path, relay, owner_token)
+
+    created = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE ledger.txt KESTREL-8813; SAY done")
+    done = H.await_state(relay, owner_token, created["id"], {"completed", "failed"}, timeout=120)
+    assert done["state"] == "completed", done
+
+    said = []
+    for argv in (
+        # ⚠️ **Scoped to this test's own project, and the bare cross-project `grid task list` is
+        # deliberately NOT swept.** This relay is session-scoped, so that form lists every OTHER
+        # test's tasks too — and a task's PROMPT is a person's own words, echoed back. `test_16`
+        # writes "SAY hello from an empty trunk", which arrived here as a git word on the
+        # application's surface and is nothing of the kind.
+        #
+        # The rule this file enforces is about what the GRID says, never about what somebody typed.
+        # The cross-project list's own chrome — its header, its empty line, its next-page hint — is
+        # static text and is swept by `tests/test_application_surface.py`; that it renders at all is
+        # `test_28`'s business.
+        ["grid", "task", "list", "--project", project],
+        # `project create` was missing, and review found real leaks behind that gap: it printed
+        # `main is now at …` and told a new person "a task is cut from `main`". It is the busiest
+        # command on the application's surface and the FIRST one anybody runs.
+        ["grid", "project", "create", "--name", "swept-here", "--empty"],
+        ["grid", "task", "get", created["id"]],
+        ["grid", "task", "diff", created["id"]],
+        ["grid", "project", "status", project],
+        ["grid", "project", "files", project],
+        # A REFUSAL as well as a success: a bad day is where the vocabulary leaks, and the sentence
+        # a person is left staring at comes from the relay rather than from this repository.
+        ["grid", "task", "get", "no-such-turn"],
+        ["grid", "task", "undo", created["id"]],
+    ):
+        finished = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120)
+        said.append((argv, finished.stdout + finished.stderr))
+
+    offences = []
+    for argv, text in said:
+        for word in vocabulary.offences(text):
+            excerpt = next((" ".join(line.split()) for line in text.splitlines()
+                            if word in line.lower()), "")
+            offences.append(f"`{' '.join(argv)}` said {word!r}: {excerpt[:140]}")
+    assert not offences, (
+        "git vocabulary reached a person driving the application (ADR 0034 D-m):\n  "
+        + "\n  ".join(sorted(set(offences))))
+
+    # The positive control this whole assertion needs: prove the sweep can see the output at all.
+    # Every check above is "nothing was found", which is also what reading nothing reports.
+    assert any("KESTREL-8813" in text or created["id"] in text for _argv, text in said), (
+        "the sweep read no output from any command, so finding no git words proves nothing")

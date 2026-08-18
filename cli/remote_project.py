@@ -155,17 +155,23 @@ def _project_create(args: argparse.Namespace) -> int:
             # exists to remove.
             raise SystemExit(_no_bootstrap_message(args, project_id))
         if not emitted:
-            print(f"{trunk.get('trunk') or 'main'} is now at {trunk.get('commit')} on {label}")
+            # The trunk's NAME is not printed (ADR 0034 D-m, issue 46) — the same change
+            # `_project_status` made, and for the same reason: it comes off the wire as `main`.
+            print(f"{project_id} is ready to work in, at version "
+                  f"{trunk.get('commit') or '(nothing yet)'} on {label}")
             print()
             print(f"Next: grid task create --project {project_id} --prompt '<what to do>'")
         return 0
 
     if emitted:
         return 0
-    # NOT `grid task create` (ADR 0033 D-o, issue 25). A project has no trunk when it is created, so
-    # that advice was guaranteed to fail — the first thing a new user was told to do was the one
-    # thing that could not work. The next step is a trunk, and there are two ways to get one.
-    print("\nGive it a trunk — a task is cut from `main` and it has none yet:")
+    # NOT `grid task create` (ADR 0033 D-o, issue 25). A project has nothing in it when it is
+    # created, so that advice was guaranteed to fail — the first thing a new user was told to do was
+    # the one thing that could not work. The next step is giving it a starting point, two ways.
+    #
+    # No git word (ADR 0034 D-m, issue 46): this is the first sentence a new person reads, and it
+    # named a branch they have never heard of.
+    print("\nGive it something to start from — a task needs it and there is nothing there yet:")
     print(f"  grid project init {project_id}                 # start empty")
     print(f"  grid project import <path> {project_id}        # bring an existing repository")
     return 0
@@ -205,15 +211,15 @@ def _no_bootstrap_message(args: argparse.Namespace, project_id: str) -> str:
     grid = getattr(args, "grid", None)
     suffix = f" --grid {grid}" if grid else ""
     return (
-        f"Project {project_id} was created, but this relay ignored --empty and gave it no trunk — "
-        f"it predates the bootstrap key, which it drops rather than refusing. Nothing else is "
-        f"wrong, and the project is fine.\n"
+        f"Project {project_id} was created, but this relay ignored --empty and left it empty — "
+        f"it predates the key that asks for it, which it drops rather than refusing. Nothing else "
+        f"is wrong, and the project is fine.\n"
         f"\n"
         f"  Give it one with the command the relay would have run:\n"
         f"    grid project init {project_id}{suffix}\n"
         f"\n"
         f"  Or bring an existing repository in instead — still possible, because nothing has "
-        f"claimed the trunk yet:\n"
+        f"been put in it yet:\n"
         f"    grid project import <path> {project_id}{suffix}")
 
 
@@ -233,8 +239,10 @@ def _project_init(args: argparse.Namespace) -> int:
     base, token, label = _resolve(args)
     answer = relay.init_project(base, token, args.project_id)
 
-    if _emit(args, answer):
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard
+    # below was unreachable under `--json`, which is the one mode an application drives.
+    emitted = _emit(args, answer)
+    answer = answer if isinstance(answer, dict) else {}
     trunk, commit = answer.get("trunk"), answer.get("commit")
     if answer.get("status") != "initialized" or not commit:
         # The house guard: a reply this command cannot read is not an initialization it may report.
@@ -244,6 +252,8 @@ def _project_init(args: argparse.Namespace) -> int:
             f"The relay's answer for project {args.project_id} did not say the project was "
             f"initialized, so this cannot be reported as one. "
             f"`grid project init {args.project_id} --json` shows what it sent.")
+    if emitted:
+        return 0
     print(f"{trunk or 'main'} is now at {commit} on {label}")
     print()
     print(f"Next: grid task create --project {args.project_id} --prompt '<what to do>'")
@@ -581,8 +591,10 @@ def _project_import(args: argparse.Namespace) -> int:
 
     answer = relay.finish_project_import(base, token, args.project_id)
 
-    if _emit(args, answer):
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard
+    # below was unreachable under `--json`, which is the one mode an application drives.
+    emitted = _emit(args, answer)
+    answer = answer if isinstance(answer, dict) else {}
     status = answer.get("status")
     imported = answer.get("commit")
     if status != "imported" or not imported:
@@ -593,6 +605,8 @@ def _project_import(args: argparse.Namespace) -> int:
             f"The relay's answer for project {args.project_id} did not say the repository was "
             f"imported, so this cannot be reported as one. "
             f"`grid project import {args.path} {args.project_id} --json` shows what it sent.")
+    if emitted:
+        return 0
     print(f"{answer.get('trunk') or 'main'} is now at {imported}")
     for warning in answer.get("warnings") or ():
         # Printed VERBATIM. These are the relay's words about a repository this CLI never read, and
@@ -627,10 +641,11 @@ def _project_status(args: argparse.Namespace) -> int:
     base, token, _label = _resolve(args)
     answer = relay.project_status(base, token, args.project_id)
 
-    if _emit(args, answer):
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard
+    # below was unreachable under `--json`, which is the one mode an application drives.
+    emitted = _emit(args, answer)
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
-    trunk = answer.get("trunk")
+    trunk = answer.get("trunk") if isinstance(answer, dict) else None
     if not trunk:
         # A reply this command cannot read is NOT a status — the same rule `commit`, `create` and
         # `import` all follow. Printing the template with blanks in it would read as "this project
@@ -640,9 +655,11 @@ def _project_status(args: argparse.Namespace) -> int:
         # It is the right replacement rather than the nearest one: every relay that answers this
         # route names the trunk, and the trunk is what the rest of the output is about.
         raise SystemExit(
-            f"The relay's answer for project {args.project_id} did not name its trunk, so this "
-            f"cannot be reported as a status. "
+            f"The relay's answer for project {args.project_id} did not say what the project "
+            f"holds, so this cannot be reported as a status. "
             f"`grid project status {args.project_id} --json` shows what it sent.")
+    if emitted:
+        return 0
     print(f"project {args.project_id}")
     # ⚠️ `is True`, never truthiness (ADR 0033 D-p, issue 33). *Absent ⇒ not archived*, which is
     # every relay predating this slice — the rule `serves_you` follows. Printed FIRST because it
@@ -662,7 +679,16 @@ def _project_status(args: argparse.Namespace) -> int:
     if answer.get("visibility") == project_visibility.VISIBILITY_PRIVATE:
         print("PRIVATE — only its members can reach it.")
         print(f"Share it with: grid project share {args.project_id}")
-    print(f"{trunk}={answer.get('main_commit') or '(none yet)'}")
+    # ⚠️ **The trunk's NAME is not printed** (ADR 0034 D-m, issue 46). It came straight off the wire
+    # and it is `main`, so this line read `main=066b5a20…` — a git word and a git oid, on the
+    # application's home screen, for a person who has never seen either. The value is still shown
+    # because it is the project's change signal: an application diffs it against the one it holds to
+    # notice that anybody's work landed. `--json` carries `trunk` and `main_commit` unchanged, which
+    # is where a program reads them.
+    #
+    # Found by `e2e_cross_repo.py::test_29`, not by the static scan — the word arrived from the
+    # relay at run time, so no literal in this repository contains it.
+    print(f"version={answer.get('main_commit') or '(nothing in it yet)'}")
 
     # `active_turns`, a LIST, since ADR 0034 D-b (issue 40): a member holds one turn per
     # conversation, so the singular `active_task` this used to read could only ever show one of
@@ -806,9 +832,11 @@ def _project_commit(args: argparse.Namespace) -> int:
     answer = relay.commit_project(base, token, args.conversation_id,
                                   message=args.message, files=files, deletes=deletes)
 
-    if _emit(args, answer):
-        return 0
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard
+    # below was unreachable under `--json`, which is the one mode an application drives.
+    emitted = _emit(args, answer)
     # `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+    answer = answer if isinstance(answer, dict) else {}
     commit = answer.get("commit")
     branch = answer.get("branch") or "the conversation's branch"
     if not commit:
@@ -821,6 +849,8 @@ def _project_commit(args: argparse.Namespace) -> int:
             f"The relay's answer to committing into conversation {args.conversation_id} did not "
             f"say what it wrote, so this cannot be reported as a commit. "
             f"`grid project commit {args.conversation_id} … --json` shows what it sent.")
+    if emitted:
+        return 0
     print(f"{branch} is now at {commit}")
     previous = answer.get("previous_commit")
     if previous:

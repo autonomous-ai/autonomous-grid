@@ -493,8 +493,12 @@ def _add_project(sub) -> None:
     # thing anybody does is refused, which is the first wall a new user hits.
     create.add_argument(
         "--empty", action="store_true",
-        help=("Give it a trunk now, so a task can run in it immediately. "
-              "IRREVERSIBLE: a project that has a trunk can never `grid project import`."))
+        # ⚠️ No git word here (ADR 0034 D-m, issue 46): this flag is among the first things a new
+        # person meets, and "trunk" sends them to git's documentation for a product that has
+        # deliberately hidden git from them. `tests/test_application_surface.py` keeps it that way.
+        help=("Start it ready to work in, so a task can run in it immediately. IRREVERSIBLE: a "
+              "project that already holds something can never take in an existing repository with "
+              "`grid project import`."))
     create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     create.set_defaults(handler=cmd_remote_project)
@@ -569,7 +573,7 @@ def _add_project(sub) -> None:
         help="Permanently remove a project that has nothing in it",
         description=(
             "Delete a project, its members and its repository. THIS CANNOT BE UNDONE.\n\n"
-            "Refused unless the project has never had a trunk and has never had a task — in that "
+            "Refused unless the project has never held anything and has never had a task — in that "
             "state there is provably nothing in it to lose. Anything else is refused, naming "
             "`grid project archive`, which takes a project out of the way and keeps every byte.\n\n"
             "For the project created by a typo, and for one you inited or imported into by "
@@ -684,8 +688,8 @@ def _add_project(sub) -> None:
             "What is holding your turns was answerable before only by attempting a create and "
             "reading the refusal. It is a read now, and it costs nothing.\n\n"
             "It is also how an application notices the project changed without running `git fetch`: "
-            "the grid applies every finished turn to the project itself, so the project's own "
-            "commit moves whenever anybody's work lands."),
+            "the grid applies every finished turn to the project itself, so what the project "
+            "holds changes whenever anybody's work lands."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     project_arg.add_project(status)
     status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
@@ -940,10 +944,13 @@ def _add_task(sub) -> None:
     # given an empty one can never bring an existing repository in, and nothing undoes it.
     create.add_argument(
         "--init-project", dest="init_project", action="store_true",
-        help="Give the project an empty trunk first, if it has none, then run the task. For work "
-             "that starts from nothing. ONE-WAY: a project with a trunk can never import an "
-             "existing repository, so use `grid project import` instead if you have one. Your "
-             "uploaded files go on your own branch, never on the trunk.")
+        # No git word (ADR 0034 D-m, issue 46) — see `grid project create --empty`, which this is
+        # the convenience form of.
+        help="Start the project empty first, if it holds nothing yet, then run the task. For work "
+             "that starts from nothing. ONE-WAY: a project that already holds something can never "
+             "take in an existing repository, so use `grid project import` instead if you have "
+             "one. Your uploaded files start inside your own conversation, and reach the project "
+             "when the task succeeds.")
     # ADR 0032 / issue 32. `create` printed an id and stopped, so every use was create → copy the id
     # → `grid task follow <id>`. This is that, with the id it already has and no window in between:
     # the stream is attached from `after_seq=-1`, so nothing is missed.
@@ -1076,15 +1083,20 @@ def _add_task(sub) -> None:
     # `list` — nothing listed tasks at all before ADR 0033 issue 19a. `grid task get` answers one id
     # at a time, and the id came from `grid task create`, so somebody who closed their terminal had
     # to clone the project and read `task/*` refs by hand.
-    listing = task_sub.add_parser("list", help="List the tasks in a project")
-    # STILL REQUIRED (issue 28) — the slice makes the two spellings uniform, it does not invent a
-    # default. What changes is that the refusal is ours and names both spellings, where argparse's
-    # named only `--project`.
-    project_arg.add_project(listing, help="Project id to list, from `grid project list`.")
+    listing = task_sub.add_parser("list", help="List your conversations, or one project's")
+    # OPTIONAL since ADR 0034 D-m (issue 46), and omitting it means something DIFFERENT from what it
+    # means on `create`. There it resolves the caller's own `default` project; here it widens to
+    # every project — an application's home screen is *your conversations*, which names none. Issue
+    # 28's refusal still fires for a blank value, and both spellings still work when one is given.
+    project_arg.add_project(
+        listing, required=False,
+        help="Project id to list, from `grid project list` (default: your conversations in every "
+             "project you can reach, newest page last).")
     listing.add_argument(
         "--all", action="store_true",
         help="Every member's tasks, not only your own. A project is shared, so this is how a team "
-             "sees what the team ran.")
+             "sees what the team ran. Needs a project: the whole grid's work is listed one project "
+             "at a time.")
     listing.add_argument(
         "--state", action="append", default=None, metavar="STATE",
         help="Only tasks in this state (queued, running, completed, failed, timed_out). "
@@ -1115,13 +1127,13 @@ def _add_task(sub) -> None:
             "message you send continues where it left off — there is no way to end a conversation, "
             "because the grid holds no such state.\n\n"
             "A project is shared, so any member may cancel any task in it: the colleague whose "
-            "merge has been stuck all afternoon is often the person who needs to stop it. The "
-            "event log records who did.\n\n"
+            "combining step has been stuck all afternoon is often the person who needs to stop it. "
+            "The event log records who did.\n\n"
             "The conversation is free to take its next message immediately. The agent itself stops "
             "within about half a minute, on the provider's next lease renewal — and on a provider "
             "that has not been updated yet it runs to completion, harmlessly, with nothing waiting "
             "on it.\n\n"
-            "Nothing is rewound: the task's branch is left exactly where the agent got to, so "
+            "Nothing is rewound: whatever the agent had already done is kept, so "
             "`grid task fetch` still works on it."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     cancel.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
