@@ -30,6 +30,7 @@ from remote import (
 )
 from shared.handlers import HANDLERS
 from shared import run_records
+from shared.system import node_hardware
 from shared.filelock import file_lock
 from shared.media import media_gating  # stdlib-only module; safe to import eagerly
 from shared.models import api_catalog
@@ -1067,7 +1068,7 @@ def _assemble_snapshot(
 
 
 def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
-    """How the node appears on the grid page: name + engine kind label.
+    """How the node appears on the grid page: name, engine kind label, and the machine itself.
 
     The display name comes from the record's ``meta_name`` (the ``--name`` a remote operator gave, or
     the box's hostname when omitted), falling back to ``engine_id`` for a record written before the
@@ -1092,6 +1093,12 @@ def _meta(record: dict[str, Any], engine_id: str) -> dict[str, Any]:
         else:
             label = "llama.cpp"
     meta = {"name": record.get("meta_name") or engine_id, "engine": label}
+    # What the machine IS — chip on Apple Silicon, card elsewhere. Without it the grid page can only
+    # say the hostname and the OS ("Grid-Relay · macOS"), which is the same sentence for a laptop
+    # and for a 192 GB Mac Studio. Empty fields are dropped rather than sent blank: the relay merges
+    # meta over what it holds, so a probe that failed this run must not erase a name that worked on
+    # the last one. Cached in `node_hardware`, so the heartbeat path pays nothing.
+    meta.update(node_hardware.meta_fields())
     # The seat tier of an API engine (codex: free/plus/pro/…), surfaced on the grid page next to the
     # engine kind. A public label, never a secret — distinct from the token/account_id we never emit.
     # Union identities can gather several engines; take the first spec that carries one (only API
@@ -1807,7 +1814,12 @@ def heartbeat_once(state: _ServeState, *, _allow_refresh: bool = True) -> str:
     """One heartbeat; 404 → re-register (node pruned), 401 → refresh + retry once."""
     token = state.token()
     try:
-        result = relay.heartbeat(state.signaling_url, token, load=state.load())
+        # The hardware fields ride along on every beat — only those, not the whole meta: name and
+        # engine are already right from registration, while `chip`/`device` are the ones a node that
+        # joined before they existed can never correct any other way. Cached, so this costs nothing.
+        result = relay.heartbeat(
+            state.signaling_url, token, load=state.load(), meta=node_hardware.meta_fields(),
+        )
     except relay.RelayUnauthorized:
         if _allow_refresh and state.refresh(stale_token=token):
             return heartbeat_once(state, _allow_refresh=False)

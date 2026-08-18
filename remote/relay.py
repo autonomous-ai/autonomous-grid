@@ -247,16 +247,32 @@ def deregister_node(signaling_url: str, access_token: str, node_id: str) -> None
     _guard(resp, "deregister")
 
 
-def heartbeat(signaling_url: str, access_token: str, *, load: dict[str, Any]) -> str:
+def heartbeat(
+    signaling_url: str,
+    access_token: str,
+    *,
+    load: dict[str, Any],
+    meta: dict[str, Any] | None = None,
+) -> str:
     """Keep the node live (``POST /nodes/heartbeat``). Returns ``"ok"`` or ``"missing"`` (404 →
     the node was pruned, so the caller re-registers). 401 raises ``RelayUnauthorized``.
 
-    The body carries only ``load`` — the relay identifies the node from the bearer token, not a
-    body field (grid-src parity).
+    The node is identified by the bearer token, never a body field (grid-src parity), so the body
+    carries only what the relay cannot already know: this node's ``load``, and optionally its
+    presentation ``meta``.
+
+    ``meta`` repeats what registration already sent, and that repetition is the point. Registration
+    happens once, so a field the grid page gained afterwards — ``chip``, ``device`` — would stay
+    blank on a machine that has been up and serving for weeks. Sending it here means a restart is
+    enough to correct a node, rather than a re-register nobody performs by hand. The relay merges it
+    over what it holds and ignores it entirely on an older build, so this is safe to send always.
     """
+    body: dict[str, Any] = {"load": load}
+    if meta:
+        body["meta"] = meta
     try:
         with _client(signaling_url, access_token, timeout=10.0) as client:
-            resp = client.post("/nodes/heartbeat", json={"load": load})
+            resp = client.post("/nodes/heartbeat", json=body)
     except httpx.HTTPError as exc:
         raise RelayError(f"heartbeat transport error: {exc}") from None
     if resp.status_code == 404:
