@@ -56,6 +56,18 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
         return _wip_reset(args)
     if args.subcommand == "status":
         return _project_status(args)
+    if args.subcommand in ("files", "file"):
+        # ADR 0034 D-m (issue 45). Their handlers live in `cli/project_files.py` — this file is past
+        # the 800-line ceiling, the same reason `project_archive.py` and `project_providers.py` were
+        # split out — and dispatch stays here so `cli/parser.py` needs no new import.
+        from . import project_files
+
+        return (project_files.project_files(args) if args.subcommand == "files"
+                else project_files.project_file(args))
+    if args.subcommand == "download":
+        from .project_download import project_download
+
+        return project_download(args)
     if args.subcommand == "commit":
         return _project_commit(args)
     if args.subcommand == "import":

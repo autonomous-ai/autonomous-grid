@@ -2263,3 +2263,143 @@ def test_the_relay_still_refuses_an_undo_from_anybody_but_the_two_owners():
     assert "not_yours_to_undo" in body, (
         "the refusal code changed; `grid task undo --help` in this repository still promises the "
         "rule it named")
+
+
+# --------------------------------------------------------------------------------------------
+# ADR 0034 D-m (issue 45) — the read plane: files, one file, one turn's diff, and a download.
+# --------------------------------------------------------------------------------------------
+
+
+def _client_paths(function):
+    """Every path a relay-client function builds, with its `{...}` slots blanked.
+
+    Read out of the function's own f-strings rather than restated, so what is compared is what the
+    request is actually built from — `test_the_follow_up_route_…`'s method, extracted here because
+    issue 45 needs it four times.
+    """
+    import ast
+    import inspect
+
+    built = [
+        "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
+        for node in ast.walk(ast.parse(inspect.getsource(function)))
+        if isinstance(node, ast.JoinedStr)
+    ]
+    # Narrowed to the ones that are actually RELAY PATHS. A function may build other f-strings —
+    # `download_project` builds a temp-file prefix and a transport-error sentence — and comparing
+    # those against a route table would fail for a reason that has nothing to do with the contract.
+    # The prefix is the honest discriminator: it is what makes a string a path on this plane, and a
+    # client that stopped spelling it is exactly what the comparison below is looking for.
+    paths = {value for value in built if value.startswith("/relay/")}
+    assert paths, (
+        f"{function.__name__} no longer builds a /relay/… path from an f-string; teach this check "
+        f"the new spelling rather than deleting it")
+    return paths
+
+
+def _served(module, *slots):
+    """grid-src's declared paths for `module`, prefixed and with `slots` blanked.
+
+    The `/relay/v1` prefix lives on the `APIRouter` rather than on each decorator, so it is added
+    back here instead of stripped off the client's — asserting the CLIENT still spells it is part of
+    what this compares, since the prefix is a third hand-kept copy (grid-apis has one too).
+    """
+    served = set()
+    for path in _relay_route_paths(module):
+        for slot in slots:
+            path = path.replace(slot, "{}")
+        served.add("/relay/v1" + path)
+    return served
+
+
+def test_the_three_project_reads_this_cli_asks_for_are_the_ones_the_relay_serves():
+    """ADR 0034 D-m (issue 45): `…/files`, `…/file` and `…/download`.
+
+    The path is the whole contract for all three — no body, one query parameter — and a drift is
+    silent in the worst direction, exactly as issue 47's is: this CLI would get FastAPI's bare 404
+    and `missing_route_hint` would turn it into *"ask your operator to update the relay"* about a
+    relay that is perfectly up to date, sending somebody to chase an operator over a typo in this
+    repository.
+    """
+    from remote import relay
+
+    served = _served("project_files.py", "{project_id}") | _served(
+        "project_download.py", "{project_id}")
+
+    for function in (relay.project_files, relay.project_file, relay.download_project):
+        asked = _client_paths(function)
+        assert asked <= served, (
+            f"{function.__name__} asks for {sorted(asked - served)}, which grid-src does not "
+            f"serve — every call would get a bare 404 and be reported as 'your relay is too old'")
+
+
+def test_the_turn_diff_this_cli_asks_for_addresses_a_TURN_on_the_relay_too():
+    """⚠️ `{task_id}` is a TURN on `/diff`, where the SAME segment is a CONVERSATION on `/turns`,
+    `/commit` and `/stream`.
+
+    That is issue 44's trap one route along, and the reason this is its own test rather than a
+    fourth entry above: the two objects share a path prefix, so a drift here is not a 404 but a
+    request about the wrong object — and grid-src's own route is what says which it means.
+    """
+    from remote import relay
+
+    served = _served("turn_diff.py", "{task_id}")
+    asked = _client_paths(relay.turn_diff)
+
+    assert asked <= served, (
+        f"`grid task diff` asks for {sorted(asked - served)}, which grid-src's turn_diff.py does "
+        f"not serve")
+    # And the relay really does spell it `task_id` — a rename there to `conversation_id` would keep
+    # this CLI's path working while changing what the id MEANS, which no path comparison can see.
+    assert any("{task_id}" in path for path in _relay_route_paths("turn_diff.py")), (
+        "grid-src's diff route no longer addresses a TURN. If it now addresses a conversation, this "
+        "CLI is sending the wrong id and every diff is about somebody's whole conversation or "
+        "about nothing")
+
+
+def test_this_clis_download_timeout_stays_above_the_relays_own_ceiling():
+    """The third timeout pair in this file, and it faces the same way as the import one.
+
+    A client that gives up before the relay does turns a refusal the relay was about to make into
+    "the connection died" — and nothing on either side can then say which happened. The relay's
+    figure is PARSED rather than restated, so raising one without the other fails here instead of in
+    a fleet where large downloads mysteriously stop working.
+    """
+    import ast
+
+    from remote import relay
+
+    source = _relay_module("project_download.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    relay_ceiling = None
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(target, "id", None) == "ARCHIVE_TIMEOUT_SECONDS" for target in node.targets):
+            relay_ceiling = node.value.value
+    assert isinstance(relay_ceiling, (int, float)), (
+        "grid-src's project_download.ARCHIVE_TIMEOUT_SECONDS is no longer a literal at module "
+        "scope, so this pair cannot be checked from here")
+
+    assert relay._DOWNLOAD_TIMEOUT > relay_ceiling, (
+        f"this CLI gives up on a download after {relay._DOWNLOAD_TIMEOUT}s while the relay is "
+        f"willing to spend {relay_ceiling}s packing it — so a large project fails client-side "
+        f"while the relay does the work anyway, and the log blames a timeout the relay never saw")
+
+
+def test_the_download_bound_is_the_relays_alone_and_this_cli_states_no_second_one():
+    """A NEGATIVE lockstep check, and the reason it is worth writing.
+
+    `task_download_max_bytes` is the relay's, measured against the tree before a byte is streamed. A
+    copy over here would be a second bound that silently disagrees the moment an operator raises
+    theirs — this CLI would refuse a download the grid was perfectly willing to serve, and nothing
+    would say why. The refusal is displayed verbatim instead, like `project_archived`.
+    """
+    from pathlib import Path
+
+    client = Path(__file__).resolve().parent.parent
+    for name in ("remote/relay.py", "cli/project_download.py"):
+        text = (client / name).read_text()
+        assert "task_download_max_bytes" not in text and "TASK_DOWNLOAD_MAX_BYTES" not in text, (
+            f"{name} names the relay's download ceiling. It is the relay's alone — a copy here is a "
+            f"second bound that disagrees the moment an operator raises theirs")

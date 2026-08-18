@@ -891,6 +891,9 @@ grid project member add    <project-id> --email <address> [--grid <grid>] [--jso
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
 grid project wip reset     <project-id> <conversation-id> --commit <oid> [--grid <grid>] [--json]
 grid project status        <project-id> [--grid <grid>] [--json]
+grid project files         <project-id> [<path>] [--grid <grid>] [--json]
+grid project file          <project-id> <path> [--output <file>] [--grid <grid>] [--json]
+grid project download      <project-id> [--output <file>] [--grid <grid>] [--json]
 grid project commit        <conversation-id> -m <message> [--file <local[:dest]>]… [--dir <local[:dest]>]…
                                         [--delete <path>]… [--grid <grid>] [--json]
 grid project import        <path> <project-id> [--branch <ref>] [--grid <grid>] [--json]
@@ -1152,6 +1155,59 @@ lease before it reports, so anything the relay did inside that request would be 
 nobody is watching.
 
 
+### Looking at your project without git
+
+```
+grid project files    <project-id> [<path>]
+grid project file     <project-id> <path> [--output <file>]
+grid project download <project-id> [--output <file>]
+grid task    diff     <turn-id>
+```
+
+These need **no git on your machine** and no clone. They read the project as it stands now — the
+trunk, which is where the grid puts every finished task's work — so what you see is what the whole
+team has done, including your own.
+
+`grid project files` lists one folder at a time. With no path you get the top of the project; give a
+folder's name to look inside it. A folder is shown with a trailing `/`, and an executable file with
+a `*`.
+
+```
+$ grid project files abc123
+the top of the project:
+  README.md  (612 bytes)
+  src/
+```
+
+A project you have created but not started yet says so rather than showing an empty list — there is
+a difference between *nothing in it* and *this folder is empty*, and both are different again from
+the command failing.
+
+`grid project file` prints one file. Anything that is not text needs `--output`, because writing a
+binary to a terminal stops that terminal rendering text at all. A very large file is refused with its
+size, and `grid project download` is what gets it.
+
+`grid project download` writes the whole project to a zip — `<project-id>.zip` unless you say
+otherwise with `--output`. It is a snapshot to hand to somebody or to open in an editor, not a
+repository: to keep working in the project, send a task. A project larger than the grid will pack in
+one go is refused with both numbers, and cloning is the way to get that one.
+
+`grid task diff` shows what one finished task changed, and who asked for it:
+
+```
+$ grid task diff t-91f2
+t-91f2 — asked for by Alice Example
+    added  docs/notes.txt  +4 -0
+```
+
+A task that changed nothing says so. A task that ran long enough ago that the grid no longer keeps
+the details also says so — both are answers, and both exit 0. A step the grid ran itself to combine
+your work with a colleague's is labelled as one rather than attributed to you.
+
+> These are reads. They keep working on an **archived** project — that is the whole reason archiving
+> exists rather than deleting. Anyone who can reach the project can use them; a **private** project
+> refuses everyone who is not a member, exactly as its other endpoints do.
+
 ### Undoing a change
 
 ```
@@ -1360,6 +1416,7 @@ grid task follow <task-id> | --conversation <conversation-id>
                  [--after-seq <n>] [--grid <grid>] [--json]
 grid task fetch  <task-id> [--into <dir>] [--grid <grid>] [--json]
 grid task cancel <task-id> [--grid <grid>] [--json]
+grid task diff   <task-id> [--grid <grid>] [--json]
 grid task undo   <task-id> [--grid <grid>] [--json]
 ```
 
@@ -1589,7 +1646,7 @@ Limits, refused with the number stated rather than truncated: **200 files**, **5
 ### Getting the result back
 
 `fetch` puts a finished task's files on disk: `grid task fetch <task-id>` lands them in `./<task-id>`,
-or wherever `--into` names. It needs `git` on the machine you run it from.
+or wherever `--into` names. It needs `git` on the machine you run it from — `grid project files`, `grid project file` and `grid task diff` are the ways to read the same work on a machine that has none.
 
 The project is a git repository the relay serves over HTTP, and **your grid token is the whole
 credential** — no SSH key is provisioned for anyone, at either end. The token is handed to `git`

@@ -60,6 +60,21 @@ def add_project(parser: argparse.ArgumentParser, *, required: bool = True,
         _FORMS: (f"{leading}<project-id>", f"{leading}--project <project-id>")})
 
 
+# What each TRAILING-OPTIONAL shape's second slot is called — the dest to shift into, and the word a
+# refusal uses for it. A table for `_SECOND`'s reason, restated because this one was a single
+# hard-coded shape until ADR 0034 D-m (issue 45) needed a second: `directory` and `path` differ only
+# in their words, and two copies of the same slot arithmetic is how one of them comes to behave
+# differently. `grid project files --project P src` parked `src` in `project_id` and listed the top
+# of a project called `src` — measured, before this table existed.
+# `(dest, word, unset)` — the slot to shift into, the word a refusal uses for it, and the value
+# argparse leaves there when the caller gave none. The third element is not decoration: `directory`
+# defaults to `None` and `path` to `""`, so a truthiness test would quietly change what "already
+# filled" means for one of them, which is precisely the drift this table exists to prevent.
+_TRAILING = {
+    "directory": ("directory", "directory", None),
+    "path": ("path", "path", ""),
+}
+
 # What each two-positional shape's SECOND value is called, in every place a refusal has to name it.
 # A table rather than a branch per shape: `member` and `conversation` differ only in their words, and
 # three copies of the same slot arithmetic is how one of them comes to behave differently.
@@ -95,6 +110,22 @@ def add_directory(parser: argparse.ArgumentParser, *, help: str) -> None:
     parser.add_argument("directory", nargs="?", default=None, help=help)
     parser.set_defaults(**{_SHAPE: "directory",
                            _FORMS: (f"{positional} [<directory>]", f"{flag} [<directory>]")})
+
+
+def add_path(parser: argparse.ArgumentParser, *, help: str) -> None:
+    """Register `files`' trailing OPTIONAL path, and mark the shape (ADR 0034 D-m, issue 45).
+
+    Call it AFTER `add_project`, for the reason `add_member` documents.
+
+    ⚠️ **Only for an OPTIONAL trailing positional.** `grid project file`'s path is REQUIRED, so
+    argparse gives a lone positional to it rather than to the optional project id and the ambiguity
+    this shape exists for cannot arise — measured, and the same reason `wip reset`'s conversation id
+    needs no rule of its own.
+    """
+    positional, flag = _forms_so_far(parser, "add_path")
+    parser.add_argument("path", nargs="?", default="", help=help)
+    parser.set_defaults(**{_SHAPE: "path",
+                           _FORMS: (f"{positional} [<path>]", f"{flag} [<path>]")})
 
 
 def add_conversation(parser: argparse.ArgumentParser, *,
@@ -159,8 +190,8 @@ def resolve(args: argparse.Namespace) -> argparse.Namespace:
     # Before any of the shape helpers: they compare and move these values, and a blank one makes
     # every message downstream describe the wrong problem.
     _refuse_a_blank_value(args, prog=prog, forms=forms, required=required)
-    if shape == "directory":
-        args = _shift_the_directory(args, prog=prog, forms=forms)
+    if shape in _TRAILING:
+        args = _shift_the_trailing_slot(args, shape, prog=prog, forms=forms)
     if shape in _SECOND:
         args = _place_a_lone_positional(args, shape, prog=prog, forms=forms)
 
@@ -234,9 +265,9 @@ def _forms(args: argparse.Namespace, *, prog: str) -> tuple[str, str]:
     return f"{prog} {positional}", f"{prog} {flag}"
 
 
-def _shift_the_directory(args: argparse.Namespace, *, prog: str,
-                         forms: tuple[str, str]) -> argparse.Namespace:
-    """`clone`/`refresh` are `<project-id> [<directory>]`; with `--project` given, the slots shift.
+def _shift_the_trailing_slot(args: argparse.Namespace, shape: str, *, prog: str,
+                             forms: tuple[str, str]) -> argparse.Namespace:
+    """`<project-id> [<second>]` commands: with `--project` given, the slots shift.
 
     Measured: argparse fills consecutive optional positionals left to right, so
     `clone --project abc mydir` parks `mydir` in `project_id` and leaves `directory` unset — a
@@ -246,25 +277,27 @@ def _shift_the_directory(args: argparse.Namespace, *, prog: str,
     Two of them do not: with the id named there is no second slot to shift into, so that is refused
     rather than guessed at.
     """
+    dest, word, unset = _TRAILING[shape]
     flag = getattr(args, _PROJECT_FLAG_DEST, None)
     positional = getattr(args, "project_id", None)
     if flag is None or positional is None:
         return args
     if positional == flag:
         # One project id said both ways — the documented "both spellings, same value, is fine". NOT
-        # a directory. `clone` hid this because its own default directory is named after the project
-        # id, so shifting made no difference there; `refresh` defaults to the CURRENT directory, and
-        # a member who restated the id out of habit would silently refresh `./<id>` instead. Found
-        # in review. Saying it twice AND naming a directory still works: `clone --project P P dir`.
+        # a second slot. `clone` hid this because its own default directory is named after the
+        # project id, so shifting made no difference there; `refresh` defaults to the CURRENT
+        # directory, and a member who restated the id out of habit would silently refresh `./<id>`
+        # instead. Found in review. Saying it twice AND naming a second value still works:
+        # `clone --project P P dir`.
         return args
-    directory = getattr(args, "directory", None)
-    if directory is not None:
+    second = getattr(args, dest, unset)
+    if second != unset:
         raise SystemExit(
-            f"{prog}: {positional!r} and {directory!r} were both given after --project {flag}, and "
-            f"only one of them can be the directory.\nGive the project id once, either way:\n"
+            f"{prog}: {positional!r} and {second!r} were both given after --project {flag}, and "
+            f"only one of them can be the {word}.\nGive the project id once, either way:\n"
             f"    {forms[0]}\n    {forms[1]}")
     return argparse.Namespace(
-        **{**vars(args), "project_id": None, "directory": positional})
+        **{**vars(args), "project_id": None, dest: positional})
 
 
 def _place_a_lone_positional(args: argparse.Namespace, shape: str, *, prog: str,

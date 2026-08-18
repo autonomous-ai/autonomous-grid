@@ -132,6 +132,12 @@ def cmd_remote_task(args: argparse.Namespace) -> int:
         return _task_list(args)
     if args.subcommand == "cancel":
         return _task_cancel(args)
+    if args.subcommand == "diff":
+        # ADR 0034 D-m (issue 45). Its handler lives in its own module for `task_undo`'s reason, and
+        # dispatch stays here so `cli/parser.py` needs no new import.
+        from .task_diff import task_diff
+
+        return task_diff(args)
     if args.subcommand == "undo":
         # ADR 0034 D-l (issue 44). Its handler lives in its own module — this one is past the
         # repository's size ceiling — and dispatch stays here so `cli/parser.py` needs no new import.

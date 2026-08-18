@@ -1865,3 +1865,78 @@ def test_26_undoing_a_change_leaves_every_later_turn_alone(
     surface = " ".join(str(value) for value in answer.values()).lower() + " " + said.lower()
     leaked = [word for word in _BRANCH_VOCABULARY if word in surface]
     assert not leaked, f"undo showed a person {leaked}: {surface}"
+
+
+def test_27_a_project_is_readable_with_no_git_in_the_path(
+        relay, owner_token, spawn_provider, tmp_path):
+    """ADR 0034 D-m / issue 45, at the one seam where both repositories are on the wire.
+
+    An agent does some work, it reaches the project by itself (D-d), and then the whole read surface
+    is exercised **without a single git invocation on this side**: list a folder, read a file, see
+    what that one turn changed, and take the project away as a zip.
+
+    ⚠️ **What only an end-to-end run can catch here.** Every unit test on this side reads a body
+    this repository wrote down, and every unit test on the relay's side drives its own routes — so a
+    path that drifted, a query parameter the relay stopped reading, or an envelope shaped
+    differently would leave BOTH suites green. That is the `task_cancelled` lesson (issue 19b),
+    which needed `test_09` for exactly this reason.
+
+    And the reads are of the TRUNK, which is what makes the D-d dependency real: nothing here
+    promotes anything, so if auto-apply stopped working the listing would simply not contain the
+    agent's file.
+    """
+    import zipfile
+
+    from remote import relay as relay_client
+
+    spawn_provider("A")
+    project = relay_client.create_project(
+        relay, owner_token, name="p-readable", bootstrap=relay_client.BOOTSTRAP_EMPTY)["id"]
+
+    created = relay_client.create_task(
+        relay, owner_token, project_id=project,
+        prompt="WRITE docs/notes.txt HALIBUT-4417; SAY wrote it")
+    done = H.await_state(relay, owner_token, created["id"], {"completed", "failed"}, timeout=120)
+    assert done["state"] == "completed", done
+    # The relay applies it to the trunk on its own sweep; nobody runs a command in between.
+    assert H.wait_for(
+        lambda: any(entry["name"] == "docs"
+                    for entry in relay_client.project_files(
+                        relay, owner_token, project)["entries"]),
+        timeout=60), "the agent's work never reached the trunk, so there is nothing to read"
+
+    # 1. A folder listing, one level at a time.
+    top = relay_client.project_files(relay, owner_token, project)
+    assert top["commit"], top
+    assert [entry["name"] for entry in top["entries"]] == ["docs"], top
+    assert top["entries"][0]["type"] == "directory", top
+    inside = relay_client.project_files(relay, owner_token, project, path="docs")
+    assert [entry["name"] for entry in inside["entries"]] == ["notes.txt"], inside
+
+    # 2. One file's contents, by the path the listing just handed back.
+    blob = relay_client.project_file(relay, owner_token, project, path="docs/notes.txt")
+    assert blob["encoding"] == "utf-8", blob
+    assert "HALIBUT-4417" in blob["content"], blob
+
+    # 3. What that one turn changed, and who asked for it.
+    diff = relay_client.turn_diff(relay, owner_token, created["id"])
+    assert diff["available"] is True, diff
+    assert [f["path"] for f in diff["files"]] == ["docs/notes.txt"], diff
+    assert diff["files"][0]["status"] == "added", diff
+    assert "HALIBUT-4417" in (diff["patch"] or ""), diff
+
+    # 4. And the whole project as one zip, which really opens.
+    destination = tmp_path / "taken-away.zip"
+    written = relay_client.download_project(relay, owner_token, project, destination)
+    assert written > 0
+    archive = zipfile.ZipFile(destination)
+    assert archive.testzip() is None, "a truncated zip is not a download"
+    assert archive.read("docs/notes.txt").decode() .strip().endswith("HALIBUT-4417"), (
+        archive.namelist())
+
+    # 5. Nothing anybody read on the way names a branch (ADR 0034 D-m).
+    surface = " ".join(
+        str(value) for payload in (top, inside, blob, diff)
+        for key, value in payload.items() if key != "patch").lower()
+    leaked = [word for word in _BRANCH_VOCABULARY if word in surface]
+    assert not leaked, f"the read surface showed a person {leaked}: {surface[:600]}"

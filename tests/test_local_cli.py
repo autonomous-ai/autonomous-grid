@@ -35228,6 +35228,14 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
     (["project", "wip", "reset", "P1", "C1", "--commit", "c" * 40],
      ["project", "wip", "reset", "--project", "P1", "C1", "--commit", "c" * 40]),
     (["project", "status", "P1"], ["project", "status", "--project", "P1"]),
+    # ADR 0034 D-m / issue 45. ⚠️ `files` is the `clone`/`refresh` shape — an OPTIONAL positional
+    # behind the optional project id — so `--project P src` needed `project_arg.add_path` to shift
+    # the slots; before it, `src` landed in `project_id` and the command listed a project called
+    # `src`. `file`'s path is REQUIRED, so argparse gives a lone positional to it and no rule is
+    # needed, exactly as `wip reset`'s conversation id needs none.
+    (["project", "files", "P1"], ["project", "files", "--project", "P1"]),
+    (["project", "file", "P1", "a.txt"], ["project", "file", "--project", "P1", "a.txt"]),
+    (["project", "download", "P1"], ["project", "download", "--project", "P1"]),
     (["project", "import", "./repo", "P1"], ["project", "import", "./repo", "--project", "P1"]),
     (["project", "clone", "P1"], ["project", "clone", "--project", "P1"]),
     (["project", "refresh", "P1"], ["project", "refresh", "--project", "P1"]),
@@ -35948,3 +35956,442 @@ def test_task_undo_passes_every_refusal_through_in_the_relays_own_words(
         cli.main(["task", "undo", "t-1"])
 
     assert str(caught.value) == message
+
+
+# --------------------------------------------------------------------------------------------
+# `grid project files | file | download` and `grid task diff` — seeing a project with no git
+# (ADR 0034 D-m, issue 45).
+# --------------------------------------------------------------------------------------------
+
+
+def test_project_files_asks_the_files_route_and_lists_what_came_back(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["query"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={
+            "project_id": "P1", "commit": "a" * 40, "path": "",
+            "entries": [{"name": "README.md", "type": "file", "size": 12,
+                         "executable": False, "symlink": False},
+                        {"name": "src", "type": "directory", "size": None,
+                         "executable": False, "symlink": False}],
+            "total": 2, "truncated": False})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "files", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/files")
+    assert seen["query"] == {"path": ""}
+    assert seen["auth"] == "Bearer AT"
+    out = capsys.readouterr().out
+    assert "README.md" in out
+    # A folder is marked as one, so the eye separates the two without reading a `type` column.
+    assert "src/" in out
+
+
+def test_project_files_sends_the_folder_it_was_asked_for(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"project_id": "P1", "commit": "a" * 40, "path": "src",
+                                         "entries": [], "total": 0, "truncated": False})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "files", "P1", "src/"]) == 0
+
+    # Trimmed of its slashes before it goes on the wire, so `src/` and `src` are one request and the
+    # relay never has to decide what a trailing separator means.
+    assert seen["query"] == {"path": "src"}
+
+
+def test_an_empty_folder_is_not_the_same_as_a_project_with_nothing_in_it(
+        monkeypatch, tmp_path, capsys):
+    """The criterion: "empty directory" has to be distinguishable from "could not ask", and both
+    from a project that has not been started."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": None, "path": "", "entries": [], "total": 0,
+        "truncated": False}))
+    assert cli.main(["project", "files", "P1"]) == 0
+    nothing_yet = capsys.readouterr().out
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": "a" * 40, "path": "src", "entries": [], "total": 0,
+        "truncated": False}))
+    assert cli.main(["project", "files", "P1", "src"]) == 0
+    empty_folder = capsys.readouterr().out
+
+    assert nothing_yet != empty_folder
+    assert "nothing in it yet" in nothing_yet
+    assert "nothing here" in empty_folder
+
+
+def test_a_listing_the_cli_cannot_read_is_not_reported_as_an_empty_one(monkeypatch, tmp_path):
+    """The house guard. A reply this command cannot read is not a listing it may report — otherwise
+    a relay that changed shape would tell somebody their project is empty."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "files", "P1"])
+
+    assert "--json" in str(caught.value)
+
+
+def test_project_file_prints_text_and_writes_bytes_with_output(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["path"], seen["query"] = request.url.path, dict(request.url.params)
+        return httpx.Response(200, json={
+            "project_id": "P1", "commit": "a" * 40, "path": "a.txt", "size": 6,
+            "executable": False, "symlink": False, "too_large": False, "limit": 5 * 1024 * 1024,
+            "binary": False, "encoding": "utf-8", "content": "hello\n"})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "file", "P1", "a.txt"]) == 0
+
+    assert seen["path"] == "/relay/v1/projects/P1/file"
+    # The path rides a QUERY parameter, never a path segment: a file's path has slashes in it.
+    assert seen["query"] == {"path": "a.txt"}
+    assert capsys.readouterr().out == "hello\n"
+
+    destination = tmp_path / "out.txt"
+    assert cli.main(["project", "file", "P1", "a.txt", "--output", str(destination)]) == 0
+    assert destination.read_bytes() == b"hello\n"
+
+
+def test_a_binary_file_is_saved_and_never_written_to_the_terminal(monkeypatch, tmp_path, capsys):
+    """A terminal handed a PNG stops rendering text, and the person's next command is invisible to
+    them — a worse outcome than being told which flag to use."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    blob = b"\x89PNG\r\n\x1a\n\x00\x01\x02"
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": "a" * 40, "path": "logo.png", "size": len(blob),
+        "executable": False, "symlink": False, "too_large": False, "limit": 5 * 1024 * 1024,
+        "binary": True, "encoding": "base64", "content": base64.b64encode(blob).decode()}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "file", "P1", "logo.png"])
+    assert "--output" in str(caught.value)
+
+    destination = tmp_path / "logo.png"
+    assert cli.main(["project", "file", "P1", "logo.png", "--output", str(destination)]) == 0
+    assert destination.read_bytes() == blob
+
+
+def test_a_file_over_the_relays_bound_is_refused_with_the_way_forward(monkeypatch, tmp_path):
+    """The relay answers 200 with `too_large` — the file is real and the ask was reasonable — but
+    THIS command promised contents and did not get them, so it exits non-zero."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": "a" * 40, "path": "big.bin", "size": 99_000_000,
+        "executable": False, "symlink": False, "too_large": True, "limit": 5 * 1024 * 1024,
+        "binary": None, "encoding": None, "content": None}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "file", "P1", "big.bin"])
+
+    assert "grid project download P1" in str(caught.value)
+
+
+def test_project_download_streams_the_zip_to_disk_and_says_where(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    payload = b"PK\x03\x04" + b"z" * 500
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, content=payload,
+                              headers={"content-type": "application/zip"})
+
+    _mock_relay(monkeypatch, handler)
+    destination = tmp_path / "p.zip"
+    assert cli.main(["project", "download", "P1", "--output", str(destination)]) == 0
+
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/download")
+    assert destination.read_bytes() == payload
+    assert str(destination) in capsys.readouterr().out
+
+
+def test_a_refused_download_leaves_no_part_file_behind(monkeypatch, tmp_path):
+    """The part file is this command's own litter. A refusal that left one behind would look like a
+    half-finished download in the folder the person was watching."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(413, json={
+        "detail": {"code": "project_too_large_to_download",
+                   "message": "This project holds 5000000000 bytes", "bytes": 5_000_000_000,
+                   "limit": 1_073_741_824}}))
+    destination = tmp_path / "p.zip"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(destination)])
+
+    assert "5000000000" in str(caught.value)
+    assert not destination.exists()
+    assert list(tmp_path.glob(".p.zip.*")) == [], "a .part file survived a refusal"
+
+
+def test_task_diff_asks_the_diff_route_and_names_who_asked(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "task_id": "t-1", "project_id": "P1", "kind": "message", "state": "completed",
+            "author": {"name": "Alice Example", "email": "alice@example.com"},
+            "created_at": None, "completed_at": None, "available": True,
+            "files": [{"path": "a.txt", "status": "added", "added": 2, "deleted": 0,
+                       "binary": False}],
+            "patch": "--- /dev/null\n+++ b/a.txt\n", "patch_truncated": False})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["task", "diff", "t-1"]) == 0
+
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/tasks/t-1/diff")
+    out = capsys.readouterr().out
+    assert "Alice Example" in out
+    assert "a.txt" in out
+    assert "+2 -0" in out
+
+
+def test_a_merge_step_is_not_attributed_to_the_person(monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g: a merge turn is machinery, not a message. `kind` is compared for EQUALITY —
+    absent means a person's message, which is the right degrade for an older relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "task_id": "t-2", "project_id": "P1", "kind": "merge", "state": "completed",
+        "author": {"name": "Alice Example", "email": "a@example.com"},
+        "created_at": None, "completed_at": None, "available": True,
+        "files": [], "patch": None, "patch_truncated": False}))
+
+    assert cli.main(["task", "diff", "t-2"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Alice Example" not in out
+    assert "combine" in out
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("no_result", "did not change anything"),
+    ("expired", "no longer keeps"),
+    ("something_new", "no change to show"),
+])
+def test_a_task_with_no_change_to_show_is_an_answer_and_not_a_failure(
+        monkeypatch, tmp_path, capsys, reason, expected):
+    """Both documented reasons are answers, so the exit code stays 0 — and a reason this CLI has
+    never heard of is DISPLAYED rather than guessed at (the `task.retry` rule)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "task_id": "t-3", "project_id": "P1", "kind": "message", "state": "failed",
+        "author": None, "created_at": None, "completed_at": None,
+        "available": False, "reason": reason, "files": [], "patch": None,
+        "patch_truncated": False}))
+
+    assert cli.main(["task", "diff", "t-3"]) == 0
+
+    assert expected in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", [
+    ["project", "files", "P1"],
+    ["project", "file", "P1", "a.txt"],
+    ["project", "download", "P1"],
+    ["task", "diff", "t-1"],
+])
+def test_an_old_relay_gets_a_sentence_naming_the_relay_not_a_bare_not_found(
+        monkeypatch, tmp_path, command):
+    """All four arrived in one release, so one hint covers them — `_OLD_RELAY_NO_ARCHIVE`'s
+    precedent. It must NOT be `_OLD_RELAY`, which claims the relay has no projects at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(command)
+
+    message = str(caught.value)
+    assert "predates" in message
+    assert "operator to update it" in message
+    assert "does not have projects" not in message
+
+
+@pytest.mark.parametrize("command", [
+    ["project", "files", "P1"],
+    ["project", "file", "P1", "a.txt"],
+    ["project", "download", "P1"],
+    ["task", "diff", "t-1"],
+])
+def test_a_real_refusal_is_shown_in_the_relays_own_words(monkeypatch, tmp_path, command):
+    """The other side of that gate: a 404 the relay MEANT must keep its own sentence."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(command)
+
+    assert str(caught.value) == "No such project"
+
+
+@pytest.mark.parametrize("command,route", [
+    (["project", "files", "P1", "--json"], "files"),
+    (["project", "file", "P1", "a.txt", "--json"], "file"),
+    (["task", "diff", "t-1", "--json"], "diff"),
+])
+def test_json_puts_the_relays_own_document_on_stdout(monkeypatch, tmp_path, capsys, command, route):
+    """The application contract: stdout is one parseable document and nothing else."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = {"project_id": "P1", "commit": "a" * 40, "path": "a.txt", "entries": [], "total": 0,
+            "truncated": False, "size": 6, "executable": False, "symlink": False,
+            "too_large": False, "limit": 10, "binary": False, "encoding": "utf-8",
+            "content": "hello\n", "available": False, "reason": "no_result", "files": [],
+            "patch": None, "patch_truncated": False, "task_id": "t-1", "kind": "message",
+            "state": "failed", "author": None, "created_at": None, "completed_at": None}
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    assert cli.main(command) == 0
+
+    assert json.loads(capsys.readouterr().out) == body
+
+
+def test_a_diff_reply_the_cli_cannot_read_is_refused_not_reported_as_no_change(
+        monkeypatch, tmp_path):
+    """⚠️ Found by review. This is the surface that audits what landed, so "I do not understand what
+    the relay sent" printed as "this task changed nothing" is the one wrong answer that stops
+    somebody looking. `grid project files` refuses in the same situation; this now matches it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"task_id": "t-1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "diff", "t-1"])
+
+    assert "--json" in str(caught.value)
+
+
+def test_a_download_that_wrote_nothing_is_refused_rather_than_called_empty(monkeypatch, tmp_path):
+    """⚠️ Found by review. An empty project is a 22-byte zip, not a 0-byte one, and a project with
+    no trunk is refused by the relay before anything streams — so there is no legitimate way to get
+    here, and the first draft's reassuring note described a real fault as normal."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, content=b"",
+                                                      headers={"content-type": "application/zip"}))
+    destination = tmp_path / "p.zip"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(destination)])
+
+    assert "no data" in str(caught.value)
+    assert "empty project" not in str(caught.value).split("This is not")[0]
+
+
+@pytest.mark.parametrize("bad", ["missing-folder", "a-file"])
+def test_a_download_to_an_unwritable_place_is_a_clean_refusal_not_a_traceback(
+        monkeypatch, tmp_path, bad):
+    """⚠️ The `.part` file is created BEFORE the request, so its failure is outside the transport's
+    own handler. Measured: `--output /nonexistent-dir/p.zip` printed a raw `FileNotFoundError` at
+    the user, where this plane's contract is that any failure is a clean `SystemExit`.
+
+    Refused before the relay is asked for anything, which is also the cheap direction: there is no
+    point packing a project into a path that cannot be written.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    if bad == "missing-folder":
+        output = tmp_path / "no-such-folder" / "p.zip"
+    else:
+        # A parent that exists and is not a directory — `--output existing-file/p.zip`.
+        (tmp_path / "plain.txt").write_text("i am a file\n")
+        output = tmp_path / "plain.txt" / "p.zip"
+
+    asked = []
+    _mock_relay(monkeypatch, lambda r: asked.append(r) or httpx.Response(200, content=b"PK"))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(output)])
+
+    assert "Cannot write to" in str(caught.value)
+    assert "--output" in str(caught.value)
+    assert asked == [], "the relay was asked to pack a project into a path that cannot be written"
+
+
+@pytest.mark.parametrize("command,body", [
+    (["project", "files", "P1"], {"project_id": "P1"}),
+    (["task", "diff", "t-1"], {"task_id": "t-1"}),
+])
+def test_an_unreadable_reply_exits_non_zero_in_BOTH_modes(monkeypatch, tmp_path, capsys,
+                                                          command, body):
+    """⚠️ Found by review. `_emit` returns True whatever the payload's shape, so an early
+    `if _emit(...): return 0` puts the shape guard out of reach of `--json` — the one mode an
+    application actually drives. An unreadable listing exited 0 there and 1 in a terminal.
+
+    `_project_create`'s guard states the rule this restores: stdout stays one parseable document,
+    the explanation goes to stderr, and **the exit code carries the verdict**.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    with pytest.raises(SystemExit):
+        cli.main(command)
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as as_json:
+        cli.main(command + ["--json"])
+
+    # The document still went to stdout — the refusal is AFTER a successful print, not instead of it.
+    assert json.loads(capsys.readouterr().out) == body
+    assert "--json" in str(as_json.value)
+
+
+def test_a_download_that_cannot_be_moved_into_place_leaves_nothing_behind(monkeypatch, tmp_path):
+    """The one exit path whose cleanup did not run: `partial.replace(destination)` sits outside both
+    handlers, so an `OSError` there escaped raw AND stranded the part-file. Reachable by a race the
+    length of a download makes real — the destination becoming a non-empty directory while the bytes
+    were arriving."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    destination = tmp_path / "p.zip"
+
+    def in_the_way(request):
+        # The RACE, not the steady state: `cli/project_download.py`'s `is_dir()` pre-check already
+        # refuses a directory that is there when the command starts — cleanly, and before the relay
+        # is asked for anything. What it cannot see is the destination appearing WHILE the bytes
+        # arrive, which over a long download is a real interval.
+        destination.mkdir()
+        (destination / "occupied.txt").write_text("in the way\n")
+        return httpx.Response(200, content=b"PK\x03\x04zip",
+                              headers={"content-type": "application/zip"})
+
+    _mock_relay(monkeypatch, in_the_way)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(destination)])
+
+    assert "could not put them at" in str(caught.value)
+    assert list(tmp_path.glob(".p.zip.*")) == [], "a .part file survived a failed move"

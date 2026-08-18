@@ -20,6 +20,7 @@ module is the stateless wire boundary.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, Iterable, Iterator
 from urllib.parse import quote
 
@@ -931,6 +932,19 @@ _OLD_RELAY = (
 # does not, with no way to tell from here.
 _IMPORT_FINISH_TIMEOUT = 900.0
 
+# How long this CLI waits for a whole-project download (ADR 0034 D-m, issue 45).
+#
+# ⚠️ **Must stay ABOVE grid-src's `project_download.ARCHIVE_TIMEOUT_SECONDS` (600s)** — the same
+# direction as `_IMPORT_FINISH_TIMEOUT` against the relay's 600s object walk, and the same reason:
+# a client that gives up first turns a refusal the relay was about to make into "the connection
+# died", and no log on either side can then say which happened. `tests/test_task_lease.py` parses
+# the relay's constant rather than restating it.
+#
+# A finite read timeout rather than `_TASK_FOLLOW_TIMEOUT`'s `read=None`: a stream that legitimately
+# goes quiet for hours is a conversation somebody is watching, where a download that goes quiet is a
+# relay that has stopped packing.
+_DOWNLOAD_TIMEOUT = 900.0
+
 
 # A relay that predates ADR 0033 D-p (issue 33) has none of the three lifecycle routes, and answers
 # the same bare framework 404 an unknown project id would produce on a relay that does.
@@ -1348,6 +1362,153 @@ def send_turn(
         # The id is user input going into a path.
         f"/relay/v1/tasks/{quote(conversation_id, safe='')}/turns",
         json=body, missing_route_hint=_OLD_RELAY_NO_SEND)
+
+
+# The four reads of ADR 0034 D-m (issue 45) arrived in ONE release, so a relay missing any of them
+# is missing all four and one sentence covers the lot — `_OLD_RELAY_NO_ARCHIVE`'s precedent, and for
+# its reason.
+#
+# ⚠️ **Its own sentence rather than `_OLD_RELAY`**, which says the relay has no projects at all. It
+# plainly has: this CLI reached these routes through a project id it got from `grid project list`.
+#
+# It names what still works, as its five siblings do — and here that is deliberately hedged, because
+# the whole point of the slice is the person who CANNOT use it. `clone` is offered as the answer for
+# a reader who happens to have git, not as the answer.
+_OLD_RELAY_NO_READS = (
+    "This grid's relay cannot show a project's files over the network — it predates that. Ask its "
+    "operator to update it. If you have git on this machine, `grid project clone <project-id>` "
+    "still gets you a copy in the meantime."
+)
+
+
+def project_files(signaling_url: str, access_token: str, project_id: str, *,
+                  path: str = "") -> dict[str, Any]:
+    """One directory level of a project (``GET /relay/v1/projects/{id}/files``).
+
+    `path=""` is the top of the project. The relay answers a listing of the TRUNK — what the project
+    holds now, everybody's work included — and there is deliberately no way to name a conversation's
+    branch: that is a developer's question and this surface is not for one.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        # The id is user input going into a path.
+        f"/relay/v1/projects/{quote(project_id, safe='')}/files",
+        params={"path": path}, missing_route_hint=_OLD_RELAY_NO_READS)
+
+
+def project_file(signaling_url: str, access_token: str, project_id: str, *,
+                 path: str) -> dict[str, Any]:
+    """One file's contents (``GET /relay/v1/projects/{id}/file``).
+
+    ⚠️ **The path goes in a QUERY parameter and never in the path segment**, and that is not a style
+    choice: a file's path contains slashes, so putting it in the URL path would make
+    `/projects/{id}/file/{path}` ambiguous against every future route under `/file/`, and `%2F` is
+    rejected or normalised by proxies before FastAPI ever sees it.
+
+    The reply is one envelope for text and binary alike — `encoding` says which, `content` is `None`
+    when the file is over the relay's inline bound, and `size` is stated either way.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/file",
+        params={"path": path}, missing_route_hint=_OLD_RELAY_NO_READS)
+
+
+def turn_diff(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:
+    """What one TURN changed (``GET /relay/v1/tasks/{id}/diff``).
+
+    ⚠️ **The turn, not the conversation** — `undo_task`'s note, for the same reason and the same
+    hazard: the identical `/tasks/{id}/…` prefix addresses a CONVERSATION on `turns`, `commit` and
+    `stream`. `tests/test_task_lease.py` pins this path against the relay's own decorator, because a
+    drift would surface as "ask your operator to update the relay" about one that is up to date.
+
+    `available: false` is an ANSWER and not a failure — a turn that produced nothing, or one whose
+    history the relay's retention window has collected. `reason` says which.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "GET",
+        f"/relay/v1/tasks/{quote(task_id, safe='')}/diff",
+        missing_route_hint=_OLD_RELAY_NO_READS)
+
+
+def download_project(signaling_url: str, access_token: str, project_id: str,
+                     destination: Path) -> int:
+    """The whole project as a zip, written to `destination` (``GET …/{id}/download``). Bytes written.
+
+    ⚠️ **Streamed, so the bare-404 hint is applied HERE rather than by `_task_oneshot`** — the trap
+    `stream_conversation_events` records: a streamed response has no `.text` until it is drained, so
+    the one-shot helper's gate, which is on a body, never runs on this path. Keyed on the same bare
+    `"Not Found"` string, so a relay that HAS the route and refuses for its own reason still shows
+    its own words.
+
+    ⚠️ **`_DOWNLOAD_TIMEOUT` must stay ABOVE the relay's `project_download.ARCHIVE_TIMEOUT_SECONDS`**
+    (600s), the same direction as the import pair and the git-transport pair. A client that gives up
+    first turns a refusal the relay was about to make into "the connection died", and neither side
+    can then say which happened. Parsed out of grid-src by `tests/test_task_lease.py`.
+
+    Written to a temporary file beside the destination and moved into place only once the stream has
+    finished, so an interrupted download never leaves a half-file where a whole one is expected —
+    a zip is read from its tail, so a truncated one fails in a way that reads as corruption.
+    """
+    import tempfile
+
+    destination = Path(destination)
+    written = 0
+    try:
+        handle = tempfile.NamedTemporaryFile(
+            dir=str(destination.parent), prefix=f".{destination.name}.", suffix=".part",
+            delete=False)
+    except OSError as exc:
+        # ⚠️ **Outside the `try` below, so it needs its own.** A directory that does not exist, one
+        # that is not writable, or a `--output` whose parent is a FILE all raise here — before a
+        # single byte is asked of the relay — and an `OSError` escaping this module is a traceback
+        # where this plane's contract is a clean `SystemExit`. Measured:
+        # `--output /nonexistent-dir/p.zip` printed `FileNotFoundError` at the user.
+        raise SystemExit(
+            f"Cannot write to {destination}: {exc.strerror or exc}. Give --output a path in a "
+            f"folder that exists and is writable.") from None
+    partial = Path(handle.name)
+    try:
+        with _client(signaling_url, access_token, timeout=_DOWNLOAD_TIMEOUT) as client:
+            with client.stream(
+                    "GET",
+                    f"/relay/v1/projects/{quote(project_id, safe='')}/download") as resp:
+                if resp.status_code >= 400:
+                    resp.read()  # a streamed response has no `.text` until it is drained
+                    message = _task_error_message(resp)
+                    if (resp.status_code == 404
+                            and message.strip().lower() == _BARE_FRAMEWORK_404):
+                        raise SystemExit(_OLD_RELAY_NO_READS)
+                    raise TaskRefusal(message, code=refusal_code(resp),
+                                      status=resp.status_code)
+                with handle:
+                    for chunk in resp.iter_bytes():
+                        handle.write(chunk)
+                        written += len(chunk)
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        partial.unlink(missing_ok=True)
+        raise SystemExit(f"Cannot reach the relay (GET download): {exc}") from None
+    except BaseException:
+        # Every other way out, `SystemExit` included: the part file is this function's own litter and
+        # must not survive a refusal or a Ctrl-C.
+        partial.unlink(missing_ok=True)
+        raise
+    try:
+        # ⚠️ **Its own handler: this line is OUTSIDE both arms above**, so an `OSError` here would
+        # escape as a traceback and leave the part-file behind — the one exit path where cleanup did
+        # not run. Reachable by a race the length of a download makes real: `destination` becoming a
+        # non-empty directory, or its permissions changing, while the bytes were arriving.
+        #
+        # A `--output` naming a SYMLINK is replaced rather than written through, which is
+        # `os.replace`'s own semantics and what every download tool does; named here because it is
+        # the kind of thing somebody later reads as a bug.
+        partial.replace(destination)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise SystemExit(
+            f"Downloaded {written} bytes but could not put them at {destination}: "
+            f"{exc.strerror or exc}. Nothing was left behind; try a different --output.") from None
+    return written
 
 
 def get_task(signaling_url: str, access_token: str, task_id: str) -> dict[str, Any]:

@@ -692,6 +692,65 @@ def _add_project(sub) -> None:
     status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     status.set_defaults(handler=cmd_remote_project)
 
+    # `files` / `file` / `download` — seeing the project with no git on the machine (ADR 0034 D-m,
+    # issue 45). Until these, the only read path was `clone`, which needs git AND a credential
+    # helper git is new enough to describe — a dead end at the first step for the person this
+    # product is for.
+    files = project_sub.add_parser(
+        "files",
+        help="List what is in the project, one folder at a time",
+        description=(
+            "See what is in your project.\n\n"
+            "No git needed on this machine. With no path you get the top of the project; give a "
+            "folder's name to look inside it.\n\n"
+            "What you see is the project as it stands now — everybody's finished work, applied by "
+            "the grid as each task completes."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(files)
+    # Through `project_arg` rather than a bare `add_argument`: an optional positional BEHIND the
+    # optional project id is the `clone`/`refresh` shape, and argparse fills the two left to right —
+    # so `grid project files --project P src` parks `src` in the project id and lists the top of a
+    # project called `src`. Measured, before `add_path` existed.
+    project_arg.add_path(files, help="Folder to look inside (default: the top of the project).")
+    files.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    files.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    files.set_defaults(handler=cmd_remote_project)
+
+    one_file = project_sub.add_parser(
+        "file",
+        help="Read one file out of the project",
+        description=(
+            "Read one file, without git and without downloading the whole project.\n\n"
+            "Text is printed. Anything that is not text needs `--output`, because writing it to a "
+            "terminal stops that terminal rendering text at all.\n\n"
+            "A very large file is refused with its size — `grid project download` gets it as part "
+            "of the whole project."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(one_file)
+    one_file.add_argument("path", help="File to read, e.g. `src/app.py`.")
+    one_file.add_argument("--output", default=None,
+                          help="Write the file here instead of printing it.")
+    one_file.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    one_file.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    one_file.set_defaults(handler=cmd_remote_project)
+
+    download = project_sub.add_parser(
+        "download",
+        help="Download the whole project as a zip",
+        description=(
+            "Take the whole project away as one zip file.\n\n"
+            "No git needed. This is the copy to hand to somebody else, or to open in an editor on "
+            "a machine that has no developer tools.\n\n"
+            "It is a snapshot of the project as it stands, not a repository: to keep working in it "
+            "through the grid, send a task instead."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(download)
+    download.add_argument("--output", default=None,
+                          help="Where to write the zip (default: <project-id>.zip here).")
+    download.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    download.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    download.set_defaults(handler=cmd_remote_project)
+
     # `commit` — a change goes in without an agent (ADR 0033 D-j, issue 20), onto the branch of a
     # CONVERSATION named on the command line (ADR 0034 D-e, issue 41).
     committer = project_sub.add_parser(
@@ -1069,6 +1128,25 @@ def _add_task(sub) -> None:
     cancel.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     cancel.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     cancel.set_defaults(handler=cmd_remote_task)
+
+    # `diff` — what one task changed (ADR 0034 D-m, issue 45). The audit surface auto-apply created:
+    # every finished task is now a release, and the promotion ledger that used to answer "what
+    # landed" went with `grid project promote`.
+    diff = task_sub.add_parser(
+        "diff",
+        help="See what one finished task changed",
+        description=(
+            "See exactly what one task changed in the project.\n\n"
+            "Finished work reaches the project by itself, so this is how you check that what "
+            "arrived is what you meant — including any files you sent with the message.\n\n"
+            "A task that changed nothing says so. A task that ran long ago may no longer have its "
+            "details kept, which is also an answer rather than a problem.\n\n"
+            "To take a change back out, `grid task undo <task-id>`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    diff.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    diff.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    diff.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    diff.set_defaults(handler=cmd_remote_task)
 
     undo = task_sub.add_parser(
         "undo",
