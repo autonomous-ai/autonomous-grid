@@ -112,7 +112,7 @@ and never building.
 
 ## 1. Mate-in-One — pick the best fit
 
-![Mate-in-One — the baseline: one prompt, ranked to one worker, one answer](mate.svg)
+![Mate-in-One — the baseline: one prompt, ranked to one worker, one answer](images/mate.svg)
 
 **Intent.** Decide which single model best fits a job, then run it once. This
 is the current Grid router verbatim: a deterministic hard filter, an advisor
@@ -148,7 +148,7 @@ classification that looks right in training data and fails on the tail.
 
 ## 2. Fan-Out — same prompt, N answers, a vote
 
-![Fan-Out — one prompt fanned to three workers, a vote, expand on a tie](fanout.svg)
+![Fan-Out — one prompt fanned to three workers, a vote, expand on a tie](images/fanout.svg)
 
 **Intent.** Run several independent models on the *same* prompt and keep the
 one the majority agree on. This is best-of-N / self-consistency, made viable
@@ -218,7 +218,7 @@ hoping for it.
 
 ## 3. Master / Slave — a planner splits the job
 
-![Master / Slave — a planner splits the job into specialist lanes that merge](master.svg)
+![Master / Slave — a planner splits the job into specialist lanes that merge](images/master.svg)
 
 **Intent.** A planner decomposes the job, each piece goes to the specialist
 built for it, and the results come back together. This is Anthropic's
@@ -263,7 +263,7 @@ parts that were never meant to go together. Plan quality is the whole bet.
 
 ## 4. Adversarial — two careful reads, a judge
 
-![Adversarial — two careful reads disagreeing into a judge's decision](adversarial.svg)
+![Adversarial — two careful reads disagreeing into a judge's decision](images/adversarial.svg)
 
 **Intent.** Two independent careful reads of the same job, and a judge who
 settles where they disagree. This is multi-agent debate / the dissent gate,
@@ -317,7 +317,7 @@ therefore their blind spot).
 
 ## 5. Strategy — each request chooses a pattern
 
-![Strategy — each request is routed to the pattern that fits it](strategy.svg)
+![Strategy — each request is routed to the pattern that fits it](images/strategy.svg)
 
 **Intent.** A per-request switch decides *which* of the other patterns runs.
 The router stops being one shape and becomes the thing that picks the shape.
@@ -359,7 +359,7 @@ strategy layer needs the same humility it gives the layers below.
 
 ## 6. Brute-Force — many identical tries, keep the best
 
-![Brute-Force — a deck of identical workers, best of N into the answer](brute.svg)
+![Brute-Force — a deck of identical workers, best of N into the answer](images/brute.svg)
 
 **Intent.** Run N *identical* tries at the same rough draft and keep the best
 one. This is the "spin off twenty agents doing the same thing" mode, made
@@ -424,7 +424,7 @@ deterministic.)
 
 ## 7. Ensemble — same prompt, keep the average
 
-![Ensemble — three workers into a mean that averages their answers](ensemble.svg)
+![Ensemble — three workers into a mean that averages their answers](images/ensemble.svg)
 
 **Intent.** Run N answers and keep the *average*, not a winner. Where #2
 *votes* and #6 *selects*, this *averages* — the anti-cleverness pooling rule.
@@ -477,7 +477,7 @@ and the wrong needle.
 
 ## 8. Verifier Gate — one draft, a check, retry on fail
 
-![Verifier Gate — one draft passes a check, a dashed loop retries on fail](verify.svg)
+![Verifier Gate — one draft passes a check, a dashed loop retries on fail](images/verify.svg)
 
 **Intent.** Run one draft, *verify* it, and let a failing check loop the work
 back for another try. This is generator + verifier, and the loop is what
@@ -539,7 +539,7 @@ to a weak check.
 
 ## 9. Debate — two reads that loop until they agree
 
-![Debate — two careful reads into a judge, a dashed loop for disagreement](debate.svg)
+![Debate — two careful reads into a judge, a dashed loop for disagreement](images/debate.svg)
 
 **Intent.** Like #4, two careful reads and a judge — but disagreement loops
 the reads back for another round, instead of the judge ruling immediately.
@@ -600,7 +600,7 @@ above — exhaustion is an escalator, never a forced ruling.)
 
 ## 10. Pipeline — each step consumes the last
 
-![Pipeline — scout, write, check as a chain of three steps to the answer](handoff.svg)
+![Pipeline — scout, write, check as a chain of three steps to the answer](images/handoff.svg)
 
 **Intent.** A *sequence* of specialist steps, each consuming the previous
 one's output — scout → write → check → answer. This is #3's planner without
@@ -660,7 +660,7 @@ the chain.
 
 ## 11. Negative Selection — force divergence before you judge
 
-![Negative Selection — three workers, a select node that drops clones, then a vote](negative.svg)
+![Negative Selection — three workers, a select node that drops clones, then a vote](images/negative.svg)
 
 **Intent.** Run several models on the prompt, but *hard-filter the sample set
 for dissimilarity before the vote* — the immune system training its
@@ -723,7 +723,7 @@ has nothing to screen on.
 
 ## 12. Markowitz Ensemble — correlation-weighted, not just averaged
 
-![Markowitz Ensemble — workers into a weighted-mean node, correlation-weighted](markov.svg)
+![Markowitz Ensemble — workers into a weighted-mean node, correlation-weighted](images/markov.svg)
 
 **Intent.** Instead of averaging whatever N models the router happened to pick
 (#7), treat the ensemble as a *portfolio problem*: weight the members by their
@@ -788,7 +788,7 @@ the swap budget before any sample runs; on one GPU the pattern degrades toward
 
 ## 13. PID Confidence Loop — a budget that tracks error, history, and trend
 
-![PID Confidence Loop — set spend, samples, check, with a P·I·D re-command loop](pid.svg)
+![PID Confidence Loop — set spend, samples, check, with a P·I·D re-command loop](images/pid.svg)
 
 **Intent.** Replace #5's open-loop one-shot pattern-pick with a *closed control
 loop* whose setpoint is "confidence ≥ threshold" and whose manipulated
@@ -863,7 +863,7 @@ so the caller understands *why* latency jumped. Re-command must obey
 
 ## 14. Pheromone Router — learn which shape wins, with decay
 
-![Pheromone Router — choose from learned weights, verified wins reinforce back](pheromone.svg)
+![Pheromone Router — choose from learned weights, verified wins reinforce back](images/pheromone.svg)
 
 **Intent.** Make #5's strategy layer a *learning loop*: keep a per-request-class
 weight over {pattern, model, prompt-template}, reinforce what verified, and
@@ -960,7 +960,7 @@ learns*, not a new pattern):
 
 ## 15. Byzantine Adjudicator — spend more when the disagreement is adversarial
 
-![Byzantine Adjudicator — workers into a classify node: noise versus byzantine split](byzantine.svg)
+![Byzantine Adjudicator — workers into a classify node: noise versus byzantine split](images/byzantine.svg)
 
 **Intent.** Stop treating all disagreement as the same. Classify a #2 fan-out's
 divergence as either **noise** or **Byzantine**, and dose the redundancy
@@ -1023,7 +1023,7 @@ visible: `usage.escalation_depth`, `usage.divergence_shape: noise|byzantine`.
 
 ## 16. Straggler Backup — duplicate only the overdue worker
 
-![Straggler Backup — a worker with a backup spawned when it runs over budget](straggler.svg)
+![Straggler Backup — a worker with a backup spawned when it runs over budget](images/straggler.svg)
 
 **Intent.** For a parallel pattern (#2, #6), add a latency watchdog: if a worker
 exceeds its expected time budget, spawn a duplicate on a *different node* and
@@ -1073,7 +1073,7 @@ concurrent speculations or a flash crowd spawns N redundant runs.
 
 ## 17. Materialized Answer — cache the verified answer by a semantic key
 
-![Materialized Answer — job, a semantic hash, the pattern, with a verified→cache loop](materialized.svg)
+![Materialized Answer — job, a semantic hash, the pattern, with a verified→cache loop](images/materialized.svg)
 
 **Intent.** Cache a *verified* answer keyed by a semantic hash of
 (request-class, content-fingerprint, model), serve repeat expensive requests at
@@ -1135,7 +1135,7 @@ don't both recompute — the write-back is exactly-once, keyed like the ledger.
 
 ## 18. Canary Trust-Equity — earn a vote before you ever cast one
 
-![Canary Trust-Equity — job, incumbent and canary workers, a comparison gate, the answer](canary.svg)
+![Canary Trust-Equity — job, incumbent and canary workers, a comparison gate, the answer](images/canary.svg)
 
 **Intent.** Give a new model or pattern **observation-only, and then a
 graduated vote** — it shadows the incumbent on live traffic and only earns the
@@ -1213,7 +1213,7 @@ voted.
 
 ## 19. CVaR Budgeting — size the spend by the tail, not the mean
 
-![CVaR Budgeting — job, a budget over scenarios, weighted sample sizes, the answer](cvar.svg)
+![CVaR Budgeting — job, a budget over scenarios, weighted sample sizes, the answer](images/cvar.svg)
 
 **Intent.** Size a request's sample budget from the **tail risk of the answer
 class**, not its average behavior — spend a lot more on the rare request that's
@@ -1277,7 +1277,7 @@ replays).
 
 ## 20. Circuit Breaker + Bulkhead — fail fast, quarantine the toxic class
 
-![Circuit Breaker + Bulkhead — job, a trip mechanism, a degraded answer and a quarantined model, the answer](circuit.svg)
+![Circuit Breaker + Bulkhead — job, a trip mechanism, a degraded answer and a quarantined model, the answer](images/circuit.svg)
 
 **Intent.** When a model or request-class starts failing, **trip fast and
 degrade** instead of spending the whole request on a corpse — and isolate the
@@ -1347,7 +1347,7 @@ to "quarantine onto nothing" (#20 leans on #16's gate).
 
 ## 21. Delphi Consensus — anonymous rounds, iterated until the spread closes
 
-![Delphi Consensus — job, multiple rounds of anonymous numeric estimates, the answer](delphi.svg)
+![Delphi Consensus — job, multiple rounds of anonymous numeric estimates, the answer](images/delphi.svg)
 
 **Intent.** For a **numeric estimate**, run the workers in *iterated anonymous
 rounds* — each writes a private number and a one-line reason, then sees the
@@ -1432,7 +1432,7 @@ hold — the moment one breaks it is just #7 with extra steps.
 
 ## 22. Trial Sequential Analysis — the learner may only win once N is met
 
-![Trial Sequential Analysis — job, challenger and incumbent, an N-verified ledger, the answer](trial_seq.svg)
+![Trial Sequential Analysis — job, challenger and incumbent, an N-verified ledger, the answer](images/trial_seq.svg)
 
 **Intent.** When the router's own learner wants to declare "model X is
 better," require **a pre-specified number of verified outcomes** for that
@@ -1516,7 +1516,7 @@ has a duration attached to it.
 
 ## 23. Evidence-Bar Ladder — proof threshold scales with the cost of error
 
-![Evidence-Bar Ladder — job, a class-of-cost rank, three proof shelves, the answer](evid_bar.svg)
+![Evidence-Bar Ladder — job, a class-of-cost rank, three proof shelves, the answer](images/evid_bar.svg)
 
 **Intent.** Carry a **ladder of proof thresholds** rather than one confidence
 setpoint — classify each request by the *cost of a wrong answer* and *which
@@ -1583,7 +1583,7 @@ to every request's audit trail stays at **preponderance**: one check, ship.
 
 ## 24. Type-Revelation Screening — probe a model's type in idle, before trust
 
-![Type-Revelation Screening — job, a probe bank and a model, a prior update, allocation](screening.svg)
+![Type-Revelation Screening — job, a probe bank and a model, a prior update, allocation](images/screening.svg)
 
 **Intent.** Because the router can't observe a model's real competence, run a
 **proactive synthetic battery** — a small bank of calibrated probes per
@@ -1674,7 +1674,7 @@ re-measure rather than write it off forever.
 
 ## 25. Condorcet Pairwise Pooling — head-to-head beats plurality on a three-way split
 
-![Condorcet Pairwise Pooling — job, a three-way gap, pairwise comparisons, the best answer](condorcet.svg)
+![Condorcet Pairwise Pooling — job, a three-way gap, pairwise comparisons, the best answer](images/condorcet.svg)
 
 **Intent.** When N models split a genuinely ambiguous request into **three or
 more camps**, don't count plurality — run **pairwise head-to-head comparisons**
@@ -1767,7 +1767,7 @@ plurality wearing a Condorcet costume.
 
 ## 26. Slack-Stealing Scheduler — run background work only in the idle a live request leaves free
 
-![Slack-Stealing Scheduler — foreground with deadlines, background only in the slack, preempted on arrival](slack_steal.svg)
+![Slack-Stealing Scheduler — foreground with deadlines, background only in the slack, preempted on arrival](images/slack_steal.svg)
 
 **Intent.** Give the router the background executor #18, #22, and #24 all
 assume and none of them build: reserve the GPU's seats for live requests with
@@ -1860,7 +1860,7 @@ without ceremony the moment anyone needs the GPU.
 
 ## 27. Thompson Posterior Router — route by sampling each model's posterior, not by argmax
 
-![Thompson Posterior Router — per-model posterior, sample the draw, the loser still gets pulled](thompson.svg)
+![Thompson Posterior Router — per-model posterior, sample the draw, the loser still gets pulled](images/thompson.svg)
 
 **Intent.** Replace #14's greedy reinforce-and-decay learner with a **Bayesian
 exploration policy**: keep a Beta posterior `p_win` per {pattern, model,
