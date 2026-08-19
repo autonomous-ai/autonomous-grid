@@ -72,6 +72,7 @@ fixed and mean the same thing in every pattern:
 - **Mechanics** — how the parts collaborate: who decides, who waits, what
   crosses which edge.
 - **Consequences** — what the pattern costs and what it forgives.
+- **Known Uses** — real systems and techniques that already run this shape, so the abstraction is anchored, not invented.
 - **Failure mode** — the specific way this pattern goes wrong, and the honest
   version of its promise.
 - **Refinements** — how to build it: the concrete rules that keep the promise
@@ -244,6 +245,8 @@ throughput, which a later pattern (#5) exploits: the ranker picks by
 point of failure on the ranker's judgment — one wrong `SIMPLE` call and the
 whole answer is wrong, silently. There is no second read.
 
+**Known Uses.** Route each request to exactly one model you already trust, with a monotonic fallback. Every model-serving layer ships this as its default path (a single model-id with a retry), and 'pick one by a cheap cost model, else fall back' is the shape of most production prompt-routers before they learn anything.
+
 **Failure mode.** The ranker is confident and wrong. Familiar: a
 classification that looks right in training data and fails on the tail.
 
@@ -297,6 +300,8 @@ ignites the expand branch.
 would buy one. Cost is three answers' tokens you never paid for. The risk
 is slow consensus: three models agreeing is great, three models each with a
 plausible but different answer burns the win and falls to expand.
+
+**Known Uses.** Self-consistency decoding: sample N completions of the same prompt and majority-vote the answer (Wang et al., 2022) — the canonical Fan-Out on the token level, and it is exactly how 'think harder' is spent in local math/code loops.
 
 **Failure mode.** Unanimous-but-wrong. All three share the same blind spot
 because they share the same tail of the web. The vote is a measurement of
@@ -384,6 +389,8 @@ the planner's own judgment: a bad split is worse than no split, because you
 pay the planner, the wrong specialists, *and* a merge that has to stitch
 mismatched parts.
 
+**Known Uses.** Plan-then-execute and decompose agents: a master LLM writes a plan, slave workers execute each step, results flow back. This is the spine of plan-and-execute / ReAct-style hierarchical agents and most tool-orchestration frameworks.
+
 **Failure mode.** The planner miscuts the seam and the merge has to reconcile
 parts that were never meant to go together. Plan quality is the whole bet.
 
@@ -431,6 +438,8 @@ curates its own evidence, so an adversary is the fix.
 **Consequences.** The surest hedge against quiet wrongness, but it never runs
 the "easy" path — it spends two reads on every job, even the trivial ones.
 That is the pattern's own misfit: #4 is wasted on a simple lookup.
+
+**Known Uses.** Generator-versus-checker: the GAN's discriminator and today's 'judge LLM' both stand a separate model against the produced answer so a second pair of eyes (and a different inductive bias) audits the first. Socratic/calibration techniques use the same two-voice shape.
 
 **Failure mode.** Both reads share the false frame and the judge inherits it
 — disagreement that never happens because the two readers were given the same
@@ -506,6 +515,8 @@ adaptive. The cost is judging-requires-a-judge: the strategy layer must be
 right about *which pattern*, and a good mate-in-one judgment is not
 guaranteed to transfer to a good strategy judgment. It can fall back to a
 default when uncertain; the default is what we ship today.
+
+**Known Uses.** GoF's own Strategy: a runtime-selected algorithm chosen by request shape. Any router whose policy is 'select a pattern per request' — including the other 26 entries in this catalog — is a Strategy in action.
 
 **Failure mode.** The cost heuristic itself is wrong — a request that looks
 cheap but is a trap, silently routed to a single model that misses it. The
@@ -584,6 +595,8 @@ buys a floor, never a ceiling. It shines on satisfiability-style problems
 (any valid answer wins), not on noise where the average is the truth — and if
 the "best" sample is still uniformly hard, the floor is where it always was.
 
+**Known Uses.** Best-of-N sampling (BoN): draw many candidates and keep the best by a metric, used to push RLHF reward margins; and 'keep sampling until a test passes' is brute-force retry in code/tool loops.
+
 **Failure mode.** The best of N bad tries is still a bad try. Brute coverage
 raises the floor; it does nothing for an answer that is uniformly hard.
 
@@ -648,6 +661,8 @@ answers. The costs: it only applies where averaging is a sensible reduction
 (a number, a probability, a vector — not a piece of prose), and it inherits
 the shared-bias problem — if every sample is biased the same way, the mean
 is confidently wrong with small variance (the classic underestimation trap).
+
+**Known Uses.** Averaging across ensemble members: ensemble distillation and weight/response averaging across checkpoints (and across differently-initialized models) is Ensemble at the top of the stack.
 
 **Failure mode.** Averaging bakes in the bias. Low variance is *not* the same
 as accuracy — an ensemble of correlated erring answers has beautiful dials
@@ -718,6 +733,8 @@ measured against (a tool check that passes on held-out bad drafts) or it is
 not a check, it is a rubber stamp in a purple box. Design the verifier, not
 the generator: a weak verifier means a confident "ok" on a wrong answer — the
 quiet-fail case again.
+
+**Known Uses.** LLM-as-a-judge / reward-model reranking: a separate verifier model scores one draft (rather than voting among many) and gates release — the reward-model reranker in RLHF is Verifier Gate under a different name.
 
 **Failure mode.** The verifier rubber-stamps. Everything rides on the check
 being a real check — if it's a cheap heuristic that can't see the error, the
@@ -801,6 +818,8 @@ blind spot rather than break it if the two reads are the same model with the
 same prompt — the loop then converges fast and confidently on the group's
 shared error (the "everyone agrees because everyone was primed the same"
 failure, worse than #4's single quiet slip).
+
+**Known Uses.** Multi-agent debate (Du et al., 2023) and Socratic variants: two or more models argue through a problem until agreement, which both cross-checks and re-derives the reasoning.
 
 **Failure mode.** Fake convergence — agreement that is really both reads
 sharing the same primed wrongness, now certified by K rounds of agreement.
