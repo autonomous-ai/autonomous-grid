@@ -90,6 +90,20 @@ same role, and the pick is the shape of the task, not a benchmark:
 **layer of work**, not by a benchmark score. Five layers of agent work, five
 home bases:
 
+**Five home bases, at a glance.** One line per layer tells you which
+harness to reach for before the detail below; the prose that follows is the
+*why* and the *when-not*.
+
+| Layer | Home base | Distinctive strength | Grab it when |
+|-------|-----------|----------------------|--------------|
+| Channel | **OpenClaw** | sits *in* Slack/Telegram/Discord/email; reaches tools by plugin | the task starts where you already operate and spans several tools |
+| Memory | **Hermes Agent** | builds skills, remembers you across sessions, provider-agnostic | the value is an agent that *accumulates* context, not a one-shot answer |
+| Desktop | **Claude Cowork** | turnkey managed desktop agent, no terminal | a non-technical professional delegates file/browser/spreadsheet work |
+| Coding | **Claude Code** | repo-aware single-developer workspace; parallel sessions and subagents | the deliverable is a code change under an engineering loop |
+| Command-center | **Codex** | worktrees, cloud envs, PR throughput for many agents × many repos | you supervise many agents across many repos |
+
+
+
 - **Channel layer — OpenClaw.** If the task starts where the operator already
   lives (Slack, Telegram, Discord, email) and the answer spans several tools,
   OpenClaw is the substrate: a self-hostable agent that sits *in* the channel,

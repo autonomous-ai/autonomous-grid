@@ -566,3 +566,26 @@ six of `qwen3-coder` are the only spellings. Agent + model diagram regens clean
 (up to `index.svg`); geometry verifier 0 issues; structure intact.
 
 **Commit/push.** `a9f68ce`.
+
+## Round 31 — GoF lens: the framework layers lacked a scannable index
+
+**Critique.** The five "home base" layers (Channel/Memory/Desktop/Coding/
+Command-center) and their "grab it when" were carried entirely in prose
+bullets under *Which harness for which job*. GoF leads with a pattern-summary
+table before the deep dive; a practitioner reaching for "which home-base when"
+had to read ~140 lines of prose to get a one-line answer. The user's own ask —
+"understand their strengths and weaknesses and when to use what" — is served
+best by an at-a-glance index first, then the nuance.
+
+**Changes applied.**
+- Added a compact **Five home bases, at a glance** table (Layer · Home base ·
+Distinctive strength · Grab it when) directly under the *Which harness for
+which job* intro, summarizing the five layers with a one-line "grab it when"
+each. The prose bullets below retain the full *why* and *when-not*, so the
+table is a summary index, not a duplicate.
+
+**Verification.** Table uniform (5 pipes/row × 5 rows); markdown globally
+balanced (backtick/bold); both diagram regens green; geometry 0 issues;
+7 pattern sections + full skeleton intact.
+
+**Commit/push.** (R31 — this commit).
