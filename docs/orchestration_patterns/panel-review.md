@@ -216,3 +216,36 @@ four lenses' concrete flags to fold in next:
    catalogue's own cross-references.
 3. Keep scanning for passive-voice residue in the `Motivation`/`Consequences`
    of the later patterns (#18–#27), which were edited least.
+
+---
+
+## Round 7 — Refinements coverage, prose scan, front-matter fix
+
+**Changes applied.**
+- **`Refinements` expanded (open item from Round 4/6).** Split the two
+  remaining build-rule walls — **#20** Circuit Breaker (five rules: measured
+  threshold, named degrade path, metered recovery probes, mid-request-trip
+  state change, envelope honesty) and **#24** Type-Revelation (five rules:
+  rotate the exam, stay mostly type-driven, atomic preempted updates, durable
+  type-map, slack-valid probes) — out of their `Mechanics` into numbered
+  `Refinements`, matching the 13 patterns already split. `Refinements` now
+  appears in 15 of 27 patterns. Every fact preserved (verified by token
+  presence + structure check).
+- **Passive-voice / verbosity scan:** swept all 27 for weak constructs
+  (`in order to`, `It is`, `there is`, `due to the fact`, etc.) — the doc is
+  clean; no edit-worthy residue found in the least-edited patterns (#18–#27).
+- **Front-matter bug fix:** the Round-6 decision-key insertion left a stray
+  `**Two levers` fragment duplicating the next heading; removed, and aligned
+  list-item continuation indentation.
+
+**Verification.** Structure integrity: all 27 skeletons complete; `Refinements`
+15/27. Facts preserved; diagrams 27/27 `verok`.
+
+**Round 7 finding (direct lenses).** The catalog has now absorbed the GoF
+restructure (`Motivation`/`Consequences`, `Also Known As`, `Related Patterns`,
+`Refinements`, decision-order key). Remaining gains are *audit* (statement-vs-
+diagram consistency per pattern) and *front-matter polish*, not restructure.
+**Open:** (a) confirm each pattern's `Structure` caption matches its SVG
+figure exactly; (b) confirm the decision-key's step targets (#-numbers) match
+the catalogue cross-references (spot-checked correct); (c) consider a one-page
+"catalog map" figure linking the 27 by the listed families.
