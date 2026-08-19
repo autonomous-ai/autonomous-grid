@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1374 568" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1476 568" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -11,36 +11,40 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1374" height="568" fill="#fff"/>
+  <rect width="1476" height="568" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Route across harness lanes — role → lane → gate</text>
   <text x="195" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">each request</text>
   <text x="470" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">act contract binds</text>
   <path d="M 120 210 C 195 210, 195 210, 270 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 466 210 C 560 210, 560 92, 655 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 466 210 C 556 210, 556 210, 647 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 466 210 C 560 210, 560 328, 655 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 466 210 C 552 210, 552 446, 638 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 867 92 C 1000 92, 1000 210, 1132 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 876 210 C 1004 210, 1004 210, 1132 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 867 328 C 1000 328, 1000 210, 1132 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 884 446 C 1008 446, 1008 210, 1132 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 466 210 C 544 210, 544 92, 622 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 466 210 C 537 210, 537 210, 608 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 466 210 C 540 210, 540 328, 615 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 466 210 C 526 210, 526 446, 587 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 901 92 C 1068 92, 1068 210, 1235 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 914 210 C 1074 210, 1074 210, 1235 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 907 328 C 1071 328, 1071 210, 1235 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 935 446 C 1085 446, 1085 210, 1235 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <rect x="270" y="177" width="195" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
   <text x="368" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pick lane</text>
   <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">residency first</text>
-  <rect x="655" y="59" width="212" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="761" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex exec</text>
+  <rect x="622" y="59" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="761" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex</text>
+  <text x="761" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-27b · exec</text>
   <text x="761" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">bounded coding</text>
-  <rect x="647" y="177" width="229" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="761" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <rect x="608" y="177" width="306" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="761" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="761" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · stream</text>
   <text x="761" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">open work</text>
-  <rect x="655" y="295" width="212" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="761" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <rect x="615" y="295" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="761" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="761" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">laguna-s-2.1 · ACP</text>
   <text x="761" y="397" text-anchor="middle" fill="#2b2b29" font-size="21">verifiable</text>
-  <rect x="638" y="413" width="246" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="761" y="456" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw fan</text>
+  <rect x="587" y="413" width="348" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="761" y="437" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw fan</text>
+  <text x="761" y="469" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · N copies</text>
   <text x="761" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">N copies</text>
-  <rect x="1132" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="1205" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="1235" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1307" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 </svg>

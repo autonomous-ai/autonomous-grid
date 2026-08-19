@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1290 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1370 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
@@ -11,31 +11,34 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1290" height="450" fill="#fff"/>
+  <rect width="1370" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Only one ledger — the fsync'd box is the only truth</text>
-  <text x="663" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">events, not state</text>
-  <text x="961" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">off-box, on a cadence</text>
-  <path d="M 120 92 C 264 92, 264 210, 408 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 176 210 C 292 210, 292 210, 408 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 142 328 C 275 328, 275 210, 408 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 552 210 C 663 210, 663 210, 773 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 873 210 C 961 210, 961 210, 1048 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="20" y="59" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="70" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">act</text>
-  <rect x="-36" y="177" width="212" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="70" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">graduation</text>
-  <rect x="-2" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="70" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">denial</text>
-  <rect x="408" y="177" width="145" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="480" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">append</text>
-  <text x="480" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-stamped events</text>
-  <rect x="765" y="169" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
-  <rect x="757" y="161" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
-  <rect x="773" y="177" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="823" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">WAL</text>
-  <text x="823" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">one box</text>
-  <text x="823" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">append-only · no replication</text>
-  <rect x="1048" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1121" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">export</text>
-  <text x="1121" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">different medium</text>
+  <text x="743" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">events, not state</text>
+  <text x="1041" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">off-box, on a cadence</text>
+  <path d="M 202 92 C 345 92, 345 210, 488 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 216 210 C 352 210, 352 210, 488 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 216 328 C 352 328, 352 210, 488 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 632 210 C 743 210, 743 210, 853 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 953 210 C 1041 210, 1041 210, 1128 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="-62" y="59" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="70" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="70" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · act</text>
+  <rect x="-76" y="177" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="70" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="70" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-4.6 · graduate</text>
+  <rect x="-76" y="295" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="70" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
+  <text x="70" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · deny</text>
+  <rect x="488" y="177" width="145" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="560" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">append</text>
+  <text x="560" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-stamped events</text>
+  <rect x="845" y="169" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="837" y="161" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="853" y="177" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="903" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">WAL</text>
+  <text x="903" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">one box</text>
+  <text x="903" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">append-only · no replication</text>
+  <rect x="1128" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1201" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">export</text>
+  <text x="1201" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">different medium</text>
 </svg>
