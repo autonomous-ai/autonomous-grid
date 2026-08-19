@@ -595,6 +595,17 @@ act after the rest have run as simulation, not action. (The gated-selector
 rule is in Mechanics above; it is the pattern's verifier and must be
 deterministic.)
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def brute_force(request, worker, n, gate, tie_break):
+    drafts = [worker(request) for _ in range(n)]   # N identical, read-only tries
+    passing = [d for d in drafts if gate(d)]        # deterministic gate, never an LLM picker
+    if not passing:
+        return None                                 # a floor, not a ceiling
+    best = tie_break(passing)                       # pre-named: first pass / cheapest
+    return best                                     # losers were simulation; only `best` may act
+```
+
 **On the Grid stack.** A self-contained unit test must be right, so the router runs eight identical tries of `qwen3-coder` over the Hermes lane and keeps the best by test pass. The example enforces the hard rule: only the selected worker may act. If the workers can call tools or run code, eight tries is eight executions — so the losing tries run as pure simulation and the single winner is the only one allowed to write or execute. With a single executor seat, those eight tries are eight serialized runs; the count is a knob, and the local win is that the seven losers cost tokens you never paid for, not that they ran in parallel.
 
 ---
@@ -650,6 +661,17 @@ dispersion — a tight cluster with a shared prior is the trap, not good news.
 the N samples on request) — a mean without its variance looks more certain
 than it is. #12 attacks the same bias from the pool side: weight by *measured*
 correlation.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def ensemble(request, workers, trim=0.2):
+    samples = [w(request) for w in workers]        # same prompt, N lanes
+    est = trimmed_mean(samples, trim)               # robust, not arithmetic: one outlier can't drag
+    spread = stdev(samples)
+    if spread > ESCALATE_AT:                        # a tight shared prior is a trap, not good news
+        return escalate(request, samples)
+    return est, spread                              # the average with its dispersion, never mean alone
+```
 
 **On the Grid stack.** A numeric forecast request runs the same prompt on `qwen36-27b-mtp`, `qwen36-35b-a3b-mtp`, and `glm-4.6` over three lanes and averages. The example's point: if the three are correlated (two share the Qwen training tail), the ensemble has low variance and the wrong needle — averaging bakes in the shared bias. #12's covariance fix answers exactly this. The honest caveat rides on the report: a mean without its dispersion looks more certain than it is, and one garbage sample (a hallucinated huge number) drags a plain mean — which is why a median or trimmed-mean with outlier rejection is the defensible pooling rule here, not the arithmetic mean.
 
@@ -717,6 +739,16 @@ to more compute or flag the human; never ship the last draft by default. (3)
 what (schema, linter, tool call), so a confident-wrong answer can be traced
 to a weak check.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def verifier_gate(request, draft, check, k=3):
+    for attempt in range(1, k + 1):
+        d = draft(request, attempt)                 # perturb across retries: independence
+        if check(d):                                # deterministic / tool-grounded, not a vibe
+            return d, {"verified_by": check.name}   # attributable: what, and by what
+    return escalate(request)                        # K exhausted: hand up, never ship the last draft
+```
+
 **On the Grid stack.** A code edit drafts on `qwen36-27b-mtp`, then the verifier checks the output against the config schema via a Codex (`exec --json`) tool call — a deterministic check, not a second model reading the draft. Tool grounding is the one check that breaks the shared prior for free: the verifier does not share the generator's training tail the way a model-as-verifier would. The example names what was verified and by what (schema, linter, tool), so a confident-wrong answer that slips past a shallow check can be traced back to the weak check, and the check can be raised.
 
 ---
@@ -781,6 +813,20 @@ framings — otherwise the loop is ceremony that certifies the shared error. If
 the reads pre-converge on round 1 after priming, that's a red flag to
 escalate, not a pass. (The cap-K and judge-abstain mechanics live in Mechanics
 above — exhaustion is an escalator, never a forced ruling.)
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def debate(request, read_a, read_b, judge, k=3):
+    a, b = read_a(request), read_b(request)         # different families: hard divergence
+    for r in range(k):
+        if small_delta(a, b, streak=2) and confirmed(a, b):
+            return a                                # converged against a reference, not "went quiet"
+        a, b = read_a(b), read_b(a)                 # each reads the other's objection
+    verdict = judge(a, b)
+    if verdict is ABSTAIN:
+        return hand_up(request)                     # K exhausted: abstain, never force a pick
+    return verdict
+```
 
 **On the Grid stack.** Two reads of `qwen36-35b-a3b-mtp` and `qwen36-27b-mtp` loop until they agree on a borderline design call. Same-family reads converge fast — so this pattern only earns its loop if the reads are forced apart (two families, or a devil's-advocate framing on one side); otherwise "agreement" is both priming errors certified over K rounds, which is worse than #4's single quiet slip. The example logs per-round deltas: a prompt convergence is a success, and an oscillation that never converges is a signal to stop and hand the call to a non-debate arbiter — a tool check, a bigger model, or the human.
 
