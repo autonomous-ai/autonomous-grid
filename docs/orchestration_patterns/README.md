@@ -133,7 +133,7 @@ as a small set of properties and let the first that holds pick the leaf:
    vote is the cheapest insurance; distrust its agreement when you can't field
    genuinely different reads (#11).
 3. **Is the request several requests with a named order?** → #10 pipeline; an
-  *unfixed* order that needs a planner → #3.
+   *unfixed* order that needs a planner → #3.
 4. **Is a wrong answer costly, and do two independent voices disagree?** → #4
    (one round) or #9 (loop until they close).
 5. **Does the *same* expensive answer keep coming back?** → #17 (memorize it),
@@ -155,7 +155,7 @@ a leaf per request-class until #14/#27 learn to pick for it. **Brute-Force
 a better pooling, so coverage beats cleverness. **Verifier Gate (#8)** is the
 leaf when checking is far cheaper than getting it wrong — one draft, a check,
 retry on fail; it composes with #1 and #6 rather than replacing them.
-**Two levers
+
 **Two levers, twenty-seven shapes.** *(If you read one thing, read this — it is
 the shape of the whole catalog.)* Every pattern is a point in a small grid:
 *how many samples* (1, N, or many) × *how they're pooled* (a single pick, a
