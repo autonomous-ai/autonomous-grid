@@ -182,6 +182,15 @@ reinforcement becomes evidence-concentrating exploration with a priced budget);
 together they close the two holes the first twenty-five kept invoking by name
 and never building.
 
+**The catalog, as one figure.** The map below lays out all twenty-seven
+patterns arrayed *primitive → composition → stateful → epistemic → machinery*
+— the same order the entries run — so the families the cross-references name
+(the primitives #1–#5, their compositions #6–#10, the stateful #11–#21, the
+epistemic #22–#25, the machinery #26–#27) are visible in one look before any
+single pattern is read.
+
+![Local AI orchestration pattern catalog — the 27 patterns arrayed primitive → composition → stateful → epistemic → machinery](images/index.svg)
+
 ---
 
 ## 1. Mate-in-One — pick the best fit
