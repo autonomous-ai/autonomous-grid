@@ -25350,6 +25350,158 @@ def test_task_get_does_not_blame_capacity_for_a_task_that_really_ran(
     assert "no provider" not in out.lower()
 
 
+def _queued_task_and_fleet(providers, *, task=None, status_code=200, seen=None):
+    """Route a `task get` at a queued task and the project-status read that follows it.
+
+    Two endpoints, because the whole point of the behaviour under test is that the second one is
+    consulted — a single canned reply could not tell "asked and rendered" from "never asked".
+    `seen` collects the paths, so a test can assert on the call that did NOT happen.
+    """
+    task = task or {"id": "T1", "state": "queued", "project_id": "P1", "error": None}
+
+    def handler(request):
+        path = request.url.path
+        if seen is not None:
+            seen.append(path)
+        if path.endswith("/status"):
+            return httpx.Response(status_code, json={"providers": providers})
+        return httpx.Response(200, json=task)
+
+    return handler
+
+
+def test_task_get_says_why_a_queued_task_has_not_started(monkeypatch, tmp_path, capsys):
+    """The first hour: a task sits `queued` and nothing says the grid has nobody to run it.
+
+    The answer existed only in `grid project status`, which a new person has no reason to run and
+    is not told to — so the silence lasted until `queue_expired` hours later.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet({"online": 0, "paused": 0}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "state=queued" in out
+    assert "No provider is online" in out, f"the reason it is waiting, beside the task:\n{out}"
+    assert "grid join" in out, f"and the thing to do about it:\n{out}"
+
+
+def test_task_get_tells_a_queued_member_their_domain_is_not_served(monkeypatch, tmp_path, capsys):
+    """`serves_you: false` is the state `online` gets exactly backwards (ADR 0033 D-f, issue 24).
+
+    A healthy fleet number beside work no provider will ever be offered reads as "the grid is
+    busy". Same helper as `project status`, so the two surfaces cannot answer differently.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet(
+        {"online": 3, "paused": 0, "serves_you": False}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "does not serve your account's email domain" in out, out
+    assert "No provider is online" not in out, (
+        "three providers ARE online — the unserved sentence must replace the fleet count, "
+        f"not stack with a number that contradicts it:\n{out}")
+
+
+def test_task_get_stays_quiet_about_the_fleet_when_somebody_can_take_it(
+        monkeypatch, tmp_path, capsys):
+    """The positive control. A queued task on a healthy fleet is ordinary, and saying so on every
+    poll is the noise that makes the sentence that matters invisible."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet({"online": 2, "paused": 0}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "state=queued" in out
+    assert "provider" not in out.lower(), f"nothing is wrong, so nothing is said:\n{out}"
+
+
+def test_task_get_never_asks_about_the_fleet_for_a_task_that_finished(
+        monkeypatch, tmp_path, capsys):
+    """The cost bound. `task get` is polled in a loop, so the extra read happens only in the states
+    that raise the question — never on the path a script hammers."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = []
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet(
+        {"online": 0, "paused": 0}, seen=seen,
+        task={"id": "T1", "state": "completed", "project_id": "P1", "result_text": "hi"}))
+    cli.main(["task", "get", "T1"])
+
+    assert not any(p.endswith("/status") for p in seen), (
+        f"a finished task raises no question about capacity, so it must cost no read: {seen}")
+
+
+def test_task_get_json_is_untouched_by_the_fleet_read(monkeypatch, tmp_path, capsys):
+    """`--json` owes the caller the relay's document and nothing else. An extra sentence on stdout
+    would be a parse error in the one mode an application drives."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = []
+    task = {"id": "T1", "state": "queued", "project_id": "P1", "error": None}
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet({"online": 0, "paused": 0}, task=task, seen=seen))
+    cli.main(["task", "get", "T1", "--json"])
+
+    assert json.loads(capsys.readouterr().out) == task
+    assert not any(p.endswith("/status") for p in seen), (
+        f"nothing to render means nothing to fetch: {seen}")
+
+
+def test_a_fleet_read_that_fails_never_becomes_the_tasks_verdict(monkeypatch, tmp_path, capsys):
+    """⚠️ The guard that matters. This is an EXTRA sentence beside a report that already
+    succeeded, and `task get`'s exit code is a verdict about the TASK — so a status call that
+    5xxs, times out or answers something unreadable must change neither the report nor the code.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet(None, status_code=500))
+    code = cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "state=queued" in out, f"the task's own report survives the fleet read:\n{out}"
+    assert code == 2, "still 'ask again' — the fleet has no say in whether the task finished"
+
+
+def test_a_task_that_expired_waiting_is_told_who_was_online(monkeypatch, tmp_path, capsys):
+    """`_QUEUE_EXPIRED_NOTE` names `grid project status` by hand — so the person who most needs the
+    answer was sent to run a second command. Answer it where the question is asked."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet({"online": 0, "paused": 0}, task={
+        "id": "T1", "state": "timed_out", "error": "queue_expired", "project_id": "P1"}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "error=queue_expired" in out
+    assert "No provider is online" in out, f"the answer, not a pointer to it:\n{out}"
+
+
+def test_a_task_view_with_no_project_asks_nothing(monkeypatch, tmp_path, capsys):
+    """An older relay's task view carries no `project_id`. There is nothing to ask about, and
+    guessing one would read a project the caller never named."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = []
+
+    _mock_relay(monkeypatch, _queued_task_and_fleet(
+        {"online": 0, "paused": 0}, seen=seen, task={"id": "T1", "state": "queued"}))
+    cli.main(["task", "get", "T1"])
+
+    assert "state=queued" in capsys.readouterr().out
+    assert not any(p.endswith("/status") for p in seen), f"nothing to ask about: {seen}"
+
+
 def test_task_follow_says_which_budget_a_timed_out_task_spent(capsys):
     """The same distinction where a person actually watches a task end."""
     from cli import remote_task

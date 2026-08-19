@@ -1708,6 +1708,44 @@ def _note_an_unreadable_state(task_id: str, state: Any) -> None:
           f"See what it sent with `grid task get {task_id} --json`", file=sys.stderr)
 
 
+def _say_why_nothing_has_claimed_it(base: str, token: str, task: dict) -> None:
+    """Answer "why has nothing picked this up" where the question is actually asked.
+
+    The answer already existed, one command away, in `grid project status` — so completely that
+    `_QUEUE_EXPIRED_NOTE` has to name that command by hand. A person in their first hour has no
+    reason to run it and, until their task expires hours later, no reason to think anything is
+    wrong: a queue of one on a grid with no provider looks exactly like a queue of one on a busy
+    grid. This closes that gap by reading the fleet at the two moments the question exists.
+
+    Rendering goes through `project_providers`, the SAME helper `grid project status` uses, rather
+    than a second copy of the sentences: `serves_you` is the one state `online` gets backwards
+    (ADR 0033 D-f, issue 24), and two renderers of that rule would eventually disagree about it.
+
+    ⚠️ **Best-effort, and silent on every failure — deliberately.** This is an extra sentence beside
+    a report that has already succeeded, and `grid task get`'s exit code is a verdict about the
+    TASK. A status read that 5xxs, times out, or answers something unreadable must change neither
+    the report nor the code; a fleet this cannot read is exactly the "say nothing" case
+    `project_providers` is built around. `SystemExit` is in the tuple because it is this CLI's
+    clean-error idiom and `relay` raises it for an ordinary refusal — letting it through would
+    turn "I could not check the fleet" into the task's own verdict, which is the bug this guard
+    exists to prevent rather than a theoretical one.
+    """
+    project_id = task.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        # An older relay's task view carries no `project_id`. Nothing to ask about — and guessing
+        # one would read a project the caller never named.
+        return
+    from cli import project_providers
+    from remote import relay
+
+    try:
+        answer = relay.project_status(base, token, project_id)
+    except (Exception, SystemExit):
+        return
+    if isinstance(answer, dict):
+        project_providers.print_providers(answer.get("providers"))
+
+
 def _task_get(args: argparse.Namespace) -> int:
     from remote import relay
 
@@ -1748,6 +1786,12 @@ def _task_get(args: argparse.Namespace) -> int:
 
     print(f"task {task.get('id') or args.task_id}")
     print(f"state={task.get('state') or 'unknown'}")
+    if state == "queued":
+        # Only `queued`, and only here: `task get` is polled in a loop, so the extra read is paid
+        # in the states that raise the question and nowhere else. `preparing` is excluded on
+        # purpose — the relay is still writing the task's own inputs, and no provider could have
+        # claimed it yet, so a fleet report there would blame the fleet for the relay's own step.
+        _say_why_nothing_has_claimed_it(base, token, task)
     if task.get("provider_id"):
         print(f"provider={task['provider_id']}")
     if task.get("claude_session_id"):
@@ -1756,6 +1800,11 @@ def _task_get(args: argparse.Namespace) -> int:
         print(f"error={task['error']}")
         if task["error"] == QUEUE_EXPIRED:
             print(_QUEUE_EXPIRED_NOTE)
+            # The note ends by naming `grid project status`. Answering it here instead of sending
+            # somebody there is the whole of G-01's lesson applied one surface further along: this
+            # is the state that EMPTIES the queue, so it is also the state in which the member who
+            # was never served has the least to go on.
+            _say_why_nothing_has_claimed_it(base, token, task)
     if _is_merge_turn(task) and code == _EXIT_ENDED_BADLY:
         # ADR 0034 D-g (issue 42): a merge turn that fails must not be a person's last word. The
         # relay's `error` above is the PROVIDER's diagnostic — it names the paths git still has
