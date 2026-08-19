@@ -687,3 +687,36 @@ compound noun. See the model-layer log for the shared rationale and the 14
 model-layer sites. Verified markdown balanced and structure intact.
 
 **Commit/push.** (R36 — this commit).
+
+## Round 37 — author the `agents.md` agent-layer execution companion
+
+Resolved the largest outstanding open item. Authored
+[`agents.md`](agents.md) in this directory — the agent-layer execution
+companion mirroring the model layer's `router-execution.md` shape (honest
+baseline + the concrete execution model the seven patterns run on), with:
+
+- The **execution primitive**: one loop = route lane → residency first →
+  act-gate → act → ledger, and the "one seat, one actor" constraints.
+- **Session lifecycle as the join** (spawn/warm/handoff/kill) — the agent
+  layer's re-join on top of the model layer's spawn/pool join.
+- **The divergence unit**: harness × model tail (weak reflex-only vs strong
+  family divergence), with the same-model caveat against over-claiming #2/#11
+  family independence.
+- A **harness × model seat table** keyed to current local SoTA
+  (`deepseek-v4-flash`, `glm-5.2`, `qwen3-coder`, `qwen38-27b-mtp`,
+  `qwen38-35b-a3b-mtp`) across Hermes ACP, OpenClaw, Claude Code, Codex, Pi,
+  and OpenCode.
+- **Staged admission** as earned (shadow → bounded → full), **background in
+  idle slack** (#4), and **exact-once durable ledger** (#7) with no second box.
+- A **worked ledger walk** end-to-end (repro → two divergent fixes →
+  cross-lane review → preempt → certify-by-fact → shipped), using current
+  models on a concrete 48 GB box.
+- Wired the new companion into the README's **Read with** so no reference
+  dangles; removed the "unpublished" framing.
+
+**Verification.** New doc: markdown balanced, all agent-layer `#N` refs in
+range (the lone `#11` is explicitly flagged as a model-layer family-divergence
+ref), all current model names present. README structure intact after the
+Read-with edit.
+
+**Commit/push.** (R37 — this commit).

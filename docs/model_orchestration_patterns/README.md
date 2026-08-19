@@ -328,7 +328,7 @@ full-call-for.** You don't need all N to agree to ship — wait for the first
 (3 answers agree fast) and keeps the hard path honest (a 2-of-3 near-split is
 already the signal to spend more, not a tie you wait for). (2) **Early-return
 on the fan-out join.** The three "parallel" workers on one GPU are contended,
-so treat the first two matching answers as *sufficient*, not *necessary* — 
+so treat the first two matching answers as *sufficient*, not *necessary* —
 stop the remaining workers and cancel them together. (3) **Vote on a
 decorrelated population.** A vote is only evidence if the samples are
 independent; same model + same prompt + same temperature re-samples one

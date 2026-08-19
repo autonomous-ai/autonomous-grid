@@ -1244,7 +1244,9 @@ multi-agent system.
 is the foundation this one runs on; its entries are the `#` references used
 here.
 
-**Read with.** `ROUTER.md` (what the naive router does today),
-`router-execution.md` (how the router executes the model layer's machinery) —
-both in `autonomous-org/projects/grid-orchestration/`. Draw before you write:
+**Read with.** [`agents.md`](agents.md) — the agent-layer execution
+companion in this directory (the session/seat model these seven patterns run
+on). The model layer's companions — `ROUTER.md` (what the router does today)
+and `router-execution.md` (how it executes the model layer's machinery) —
+live in `autonomous-org/projects/grid-orchestration/`. Draw before you write:
 `knowledge/diagram-style.md`, `knowledge/technical-writing-style.md`.
