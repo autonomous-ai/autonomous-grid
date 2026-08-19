@@ -528,3 +528,41 @@ sentence in the front matter.
 patterns structurally intact.
 
 **Commit/push.** `f0e71dd`.
+
+---
+
+## Round 28 — model-token consistency + description-of-divergence audit
+
+**Lens: AI/ML precision + cross-pattern consistency.** Re-reading Patterns 4–7
+word-by-word surfaced a naming drift the greps had been hiding: the same
+canonical resident models were written two ways in different sections —
+`qwen38-27b` / `qwen38-35b` (bare, in the worked example and Pattern 4's On
+the Grid stack) versus `qwen38-27b-mtp` / `qwen38-35b-a3b-mtp` (the canonical,
+suffixed forms Pattern 3's lane map and the front-matter roster use). On a
+catalog whose whole promise is *precise* identifiers, two spellings of one
+model read as two models.
+
+**Second defect, same lens.** The worked example's fix-B row gave **OpenCode**
+the bare `qwen38-35b` — the *same model number* as the Claude Code write seat —
+while its own copy claims "a fully different harness+**model** tail." The claim
+was false on the "model" half: the divergence was harness-only, one model
+reused. A reviewer following #6 would flag that the "diverges on purpose" arm
+wasn't diverging.
+
+**Changes applied.**
+- Standardized every resident model token to its canonical suffixed form:
+  `qwen38-27b` → `qwen38-27b-mtp`, `qwen38-35b` → `qwen38-35b-a3b-mtp`
+  (Pattern 4 On the Grid, worked-example repro seat, certify call, Claude Code
+  write seat).
+- Gave fix B's **OpenCode** a genuinely distinct open-weight coder,
+  `qwen3-coder`, so the draft arm now truly differs from both fix A
+  (`deepseek-v4-flash` on Hermes) and the write seat (`qwen38-35b-a3b-mtp` on
+  Claude Code) — harness and model both diverge, which is what #6's weak arm
+  actually requires.
+
+**Verification.** `grep` confirms zero remaining bare `qwen38-27b`/`qwen38-35b`
+forms; the five spins of `qwen38-27b-mtp`, four of `qwen38-35b-a3b-mtp`, and
+six of `qwen3-coder` are the only spellings. Agent + model diagram regens clean
+(up to `index.svg`); geometry verifier 0 issues; structure intact.
+
+**Commit/push.** `a9f68ce`.
