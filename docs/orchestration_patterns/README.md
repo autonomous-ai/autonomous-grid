@@ -83,6 +83,24 @@ liability is where a pattern is actually decided. The patterns are numbered
 and cross-reference each other by `#number`; read the primitives (#1–#5)
 before their compositions, and treat the framing below as the map.
 
+**How to read the figures.** Every figure uses one fixed visual language, so
+any diagram is readable at a glance — where a request enters, where compute
+happens, where a decision is made, and which edges loop back.
+
+- **Coral pills** are the request's entry (`job`) and its exit (`answer`) —
+  the two points where the pattern touches the outside world.
+- **Green boxes** are *work*: a worker, a probe, a step — a unit that burns
+  compute to produce something.
+- **Purple boxes** are *decisions*: the rank, the vote, the gate, the
+  aggregate, the posterior draw — where the shape is decided, not executed. A
+  green box never decides; a purple box never does the work.
+- **Arrows** run forward along the answer. A **dashed** arrow is a return
+  path — a revise, retry, re-command, or decay — the edge that makes a
+  pattern stateful.
+
+The same four roles and two edge types appear in all twenty-seven figures;
+`docs/DIAGRAMS.md` is the formal register, and this block is the field guide.
+
 ## The one sentence per pattern
 
 | # | Pattern | The move | Use it when |

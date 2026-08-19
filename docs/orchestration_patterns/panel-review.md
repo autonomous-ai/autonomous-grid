@@ -277,3 +277,26 @@ every audit thrown at it (structure, diagrams, statements-vs-figures, related-
 pattern graph). Further rounds are converging on verification passing clean;
 remaining open item is the optional `agents.md` companion (external to this
 repo) and any fresh judge critique.
+
+---
+
+## Round 10 — figure legend + visual deliverables
+
+**Changes applied.** Added a **"How to read the figures"** field guide in the
+front matter, paired with "How to read a pattern": the four node roles
+(coral = request in/out, green = work, purple = decision, dashed edge = return
+loop) stated once, so any of the 27 diagrams is legible without a cross-doc
+trip to `docs/DIAGRAMS.md`. The role→color mapping was verified against
+`build_diagrams.py` (`work`=green, `decide`=purple, `terminal`=coral,
+`dashed`=revise/return). Structure integrity re-verified: all 27 complete.
+
+**Visual deliverables (in /tmp, not committed).** Rendered all 27 figures +
+the composed `index.svg` to PNGs at their true viewBox aspect ratios via
+headless Chrome (`/tmp/op_all/fresh/`), and built a self-contained
+`/tmp/op_all/index.html` that inlines every SVG with captions for a single-
+glance review of the whole catalog. `view_image` is unavailable in-session,
+so the geometry verifier in the generator is the in-session guarantee.
+
+**Round 10 finding.** Front matter now fully self-contains the reading
+instructions (skeleton + figure legend + decision order + catalog map). The
+catalog is at a strong, internally consistent state.
