@@ -720,3 +720,25 @@ ref), all current model names present. README structure intact after the
 Read-with edit.
 
 **Commit/push.** (R37 — this commit).
+
+## Round 38
+
+**Change.** Upgraded agent pattern #5's `Sample Code` from a toy two-line
+admittance sketch into a working three-stage sketch (shadow → bounded → full)
+that is honest to the layer's own constraints and cross-referenced:
+
+- Each stage transition is a **ledger event** (`#7`), and the deterministic
+  arm **scores ground-truth-first** (`#6`: fact arm, then weak diagnostics) —
+  so the sketch exercises the two most load-bearing agent-layer guarantees.
+- **Idle-row constraint** surfaced (`#4`): a failing shadow harness keeps
+  scoring in the router's idle slack rather than burning an act seat.
+- **Round-key grant** as the bounded→full reward (`#1`): the act step is gated
+  behind a router quorum plus a fresh `round_id` key, keeping one-seat-one-actor.
+- Renamed like nits to the rest of the layer (`BOUNDED_QUORUM`, `STAGES`), and
+  every name stays a parameter per "A word on the examples".
+
+**Verification.** Markdown balanced (backticks/bold), README structure intact,
+all `#N` refs in range. Pure additive edit — no fact removed.
+
+**Commit/push.** (R38 — this commit).
+

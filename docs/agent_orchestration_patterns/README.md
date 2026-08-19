@@ -913,16 +913,28 @@ order the whole layer depends on.
 
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
 ```python
-AUTHORIZED = set()          # harnesses that cleared the bar
-TRUST_BAR = 0.9
+# Three stages, each a ledger event (#7); the deterministic arm scores first.
+STAGES = ("shadow", "bounded", "full")
+BOUNDED_QUORUM = 2          # the bounded act step needs a router quorum (#1)
 
-def admit(harness, authority):
-    if harness in AUTHORIZED: return harness          # already trusted
-    shadow = harness.shadow()                          # read-only fan shells
-    score = authority.score(shadow)                    # vs ground-truth authority
-    if score >= TRUST_BAR:
-        AUTHORIZED.add(harness); return harness        # promote to act
-    return deny(harness)                               # stays read-only
+def admit(harness, authority, ledger, idle):
+    stage = ledger.stage(harness)                      # replay from the log
+    if stage == "full": return harness                # already earned the act
+    shadow = harness.shadow(read_only=True)           # #1's N−1 shells, no creds
+    score = authority.score_ground_truth_first(shadow) # #6: fact arm, then weak
+    if stage == "shadow":
+        if score.wins >= TRUST_BAR.WIN_N:              # e.g. ≥ 20 labeled wins
+            harness.mode = "bounded"                   # act gated behind quorum
+            ledger.append(harness, "shadow -> bounded")
+            return harness
+        idle.run(shadow)                               # #4: shadow in idle slack
+        return deny(harness)
+    # bounded -> full: the act step now needs the round_id key (#1)
+    if stage == "bounded" and score.wins >= TRUST_BAR.WIN_N_2:
+        harness.mode = "full"; harness.grant_scope(round_key=True)
+        ledger.append(harness, "bounded -> full")
+        return harness
+    return deny(harness)                               # scores against the bar
 ```
 
 **On the Grid stack.** A new coding engine lands on this box as an OpenClaw
