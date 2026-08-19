@@ -578,3 +578,29 @@ preserved; no fact invented.
 intact; all case-study refs in range 1–27. Diagrams untouched.
 
 **Commit/push.** (R41 — this commit).
+
+## Round 41b — deep per-claim audit of the case study (verified, no change)
+
+Completed the missing deep audit of "One request, walked through the catalog":
+read the narrative in full and checked each claim's cited pattern against that
+pattern's own `Intent`/`Mechanics` content.
+
+- **The spend (#5)** — #5 Strategy's intent is per-request pattern choice.
+  The claim that a formal, expensive-to-be-wrong property routes to spend-N
+  (not Mate-in-One) matches #5's shape-vs-economics framing. ✓
+- **The fan (#2, #11, #12)** — #2 Fan-Out votes N answers; #11 Negative
+  Selection forces divergence before judging; #12 Markowitz Ensemble weights
+  by measured error-correlation so the mean reduces variance. All three
+  intents confirmed verbatim. ✓
+- **The certify (#8, #22)** — #8 Verifier Gate grants a deterministic external
+  check; #22 requires a pre-specified N with a widening significance boundary
+  across peeks. Both intents confirmed verbatim. ✓
+- **The state (#17, #24)** — #17 caches the verified answer by a semantic key;
+  #24 probes a model's type in idle before trust is at stake. ✓
+- **The risk (#19, #20)** — #19 prices spend as CVaR over the tail; #20 trips a
+  breaker on a toxic request class and escalates to a stronger arm rather than
+  re-spending on the tails that failed. ✓
+
+No factual drift found; ten cited `#N` all resolve to catalog-correct
+patterns. The narrative is consistent with the actual pattern content. Logged
+as verified; no edit needed.

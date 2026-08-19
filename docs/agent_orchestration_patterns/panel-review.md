@@ -917,3 +917,29 @@ order steps 1–6 present, no dangling "A word on the examples" reference
   ✓; #18 Canary "admits a model" ✓; #24 probes unknown models in idle ✓; #26
   slack-stealing ✓; #2/#11 family independence ✓.
 - Markdown balanced; 7 agent headers intact. No diagram change.
+
+## Round 47 — fresh 4-lens judge pass on R45/R46 (one actionable flag, fixed)
+
+**Lenses: GoF / architecture / AI-ML / local-AI (run directly).**
+- **GoF / code-review:** R45's cumulative-bar fix is correct — prose said
+  cumulative ("≥ 20 labeled wins"), code now computes
+  `wins = ledger.cumulative_wins(harness) + run.wins`. Judge flag: the new
+  `ledger.cumulative_wins` helper is *never sourced* in the sketch — a reader
+  can't tell whether the ledger stores a win counter or re-derives it. #7 says
+  the ledger stores *events* and "replay reproduces the actual path", so the
+  honest resolution is to name it a derived replay tally. **Fixed:** added a
+  two-line comment — "cumulative_wins is derived by replaying the log (#7) —
+  the ledger stores events, not a win counter; this is the run's own tally on
+  top." Consistency with #7 restored, no behavior change.
+- **Architecture:** R46's `swap_cost` re-point (#1 → #12 Markowitz) is
+  correct and consistent — #12 owns the single-GPU swap-cost analysis and agent
+  #6's fallback arm already cites #12 for the same serial-VRAM-swap cost. ✓
+- **AI-ML:** The cumulative admission bar is sound epistemics — it is a
+  pre-specified threshold (#22-style), not a retro-fitted one; and scoring on
+  the ground-truth arm first, reserving the weak consensus arm, is the right
+  ordering. ✓
+- **Local-AI:** Allowing the count to accumulate across idle shadow runs on a
+  free-token box (rather than requiring one giant run) matches the model
+  layer's "local buys spend-N" economics. ✓
+
+**Verified.** Markdown balanced; 7 agent skeletons intact; diagrams untouched.

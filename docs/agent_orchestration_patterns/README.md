@@ -947,6 +947,8 @@ def admit(harness, authority, ledger, idle):
     if stage == "full": return harness               # already earned the act
     shadow = harness.shadow(read_only=True)          # #1's N−1 shells, no creds
     run = authority.score_ground_truth_first(shadow) # #6: fact arm, then weak
+    # cumulative_wins is derived by replaying the log (#7) — the ledger
+    # stores events, not a win counter; this is the run's own tally on top.
     wins = ledger.cumulative_wins(harness) + run.wins  # the bar is cumulative
     if stage == "shadow":
         if wins >= TRUST_BAR.WIN_N:                  # e.g. ≥ 20 labeled wins
