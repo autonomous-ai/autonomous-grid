@@ -477,7 +477,7 @@ hundred readers expose the same world surface. The price is N−1 seats of
 warm-session cost and the scheduler's serial-swap time, so the gate must be
 paired with a budget that prices it.
 
-**Known Uses.** Single-writer / single-flight discipline wherever N readers could each act: a PostgreSQL advisory lock, an etcd/leader lease, an actor's single-threaded mailbox, an idempotent etag-or-CAS mutation. Every one enforces 'N−1 may read, one may write,' the same way the act-gate caps a fan.
+**Known Uses.** Single-writer / single-flight discipline wherever N readers could each act: a PostgreSQL advisory lock, an etcd/leader lease, an actor's single-threaded mailbox, an idempotent etag-or-CAS mutation. Every one enforces 'N−1 may read, one may write,' the same way the act-gate caps a fan. On a local stack today the same single-flight runs as Codex's per-repo worktree gating its one PR merge, OpenClaw's tool-approval covering the single world-touching call, and Omnigent's session-wins ALLOW/DENY/ASK policy stack — N−1 read, one write, whatever the substrate.
 
 **Failure mode.** The gate is *asserted* in a prompt instead of *enforced* by
 a mechanism. Read-only that can't be mechanically enforced is a hope, and a
@@ -595,7 +595,7 @@ seat back from the snapshot.
 most requests from cold-start into context-swap, which is what makes the
 N−1-reader fan in #1 affordable at all.
 
-**Known Uses.** Session and connection lifecycle management: connection pools that warm and reuse instead of cold-starting, OS process/container lifecycle, browser session-restore, and keep-alive caches — all turn an expensive spawn into a cheap resume, which is exactly what the warm/handoff/kill transitions do for a resident session.
+**Known Uses.** Session and connection lifecycle management: connection pools that warm and reuse instead of cold-starting, OS process/container lifecycle, browser session-restore, and keep-alive caches — all turn an expensive spawn into a cheap resume, which is exactly what the warm/handoff/kill transitions do for a resident session. On the local stack it is the keep-alive on an Ollama or llama.cpp server, the warm pool on a Codex cloud environment, and Hermes' one gateway process holding a persistent session across Telegram/Discord/CLI instead of cold-spawning per message.
 
 **Failure mode.** Handoff over-claiming. The moment a router treats
 cross-harness handoff as a free context move, it will route an overdue Claude
@@ -694,7 +694,7 @@ green lanes — Codex exec (bounded coding), Claude Code (open work), Hermes ACP
 is a mis-route caught before dispatch. The harness stops being an
 implementation detail and becomes part of the routing decision it always was.
 
-**Known Uses.** Policy routing by declared role: RBAC where a role names the lanes it may enter, and network/harness traffic-engineering where the routing decision is 'role → lane → gate,' not a per-request ad-hoc pick. CI platforms route a job to the runner that may run it the same way.
+**Known Uses.** Policy routing by declared role: RBAC where a role names the lanes it may enter, and network/harness traffic-engineering where the routing decision is 'role → lane → gate,' not a per-request ad-hoc pick. CI platforms route a job to the runner that may run it the same way. On today's stack the lane is real: OpenClaw scopes its plugins to the channel the task lives in, Codex routes each PR through its own worktree, and the harness×model seat table in the companion routes a task to the resident harness that may run it.
 
 **Failure mode.** The lane table read as a menu of warm seats. A five-lane
 table on a 1-GPU/Apple box is not five resident lanes — the box holds ~1–2
@@ -804,7 +804,7 @@ use. The scheduler has four numbers an operator actually sets — the idle
 threshold, the preemption trigger, the residency bound, and the snapshot's
 home.
 
-**Known Uses.** Preemptive scheduling: OS time-slicing, cloud spot/preemptible instances, and Kubernetes eviction all treat the running unit as preemptible and restartable from a checkpoint — the seat-as-executor pattern is that discipline on a 1-seat GPU box.
+**Known Uses.** Preemptive scheduling: OS time-slicing, cloud spot/preemptible instances, and Kubernetes eviction all treat the running unit as preemptible and restartable from a checkpoint — the seat-as-executor pattern is that discipline on a 1-seat GPU box. On the GPU today it is Ollama/vLLM continuous batching preempting to yield a seat to the deadline-bearing request — the executor *is* the seat, so background work runs only in the idle.
 
 **Failure mode.** A policy statement with no numbers. Until the idle
 threshold, preemption trigger, residency bound, and snapshot destination are
@@ -895,7 +895,7 @@ as the evidence says. The admission bar itself is a number the builder sets
 from its own verifier run — N wins at X% agreement with the authority — not a
 universal threshold.
 
-**Known Uses.** Progressive delivery and staged trust: canary → controlled → full rollouts, and CI trust ladders (build → test → integration → production) that grant a new actor a little more reach only as evidence accumulates — Staged Admission is the agent-layer version of that ladder.
+**Known Uses.** Progressive delivery and staged trust: canary → controlled → full rollouts, and CI trust ladders (build → test → integration → production) that grant a new actor a little more reach only as evidence accumulates — Staged Admission is the agent-layer version of that ladder. On the local stack it is admitting a new model or harness as a read-only shadow, running it in the router's idle slack until it beats the ground-truth authority on labeled wins, then granting the `round_id`-keyed act step only at the top rung — the canary ladder made concrete on one-box residency.
 
 **Failure mode.** The bar set before the verifier is trustworthy. If #6's
 authority is an ungrounded vote, the shadow is scoring against noise and "≥ N
@@ -1008,7 +1008,7 @@ a named ground, and a replay can tell a fact-forced verdict from a consensus
 guess. The weak arm buys coverage where no mechanical check exists — and
 nothing more, which is exactly why it stays a proposal.
 
-**Known Uses.** Tests, schema checks, and CI as the ground-truth authority: a passing suite or conformance check certifies a change regardless of the model's prior, and a reward model is a verifier the same way a test is — an independent, grounded fact outranks any session's report.
+**Known Uses.** Tests, schema checks, and CI as the ground-truth authority: a passing suite or conformance check certifies a change regardless of the model's prior, and a reward model is a verifier the same way a test is — an independent, grounded fact outranks any session's report. On the local stack the deterministic arm is a test or schema gate running in the router's own pipeline — a suite pass, a conformance check — and a reward model is a verifier the same way a test is, both outranking any session's report of its own success.
 
 **Failure mode.** The verifier as a session. The moment a fan's own sibling —
 same harness, same working tree, same prior — is allowed to certify, "the
@@ -1112,7 +1112,7 @@ a replay that answers "what actually happened, in what order." The export
 buys recoverability — the one upgrade the single-box rule allows — without
 introducing a second truth that could diverge from the first.
 
-**Known Uses.** Write-ahead logging: PostgreSQL's WAL, SQLite's rollback journal, and every append-only event log make the durable log the single source of truth for crash recovery and replay — Only-One-Ledger is the WAL discipline with an explicit periodic export so 'one box' never means 'one point of loss.'
+**Known Uses.** Write-ahead logging: PostgreSQL's WAL, SQLite's rollback journal, and every append-only event log make the durable log the single source of truth for crash recovery and replay — Only-One-Ledger is the WAL discipline with an explicit periodic export so 'one box' never means 'one point of loss.' On a local stack the ledger is one append-only event log beside the engine (SQLite WAL or a plain JSONL file) that the router fsyncs on every act, with a periodic export to a different medium — so one box never means one point of loss.
 
 **Failure mode.** "Only truth" read as "only copy." On a single box the WAL
 *is* the node, so a disk wipe silently destroys the very state the layer

@@ -742,3 +742,27 @@ all `#N` refs in range. Pure additive edit — no fact removed.
 
 **Commit/push.** (R38 — this commit).
 
+
+## Round 39
+
+**Change.** Known Uses precision pass on the agent layer (patterns #1–#7).
+The seven `Known Uses` blocks anchored the shapes only to classic systems
+(advisory locks, connection pools, RBAC, K8s eviction, canary, CI, WAL). Left
+those anchors intact and appended one precise *modern local-stack instance*
+per pattern, so a reader sees the shape already running in the tools this
+catalog names — Codex per-repo worktree single-flight and PR merge gating
+(#1), the Ollama/llama.cpp keep-alive and Codex warm pool and Hermes single
+gateway process (#2), OpenClaw plugin scoping to the channel + the
+harness×model seat table (#3), Ollama/vLLM continuous batching preempting for
+the deadline-bearing request (#4), the read-only shadow in idle slack + the
+`round_id`-keyed act step at the top rung (#5), the suite/conformance gate in
+the router's own pipeline (#6), and the single append-only JSONL/SQLite-WAL
+ledger fsync'd on every act with periodic off-box export (#7). Each instance
+is consistent with — and never contradicts — the framework claims already made
+in the "Which harness for which job" section and `agents.md`.
+
+**Verification.** Markdown balanced (backticks/bold); structure intact; all
+frame names stay parameter placeholders. Purely additive prose — no fact
+removed or contradicted.
+
+**Commit/push.** (R39 — this commit).
