@@ -147,15 +147,17 @@ team, is *archived* and continues as `charmbracelet/crush` — the working-tree
 engine this catalog names is the SST/Anomaly lineage, not the archived one).
 **Aider** is `Aider-AI/aider`, "AI pair programming in your terminal," the
 6.8M-install (PyPI) pair-programming seat. **Command Code** is the newer CLI
-coding agent — subscription-based (a "Command Code Go" tier) with an API that
-Pi, Hermes Agent, and DeepSeek Harness all ship adapters for today; it is real
-and current, but publishes no open repo to anchor yet, so treat its ergonomics
-as the object of active churn. **Cursor** and **Devin** are the managed GUI
-and fleet ends of the pool — Cursor the desktop IDE (cursor.com), Devin
-Cognition's managed agent (devin.ai) — both with no public product repo, the
-same closed-harness shape as Claude Cowork. Point the list above at those
-sources and the "which job" layer follows; the rosters move, the layers do
-not.
+coding agent — `CommandCodeAI/command-code`, "the coding agent that
+continuously learns your coding taste" (a learned *Taste* preference compiler
+that imports Claude/Codex/Cursor sessions and writes portable `taste.md`
+packages), on npm as `command-code`, with a "Command Code Go" subscription
+tier; Pi, Hermes Agent, and DeepSeek Harness already ship adapters for its
+API, but its ergonomics are still the object of active churn. **Cursor** and
+**Devin** are the managed GUI and fleet ends of the pool — Cursor the desktop
+IDE (cursor.com), Devin Cognition's managed agent (devin.ai) — both with no
+public product repo, the same closed-harness shape as Claude Cowork. Point the
+list above at those sources and the "which job" layer follows; the rosters
+move, the layers do not.
 
 Two routing rules hold across the whole layer:
 

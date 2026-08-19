@@ -451,3 +451,48 @@ on-canvas checks = **0 issues**; both generators regen `verok` / `verify ok`.
 **Commit/push.** No content change this round — a verification-only pass; the
 fixes were already committed in the preceding rounds. Logged for the audit
 trail.
+
+---
+
+## Round 26 — provenance for the seat-pool coding engines
+
+**Lens: precision / freshness + software architecture.** Round 20 verified the
+seat-pool *names* (kept Cursor, OpenCode, Pi, Command Code, Devin, Aider;
+dropped the unverifiable Muse Code and Amp). What remained ungrounded was the
+provenance paragraph: "Where these claims come from" listed repos only for the
+five home-bases (OpenClaw, Hermes Agent, Claude Code, Codex, Pi, Claude
+Cowork) and was silent on the six coding engines the same front matter names.
+A reader could not point any seat-pool engine at a source, which undercuts
+the section's own promise that "every base is a real, current, checkable
+thing." This round carried Round 20's verified facts into that paragraph.
+
+**Source checks (re-verified live this round).**
+- **OpenCode** — `sst/opencode` redirects to `anomalyco/opencode`, "the open
+  source coding agent." Two "OpenCode" projects now exist; the other,
+  `opencode-ai/opencode` (Charm team), is **archived** and continues as
+  `charmbracelet/crush`. The working-tree engine the catalog names is the
+  SST/Anomaly lineage — flagged the ambiguity so a reader does not click the
+  dead one.
+- **Aider** — `Aider-AI/aider`, "AI pair programming in your terminal," ~6.8M
+  PyPI installs (`aider-chat`).
+- **Command Code** — `CommandCodeAI/command-code` (3735★, live), npm
+  `command-code@1.28.1`, "the coding agent that continuously learns your
+  coding taste"; a learned *Taste* preference compiler importing
+  Claude/Codex/Cursor sessions into portable `taste.md` packages, with a
+  "Command Code Go" subscription tier and Pi / Hermes Agent / DeepSeek Harness
+  API adapters already shipping.
+- **Cursor** — managed desktop IDE (cursor.com), no public product repo.
+- **Devin** — Cognition's managed agent (devin.ai), no public product repo
+  (only `CognitionAI/devin-swebench-results`, results/methodology).
+
+**Changes applied.** Expanded the provenance paragraph to ground all six
+seat-pool engines — including the two-OpenCode disambiguation and the honest
+"closed-harness same as Claude Cowork" framing for Cursor/Devin. Also corrected
+a draft line that said Command Code "publishes no open repo to anchor yet"
+(verified it does).
+
+**Verification.** Agent + model generators regen clean; geometry `diag3.py` =
+0 issues; all 7 agent patterns structurally intact.
+
+**Commit/push.** `032de24` (initial provenance), then the Command Code
+correction in the same working round.
