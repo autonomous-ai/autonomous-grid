@@ -433,13 +433,18 @@ binds is the one that decides:
    box isn't running. (For *which* harness to reach for at all — the layer of
    work it lives in — see **Which harness for which job** above; residency
    picks the lane, the layer picks the harness.)
-3. **Does the plan assume background work?** → #4. If the box can't name the
+3. **Is the session already warm?** → #2. Before paying a spawn, reuse the
+   resident session's context; same-harness resume is the real primitive and
+   cross-lane "handoff" is a restart, priced as one. The lifecycle join —
+   spawn / warm / handoff / kill — is what makes the seat the router just
+   picked affordable, and it is always the step right after the route.
+4. **Does the plan assume background work?** → #4. If the box can't name the
    idle threshold, the preemption trigger, and the residency bound, the
    "runs in the background" promise isn't real yet.
-4. **Is the harness new, or the verdict trust-affecting?** → #5 to earn the
+5. **Is the harness new, or the verdict trust-affecting?** → #5 to earn the
    act step, #6 to certify the label — consensus may propose, but only a
    deterministic fact (or the escalation seat) certifies.
-5. **Will anything have to survive this box dying?** → #7. Snapshots,
+6. **Will anything have to survive this box dying?** → #7. Snapshots,
    reputation, and the act log all append to one log, exported to a
    different medium on a cadence.
 

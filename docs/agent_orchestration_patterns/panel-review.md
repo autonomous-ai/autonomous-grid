@@ -864,3 +864,22 @@ cross-file consistency audit.
   `deepseek-v4-flash`).
 - Markdown balanced; 7/7 agent section skeletons intact; geometry
   `TOTAL ISSUES 0`.
+
+## Round 44 — decision-order cross-file reconciliation
+
+**Found.** The README's "Choosing a pattern — the decision order" omitted **#2
+(session lifecycle)** entirely — it listed #1 → #3 → #4 → #5/#6 → #7 — while
+`agents.md`'s concrete procedure includes `#2 warm` as its own step 3. The
+catalog's two decision procedures disagreed, and one of the seven patterns had
+no decided position in the "which question first" order.
+
+**Fixed.** Inserted a lifecycle question — "Is the session already warm?" → #2 —
+between the route (#3) and background (#4) steps, renumbering 3–5 → 4–6, so the
+decision order now enumerates all seven patterns in the same sequence
+`agents.md` uses (1 act-gate → 3 route → 2 warm → 4 background → 5/6 trust →
+7 ledger). Also re-swept the other sample-code blocks (#4 scheduler, #7 append)
+for the #2-class defect (code contradicting its own prose) — both are clean.
+
+**Verified.** backticks/bold balanced, 7/7 agent skeletons intact, decision
+order steps 1–6 present, no dangling "A word on the examples" reference
+(defined at README line 231), geometry still `TOTAL ISSUES 0`.
