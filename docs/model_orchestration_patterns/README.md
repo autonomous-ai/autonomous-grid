@@ -76,6 +76,8 @@ fixed and mean the same thing in every pattern:
   version of its promise.
 - **Refinements** — how to build it: the concrete rules that keep the promise
   honest (present where the pattern has implementation guidance to separate).
+- **Sample Code** — a short, runnable-in-spirit sketch of the shape, so the
+  mechanism isn't left to prose (illustrative, not the shipped stack).
 - **On the Grid stack** — one concrete local build, to keep the economics
   honest. **Related Patterns** ends each entry and points at the same family.
 
@@ -246,6 +248,14 @@ whole answer is wrong, silently. There is no second read.
 classification that looks right in training data and fails on the tail.
 
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def route_one(request, ranker):
+    cls = ranker.classify(request, ("SIMPLE", "DEMANDING"))
+    model = MATCH[cls]                # smallest adequate / most capable
+    return run_once(model, request)   # one shot, no second read
+```
+
 **On the Grid stack.** A SIMPLE fact lookup lands on `qwen36-27b-mtp` (24GB NVIDIA) over the Hermes (ACP) lane: one run, one answer, no second read. The demand for a second read only appears when the request is DEMANDING — a hard code review where the advisor's SIMPLE/DEMANDING call decides whether a single run on the box is enough or the request should have been a fan-out (#2) or a verifier (#8). This is the baseline; every later pattern is measured against its one-shot, one-model bet. It is also the lane's honest floor: on a single-node box where the resident roster is two or three models sharing one GPU, "pick the best fit and run once" is often the only shape that fits in VRAM at all.
 
 ---
@@ -319,6 +329,16 @@ matters*, not merely a different build. When only one decorrelated family is
 resident, the honest move is to downgrade the confidence claim (#2 → #1), not
 to dress one prior in N hats.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def fan_out(request, models):
+    reads = [m.read(request) for m in models]         # N independent samples
+    quorum = first_agreeing(reads, need=len(models)//2 + 1)
+    if quorum is not None:
+        return quorum                 # the majority agrees
+    return expand(reads)              # a better model joins on a tie
+```
+
 **On the Grid stack.** A ticket-classification request fans the same prompt to three workers over the OpenClaw lane — `qwen36-27b-mtp` and `qwen36-35b-a3b-mtp` on one node, `glm-4.6` (a cross-vendor counterweight) on another — then votes. The honest reading of this example is not "three voices agree" but **2-of-3 is a shared-family quorum that can pass on the Qwen tail**: the two Qwen workers share a training tail, so their agreement is evidence only *conditional on* `glm-4.6`'s genuine cross-vendor independence. Had all three been same-family, the "unanimity" would be fake — three runs of the same prior passing on the same blind spot, which the evaluator should treat as a *stronger* form of the single-read risk, not a weaker one, since the fan certifies rather than breaks it. The example exposes that the vote is a measurement of *internal* agreement, not of truth.
 
 ---
@@ -367,6 +387,14 @@ mismatched parts.
 **Failure mode.** The planner miscuts the seam and the merge has to reconcile
 parts that were never meant to go together. Plan quality is the whole bet.
 
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def split_and_merge(request, planner, specialists):
+    plan = planner.plan_and_split(request)              # purple: allocate
+    pieces = [specialists[s].run(p) for s, p in plan]   # green: the work
+    return planner.merge(pieces)                        # purple: combine
+```
 
 **On the Grid stack.** A multi-file refactor: `qwen36-35b-a3b-mtp` (the strongest local reasoning model on the box) plans the change over the Claude Code (stream-json) lane, then the OpenClaw lane fans the sub-tasks to per-file workers — `qwen36-27b-mtp` for mechanical edits, `qwen3-coder` for boilerplate — and a merge stitches the parts. The bet is the seam cut: if the planner miscuts, the merge reconciles parts that were never meant to go together. On a one-GPU box the planner and the specialists contend for the same seat — a three-way fan is really three queued calls plus the plan — so the honest form of the pattern is a mastered chain, not a genuinely parallel broadcast.
 
@@ -426,6 +454,18 @@ that breaks the shared prior for free (the judge shares the reads' family and
 therefore their blind spot).
 
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def adversarial(request, read_a, read_b, judge):
+    a, b = read_a(request), read_b(request)
+    if a == b:
+        return a                      # the two reads agree
+    verdict = judge(a, b)             # purple: decide
+    if verdict is ABSTAIN:            # a judge needs an escalate/abstain exit
+        return hand_up(request)       # tool check, bigger model, or human
+    return verdict
+```
+
 **On the Grid stack.** A contract-clause interpretation gets two adversarial reads — `qwen36-35b-a3b-mtp` and the cross-vendor `glm-4.6` on separate nodes — and a third lane judges. The judge is not a bigger same-family model (it would share the reads' blind spot): the honest judge here is **Hermes (ACP)** running a tool-grounded check — it re-reads the cited clause with a deterministic extraction against the contract text rather than ruling from vibes. Two same-family reads would be two runs of the same prior, so the divergence is a setup property (here, across vendor), not an instruction. When even the tool check can't decide (both reads cite incompatible groundings), the judge abstains and hands up to the human on the Grid Enterprise lane — the abstain exit is the part of #4 that usually collapses into #1, so the example tests it.
 
 ---
@@ -471,6 +511,20 @@ default when uncertain; the default is what we ship today.
 cheap but is a trap, silently routed to a single model that misses it. The
 strategy layer needs the same humility it gives the layers below.
 
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+SHAPES = {                       # cost x speed x needs -> a shape
+    "cheap":         route_one,
+    "hard":          fan_out,
+    "composite":     split_and_merge,
+    "consequential": adversarial,
+}
+
+def auto(request, inventory):
+    shape = choose_plan(request, inventory)   # the strategy decision
+    return SHAPES[shape](request)             # the selected pattern runs
+```
 
 **On the Grid stack.** The advisor (the small ranker LLM, `gpt-5-mini` by default) classifies each request and picks a shape, reading the live-node inventory the way the current ranker already should. A "cheap-looking" prompt that is actually a trap — a subtle reasoning question that reads SIMPLE — must be routed to a fan-out (#2) or an adversarial read (#4), not to a single `qwen36-27b-mtp` run on the Hermes lane. The example is the failure the strategy layer inherits: the cost heuristic itself is wrong because the request lied about its own difficulty. The strategy choice is a *shape* (how much compute to spend), which is the dimension a remote router never had to ask.
 
