@@ -55,8 +55,10 @@ class Diagram:
 
     def next(self, stage=None, row=None):
         """Advance cursor; returns (stage,row)."""
-        if stage is not None: self._stage = stage
-        if row is not None: self._row = row
+        if stage is not None:
+            self._stage = stage
+        if row is not None:
+            self._row = row
         return self._stage, self._row
 
     def place(self, nid, label, kind="work", row=None, stage=None, w=None,
@@ -94,8 +96,10 @@ class Diagram:
         bottom = max(y[r] + H / 2 for r in rows) + M_B
         if self.title:
             right = max(right, text_w(self.title, EDGE_FS) + 2 * M_L)
-        W = int(round(right)); Hh = int(round(bottom))
-        W += W % 2; Hh += Hh % 2
+        W = int(round(right))
+        Hh = int(round(bottom))
+        W += W % 2
+        Hh += Hh % 2
         return W, Hh
 
     def cx(self, nid): return self._x[self.nodes[nid]["stage"]]
@@ -147,8 +151,11 @@ class Diagram:
         return f'url(#{"H" if marker else "h"}{tag})'
 
     def _node(self, p, nid, n):
-        kind = n["kind"]; cx = self.cx(nid); w = self.w(nid)
-        x = cx - w / 2; y = self.top(nid)
+        kind = n["kind"]
+        cx = self.cx(nid)
+        w = self.w(nid)
+        x = cx - w / 2
+        y = self.top(nid)
         if kind == "dot":
             p.append(f'  <circle cx="{cx:.0f}" cy="{self.cy(nid):.0f}" r="9" '
                      f'fill="{INK}"/>')
@@ -775,12 +782,11 @@ def build_index():
         svgs.append((name, fn().render()))
     # parse each svg's viewBox to place it
     import re
-    placed = []
     body = []
     cursor = 40
     for name, svg in svgs:
         m = re.search(r'viewBox="0 0 (\d+) (\d+)"', svg)
-        w, h = int(m.group(1)), int(m.group(2))
+        h = int(m.group(2))
         body.append(f'<g transform="translate(30,{cursor})">')
         body.append(_strip(svg))
         body.append('</g>')
