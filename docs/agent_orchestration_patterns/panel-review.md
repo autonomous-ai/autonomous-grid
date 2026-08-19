@@ -353,3 +353,35 @@ patterns), residual-overlap diagnostic = **0 issues**. PNG contact sheets
 re-rendered under `/tmp/model_fresh` and `/tmp/agent_fresh2`.
 
 **Commit/push.** `05e609b`. All checks green.
+
+---
+
+## Round 23 — provenance verification of the meta-harness framing
+
+**Lens: local-AI / on-device + software architecture.** The landscape claim
+carries real names and licenses, so it must be *verifiable* — a catalog that
+cites "the clearest working example" of the meta-harness shape should get the
+attribution exactly right.
+
+**Finding.** The README introduced Omnigent as "**Omnigent** (Databricks /
+Matei Zaharia, Apache-2.0, `github.com/omnigent-ai/omnigent`)". Checking the
+source: `pyproject.toml` lists `authors = [Databricks, Inc.]`, and a code
+search of the repository turns up **zero** occurrences of "Zaharia". The
+Matei-Zaharia association is plausible (he co-founded Databricks) but it is
+not what the artifact itself states — and this catalog's standard is
+"verify the source, then repeat it."
+
+**Change.** Rewrote the parenthetical to the verifiable author, **Omnigent
+(Databricks, Inc., Apache-2.0, ...)**. Also tightened one policy description:
+Omnigent's own docs describe a "stricter session rules checked first" ordering,
+not "the session level wins" — aligned the sentence to the source wording so
+the three-level ALLOW/DENY/ASK stack is described the way Omnigent actually
+specifies it.
+
+**Not changed.** The `Polly`/`Debby` mechanics (cross-vendor reviewer, two-head
+debate, three-level stack) were re-verified against `examples/polly/config.yaml`
+and remain accurate; the "reviewer from a *different* harness" table row at
+the catalog's reviewer pattern is also consistent with Omnigent's Polly rule.
+
+**Commit/push.** `12428b4` (README precision) — this log entry is committed
+with it. All checks green.
