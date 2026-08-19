@@ -80,3 +80,32 @@ def read_context_length(path: str | Path) -> int | None:
             return next(iter(ctx.values())) if ctx else None
     except Exception:
         return None
+
+
+def has_mtp_head(path: str | Path) -> bool:
+    """True when the file's own header declares a fused MTP draft head.
+
+    Checks `<arch>.nextn_predict_layers` in the file, not the filename or the HF repo it
+    came from — two unsloth repos ship a file with the identical name
+    (`Qwen3.6-35B-A3B-Q8_0.gguf`) where only one actually has the layer. Any unreadable or
+    malformed file returns False; callers should not add MTP flags on doubt.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return False
+            (version,) = struct.unpack("<I", f.read(4))
+            if version < 2:
+                return False
+            struct.unpack("<Q", f.read(8))  # tensor count (unused)
+            (kv_count,) = struct.unpack("<Q", f.read(8))
+
+            for _ in range(kv_count):
+                key = _read_str(f)
+                (vtype,) = struct.unpack("<I", f.read(4))
+                val = _read_value(f, vtype)
+                if key.endswith(".nextn_predict_layers"):
+                    return bool(val)
+            return False
+    except Exception:
+        return False
