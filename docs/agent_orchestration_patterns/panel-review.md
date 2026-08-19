@@ -943,3 +943,27 @@ order steps 1–6 present, no dangling "A word on the examples" reference
   layer's "local buys spend-N" economics. ✓
 
 **Verified.** Markdown balanced; 7 agent skeletons intact; diagrams untouched.
+
+## Round 48 — harness-lanes front-matter precision fix (OpenClaw observability)
+
+**Lens: precision / clarity (front-matter harness-lanes table).**
+- Found a column-consistency imprecision in the priority layer's harness-lanes
+  table: Hermes (ACP) / Claude Code / Codex rows report **observability
+  formats** (structured tool calls / token-stream per tool step / per-tool JSON
+  events), but OpenClaw's cell read `N parallel sessions` — a *concurrency*
+  fact, not an observability fact, breaking the column's contract.
+- **Fixed** to `N parallel sessions, each a \`round_id\`-stamped trace`,
+  grounded in the glossary (line 313: a `round_id` is stamped on every session,
+  snapshot, and ledger event) and in #1/#7's action-replay keying. The cell now
+  states what you observe (per-copy traces) and how they're correlated
+  (`round_id`), not merely how many there are.
+- Verified SoTA/framework landscape while here: all current local models
+  (`qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`, `deepseek-v4-flash`, `glm-5.2`) and
+  every named framework (Hermes, OpenClaw, Claude Code/Cowork, Codex, Pi,
+  Aider, OpenCode, Command Code, Cursor, Devin, Omnigent, DeepSeek Harness)
+  present and current. No drift.
+
+**Verified.** Markdown balanced; 7 agent skeletons intact; agent `Failure
+mode` blocks are all short and focused (39–101 words) — no walls requiring the
+model-layer `Refinements` split; the convention is already consistent.
+Diagrams untouched.

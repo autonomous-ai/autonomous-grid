@@ -44,7 +44,7 @@ Lane                | Runs on          | May it act?                          | 
 Hermes (ACP)        | ACP / JSON-RPC   | read-only by default; tool scope is voluntary | structured tool calls
 Claude Code         | stream-json      | `--no-tools` for read-only           | token-stream per tool step
 Codex               | `exec --json`    | sandbox / read-only flag              | per-tool JSON events
-OpenClaw            | fan-out worker   | each copy is a full agent, act step gated by the router | N parallel sessions
+OpenClaw            | fan-out worker   | each copy is a full agent, act step gated by the router | N parallel sessions, each a `round_id`-stamped trace
 
 **On names: ACP is the wire, Hermes Agent is the product.** The first lane's
 "ACP" is **Agent Client Protocol** — the open, editor-and-agent-neutral wire
