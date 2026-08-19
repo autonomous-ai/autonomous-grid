@@ -300,3 +300,26 @@ so the geometry verifier in the generator is the in-session guarantee.
 **Round 10 finding.** Front matter now fully self-contains the reading
 instructions (skeleton + figure legend + decision order + catalog map). The
 catalog is at a strong, internally consistent state.
+
+---
+
+## Round 11 — section-order standardization (fixed-skeleton consistency)
+
+**Critique (architecture lens).** The front-matter skeleton announced
+`Mechanics → Consequences → Failure mode → Refinements → On the Grid`, but the
+patterns placed `Refinements` inconsistently: 10 correctly after `Failure
+mode`, but #2/#7/#10 before it, and #20/#24 (the Round-7 splits) directly
+after `Mechanics`. A "fixed skeleton" promise requires one order.
+
+**Changes applied.** Relocated every `Refinements` block to sit between
+`Failure mode` and `On the Grid stack` — the order the front matter announces
+and the majority already use ⇒ uniform across all 15 patterns. Fixed the
+front-matter announcement to the same order. (First attempt at a programmatic
+pass corrupted the file; rolled back via `git checkout`, then redid it as a
+surgical block-swap with the section-header parser corrected for prose-on-the-
+same-line headers.)
+
+**Verification.** Order audit: `NONE` out of order across all 27. Structure:
+all 27 skeletons complete. Word count identical before/after (27187 = 27187)
+and diff is 49/49 lines = pure reorder, zero content change — every fact
+preserved.
