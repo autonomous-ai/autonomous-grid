@@ -1461,32 +1461,42 @@ refuse/escalate) rather than let one bad node eat the budget and the wall-clock.
 failure*) → split: a coral `degraded` answer *and* green `quarantine` box
 (isolated lane) → a purple replacement rejoin on recovery → coral terminal.
 
-**Mechanics.** Watch per-model, per-class **error rate and latency over a
-rolling window**. Trip open on a threshold (consecutive failures, or error rate
-over the window, or latency past the class timeout) — never on a single failure
-(single-sample noise must not depopulate the pool; #16's threshold is
-*relative to the class deadline*, not absolute). While open, the failing model
-is bulkheaded into its own lane — it may still serve *that* lane's retries so
-it can prove recovery, but it can't block the main path. **Recovery probes are
-metered and counted in a window separate from production traffic**: "prove
-recovery" gives the member synthetic/minimal probe work whose failures must
-*not* re-open or hold the breaker, and the probe spend is bounded so recovery
-can't become a second lane quietly draining budget. The request that hits an
-open breaker serves the degraded answer now (lower-confidence, computed from
-the remaining healthy pool) or refuses/escalates (the three exits), and reports
-`circuit: open|half-open|closed` + the tripped member in the envelope. The
-**degraded path is a named shape, not an undefined "recompute"** — it is a
-re-fan over the healthy pool minus the tripped member (falling back to #1's
-mate-in-one over the best healthy member when the pool is too small to re-fan),
-and *which* member is trip-culled is a decision node (purple) that must be
-calibrated like any other. **A mid-request trip is a state change under the
-request's feet**: the request's own sample population silently changes, so the
-trip must cancel/reconcile the in-flight fan's already-collected partials, pin
-the pool-membership change to a fresh `round_id` policy snapshot, and report
-the degraded recompute as a distinct run — otherwise the seed that promised
-same-request→same-answer reproduces the pre-trip plan, not the degraded path
-it actually took. The trip resets closed after a cooldown window of clean
-health — the same decay shape as #14's re-earn.
+**Mechanics.** The breaker watches **error rate and latency per model,
+per class, over a rolling window** and trips open on a threshold — never on a
+single failure (#16's threshold is *relative to the class deadline*, not
+absolute). Once open, the failing member is bulkheaded into its own lane: it
+may still serve *that* lane's retries to prove recovery, but it can't block
+the main path, and any request that hits the open breaker serves a
+degraded-but-honest answer now (the three exits: degrade, refuse, escalate)
+with `circuit: open|half-open|closed` + the tripped member in the envelope.
+The trip resets closed after a cooldown window of clean health — the same
+decay shape as #14's re-earn.
+
+**Refinements.** Five build rules keep the promise honest:
+1. **Trip on a measured threshold, never on noise.** Trip on consecutive
+   failures, an error rate over the window, or latency past the class timeout
+   — a single slow/failed sample must not depopulate the pool. The threshold
+   is a *measured percentile over history* (the ledger #19 reads), never an
+   absolute.
+2. **Isolate the degraded path as a named shape, not a "recompute."** It is a
+   re-fan over the healthy pool *minus* the tripped member, falling back to
+   #1's mate-in-one over the best healthy member when the pool is too small to
+   re-fan. *Which* member is trip-culled is a decision node (purple) and is
+   calibrated like any other.
+3. **Meter recovery probes in a window separate from production traffic.**
+   "Prove recovery" gives the member synthetic/minimal probe work whose
+   failures must *not* re-open or hold the breaker, and the probe spend is
+   bounded so recovery can't become a second lane quietly draining budget.
+4. **Treat a mid-request trip as a state change under the request's feet.**
+   The request's own sample population silently changes, so the trip must
+   cancel/reconcile the in-flight fan's already-collected partials, pin the
+   pool-membership change to a fresh `round_id` policy snapshot, and report
+   the degraded recompute as a distinct run — otherwise the seed that promised
+   same-request→same-answer reproduces the pre-trip plan, not the path it
+   actually took.
+5. **Say *why* in the envelope.** `circuit: open|half-open|closed` and the
+   tripped member ride with the degraded answer, so a caller who got a worse
+   answer than possible isn't surprised by it.
 
 **Consequences.** Trades a little false-trip risk for a lot of collapse-avoidance.
 The degradation is the point: a grid that trips a bad node and still answers
@@ -1787,28 +1797,32 @@ worker (caption: *idle, off the critical path*) → purple `update prior` (label
 *hit rate → type bucket*) → purple `allocate` (label: *sort before real
 work*) → coral answer. Caption: *probe a model's type in idle, before trust*.
 
-**Mechanics.** Each request-class keeps a small bank of calibrated probes:
+**Mechanics.** Each request-class keeps a small bank of calibrated probes —
 known-answer questions, planted blind-spots, adversarial reframes — each
-pre-validated to correlate with real-task success on that class. Models
-answer the battery in idle slots; each hit/miss updates a Bayesian prior on
-the model's type, so the router builds a cheap type-map of the fleet (this one
-is solid on structured extraction, weak on open-ended synthesis) before real
-work is routed. Probes are refreshed on a term (#14's decay) so a model can't
-be gamed by memorizing a static exam, and a bank that stops discriminating is
-retired. Screening runs entirely off the path a request takes. A caveat
-inherited from its moral-hazard cousin: an always-adjudicated model gets
-lazy — keep the allocation only *mostly* type-driven, and occasionally route a
-cheap real request through low-prior models to re-measure rather than write
-them off. **Two ledger properties keep the picture honest.** A probe that #26
-preempts mid-generation must commit its prior update atomically-or-nothing — a
-half-run probe absorbed into the type-map is a garbage partial measurement and
-its read-modify-write races the cancellation, so serialized per model+class
-commit. And the type-map is *durable state*, not RAM: a box reboot must not
-cold-start screening from uniform or the "off the critical path" economics
-vanish — persist the prior per {model, class} in the ledger (router-execution.md)
-with #22's durability, and tie a probe's validity to the slack it ran in (a
-probe on a contended slot measures slowdown, not competence, and must not
-count as a clean hit).
+pre-validated to correlate with real-task success on that class. Models answer
+the battery in idle slots; each hit/miss updates a Bayesian prior on the
+model's type, so the router builds a cheap type-map of the fleet (this one is
+solid on structured extraction, weak on open-ended synthesis) before real work
+is routed. Screening runs entirely off the path a request takes.
+
+**Refinements.** Five build rules keep the picture honest:
+1. **Rotate the exam.** Probes refresh on a term (#14's decay) so a model
+   can't be gamed by memorizing a static battery, and a bank that stops
+   discriminating (hit rate no longer predicting real outcomes, the #22 test)
+   is retired.
+2. **Stay *mostly* type-driven.** An always-adjudicated model gets lazy, a
+   moral-hazard of the shape: occasionally route a cheap real request through
+   low-prior models to re-measure them rather than write them off.
+3. **Commit preempted updates atomically-or-nothing.** A probe #26 yanks
+   mid-generation must not drip a half-run measurement into the type-map —
+   it's a garbage partial, and its read-modify-write races the cancellation,
+   so serialize the prior commit per {model, class}.
+4. **Make the type-map durable state, not RAM.** A box reboot must not
+   cold-start screening from a uniform prior or the "off the critical path"
+   economics vanish — persist the prior per {model, class} in the ledger
+   (router-execution.md) with #22's durability.
+5. **Tie a probe's validity to the slack it ran in.** A probe on a contended
+   slot measures slowdown, not competence, and must not count as a clean hit.
 
 **Consequences.** The battery itself is work: each probe must be calibrated
 (known answer, correlated, class-specific) or the screening measures nothing.
