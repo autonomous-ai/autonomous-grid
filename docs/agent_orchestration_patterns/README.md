@@ -64,6 +64,20 @@ when the router is just picking model reads.
 interchangeable at the lane — each is a different *default posture* on the
 same role, and the pick is the shape of the task, not a benchmark:
 
+**Exec seats, at a glance.** The same summary-first shape as the home
+bases above; the bullets that follow are the *why* and the *when-not*.
+
+| Exec seat | Default posture | Reach for it when |
+|-----------|-----------------|-------------------|
+| **Aider** | thin, git-native pair-programming seat | you drive small-to-medium repo diffs and steer |
+| **OpenCode** | open, configurable terminal TUI across many models | you want the harness itself transparent and yours |
+| **Command Code** | learns your taste; portable `taste.md` | the harness should absorb and replay how you like code |
+| **Codex** | supervised, sandboxed exec + worktrees/PR pipelines | the game is N supervised lanes |
+| **Claude Code** | ergonomic single-developer workspace | the game is depth in one repo |
+| **Pi** | minimal: no permissions/plan/sub-agents, under *your* loop | you want the thinnest auditable engine under your own orchestration |
+| **Cursor** | managed desktop IDE | you hand the loop to a GUI product |
+| **Devin** | managed autonomous SWE fleet | you hand the entire loop to a product, not a lane |
+
 - **Aider** (`aider-chat`) is the pair-programming seat: a thin, git-native
   edit loop for a developer driving small-to-medium repo changes — the TL that
   writes diffs while you steer, not a supervised fleet.

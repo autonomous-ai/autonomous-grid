@@ -589,3 +589,23 @@ balanced (backtick/bold); both diagram regens green; geometry 0 issues;
 7 pattern sections + full skeleton intact.
 
 **Commit/push.** (R31 — this commit).
+
+## Round 32 — GoF lens: exec-seat coding engines had no summary index
+
+**Critique.** R31 added a summary-first table for the five *home bases* (the
+layer→harness map), but the six *coding-engine exec seats*
+(Aider/OpenCode/Command Code/Codex/Claude Code/Pi/Cursor/Devin) were still
+carried only in prose bullets — the other half of the user's exact "when to
+use what" ask. A reader deciding among coding engines had no one-line index.
+
+**Changes applied.**
+- Added an **Exec seats, at a glance** table (Exec seat · Default posture ·
+Reach for it when) right under the *Which exec seat for which shape* intro,
+mirroring the R31 home-bases table and the GoF summary-then-prose shape. The
+prose bullets remain the *why* and *when-not*.
+
+**Verification.** Both new tables uniform (home-bases 5 pipes/row; exec-seat 4
+pipes/row); markdown globally balanced; both diagram regens green; geometry 0
+issues; structure intact.
+
+**Commit/push.** (R32 — this commit).
