@@ -3002,6 +3002,70 @@ actually holds. The figures in this folder are vector `.svg` renders, generated 
 
 ---
 
+## One request, walked through the catalog
+
+The synthesis above reads like a theory; here is one request actually moving
+through the catalog, with the decisions the shapes make on it. It is the model
+layer's answer to the agent layer's "one box, one defect" — a single shape, not
+a fleet, but the same discipline: spend where the risk is, pool with
+divergence, and certify by a fact, not a session.
+
+**The problem.** The operator pastes a lock-ordering snippet and asks, "is
+this deadlock-free?" The answer gates a merge, so being wrong is expensive
+(correctness on a real property, not a taste call), and a single cold model
+asked alone will give a confident guess. This is exactly the request the
+catalog is for: *local has made the samples free, so the only honest question
+is how many to spend and how to pool them.*
+
+**The spend (#5 Strategy).** The routing question — spend 1 or spend N? — is
+#5's job, and it reads the request shape to answer it. A formal, checkable
+property with a real cost of error is *not* a Mate-in-One request (one cheap
+pick trusted by a ranker); it is a spend-N request. #5 chooses Brute-Force
+with a divergence arm over the single-shot path because correctness-gating
+equity wants evidence, not a ranker's confidence.
+
+**The fan (#2, #11, #12).** N is set by the box's live-node inventory, not a
+constant. Four drafts run — but not four identical prior runs. #11 forces
+divergence *before* the vote: one tail is prompted to produce the partial-order
+trace, another to critique the locking style, a third to hunt the specific
+reversal, so the drafts are not twin priors agreeing. #12 then weights the pool
+by correlation, so two tails that share a training set do not get double
+credit — the vote is over *independent* evidence, not volume.
+
+**The certify (#8, #22).** Where a mechanical check exists, the verdict does
+not rest on the model at all: a lockdep-style analysis is a deterministic
+external fact, and #8's verifier grants it — the same shape as the agent
+layer's "test is a fact, session is a report." #22 closes the learner's angle:
+the winner is not declared on a lucky streak — N is pre-registered and the
+acceptance boundary widens per look, so "four of four agreed" only certifies
+if the four were pre-committed, not retro-fitted.
+
+**The state (#17, #24).** The verified "deadlock-free" answer is cached by
+semantic key (#17), so the next syntactically-different-but-equivalent request
+does not re-cost the whole fan. In idle, the router probes this model tail's
+type on the locking-and-formal-property class (#24) — learning, off the live
+path and before trust is at stake, whether this tail is one to route locking
+questions to at all.
+
+**The risk layer (#19, #20).** The fan is sized by the tail, not the mean:
+#19 prices the spend as a CVaR over the cost of a wrong merge, so the router
+spends *more* on a governance-gating property than on a revertible taste call.
+And if this request class has already been toxic — prior deadlock verdicts
+shipped wrong — #20's breaker trips the class and escalates to a stronger,
+differently-trained arm instead of spending more on the same tails that just
+failed.
+
+**Why this is local.** On hosted models this exact request bills per token and
+caps per minute, so the router would rather Mate-in-One it and eat the risk
+than pay for N drafts plus a correlation-weighted vote plus a semantic cache.
+On the user's own box the fan of four, the divergence arm, the probe, and the
+cache cost nothing but seats and wall-clock — so the router is *allowed* to
+spend N and certify by fact. That is the entire difference the two levers make:
+remote forces "as little as possible, once"; local buys "as much as the risk
+deserves, pooled and certified."
+
+---
+
 ## Putting them together
 
 Five shapes, one idea: **local resets what routing buys.** Mate-in-One is

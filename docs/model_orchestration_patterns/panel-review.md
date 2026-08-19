@@ -548,3 +548,33 @@ structure intact (27 + 7 patterns, 27 + 7 Intent). Diff was pure
 hyphenation normalization, meaning preserved.
 
 **Commit/push.** (R36 — this commit).
+
+## Round 41
+
+**Change.** Added the model layer's missing GoF-signature closing: a **worked
+case study — "One request, walked through the catalog"** — placed ahead of the
+"Putting them together" synthesis, directly mirroring the agent layer's
+one-box/one-defect walk. It drives a concrete correctness-gating request (a
+lock-ordering deadlock-free verdict) through the actual shapes, so the
+synthesis stops being theory:
+
+- **The spend (#5)** — a formal, expensive-to-be-wrong property routes to
+  spend-N, not Mate-in-One; #5 reads shape to choose.
+- **The fan (#2, #11, #12)** — N drafts from the live node inventory, forced
+  to diverge before the vote (#11), correlation-weighted (#12).
+- **The certify (#8, #22)** — a lockdep-style deterministic check outranks the
+  pool (#8); #22 pre-registers N so four-of-four can't certify on a lucky
+  streak.
+- **The state (#17, #24)** — semantic-key cache; type-probe in idle.
+- **The risk (#19, #20)** — CVaR tail-priced spend; breaker trips a toxic
+  class and escalates instead of re-spending.
+- **The economics** — remote forces Mate-in-One-once; local buys
+  spend-N-certified-by-fact. The two levers, made concrete.
+
+Every `#N` used is a real model-layer pattern with its catalog semantics
+preserved; no fact invented.
+
+**Verification.** Markdown balanced (backticks/bold); 27 pattern headers
+intact; all case-study refs in range 1–27. Diagrams untouched.
+
+**Commit/push.** (R41 — this commit).
