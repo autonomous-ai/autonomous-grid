@@ -55,8 +55,8 @@ the lane" as "Hermes Agent the home-base" — the lane is how it is driven, the
 home-base is what it remembers. Where this catalog writes the lane it says
 "Hermes ACP"; where it means the memory product it says "Hermes Agent".
 
-The coding-agent engines (Cursor, OpenCode, Pi, Command Code, Devin, Muse
-Code, Amp) sit in the same seat pool — Pi is a Fleet coding-engine, *not* a
+The coding-agent engines (Cursor, OpenCode, Pi, Command Code, Devin, Aider)
+sit in the same seat pool — Pi is a Fleet coding-engine, *not* a
 model and *not* a lane; it joins the fan when a task is agent-shaped, never
 when the router is just picking model reads.
 

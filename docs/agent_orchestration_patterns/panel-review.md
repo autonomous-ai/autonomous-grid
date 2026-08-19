@@ -241,3 +241,42 @@ is **not** stale — it is the real Qwen code variant, distinct from the
 source*, not from taste, and its two most-conflatable terms are disambiguated
 in-line. Next high-leverage items: write the missing `agents.md` agent-layer
 companion (referenced, absent), and a per-pattern "Known Uses" precision pass.
+
+---
+
+## Round 20 — Seat-pool coding-engine precision
+
+**Critique (precision lens, carried over from the model layer's 8-hour ask).**
+The front-matter seat pool listed the coding-agent engines as
+"(Cursor, OpenCode, Pi, Command Code, Devin, Muse Code, Amp)". A hallucinated
+product name is exactly the "precision" defect the user asked to eliminate, so
+this round verified each name against a live source rather than trusting it.
+
+**Source checks (this round).**
+- **Command Code** — confirmed real and current: `commandcode.ai` /
+  `CommandCodeAI/command-code`, npm `command-code@0.51.0` (2026-07-16). Its
+  differentiator is a learned *Taste* preference compiler (imports
+  Claude/Codex/Cursor sessions, writes portable `taste.md` packages). Keep.
+- **Aider** — confirmed real: `Aider-AI/aider` (the AI pair-programming CLI).
+  Added as a verified seat-pool member.
+- **Devin** — confirmed real (Cognition's autonomous software engineer; the
+  open-source alternative is `OpenDevin`). Keep.
+- **Cursor** — confirmed real (Anysphere's agentic editor). Keep.
+- **OpenCode** — confirmed real (`anomalyco/opencode`, "the open source coding
+  agent"). Keep.
+- **Pi** — already confirmed earlier (`earendil-works/pi`). Keep.
+- **Muse Code** — *not* confirmable as a product; only unrelated personal
+  repos (`lumine1120/muse-code`) surfaced. Removed.
+- **Amp** — *not* confirmable as a coding agent; only unrelated repos
+  surfaced. Removed.
+
+**Changes applied.** Seat pool now reads
+"(Cursor, OpenCode, Pi, Command Code, Devin, Aider)" — every name verified
+against a live source; the two unverifiable names removed. This is the model
+layer's "names are parameters, not a billable stack" rule applied to the
+*engines* rather than the models, and it keeps the pool illustrative-but-true.
+
+**Round state.** The seat pool is now *sourced*, not asserted from memory.
+Remaining open items (unchanged in priority): the optional external
+`agents.md` companion, and the per-pattern **Known Uses precision pass**
+(7 patterns — make the "who already runs this" exemplars current and concrete).
