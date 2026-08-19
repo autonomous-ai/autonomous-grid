@@ -829,3 +829,38 @@ runtime still fails to persist judges — logged as-is). Findings:
 titles; Markdown rebalanced; single targeted edit, no structural change.
 
 **Commit/push.** (R42 — this commit).
+
+## Round 43 — agent-layer precision pass: sample-code defects + case-study audit
+
+**What was reviewed this round.** A word-by-word precision pass over the whole
+agent catalog (front matter + patterns 1–7), plus a cross-reference and
+cross-file consistency audit.
+
+**Found and fixed (two real defects in the sample code).**
+- **#2 Session lifecycle, `handoff` contradicted its own prose.** The code did
+  `_persist()` then `_load(prompt)`, but `_load` built a cold `Session(prompt)`,
+  discarding the snapshot it had just frozen — so `handoff` was
+  indistinguishable from `spawn`, contradicting the documented "restore a
+  `round_id`-frozen session snapshot instead of starting cold." Fixed `_load`
+  to restore the snapshot when one exists (else cold-start on a fresh seat).
+- **#5 Staged admission, dead constants.** `STAGES` and `BOUNDED_QUORUM = 2`
+  were defined but never used (the quorum gates the *bounded act step*, not
+  promotion, so it has no role in `admit`). Removed both; folded the quorum's
+  role into the leading comment.
+
+**Audited and verified clean (no change needed).**
+- Every model-layer `#N` attribution in the agent catalog is accurate: #6
+  Brute-Force caps fan writes, #16 Straggler Backup re-cut for sessions, #26
+  Slack-Stealing scheduler, #24 probe-new-models-in-idle, #18 model admission,
+  #12 swap-cost pricing. Confirmed against the model README.
+- R41 model-layer case study "One request, walked through the catalog": all
+  nine `#N` claims (#5/#8/#11/#12/#17/#19/#20/#22/#24, plus #2 Fan-Out) map to
+  the correct model patterns.
+- The two catalogs' organizing theses are symmetric ("Two levers, twenty-seven
+  shapes" / "Three binds, seven shapes"), and the R42 caption framing is
+  accurate.
+- Models in every agent example are current local SoTA
+  (`qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`, `qwen3-coder`, `glm-5.2`,
+  `deepseek-v4-flash`).
+- Markdown balanced; 7/7 agent section skeletons intact; geometry
+  `TOTAL ISSUES 0`.

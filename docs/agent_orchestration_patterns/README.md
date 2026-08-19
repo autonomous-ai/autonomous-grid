@@ -648,8 +648,9 @@ class Seat:  # the resident harness + model runtime
         self._persist(); self.session = None
     def _persist(self):                 # fsync before the seat frees
         write(self.snap_home, self.session.snapshot()); fsync()
-    def _load(self, prompt):
-        return Session(prompt)
+    def _load(self, prompt):            # restore the round_id-frozen snapshot
+        snap = read(self.snap_home)     # none on a fresh seat -> cold start
+        return Session(prompt, resume=snap) if snap else Session(prompt)
 ```
 
 **On the Grid stack.** On a 1–2-seat box the `seat` is the one resident model
@@ -934,8 +935,7 @@ order the whole layer depends on.
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
 ```python
 # Three stages, each a ledger event (#7); the deterministic arm scores first.
-STAGES = ("shadow", "bounded", "full")
-BOUNDED_QUORUM = 2          # the bounded act step needs a router quorum (#1)
+# Bounded mode's act step itself is gated behind a router quorum (#1).
 
 def admit(harness, authority, ledger, idle):
     stage = ledger.stage(harness)                      # replay from the log
