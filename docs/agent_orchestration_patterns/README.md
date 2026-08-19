@@ -138,8 +138,24 @@ on hardest for it: *no built-in permission system; it runs with the
 permissions of the user and process that launched it.* **Claude Cowork** is
 Anthropic's managed desktop agent (no public repo; the name is confirmed by
 the many open reimplementations that describe themselves as "Open Source
-version of Claude Cowork"). Point the list above at those sources and the
-"which job" layer follows; the rosters move, the layers do not.
+version of Claude Cowork"). The coding engines that join the fan's seat pool
+are the same kind of live, checkable thing: **OpenCode** is `sst/opencode` —
+*now maintained as `anomalyco/opencode`*, "the open source coding agent," the
+terminal TUI that leads this area's open-CLI re-engineering (be warned there
+are two "OpenCode" projects: the other, `opencode-ai/opencode` from the Charm
+team, is *archived* and continues as `charmbracelet/crush` — the working-tree
+engine this catalog names is the SST/Anomaly lineage, not the archived one).
+**Aider** is `Aider-AI/aider`, "AI pair programming in your terminal," the
+6.8M-install (PyPI) pair-programming seat. **Command Code** is the newer CLI
+coding agent — subscription-based (a "Command Code Go" tier) with an API that
+Pi, Hermes Agent, and DeepSeek Harness all ship adapters for today; it is real
+and current, but publishes no open repo to anchor yet, so treat its ergonomics
+as the object of active churn. **Cursor** and **Devin** are the managed GUI
+and fleet ends of the pool — Cursor the desktop IDE (cursor.com), Devin
+Cognition's managed agent (devin.ai) — both with no public product repo, the
+same closed-harness shape as Claude Cowork. Point the list above at those
+sources and the "which job" layer follows; the rosters move, the layers do
+not.
 
 Two routing rules hold across the whole layer:
 
