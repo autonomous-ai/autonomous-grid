@@ -642,3 +642,38 @@ patterns) — the positive halves are in its one-sentence table, the negatives i
 its Failure modes.
 
 **Commit/push.** (R33 — this commit).
+
+## Round 35 — precision pass: cross-ref network, geometry clearance, consistency
+
+**Critique.** The agent layer's prose leans on numbered cross-references to the
+model layer. "Clearer and more precise" (the user's standing ask) means those
+refs must be *factually* correct — the cited pattern number must actually hold
+the concept named. Also open from R34: confirming the model+agent edge-label
+clearance audit really is clean, and a word-by-word read of patterns #2-#7
+(the priority layer) for residual inconsistencies.
+
+**Changes applied.**
+- Cross-ref integrity audit: verified every model-layer number cited in the
+  agent layer holds the concept it is named for — #16 Straggler Backup (the
+  "straggler re-cut"), #24 Type-Revelation (probing unknown models), #26
+  Slack-Stealing Scheduler, #18 Canary Trust-Equity (admit-a-model), #2/#11
+  (family divergence), #12 Markowitz (fallback-vs-resident). All correct —
+  these are intentional inter-layer refs in narrative prose, not self-refs.
+- Agent `Related Patterns` footers confirmed all in range (1..7). No change
+  needed; audit records the resolution.
+- Geometry clearance: re-ran the extended audit (label-to-label, label-vs-node,
+  node-sub overflow, off-canvas) over both layers' current SVGs — `TOTAL
+  ISSUES 0`. Closes the R34 open item.
+- Word-by-word pass over all seven agent patterns (#2-#7 read in full). Fixed
+  the one genuine inconsistency: #2's hyphenation `politely-named` →
+  `politely named` (adverbs ending in `-ly` are not hyphenated in compounds).
+  No other drift found — prose already consistent and precise.
+
+**Verification.** Structure intact (7 pattern sections, correct skeleton
+order); markdown balanced; both layers' build green; geometry 0 issues.
+
+**Open items.** The `agents.md` companion doc remains honestly described as
+unpublished in the front-matter provenance — still the largest outstanding
+piece; a full write is the next substantive candidate.
+
+**Commit/push.** (R35 — this commit).

@@ -550,7 +550,7 @@ and the only thing that compounds across requests.
 **Motivation.** State is the product and it's durable: the session that
 remembers the codebase, the customer, the six prior turns is worth more than
 any single read it performs. Left unmanaged, that state is a leak — a
-resident session that is never killed is a politely-named resource leak on a
+resident session that is never killed is a politely named resource leak on a
 1-seat box. Managed, it is a cache: a `round_id`-frozen snapshot you can
 restore in a context swap instead of paying a cold start.
 
