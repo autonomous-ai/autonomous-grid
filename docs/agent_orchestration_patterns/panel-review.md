@@ -153,3 +153,40 @@ figures needed a rebuild):
 balanced in both READMEs. Rename confined to the pattern catalogs — operational
 docs (`cli.md`, `reference.md`, protocol drafts) left untouched to avoid
 decoupling from the real CLI model catalog.
+
+---
+
+## Round 18 — consistency audits + deepseek exemplar alignment
+
+**Critique (Architecture lens).** Round 17 renamed the rostered `qwen36`/`glm-4.6`
+tags but left two prose exemplars in the model layer still speaking the older
+`deepseek-v3` family while the agent figures and README already used
+`deepseek-v4-flash` — an internal drift between "the deepseek that appears in
+examples" and "the deepseek drawn on figures." The same lens re-checks the
+agent layer for structural and cross-reference drift, since those were the two
+bug classes the model layer had to fix in earlier rounds.
+
+**Changes applied.** Aligned the two model-layer `deepseek-v3` exemplars to
+`deepseek-v4-flash` (pure token rename, no structural change), so every deepseek
+reference across both catalogs names the current flash-tier model.
+
+**Verification (all green).**
+- **Stale-token scan:** `qwen36`, `glm-4.6`, `llama-3` — 0 hits across both
+  READMEs and the agent figures.
+- **Section order:** all 7 agent patterns carry the 12-element skeleton in the
+  exact announced order (Intent…Known Uses…Failure mode…Refinements…Sample Code…
+  On the Grid stack…Related Patterns) — no announce-vs-actual drift.
+- **Cross-reference integrity:** every model-layer `#N` the agent patterns lift
+  maps correctly — `#16` straggler→handoff, `#24` screening→probing unknowns,
+  `#26` slack-stealing→seat-as-executor, `#18` canary→admission, `#12` Markowitz,
+  `#2/#11` fan-out/negative-selection→family independence.
+- **Figures:** agent generator `9/9` re-ran `verify ok`; working tree byte-clean
+  (no spurious regeneration), confirming the committed SVGs already carry the
+  label-collision fix.
+
+**Round state.** The agent layer is at a high, audited plateau: uniform
+skeleton, accurate cross-refs, current model names, and a framework home-base
+guide (OpenClaw/Hermes/Claude Cowork/Claude Code/Codex/Pi) that already
+satisfies "when to use what." Further blind edits risk churn; remaining
+high-leverage work is chiefly verifying 2026-era framework facts against
+sources and the diagram-beauty pass.
