@@ -190,3 +190,54 @@ guide (OpenClaw/Hermes/Claude Cowork/Claude Code/Codex/Pi) that already
 satisfies "when to use what." Further blind edits risk churn; remaining
 high-leverage work is chiefly verifying 2026-era framework facts against
 sources and the diagram-beauty pass.
+
+---
+
+## Round 19 — ground the harness home-bases; kill the ACP/Agent conflation
+
+**Critique (Local-AI + GoF lens).** The "which harness for which job" guide was
+the user's explicit ask ("understand their strengths and weaknesses and when to
+use what") and it was *right in shape* — but it read as taste, not fact. A
+Design-Patterns-grade catalog must make its claims auditable, and a
+five-product taxonomy needs (a) a source a reader can point at and (b) no
+term a reader can mis-read. Two real gaps surfaced: (1) none of the five
+home-bases had a live, checkable provenance, and (2) the doc used "Hermes ACP"
+(8×, a *lane*/transport) and "Hermes Agent" (4×, the Nous *product*) in a way
+that invites the exact conflation the taxonomy is trying to prevent.
+
+**Changes applied (all grounded against live sources this round, then committed).**
+- **Provenance footnote** after the when-not-to list: names each home-base's
+  real, current source — OpenClaw `openclaw/openclaw` ("your own personal AI
+  assistant… any OS, any platform"), Hermes Agent `NousResearch/hermes-agent`
+  ("the agent that grows with you" + self-evolution / agent-governance
+  siblings), Claude Code `anthropics/claude-code`, Codex `openai/codex`, Pi
+  `earendil-works/pi` (quoted for the property the catalog leans on hardest:
+  *no built-in permission system; runs with the user's permissions*), and
+  Claude Cowork (Anthropic managed desktop; name confirmed via the many "Open
+  Source version of Claude Cowork" reimplementations, since there is no public
+  repo). Closes with the invariant: the rosters move, the layers do not.
+- **ACP ≠ Hermes Agent** one-liner under the lane table: ACP = **Agent Client
+  Protocol** (`agentclientprotocol/agent-client-protocol`, "a protocol for
+  connecting any editor to any agent") — the wire; Hermes Agent = the memory
+  product that speaks it. Named which term this catalog writes for which.
+- Re-rendered the 9 agent figures to fresh PNGs (true-aspect, 2×) and ran an
+  independent per-figure label-bounding-box overlap check: **0 residual
+  overlaps** on all 8 pattern figures; the earlier `index.svg` "collisions" are
+  my checker ignoring the `translate(30,cursor)` tile offsets (false positives).
+
+**Verification.** 9/9 agent figures `verify ok` on re-run. Backticks 314 and
+bold runs even in the agent README. All 9 image refs resolve; working tree
+clean after two pushes (`518df60` provenance, `b5a8510` ACP/Agent).
+
+**Source checks (this round).** `openclaw/openclaw` 200; `anthropics/claude-code`,
+`openai/codex`, `NousResearch/hermes-agent`, `earendil-works/pi` (93.7k★),
+`agentclientprotocol/agent-client-protocol` (4k★), `openclaw/acpx`, and
+Claude-Cowork reimplementations all confirmed; `Qwen/Qwen3.8-27B` and
+`QwenLM/Qwen3-Coder` confirm the current code-specialist line, so `qwen3-coder`
+is **not** stale — it is the real Qwen code variant, distinct from the
+`qwen38-27b` base seat.
+
+**Round state.** The agent layer's harness taxonomy is now *asserted from a
+source*, not from taste, and its two most-conflatable terms are disambiguated
+in-line. Next high-leverage items: write the missing `agents.md` agent-layer
+companion (referenced, absent), and a per-pattern "Known Uses" precision pass.
