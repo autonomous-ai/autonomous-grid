@@ -189,7 +189,7 @@ unbounded world-touching writes.
 **Where this sits in the multi-agent landscape.** A meta-harness — a layer
 that wraps several coding-agent CLIs and SDKs (Claude Code, Codex, Cursor,
 OpenCode, OpenClaw, Pi, Devin, and the rest) behind one session API — is now
-a solved, cloud-shaped problem. **Omnigent** (Databricks / Matei Zaharia,
+a solved, cloud-shaped problem. **Omnigent** (Databricks, Inc.,
 Apache-2.0, `github.com/omnigent-ai/omnigent`) is the clearest working example:
 agents are YAML files; a runner sandboxes each session and a server holds
 policies and shared history; **Polly** is an orchestrator that writes no code
@@ -197,7 +197,7 @@ and dispatches per-vendor sub-agents into parallel git worktrees; and its
 **Polly/Debby** moves are the interesting ones — route each diff to a
 *reviewer from a different vendor than the one that wrote it* (cross-vendor
 verifier as policy), run a two-head debate to convergence, and hold a
-three-level ALLOW/DENY/ASK policy stack where the session level wins. That is
+three-level ALLOW/DENY/ASK policy stack where the stricter session rules are checked first. That is
 the cloud-side version of the same discipline this catalog describes.
 
 This catalog is deliberately **not** the meta-harness. It is the *local*
