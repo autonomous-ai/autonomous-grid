@@ -814,8 +814,8 @@ def _task_follow(args: argparse.Namespace) -> int:
         # refusal is here — and it names both, because somebody who typed neither does not yet know
         # a conversation is a thing they can follow.
         raise SystemExit(
-            "Say what to follow: a turn id, or a whole conversation.\n"
-            "  grid task follow <turn-id>\n"
+            "Say what to follow: a task id, or a whole conversation.\n"
+            "  grid task follow <task-id>\n"
             "  grid task follow --conversation <conversation-id>")
 
     stop = _follow_stream(
