@@ -1750,6 +1750,21 @@ to "quarantine onto nothing" (#20 leans on #16's gate).
    tripped member ride with the degraded answer, so a caller who got a worse
    answer than possible isn't surprised by it.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def circuit_breaker(request, member, cls, live_inventory):
+    if len(live_inventory) < 2:                       # a bulkhead needs a second lane; on one node it's a fiction
+        return serve_degraded(request, member, reason="no spare seat")  # degrade/refuse, never hope one appears
+    err = measured_error_rate(member, cls, window=rolling)        # measured percentile over history, not one sample
+    if err < trip_threshold(member, cls):             # a slow/bad sample under normal contention is noise, not signal
+        return serve(request, member, envelope(circuit="closed"))
+    quarantined(member).isolate()                     # bulkhead the toxic lane; it may still prove recovery alone
+    probe = metered_probe(member, separate_window=True)  # probe spend can't re-open the breaker or drain a second lane
+    if probe.recovered():
+        return serve(request, member, envelope(circuit="half-open"))
+    return escalate(request, member, envelope(circuit="open"))  # the three exits: degrade / refuse / escalate
+```
+
 **On the Grid stack.** A request-class that has been failing hard trips the breaker fast and quarantines the toxic lane into a bulkhead — e.g. `glm-4.6` serving malformed extraction over the Hermes (ACP) lane trips and is refused for new requests — but the example is honest that on a single-node deployment a bulkhead is a fiction with no second lane. The breaker must know the live inventory (#16) and refuse to "quarantine onto nothing": with no second lane, open means the class *serves degraded or refuses*, and that is the explicit default, never a hope that a spare seat appears. While open, the failing member is bulkheaded into its own lane, recovery probes are metered in a window separate from production traffic (so a probe failure doesn't re-open the breaker, and recovery can't quietly drain budget as a second lane), and recovery is a probabilistic regression with an easing window, never absolute. The tripped member and the `circuit: open|half-open|closed` state ride in the envelope so the caller sees *why* it got a degraded answer, and the trip must not fire on a single slow/failed sample — the threshold is a measured percentile over history, not an absolute.
 
 ---
@@ -1842,6 +1857,19 @@ narrows, and the loop reports confident consensus that is really correlated
    the anonymity, the iteration, and the minimum-rounds floor all hold — the
    moment one breaks, it is just #7 with extra steps.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def delphi_consensus(request, workers, min_rounds, round_cap, bar):
+    est = [w(request) for w in workers]               # each worker: private number + one-line reason
+    kept = {id(w): None for w in workers}             # router holds attribution ONLY long enough for the rounds
+    for r in range(1, round_cap + 1):
+        med, iqr = aggregate(est)                     # median + interquartile spread, never names
+        if iqr < bar and r >= min_rounds and passes_nonfeedback_probe(est):
+            return median(est), surviving_outlier_reasons(est)   # surface the contrarian, don't flatten it
+        est = revise(est, med, iqr)                   # workers see the spread only, never who wrote what
+    return escalate(est)                              # round cap refuses/escalates, never rubber-stamps a tight-wrong
+```
+
 **On the Grid stack.** A sensitive estimate runs in anonymous rounds — each worker privately writes a number and a reason, sees only the median and interquartile spread, and revises until the spread closes. `qwen36-27b-mtp`, `qwen36-35b-a3b-mtp`, and the cross-vendor `glm-4.6` participate under `round_id`-keyed anonymity over the OpenClaw lane. The single-node cost must be owned: three models that don't co-reside on a 1-GPU/Apple box turn "rounds" into serial VRAM swaps, so **Delphi on one box is sequential re-loads, not parallel rounds** — the round cap is not a nicety here, it is the difference between a measured estimate and a thrash. The anonymity is scoped, not absolute: per-outlier targeting ("you're an outlier, defend yourself") and movement-logging both require the router to hold the worker→number mapping, so the attribution is retained only long enough to run the rounds and audited for leaks — or the pattern must pick one and drop the other. The example earns the median only while the anonymity, the iteration, and the minimum-rounds floor all hold — the moment any breaks, it collapses into #7 with extra steps.
 
 ---
@@ -1913,6 +1941,23 @@ blinks.
 pass, which is exactly the goal-seeking the barrier exists to stop. N and the
 boundary must live in an append-only decision log stamped a-priori, and the
 refusal ("insufficient N") must be the default, never the path to an override.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def trial_sequential(klass, model, incumbent, effect_size, ledger):
+    n_required = preregister_n(effect_size)           # N from expected effect size, appended a-priori, never re-estimated
+    look = 0
+    while True:
+        look += 1
+        n = ledger.count_verified(klass, model)       # exactly-once keyed appends; a retry must not double-count
+        if n < n_required:
+            return refuse(klass, model, "insufficient N")  # refusal is the success path, never an override
+        if clears_boundary(look, n):                  # O'Brien-Fleming / Lan-DeMets: boundary widens per interim look
+            ledger.append_durable(promotion(klass, model))  # append-only decision log, stamped a-priori
+            return promote(klass, model)
+        if starved(klass, model):
+            return refuse(klass, model, reason, usage(learner_eta_days=eta, learner_starved=True))
+```
 
 **On the Grid stack.** The learner is deciding whether `qwen36-35b-a3b-mtp`
 (local, 32GB Apple silicon) deserves to steal real requests from the incumbent
@@ -1986,6 +2031,17 @@ un-run) while its shelf label lags, and the router ships past-the-beyond-
 reasonable work at a metadata bar because no one re-ranked the class. Shelf
 assignments must be re-validated on every learner pass, and an under-ranked
 shelf is precisely the case #22's evidence barrier should refuse.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def evidence_bar(request, cls, ledger, learner):
+    cost, bias = ledger.shelf(cls)                    # (cost, error-bias), re-validated on every learner pass
+    if cost == "preponderance":                       # cheap to redo -> one check, ship at a bare majority
+        return ship_bare_majority(request, cls)
+    if cost == "clear_and_convincing":                # tool calls / writes -> fan out + verifier before acting
+        return fan_and_verify(request, cls)
+    return adjudicate_or_refuse(request, cls)         # irreversible -> forced divergence + hard no on ambiguity
+```
 
 **On the Grid stack.** A fan-out of Codex (`exec --json`) writing a config
 file to disk sits on the **clear-and-convincing** shelf: fan-out across
@@ -2075,6 +2131,21 @@ likelihood attached.
    (router-execution.md) with #22's durability.
 5. **Tie a probe's validity to the slack it ran in.** A probe on a contended
    slot measures slowdown, not competence, and must not count as a clean hit.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def screening(probe_bank, model, klass, prior, slack, resident):
+    if len(resident) < 2:                             # fewer than two resident models -> refuse to advertise itself
+        return prior
+    if not free_slot(slack):                          # probes run only in idle, never displacing the live model
+        return prior
+    hit = probe_bank.run(rotated_exam(klass), model)  # rotate the battery; a static exam becomes a set of tells
+    if contended(slack):                              # a probe on a contended slot measures slowdown, not competence
+        return prior
+    prior = bayes_update(prior, hit)                  # atomic-or-nothing commit per {model, class}; preempted = no half-run
+    persist_durable(klass, model, prior)              # type-map lives in the ledger, not RAM, for reboot recovery
+    return prior
+```
 
 **On the Grid stack.** During an idle window the router runs its probe bank
 only on a free seat (behind the OpenClaw lane, cancelled the instant a real
@@ -2166,6 +2237,25 @@ majority faction relabeled, and the extra machinery bought nothing but
 confidence. Independence of the voter pool must be *measured* (#12's
 covariance / #11's negative selection), not assumed, or the tournament certifies
 a consensus that was never there.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def condorcet_pool(request, voters, candidates):
+    orders = []
+    for v in voters:
+        row = extract_preference_order(v, candidates)     # ranking is the N in-join extractions on the critical path
+        if row is None:                                   # a missing voter flips the winner; never tally over N-1
+            row = extract_preference_order(v, candidates, other_seat=True)  # re-execute THAT voter, not the matrix
+        orders.append(row)
+    matrix = pairwise_tournament(orders)                  # N^2 tallies are free; extraction is the real straggler
+    winner = condorcet_winner(matrix)
+    if winner is not None:
+        return winner, usage(pooling="pairwise")          # the Condorcet promise, met
+    top = copeland_or_borda(matrix)                       # cyclic preferences -> Copeland/Borda fallback
+    if tie(top):
+        return escalate()
+    return top[0][0], usage(pooling="borda")              # report which rule shipped, never hide the fallback
+```
 
 **On the Grid stack.** Three models land three mutually-exclusive readings of
 a genuinely ambiguous request — `qwen36-27b-mtp` takes the literal parse, the
@@ -2269,6 +2359,20 @@ and the probe results — measured on a contended node, mid-generation, during a
 slowdown — are then trusted as if they were calm measurements. The router
 believes it has a background path that doesn't exist, and the #22/#24 promises
 it made on top of that path silently rot.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def slack_scheduler(real_jobs, idlers, vram):
+    for job in sorted(real_jobs, key=predicted_deadline): # EDF by predicted_deadline
+        vram.reserve(job)                                 # VRAM-residency bound: never schedule a swap a live job needs
+        try:
+            run(job)                                      # real work always wins the seat
+        except Preempted:
+            job.checkpoint() if job.resumable else job.cancel()  # preempted = checkpoint-resumable or cancelled
+        if slack := free_slack(job.window):               # background idlers ONLY inside the slack interval
+            run_in_slack(idlers.pop(), slack)             # steal the slack for probes / shadow / learner accumulation
+    return usage(probe_runs=n_probe, shadow_runs=n_shadow, learner_accum=accum)
+```
 
 **On the Grid stack.** A box holds `qwen36-27b-mtp` (24GB NVIDIA) and its Apple
 occupant; the GPU's single seat belongs to live traffic. #24's probe bank wants
@@ -2380,6 +2484,20 @@ a fluent wrong answer while the actual winner starves. Alternatively the class
 is non-stationary and no one remembered the sliding window — a past winner
 keeps its posteriors and the draw never reaches the arm that now wins, which is
 #14's ratchet wearing a Bayesian coat.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def thompson_router(request, klass, arms, posterior, breaker, capacity):
+    if breaker_open(klass) or not capacity_fits(klass):   # never sample an arm that's quarantined or non-resident
+        return divert(klass)
+    draws = {a: posterior[a].sample(1) for a in arms}     # draw ONCE per arm, then route to the highest
+    best = max(draws, key=draws.get)
+    verified = ground_truth_authority(best, request)      # only verified labels update; never a model-vote "verified"
+    posterior[best] = beta_update(posterior[best], verified)  # single tool-grounded authority feeds the ledger
+    persist_lazy(best, klass)                             # only arms actually touched get durable keys
+    evict_stale(sliding_window(posterior))                # non-stationary: a stale winner's mass rots to zero
+    return best, usage(thompson_draws=len(draws))
+```
 
 **On the Grid stack.** A request-class is split between `qwen36-27b-mtp` and
 the bigger `qwen36-35b-a3b-mtp`; an older habit has the router favoring A for
