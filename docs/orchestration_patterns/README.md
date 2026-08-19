@@ -136,7 +136,6 @@ The same four roles and two edge types appear in all twenty-seven figures;
 The first is the baseline we already ship — naive remote-style routing. The
 rest are what local gives you permission to do.
 
-
 **Choosing a pattern — the decision order.** The table above lists the *what*
 for each shape; this is the *which* — the order in which to ask the questions,
 because the first question that binds is the one that decides. Read the request
