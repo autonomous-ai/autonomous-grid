@@ -22,10 +22,10 @@
   <path d="M 1101 210 C 1199 210, 1199 210, 1297 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="38" y="59" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="170" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
-  <text x="170" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · act</text>
+  <text x="170" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · act</text>
   <rect x="10" y="177" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="170" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
-  <text x="170" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-4.6 · graduation</text>
+  <text x="170" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-5.2 · graduation</text>
   <rect x="10" y="295" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="170" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
   <text x="170" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · denial</text>

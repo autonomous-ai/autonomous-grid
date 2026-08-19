@@ -51,7 +51,7 @@ def act_gate():
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("dot", "", "dot", row=1, stage=1)
     d.place("r1", "Hermes ACP", "work", row=0, stage=2,
-            sub="glm-4.6 · read-only", w=wfit("Hermes ACP", "glm-4.6 · read-only"),
+            sub="glm-5.2 · read-only", w=wfit("Hermes ACP", "glm-5.2 · read-only"),
             note="full session, gated")
     d.place("r2", "Codex", "work", row=1, stage=2,
             sub="qwen3-coder · sandbox", w=wfit("Codex", "qwen3-coder · sandbox"))
@@ -59,7 +59,7 @@ def act_gate():
             sub="qwen3-coder · quorum", w=wfit("OpenClaw", "qwen3-coder · quorum"))
     d.place("sel", "select", "decide", row=1, stage=3)
     d.place("actor", "Claude Code", "work", row=3, stage=3,
-            sub="qwen36-35b · tools on", w=wfit("Claude Code", "qwen36-35b · tools on"),
+            sub="qwen38-35b · tools on", w=wfit("Claude Code", "qwen38-35b · tools on"),
             note="the only one that may act")
     d.place("act", "act", "terminal", row=3, stage=4,
             note="one idempotent mutation, round_id-keyed")
@@ -79,7 +79,7 @@ def lifecycle():
     d = Diagram("Session lifecycle — four transitions, one resident session")
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("seat", "Claude Code", "work", row=1, stage=1,
-            sub="qwen36-35b · resident", w=wfit("Claude Code", "qwen36-35b · resident"),
+            sub="qwen38-35b · resident", w=wfit("Claude Code", "qwen38-35b · resident"),
             note="resident session")
     d.place("warm", "warm", "decide", row=0, stage=2,
             note="the layer's cache · same harness")
@@ -108,10 +108,10 @@ def lanes():
             note="task mutability: read-only / write")
     d.place("pick", "pick lane", "decide", row=1, stage=2, note="residency first")
     d.place("l1", "Codex", "work", row=0, stage=3,
-            sub="qwen36-27b · exec", w=wfit("Codex", "qwen36-27b · exec"),
+            sub="qwen38-27b · exec", w=wfit("Codex", "qwen38-27b · exec"),
             note="bounded coding")
     d.place("l2", "Claude Code", "work", row=1, stage=3,
-            sub="qwen36-35b · stream", w=wfit("Claude Code", "qwen36-35b · stream"),
+            sub="qwen38-35b · stream", w=wfit("Claude Code", "qwen38-35b · stream"),
             note="open work")
     d.place("l3", "Hermes ACP", "work", row=2, stage=3,
             sub="laguna-s-2.1 · ACP", w=wfit("Hermes ACP", "laguna-s-2.1 · ACP"),
@@ -140,7 +140,7 @@ def seat_exec():
     d = Diagram("The seat is the executor — background only in the idle")
     d.place("job", "job", "terminal", row=0, stage=0)
     d.place("live", "Claude Code", "work", row=0, stage=1,
-            sub="qwen36-35b · live", w=wfit("Claude Code", "qwen36-35b · live"),
+            sub="qwen38-35b · live", w=wfit("Claude Code", "qwen38-35b · live"),
             note="deadline-bearing")
     d.place("ans", "answer", "terminal", row=0, stage=2)
     d.place("bg", "background jobs", "work", row=2, stage=1,
@@ -160,7 +160,7 @@ def admission():
     d = Diagram("Staged admission — shadow before it may act")
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("inc", "Claude Code", "work", row=0, stage=1,
-            sub="qwen36-35b · resident", w=wfit("Claude Code", "qwen36-35b · resident"))
+            sub="qwen38-35b · resident", w=wfit("Claude Code", "qwen38-35b · resident"))
     d.place("can", "OpenClaw", "work", row=2, stage=1,
             sub="qwen3-coder · shadow", w=wfit("OpenClaw", "qwen3-coder · shadow"),
             note="read-only shells only")
@@ -182,11 +182,11 @@ def verifier():
     d = Diagram("The verifier is ground truth, not a session")
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("draft", "Hermes ACP", "work", row=1, stage=1,
-            sub="qwen36-27b · draft", w=wfit("Hermes ACP", "qwen36-27b · draft"))
+            sub="qwen38-27b · draft", w=wfit("Hermes ACP", "qwen38-27b · draft"))
     d.place("check", "Codex exec", "decide", row=1, stage=2,
             note="test · schema — a fact")
     d.place("cons", "consensus", "work", row=3, stage=2,
-            sub="glm-4.6 over Codex · two tails", w=wfit("consensus", "glm-4.6 over Codex · two tails"),
+            sub="glm-5.2 over Codex · two tails", w=wfit("consensus", "glm-5.2 over Codex · two tails"),
             note="two tails agree")
     d.place("ans", "answer", "terminal", row=1, stage=3)
     d.edge("job", "draft", "one try")
@@ -200,9 +200,9 @@ def verifier():
 def ledger():
     d = Diagram("Only one ledger — the fsync'd box is the only truth", m_l=170)
     d.place("e1", "Claude Code", "work", row=0, stage=0,
-            sub="qwen36-35b · act", w=wfit("Claude Code", "qwen36-35b · act"))
+            sub="qwen38-35b · act", w=wfit("Claude Code", "qwen38-35b · act"))
     d.place("e2", "Hermes ACP", "work", row=1, stage=0,
-            sub="glm-4.6 · graduation", w=wfit("Hermes ACP", "glm-4.6 · graduation"))
+            sub="glm-5.2 · graduation", w=wfit("Hermes ACP", "glm-5.2 · graduation"))
     d.place("e3", "OpenClaw", "work", row=2, stage=0,
             sub="qwen3-coder · denial", w=wfit("OpenClaw", "qwen3-coder · denial"))
     d.place("app", "append", "decide", row=1, stage=1, note="round_id-stamped events")
@@ -231,21 +231,21 @@ def e2e():
             sub="qwen3-coder · fan", w=wfit("OpenClaw", "qwen3-coder · fan"),
             note="3 read-only shells, one worktree each")
     d.place("a1", "Codex", "work", row=0, stage=2,
-            sub="qwen36-27b · repro", w=wfit("Codex", "qwen36-27b · repro"))
+            sub="qwen38-27b · repro", w=wfit("Codex", "qwen38-27b · repro"))
     d.place("a2", "Hermes ACP", "work", row=1, stage=2,
             sub="deepseek-v4-flash · fix", w=wfit("Hermes ACP", "deepseek-v4-flash · fix"))
     d.place("a3", "OpenCode", "work", row=2, stage=2,
-            sub="qwen36-35b · fix", w=wfit("OpenCode", "qwen36-35b · fix"))
+            sub="qwen38-35b · fix", w=wfit("OpenCode", "qwen38-35b · fix"))
     d.place("rev", "reviewer", "decide", row=1, stage=3,
             sub="cross-vendor · never itself",
             w=wfit("reviewer", "cross-vendor · never itself"),
             note="a different lane than the fix")
     d.place("act", "Claude Code", "work", row=1, stage=4,
-            sub="qwen36-35b · the one writer", w=wfit("Claude Code", "qwen36-35b · the one writer"),
+            sub="qwen38-35b · the one writer", w=wfit("Claude Code", "qwen38-35b · the one writer"),
             note="round_id-keyed, fsync first")
     d.place("ver", "Codex exec", "work", row=1, stage=5,
-            sub="qwen36-27b · test · is a fact",
-            w=wfit("Codex exec", "qwen36-27b · test · is a fact"))
+            sub="qwen38-27b · test · is a fact",
+            w=wfit("Codex exec", "qwen38-27b · test · is a fact"))
     d.place("ans", "shipped fix", "terminal", row=1, stage=6,
             note="tokens free · no rate limit · on your box")
     d.place("wal", "WAL", "deck", row=3, stage=4, note="round_id keys, one box")

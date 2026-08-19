@@ -31,7 +31,7 @@
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <rect x="201" y="177" width="334" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="368" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
-  <text x="368" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · resident</text>
+  <text x="368" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · resident</text>
   <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">resident session</text>
   <rect x="844" y="59" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
   <text x="900" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">warm</text>

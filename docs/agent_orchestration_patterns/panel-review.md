@@ -96,3 +96,60 @@ which is the announced "where guidance separates" rule and not a defect.
 the plateau is stable. Remaining high-leverage (non-churn) candidates are a
 final human read of the assembled front matters end to end and, if more beauty
 is wanted, an optional palette/typography revision with fresh PNG renders.
+
+---
+
+## Round 16 — label-legibility hardening + the harness-selection guide
+
+**Critique (GoF / Local-AI lens).** A real rendering fault surfaced on the
+`fan-out` (#2) figure: the `single` and `expand` edge labels were stacked at
+the same edge midpoint, producing garbled, unreadable text. The verifier
+checked node-vs-label overlap but never **label-to-label** collision, so the
+defect shipped past the geometry gate. Independently, the architecture lens
+flagged that the lane table told *how to drive* a session but not *which
+harness to drive* — the frameworks (OpenClaw, Hermes, Claude Cowork, Claude
+Code, Codex, Pi) were named but their strengths, weaknesses, and when-to-pick
+were not stated as a decision aid.
+
+**Changes applied.**
+- **Provable label clearance** in `build_diagrams.py`: upgraded
+  `_label_boxes` to enforce a fixed `GAP = 8.0` px minimum clearance between
+  any two edge labels and node boxes, with 80 spreading passes clamped to the
+  viewBox. `fanout.svg` verified: `a single answer` @y294 and
+  `ties → expand` @y328 now clear each other.
+- **"Which harness for which job"** guide added after the lane table: a
+  five-layer taxonomy — **Channel=OpenClaw**, **Memory=Hermes Agent**,
+  **Desktop=Claude Cowork**, **Coding=Claude Code**,
+  **Command-center=Codex** — plus **Pi** (minimal auditable seat) and the
+  "home bases reach outward, the layer picks the harness" rule.
+- Wired the layer/harness decision into "Choosing a pattern — decision order"
+  step 2 (`layer picks the harness, residency picks the lane`).
+
+**Verification.** Label audit: 0 residual label-label overlaps across all 36
+figures. Agent generator re-run green. Markdown balanced. All facts preserved
+(pure additions + the drawing fix).
+
+---
+
+## Round 17 — refresh example models to current SoTA local names
+
+**Critique (Local-AI lens).** The example models were drifting out of date:
+`glm-4.6` is superseded (GLM-5.2 is current), and the rostered `qwen36-*`
+family names lag the current "qwen 3.8 27B" generation. Example stack tags are
+illustrative placeholders (per *A word on the examples*), but a stale name on
+a figure still reads as the catalog being behind the hardware it claims.
+
+**Changes applied.** Coordinated, figure-safe rename across both catalogs and
+the agent generator (model figures carry no model names, so only the agent
+figures needed a rebuild):
+- `qwen36-27b[-mtp]` → `qwen38-27b[-mtp]`, `qwen36-35b[-a3b-mtp]` →
+  `qwen38-35b[-a3b-mtp]` (user-confirmed current local pick), and
+  `glm-4.6` → `glm-5.2`.
+- Kept `deepseek-v4-flash` (user-confirmed) and `qwen3-coder` untouched.
+- Regenerated all 9 agent figures; 30/30 model-tag labels refreshed, 0 old
+  tokens remain.
+
+**Verification.** Agent generator `9/9` figures `verify ok`. Backticks and bold
+balanced in both READMEs. Rename confined to the pattern catalogs — operational
+docs (`cli.md`, `reference.md`, protocol drafts) left untouched to avoid
+decoupling from the real CLI model catalog.

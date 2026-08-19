@@ -472,3 +472,21 @@ clamped inside the viewBox so nothing is pushed out of frame.
   figure can be eyeballed in one page.
 
 **Commit:** `516a00b` (enforce min 8px clearance between edge labels).
+
+---
+
+## Round 17 — refresh example models to current SoTA local names
+
+**Critique (Local-AI lens).** `glm-4.6` and the rostered `qwen36-*` names in
+the `On the Grid stack` examples were lagging the current local-model
+generation ("qwen 3.8 27B", GLM-5.2). Example stack names are illustrative
+placeholders, but a stale tag still dates the catalog.
+
+**Changes applied.** Pure token rename in the model README text (the model
+layer's figures are generated from a token set that carries no model names, so
+no model SVGs required a rebuild): `qwen36-27b[-mtp]` → `qwen38-27b[-mtp]`,
+`qwen36-35b[-a3b-mtp]` → `qwen38-35b[-a3b-mtp]`, `glm-4.6` → `glm-5.2`.
+Kept `deepseek-v4-flash` and `qwen3-coder`.
+
+**Verification.** Backticks and bold balanced; zero residual old tokens; prose
+family references ("the Qwen tail") untouched. No structural change.

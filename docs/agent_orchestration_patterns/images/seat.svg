@@ -24,7 +24,7 @@
   <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <rect x="228" y="59" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="368" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
-  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · live</text>
+  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · live</text>
   <text x="368" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">deadline-bearing</text>
   <rect x="814" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="886" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>

@@ -27,7 +27,7 @@
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
   <rect x="201" y="59" width="334" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="368" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
-  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · resident</text>
+  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · resident</text>
   <rect x="208" y="295" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="368" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
   <text x="368" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · shadow</text>

@@ -120,7 +120,7 @@ Two routing rules hold across the whole layer:
 **A word on the examples — and what "local" gets you.** Every `On the Grid
 stack` block, and every harness × model tag drawn on a figure's worker nodes,
 is an *illustrative* concrete build, not a shipped configuration. Real model
-names (`qwen36-27b-mtp`, `qwen3-coder`, `glm-4.6`, `deepseek-v4-flash`) and
+names (`qwen38-27b-mtp`, `qwen3-coder`, `glm-5.2`, `deepseek-v4-flash`) and
 hardware sizes ("24 GB NVIDIA") are placeholders for "whatever is resident on
 your box" — parameters, not a billable stack. Treat them as worked examples of
 the shape, not as the shape itself.
@@ -267,7 +267,7 @@ happens, where a decision is made, and which edges loop back.
 - **Every green worker carries its harness × model tag.** The harness is the
   node's label — Claude Code, Codex, Hermes ACP, OpenClaw, OpenCode, a fan —
   and the model it runs is the smaller line beneath it (`qwen3-coder`,
-  `glm-4.6`, `deepseek-v4-flash`). That pairing *is* the routing decision, so
+  `glm-5.2`, `deepseek-v4-flash`). That pairing *is* the routing decision, so
   the figure draws it on the node instead of leaving it to prose. The model
   names are an illustrative roster, not a billable stack (see *A word on the
   examples*).
@@ -392,7 +392,7 @@ A drafts on **OpenClaw** (gated by the router's quorum — its act step is never
 its own), B re-derives on **Codex** (sandbox / read-only flag), C red-teams the
 diff on **Hermes ACP** (tool-scope, read-only by default). They need not share
 a model — A and B can each be `qwen3-coder` on the resident seat (a
-same-model read costs a context swap, not a VRAM load) while C is `glm-4.6`
+same-model read costs a context swap, not a VRAM load) while C is `glm-5.2`
 for a genuinely independent read. Only then does the router pass one concrete
 patch through to **Claude Code (stream-json)** with tools enabled for the one
 write step, and only that actor holds the approval to open the network for the
@@ -569,9 +569,9 @@ scheduler, not the table, decide which rows are warm.
 "deep streaming interpreter", "exec seat" — bound one-to-one to the lane
 names, so a builder doesn't have to reverse it by hand. The pairing
 (harness × model) is per-lane guidance, not a law; an illustrative roster:
-the exec seat pairs Codex with `qwen36-27b-mtp` (24 GB NVIDIA, sandbox /
+the exec seat pairs Codex with `qwen38-27b-mtp` (24 GB NVIDIA, sandbox /
 read-only flag on the `exec` step); the deep interpreter pairs Claude Code
-with `qwen36-35b-a3b-mtp` (32 GB Apple, `--no-tools`); the verifiable lane
+with `qwen38-35b-a3b-mtp` (32 GB Apple, `--no-tools`); the verifiable lane
 pairs Hermes with a local pin, where test-pass is the gate and tool-scope is
 *voluntary* — route write-possible work off it, use it read-only by default;
 the fan pairs OpenClaw with an open-weight coder, act step gated behind the
@@ -694,7 +694,7 @@ code-fix that lands mid-shadow evicts the shadow to its `round_id` snapshot
 (fsync'd to the off-box store) before taking the seat. The shadow resumes from
 that snapshot on the next idle, so admission progress survives preemption
 instead of restarting. The probe battery for a new model is capped at whatever
-VRAM the live seat leaves, so a resident `qwen36-35b` can keep serving
+VRAM the live seat leaves, so a resident `qwen38-35b` can keep serving
 while a smaller probe runs in the remainder — and when it can't, the battery
 waits, it never evicts the live roster.
 
@@ -869,18 +869,18 @@ def certify(draft, check, consensus):
     return verdict, "proposed_by: consensus"  # may propose, never certify
 ```
 
-**On the Grid stack.** A config change drafts on `qwen36-27b-mtp` over Hermes
+**On the Grid stack.** A config change drafts on `qwen38-27b-mtp` over Hermes
 ACP; the verdict is certified by a **Codex (`exec --json`)** tool call that
 validates the result against the config schema and, where the change is code,
 runs the test suite — a deterministic external fact that shares none of the
 draft's model prior. Only when no schema, test, or live API can certify — a
 judgment call with no mechanical check — does the router reach the weak arm,
 and it does **not** certify from it: a second read on the different tail,
-`glm-4.6` cross-vendor over Codex, yields a `proposed_by: consensus` verdict
+`glm-5.2` cross-vendor over Codex, yields a `proposed_by: consensus` verdict
 recorded in the ledger (#7) as ungrounded. A non-trust-affecting label may
 adopt it as a low-confidence read; a trust-affecting one escalates to the Grid
 Enterprise authority. And own the swap cost this arm pays on one box, exactly
-as the model layer's #12 does: `glm-4.6` is not resident beside the Qwen
+as the model layer's #12 does: `glm-5.2` is not resident beside the Qwen
 draft, so the fallback read is a serial VRAM swap on the critical path —
 priced there, and only reached when the deterministic arm really has nothing
 to offer.
@@ -1016,9 +1016,9 @@ in its own git worktree so they never step on each other's working tree:
 
 | Step | Harness | Model | What it does |
 |------|---------|-------|--------------|
-| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen36-27b` | Reproduces the 96 s hang with a minimal harness script — can't write anything but its own worktree |
+| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen38-27b` | Reproduces the 96 s hang with a minimal harness script — can't write anything but its own worktree |
 | fix A | **Hermes ACP** (ACP/JSON-RPC), read-only by default | `deepseek-v4-flash` | Drafts the dispatcher patch against the repro |
-| fix B | **OpenCode** | `qwen36-35b` | A second, independent draft from a fully different harness+model tail — real divergence, not twin priors |
+| fix B | **OpenCode** | `qwen38-35b` | A second, independent draft from a fully different harness+model tail — real divergence, not twin priors |
 | reviewer | cross-vendor pass — never itself | — | Routes *each* diff to a reviewer from a **different** harness than the one that wrote it: fix A (Hermes) is reviewed on the **OpenCode** lane; fix B (OpenCode) on the **Hermes** lane. That is Omnigent's Polly rule and exactly #6's "weak arm diverges on purpose" |
 
 Every worker is read-only. The `reviewer` is purple — it proposes; it never
@@ -1026,7 +1026,7 @@ writes.
 
 **The write (#1 act-gate).** Only after the reviewers converge does the router
 select **one** actor — **Claude Code** (stream-json, tools *enabled*) running
-`qwen36-35b` — and that single seat performs the one world-touching step. It
+`qwen38-35b` — and that single seat performs the one world-touching step. It
 is idempotent and `round_id`-keyed, so a retry of the same request applies the
 same patch once, never twice. N−1 agents read; exactly one acts. That is the
 whole gate. **Converge** has a rule: accept when *both* diffs pass the Codex
@@ -1036,7 +1036,7 @@ either escalates to #6's off-box authority (a human or a fresh independent
 lane), or the patch is dropped and the failed round is logged with its repro.
 
 **The certify (#6 verifier).** The patch is not trusted because an agent said
-so. It is certified by a **Codex `exec --json`** tool call (`qwen36-27b · test`
+so. It is certified by a **Codex `exec --json`** tool call (`qwen38-27b · test`
 — the runner is deterministic, its act is a fact) that runs the actual test
 suite and validates against the schema — a deterministic external fact that
 shares none of the writer's model prior. The `shipped fix` exit is only reached
