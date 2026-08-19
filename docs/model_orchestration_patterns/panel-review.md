@@ -358,3 +358,38 @@ agent catalog's 7/7.
 complete for every pattern. Remaining candidate work: a "Known Uses" column
 in the GoF sense (real deployments per pattern), and re-running the cross-
 catalog audits after the rename.
+
+---
+
+## Round 13 — GoF Known Uses: anchor the catalog (27/27)
+
+**Critique (GoF lens).** The book's *Known Uses* closes each pattern by naming
+real systems that already run the shape — the abstraction is anchored, not
+invented. This catalog had the section nowhere; a reader had no reason to
+believe e.g. Fan-Out or Trial-Sequential were real techniques rather than
+rhetoric.
+
+**Changes applied.** Added **Known Uses** to all 27 model patterns, placed
+between `Consequences` and `Failure mode` (GoF: talk costs, then name who
+actually does this, then say how it breaks). Anchored each shape to a concrete
+real deployment: self-consistency (Fan-Out), plan-and-execute (Master/Slave),
+best-of-N (Brute-Force), reward-model reranking (Verifier Gate), multi-agent
+debate, correlation-aware ensembling, PBFT (Byzantine), MapReduce speculative
+execution (Straggler), Hystrix/resilience4j (Circuit Breaker), RAND Delphi,
+group-sequential TSA, legal evidentiary standards (Evidence-Bar), screening
+in the economics of information, ranked-choice/Condorcet, EDF/Kubernetes
+preemption (Slack-Stealing), industrial Thompson sampling. Updated the
+"How to read a pattern" front-matter list to announce `Known Uses`.
+
+**Verification.** Section-order audit: `NONE` out of order across all 27
+(Model order is now Consistent ☑). `**Known Uses.**` count = 27. All python
+fences `ast.parse` clean, backticks balanced, no blank-line artifacts. Pure
+additions — no existing fact touched.
+
+**Round 13 finding.** The model catalog is now complete against the announced
+skeleton (Intent · AKA · Motivation · Structure · Mechanics · Consequences ·
+**Known Uses** · Failure mode · Refinements · **Sample Code** · On the Grid ·
+Related) — every pattern carries prose, figure, Known Uses, and Sample Code
+(27/27 × 4). Remaining candidate work: extend Known Uses to the 7-pattern
+agent catalog for symmetry, and a final holistic read of the assembled front
+matter.
