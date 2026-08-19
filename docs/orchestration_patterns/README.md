@@ -69,11 +69,11 @@ fixed and mean the same thing in every pattern:
 - **Structure** — the diagram and the parts it names.
 - **Mechanics** — how the parts collaborate: who decides, who waits, what
   crosses which edge.
-- **Refinements** — how to build it: the concrete rules that keep the promise
-  honest (present where the pattern has implementation guidance to separate).
 - **Consequences** — what the pattern costs and what it forgives.
 - **Failure mode** — the specific way this pattern goes wrong, and the honest
   version of its promise.
+- **Refinements** — how to build it: the concrete rules that keep the promise
+  honest (present where the pattern has implementation guidance to separate).
 - **On the Grid stack** — one concrete local build, to keep the economics
   honest. **Related Patterns** ends each entry and points at the same family.
 
@@ -287,6 +287,12 @@ would buy one. Cost is three answers' tokens you never paid for. The risk
 is slow consensus: three models agreeing is great, three models each with a
 plausible but different answer burns the win and falls to expand.
 
+**Failure mode.** Unanimous-but-wrong. All three share the same blind spot
+because they share the same tail of the web. The vote is a measurement of
+*internal* agreement, and internal agreement is not the same as truth. This
+is why #4 exists — and why #11 forces divergence by construction rather than
+hoping for it.
+
 **Refinements.** Three refinements make the vote a
 stronger measurement without changing its shape. (1) **Quorum, not
 full-call-for.** You don't need all N to agree to ship — wait for the first
@@ -311,13 +317,6 @@ are still correlated, so "different family" has to mean *different where it
 matters*, not merely a different build. When only one decorrelated family is
 resident, the honest move is to downgrade the confidence claim (#2 → #1), not
 to dress one prior in N hats.
-
-**Failure mode.** Unanimous-but-wrong. All three share the same blind spot
-because they share the same tail of the web. The vote is a measurement of
-*internal* agreement, and internal agreement is not the same as truth. This
-is why #4 exists — and why #11 forces divergence by construction rather than
-hoping for it.
-
 
 **On the Grid stack.** A ticket-classification request fans the same prompt to three workers over the OpenClaw lane — `qwen36-27b-mtp` and `qwen36-35b-a3b-mtp` on one node, `glm-4.6` (a cross-vendor counterweight) on another — then votes. The honest reading of this example is not "three voices agree" but **2-of-3 is a shared-family quorum that can pass on the Qwen tail**: the two Qwen workers share a training tail, so their agreement is evidence only *conditional on* `glm-4.6`'s genuine cross-vendor independence. Had all three been same-family, the "unanimity" would be fake — three runs of the same prior passing on the same blind spot, which the evaluator should treat as a *stronger* form of the single-read risk, not a weaker one, since the fan certifies rather than breaks it. The example exposes that the vote is a measurement of *internal* agreement, not of truth.
 
@@ -584,6 +583,10 @@ answers. The costs: it only applies where averaging is a sensible reduction
 the shared-bias problem — if every sample is biased the same way, the mean
 is confidently wrong with small variance (the classic underestimation trap).
 
+**Failure mode.** Averaging bakes in the bias. Low variance is *not* the same
+as accuracy — an ensemble of correlated erring answers has beautiful dials
+and the wrong needle.
+
 **Refinements.** Two more fixes repair the naive mean
 beyond the robust statistic in the Motive: (1) **Never let the mean terminate
 the pipeline.** Report dispersion alongside the mean and escalate on high
@@ -592,11 +595,6 @@ dispersion — a tight cluster with a shared prior is the trap, not good news.
 the N samples on request) — a mean without its variance looks more certain
 than it is. #12 attacks the same bias from the pool side: weight by *measured*
 correlation.
-
-**Failure mode.** Averaging bakes in the bias. Low variance is *not* the same
-as accuracy — an ensemble of correlated erring answers has beautiful dials
-and the wrong needle.
-
 
 **On the Grid stack.** A numeric forecast request runs the same prompt on `qwen36-27b-mtp`, `qwen36-35b-a3b-mtp`, and `glm-4.6` over three lanes and averages. The example's point: if the three are correlated (two share the Qwen training tail), the ensemble has low variance and the wrong needle — averaging bakes in the shared bias. #12's covariance fix answers exactly this. The honest caveat rides on the report: a mean without its dispersion looks more certain than it is, and one garbage sample (a hallucinated huge number) drags a plain mean — which is why a median or trimmed-mean with outlier rejection is the defensible pooling rule here, not the arithmetic mean.
 
@@ -770,6 +768,10 @@ weakest link, and *errors are not caught* — nothing loops back (that's #8's
 job; this pattern deliberately has no gate). A bad `scout` poisons the whole
 pipeline and it ships anyway.
 
+**Failure mode.** Silent compounding — a small error at the front is
+serialized and magnified through every later step, with no check to break
+the chain.
+
 **Refinements.** The
 original "no gate" was the worst robustness posture in the catalog: a job
 with a *natural order* is exactly the job guaranteed to compound an upstream
@@ -788,10 +790,6 @@ original request in every step's context.** Once `scout` compresses the
 brief, later steps have no way to check their work against provenance; carry
 the original request (or a guarded summary) through so any step or later
 review can ground back.
-
-**Failure mode.** Silent compounding — a small error at the front is
-serialized and magnified through every later step, with no check to break
-the chain.
 
 **On the Grid stack.** A document pipeline — extract, summarize, translate, format — chains `qwen36-27b-mtp` steps through the Hermes lane, each consuming the last. The example shows a small extraction error at the front being serialized and magnified through every later step, and it demands a verifier somewhere in the chain (#8) to break the compounding before the wrong transcript ships onward. The original "no gate" posture is the worst robustness choice in the catalog: a natural-order job is exactly the one guaranteed to compound an upstream error, and a cheap deterministic interface contract after `extract` (non-empty, schema-shaped) costs almost nothing and does not invite #8's full LLM loop.
 
@@ -1499,6 +1497,23 @@ with `circuit: open|half-open|closed` + the tripped member in the envelope.
 The trip resets closed after a cooldown window of clean health — the same
 decay shape as #14's re-earn.
 
+**Consequences.** Trades a little false-trip risk for a lot of collapse-avoidance.
+The degradation is the point: a grid that trips a bad node and still answers
+is more reliable than one that retries patiently into a brownout. False opens
+are the cost — a transient class that looks broken for 100ms gets deprioritized
+and the caller must see *why* in the envelope. It is the one pattern that
+deliberately *returns a worse answer than it could have*, which is only honest
+if the envelope says the breaker is open.
+
+**Failure mode.** The breaker trips on **noise, not signal** — a burst of
+slow/failed samples during normal contention opens the circuit, and the router
+now serves degraded answers for a healthy-but-busy grid. The trip threshold
+must be a *measured* percentile over history (the same ledger #19 reads),
+never an absolute. And on a single-node deployment a bulkhead is a fiction —
+there's no second lane; the breaker should know the live inventory and refuse
+to "quarantine onto nothing" (#20 leans on #16's gate).
+
+
 **Refinements.** Five build rules keep the promise honest:
 1. **Trip on a measured threshold, never on noise.** Trip on consecutive
    failures, an error rate over the window, or latency past the class timeout
@@ -1524,22 +1539,6 @@ decay shape as #14's re-earn.
 5. **Say *why* in the envelope.** `circuit: open|half-open|closed` and the
    tripped member ride with the degraded answer, so a caller who got a worse
    answer than possible isn't surprised by it.
-
-**Consequences.** Trades a little false-trip risk for a lot of collapse-avoidance.
-The degradation is the point: a grid that trips a bad node and still answers
-is more reliable than one that retries patiently into a brownout. False opens
-are the cost — a transient class that looks broken for 100ms gets deprioritized
-and the caller must see *why* in the envelope. It is the one pattern that
-deliberately *returns a worse answer than it could have*, which is only honest
-if the envelope says the breaker is open.
-
-**Failure mode.** The breaker trips on **noise, not signal** — a burst of
-slow/failed samples during normal contention opens the circuit, and the router
-now serves degraded answers for a healthy-but-busy grid. The trip threshold
-must be a *measured* percentile over history (the same ledger #19 reads),
-never an absolute. And on a single-node deployment a bulkhead is a fiction —
-there's no second lane; the breaker should know the live inventory and refuse
-to "quarantine onto nothing" (#20 leans on #16's gate).
 
 **On the Grid stack.** A request-class that has been failing hard trips the breaker fast and quarantines the toxic lane into a bulkhead — e.g. `glm-4.6` serving malformed extraction over the Hermes (ACP) lane trips and is refused for new requests — but the example is honest that on a single-node deployment a bulkhead is a fiction with no second lane. The breaker must know the live inventory (#16) and refuse to "quarantine onto nothing": with no second lane, open means the class *serves degraded or refuses*, and that is the explicit default, never a hope that a spare seat appears. While open, the failing member is bulkheaded into its own lane, recovery probes are metered in a window separate from production traffic (so a probe failure doesn't re-open the breaker, and recovery can't quietly drain budget as a second lane), and recovery is a probabilistic regression with an easing window, never absolute. The tripped member and the `circuit: open|half-open|closed` state ride in the envelope so the caller sees *why* it got a degraded answer, and the trip must not fire on a single slow/failed sample — the threshold is a measured percentile over history, not an absolute.
 
@@ -1832,6 +1831,22 @@ model's type, so the router builds a cheap type-map of the fleet (this one is
 solid on structured extraction, weak on open-ended synthesis) before real work
 is routed. Screening runs entirely off the path a request takes.
 
+**Consequences.** The battery itself is work: each probe must be calibrated
+(known answer, correlated, class-specific) or the screening measures nothing.
+It measures *type*, not *state* — a model that's fine on probes but degraded
+under real load still needs #20's breaker. And it can't see the future: a
+model that aced this class last month drifts, which is why probes regenerate.
+
+**Failure mode.** The probes become a *signaling* game instead of a screening
+test — operators learn the exam as a set of tells (the model that scores high
+on "known-answer" by pattern-matching the phrasing rather than reasoning),
+the correlation with real performance rots, and the router trusts a bucket
+that no longer means what it says. The probe bank's discriminating power
+(hit-rate actually predicting real outcomes) must be re-validated the same
+way #22 re-validates its beta — otherwise screening is astrology with a
+likelihood attached.
+
+
 **Refinements.** Five build rules keep the picture honest:
 1. **Rotate the exam.** Probes refresh on a term (#14's decay) so a model
    can't be gamed by memorizing a static battery, and a bank that stops
@@ -1850,21 +1865,6 @@ is routed. Screening runs entirely off the path a request takes.
    (router-execution.md) with #22's durability.
 5. **Tie a probe's validity to the slack it ran in.** A probe on a contended
    slot measures slowdown, not competence, and must not count as a clean hit.
-
-**Consequences.** The battery itself is work: each probe must be calibrated
-(known answer, correlated, class-specific) or the screening measures nothing.
-It measures *type*, not *state* — a model that's fine on probes but degraded
-under real load still needs #20's breaker. And it can't see the future: a
-model that aced this class last month drifts, which is why probes regenerate.
-
-**Failure mode.** The probes become a *signaling* game instead of a screening
-test — operators learn the exam as a set of tells (the model that scores high
-on "known-answer" by pattern-matching the phrasing rather than reasoning),
-the correlation with real performance rots, and the router trusts a bucket
-that no longer means what it says. The probe bank's discriminating power
-(hit-rate actually predicting real outcomes) must be re-validated the same
-way #22 re-validates its beta — otherwise screening is astrology with a
-likelihood attached.
 
 **On the Grid stack.** During an idle window the router runs its probe bank
 only on a free seat (behind the OpenClaw lane, cancelled the instant a real
