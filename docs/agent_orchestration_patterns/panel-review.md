@@ -418,3 +418,36 @@ is *distinctive*, not exclusive — OpenClaw when the task lives in the channel,
 Hermes when the value has to *remember*.
 
 **Commit/push.** `07c37fd`. All checks green.
+
+---
+
+## Round 25 — re-verification of the four reported figure bugs
+
+**Lens: GoF / diagram conventions + software architecture.** The user
+photographed four distinct rendering faults across the figures; each was
+filed as a real defect, not an aesthetic nit. This round re-confirmed, on the
+committed render, that every one is gone — coordinate-level, not just by the
+residual-overlap count.
+
+- **`single` / `expand` touching (fan-out #2):** the figure was redesigned so
+  the two edge labels no longer share a midpoint — the fan now carries
+  `same prompt`, `ties → expand`, and `a single answer` on distinct paths, and
+  `expand` is a named node, not a stacked label.
+- **`average the answers` over the `mean` node (ensemble):** the edge label now
+  sits above the node at y=192 vs the node at y=220 (font 14 vs 28), clear of
+  it and its edges.
+- **`N identical` multi-line overflow (brute-force):** now a single inline edge
+  label above the workers, no wrapped box colliding with an edge label.
+- **`d → reinforce, others decay` clipped off the left (pheromone):** no
+  negative-x text remains in either catalog (0 hits across all SVGs); the label
+  was also rewritten to the clearer `verified → reinforce, others decay`
+  (anchor=x, right edge at x≈477, text runs left to ≈213 — on-canvas).
+- **`overdue` under a node (straggler):** the label moved to the clear space
+  above (y=141), no node beneath it.
+
+Global regression: `grep -c '<text x="-"'` = 0; per-diagram label boxes +
+on-canvas checks = **0 issues**; both generators regen `verok` / `verify ok`.
+
+**Commit/push.** No content change this round — a verification-only pass; the
+fixes were already committed in the preceding rounds. Logged for the audit
+trail.
