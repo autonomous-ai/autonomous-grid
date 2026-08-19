@@ -222,7 +222,7 @@ happens, where a decision is made, and which edges loop back.
   names are an illustrative roster, not a billable stack (see *A word on the
   examples*).
 
-The same roles and edge types appear in all eight figures; `docs/DIAGRAMS.md`
+The same roles and edge types appear in all seven figures; `docs/DIAGRAMS.md`
 is the formal register, and this block is the field guide.
 
 ## The one sentence per pattern
