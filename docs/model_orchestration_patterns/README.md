@@ -1332,6 +1332,16 @@ doubles latency without telling the caller.
    concentrates all trust in it. Every escalation must be visible:
    `usage.escalation_depth`, `usage.divergence_shape: noise|byzantine`.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def byzantine_adjudicator(request, workers, n, k=3):
+    probe = [w(request) for w in workers[:k]]         # sniff small-N first, not after-the-fact
+    if not two_confident_camps(probe):                # noise: random scatter, a small majority fixes it
+        return majority(workers[:n], request)
+    judge = divergent_arbiter(request)                # must differ from the camp, never same-family
+    return judge(full_fan(request, n))                # adversarial: spend the expensive path on purpose
+```
+
 **On the Grid stack.** When three workers disagree on a sensitive request, the router distinguishes *noise* (answers scatter, a small N fixes it) from *byzantine* (answers cluster into two confident camps — the same-family signature of a shared wrong prior, which a bare majority lets win) and spends more samples on the adversarial case. The escalated adjudicator can only break the shared prior if it is genuinely divergent *from the camp*: on a same-vendor stack, the designated judge `qwen36-35b-a3b-mtp` is the same family as the fighting Qwen workers, so it shares their blind spot and the "structurally divergent arbiter" the Byzantine premise requires may not exist — verify judge-family diversity *before* escalating, else route to a cross-vendor (`glm-4.6`), a tool-grounded check, or the human. The camp test must be numeric (≥60% in one cluster, ≤1 middle), and the classifier fires before the vote commits — the worst case silently pays fan-out + classification + a whole #4, so sniff with a small N first before committing to the full fan. Every escalation surfaces `usage.escalation_depth` and `usage.divergence_shape` visibly, because this adjudicator is the most dangerous node in the catalog.
 
 ---
@@ -1390,6 +1400,18 @@ hand-tuned constant.
    single-box deployment where the node does not exist.
 3. **Cap the speculation.** Bound concurrent speculations or a flash crowd
    spawns N redundant runs.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def straggler_backup(request, worker, nodes):
+    if len(nodes) < 2:                                # no real second node -> don't advertise it
+        return worker(request, nodes[0])
+    job = worker(request, nodes[0])
+    if job.elapsed() > percentile_latency(nodes[0]):  # live per-node stat, not a hand-tuned constant
+        backup = worker(request, nodes[1])
+        return first_to_finish(job, backup)           # take the first; cancel + report the loser
+    return job
+```
 
 **On the Grid stack.** In a straggler backup, the router duplicates only the overdue worker — a slow long-read worker is shadowed by `laguna-s-2.1` on a second node, taking first-to-finish. The example is honest about the precondition: this needs a real multi-node inventory to be meaningful, and on a single-box deployment "different node" doesn't exist — the pattern must gate on the live-node inventory and refuse to advertise itself where a second lane is fiction. It also caps concurrent speculations, or a flash crowd spawns N redundant runs, and the budget comes from a live latency percentile, not a hand-tuned constant, so a strict worker isn't needlessly duplicated.
 
@@ -1459,6 +1481,19 @@ amplified across all clients.
    #14); the read-repair write-back is atomic/idempotent and exactly-once,
    keyed like the ledger, so two concurrent misses on one key don't both
    recompute.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def materialized(request, key, compute):
+    h = semantic_hash(cls(request), fingerprint(request), model)
+    entry = cache.get(h)
+    if entry and entry.fresh() and not entry.on_doubt():  # hit short-circuits; miss computes
+        return entry.answer, {"x-grid-cache": "hit"}
+    answer = verify(compute(request))                  # only a verified answer may write back
+    if answer.confidence >= FLOOR:                     # never more trusted than the check that wrote it
+        cache.put(h, Stamp(answer, verifier=verify))   # exactly-once read-repair in the WAL store
+    return answer, {"x-grid-cache": "miss"}
+```
 
 **On the Grid stack.** A repeated request hits the materialized cache by semantic key (`x-grid-cache: hit|miss`) instead of recomputing — e.g. a "summarize this repo" on `qwen36-35b-a3b-mtp` over the Claude Code (stream-json) lane, where the cache key is the (request-class, repo-fingerprint, model) triple and the hit returns in mate-in-one time. The example places a confidence floor and a verifier identity on every entry and invalidates on doubt — because a cache serializes a verification error globally: one rubber-stamped "verified" write-back serves that wrong answer to every future requester. The cached answer is never more trusted than the check that wrote it, and the fingerprint + staleness go in the `x-grid-cache-fingerprint` / `x-grid-cache-staleness` envelope, with a `bypass`/`fresh` path so a user debugging current data is never served a stale hit against their will.
 
@@ -1542,6 +1577,17 @@ graduation is a state change that must be a logged, `round_id`-stamped ledger
 event, not a silent mutation, or a replay can't reproduce which pool actually
 voted.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def canary(request, incumbent, candidate, equity):
+    answer = incumbent(request)
+    shadow = candidate(request)                          # observation-only; never reaches the caller
+    equity.update(cls(request), agree(shadow, label(answer)))  # vs adjudicated label, not raw text
+    if equity.bar_cleared(cls(request)):                 # >=20 graded hard cases at >=90%, per class
+        return promote(candidate)                        # a logged, round_id-stamped ledger event
+    return answer                                        # canary shadows until it earns a vote
+```
+
 **On the Grid stack.** A new member — a fresh `glm-4.6` build onto a Qwen-dominated box — earns a vote by shadowing real traffic over the Hermes lane while its answers go only to `compare`, never the caller, and graduates to the voting pool only after `compare`'s gate clears. A canary that only ever shadows easy traffic must not clear the bar on agreement everyone aces: trust is earned on a stratified slice of the hard cases, and until a tool-grounded ground-truth authority exists, the equity label is honestly `incumbent-only`, not "earned." Graduation is a logged, `round_id`-stamped ledger event, not a silent mutation, so a replay can reproduce exactly which pool voted — the audit trail is the point.
 
 ---
@@ -1609,6 +1655,15 @@ CVaR estimate is a model, not arithmetic: it needs the metric-determinism
 treatment (pin + calibrate the estimator, snapshot the historicals for
 replays).
 
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def cvar_budget(request, cls, priced_loss, histories, alpha=0.95):
+    if thin_tail(cls, histories):                        # a thin-tailed class isn't riskier than the mean
+        return mean_budget(cls, histories)               # degrade honestly, don't fake a quantile
+    tail = estimate_tail(priced_loss(cls), alpha, histories)  # estimator is a model, not arithmetic
+    return size_spend(request, tail)                     # spend by the tail, never by the average
+```
 
 **On the Grid stack.** The router sizes a request's spend budget by the tail, not the mean: it guards against a request class whose median is cheap but whose worst-case (a pathological prompt) is catastrophically expensive. The class's loss function is a priced dollar value — on Grid Enterprise, the wrong answer's downstream cost is a real, billable number, not a difficulty weight in costume; without it, the "tail premium" is a mean-difficulty weight dressed as CVaR. `qwen36-27b-mtp`'s CVaR estimate is carved from the same historicals #12/#13 read, and the example is honest that the estimator is a model, not arithmetic — it needs the metric-determinism treatment (pinned, calibrated, historicals snapshotted for replay) or the tail number is untrustworthy, and on a thin-tailed class it must degrade to the plain mean rather than waste tokens on a quantile that isn't riskier.
 
