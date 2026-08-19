@@ -280,3 +280,48 @@ layer's "names are parameters, not a billable stack" rule applied to the
 Remaining open items (unchanged in priority): the optional external
 `agents.md` companion, and the per-pattern **Known Uses precision pass**
 (7 patterns — make the "who already runs this" exemplars current and concrete).
+
+---
+
+## Round 21 — diagram-label collision fix + last cloud-model example gone
+
+**Critique (local-AI lens + a rendered-figure bug report).** The user pasted
+four screenshots of figures with genuinely unreadable text: an edge label
+overdrawing its endpoint node (`average the answers` over `mean`), a
+multi-line node-label overflow, a label clipped off the left canvas edge
+(`d → reinforce, others decay`), and an edge label (`overdue`) landing under a
+node. My earlier label-to-label pass had never enforced **label-vs-node
+clearance**, **on-canvas clamping**, or **anchor-aware extents** — and the
+gap-shrink logic was measuring the wrong span, so it never shrank labels that
+were wider than the space between their endpoint nodes.
+
+**Root cause (found, not guessed).** In `_label_boxes` (the shared engine that
+`docs/model_orchestration_patterns/build_diagrams.py` exports to the agent
+layer's generator), pass-0's "fit the label to its gap" computed
+`left = max(node_right_edges)` and `right = min(node_left_edges)` — the
+*outer* span of the two endpoint nodes, not the *inner* gap. For a horizontal
+edge like `worker → ans` that produced `left=1092`, `right=605`, `avail=-491`,
+so the `if avail > 0` guard never shrank the label and it overhung its
+endpoint node by ~20px. Exactly the screenshot defect.
+
+**Changes applied (both catalogs, since they share the engine).**
+- Rewrote the boundary computation: a node left of the label center bounds the
+  label on its right edge, a node right of center bounds it on its left edge —
+  so `avail` is now the true gap (e.g. `194`, not `-491`).
+- Changed the shrink to step the font size down (with a `MIN_EDGE_FS = 12`
+  floor) using the *real* `text_w` width until the label actually fits, instead
+  of the `0.6 * len` estimate that could round up and still overflow.
+- Fixed `_elabel` to unpack the full 8-field box returned by the resolver.
+- Verified: all **27 model** and **8 agent** figures regenerate `verok` /
+`verify ok`, and the residual-overlap diagnostic reports **0 issues** across
+both catalogs (was 4).
+
+**Precision (the user's standing rule: examples must be current *and* local).**
+The strategy layer's advisor was still "the small ranker LLM, `gpt-5-mini`" —
+the last non-local model used as a build example. Swapped the default to the
+local `qwen3-coder`. Every build example in the catalog now names a current
+local SoTA model (`qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`, `glm-5.2`,
+`deepseek-v4-flash`, `qwen3-coder`).
+
+**Commit/push.** Diagram fix committed and pushed as `ce675c9`; this round's
+ranker precision is committed alongside this log entry. All checks green.

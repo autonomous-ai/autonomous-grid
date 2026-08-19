@@ -537,7 +537,7 @@ def auto(request, inventory):
     return SHAPES[shape](request)             # the selected pattern runs
 ```
 
-**On the Grid stack.** The advisor (the small ranker LLM, `gpt-5-mini` by default) classifies each request and picks a shape, reading the live-node inventory the way the current ranker already should. A "cheap-looking" prompt that is actually a trap — a subtle reasoning question that reads SIMPLE — must be routed to a fan-out (#2) or an adversarial read (#4), not to a single `qwen38-27b-mtp` run on the Hermes lane. The example is the failure the strategy layer inherits: the cost heuristic itself is wrong because the request lied about its own difficulty. The strategy choice is a *shape* (how much compute to spend), which is the dimension a remote router never had to ask.
+**On the Grid stack.** The advisor (the small local ranker LLM, `qwen3-coder` by default) classifies each request and picks a shape, reading the live-node inventory the way the current ranker already should. A "cheap-looking" prompt that is actually a trap — a subtle reasoning question that reads SIMPLE — must be routed to a fan-out (#2) or an adversarial read (#4), not to a single `qwen38-27b-mtp` run on the Hermes lane. The example is the failure the strategy layer inherits: the cost heuristic itself is wrong because the request lied about its own difficulty. The strategy choice is a *shape* (how much compute to spend), which is the dimension a remote router never had to ask.
 
 ---
 
