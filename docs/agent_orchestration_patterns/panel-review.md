@@ -385,3 +385,36 @@ the catalog's reviewer pattern is also consistent with Omnigent's Polly rule.
 
 **Commit/push.** `12428b4` (README precision) — this log entry is committed
 with it. All checks green.
+
+---
+
+## Round 24 — harness provenance audit (all five home-bases live-verified)
+
+**Lens: local-AI / on-device + software architecture.** The "Where these
+claims come from" block asserts that every home-base is a real, current,
+checkable project and invites the reader to "point the list above at those
+sources." That is a load-bearing promise, so this round held each name to its
+source.
+
+**Verified against live GitHub (all pass).**
+- Repo paths resolve exactly: `openclaw/openclaw`, `NousResearch/hermes-agent`,
+  `anthropics/claude-code`, `openai/codex`, `earendil-works/pi`.
+- The Pi property the catalog says it "leans on hardest" is verbatim in Pi's
+  README: *"Pi does not include a built-in permission system… runs with the
+  permissions of the user and process that launched it."* Pi's "agent runtime
+  + coding-agent CLI + unified multi-provider LLM API" anatomy also matches.
+- Hermes Agent's README confirms it is built by Nous Research (MIT), is
+  model-agnostic (Nous Portal / OpenRouter / OpenAI / own endpoint), and runs
+  the memory/skills/self-evolution loop the catalog describes.
+
+**One real precision gap found and fixed.** Hermes Agent's README also says it
+"lives where you do — Telegram, Discord, Slack, WhatsApp, Signal, CLI — all
+from a single gateway process," on local/Docker/SSH or a serverless VM. The
+catalog had assigned **Channel layer → OpenClaw** and **Memory layer → Hermes
+Agent** without acknowledging Hermes is channel-native too, which could mislead
+a reader into thinking OpenClaw is the only channel home. Added a grounded
+parenthetical to the Memory-layer bullet: the layer pick is about which value
+is *distinctive*, not exclusive — OpenClaw when the task lives in the channel,
+Hermes when the value has to *remember*.
+
+**Commit/push.** `07c37fd`. All checks green.
