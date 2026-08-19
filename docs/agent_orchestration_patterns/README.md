@@ -60,6 +60,31 @@ sit in the same seat pool — Pi is a Fleet coding-engine, *not* a
 model and *not* a lane; it joins the fan when a task is agent-shaped, never
 when the router is just picking model reads.
 
+**Which exec seat for which shape.** The coding engines in that pool are not
+interchangeable at the lane — each is a different *default posture* on the
+same role, and the pick is the shape of the task, not a benchmark:
+
+- **Aider** (`aider-chat`) is the pair-programming seat: a thin, git-native
+  edit loop for a developer driving small-to-medium repo changes — the TL that
+  writes diffs while you steer, not a supervised fleet.
+- **OpenCode** (`anomalyco/opencode`) is the open terminal TUI: a configurable,
+  auditable, hackable harness that works across many models — the seat when
+  you want the harness itself to be transparent and yours.
+- **Command Code** (`command-code`) is the seat that *learns your taste*: its
+  Taste compiler imports Claude/Codex/Cursor sessions and writes portable
+  `taste.md` packages, so your preferences follow you across tools — the pick
+  when the harness should absorb and replay how you like code written.
+- **Codex** and **Claude Code** are the two "default" coding seats with
+  different reach — Codex the supervised, sandboxed exec with worktrees and
+  PR pipelines (fleet), Claude Code the ergonomic single-developer workspace
+  (one repo done well). Reach for Codex when the game is N supervised lanes,
+  Claude Code when the game is depth in one repo.
+- **Pi** is the minimal seat (DIY discipline: no permissions, plan, or
+  sub-agents) when you want the thinnest auditable engine under *your*
+  orchestration; **Cursor** and **Devin** are the managed GUI/fleet ends
+  (desktop IDE / autonomous SWE) when you hand the loop to a product instead
+  of a lane.
+
 **Which harness for which job.** The lanes above are *how to drive* a session;
 *which harness to drive* is a separate decision, and it is settled by the
 **layer of work**, not by a benchmark score. Five layers of agent work, five
