@@ -900,3 +900,20 @@ order steps 1–6 present, no dangling "A word on the examples" reference
   already uses (`ledger.stage`) and with #7's append-only ledger. Bounded→full
   now also consumes the accumulated count. Zero diagram change.
 - Markdown re-verified balanced (fences 14, backticks/bold even, 7 headers).
+
+## Round 46 — deep per-claim audit of agent→model cross-references
+
+**Lens: traceability / precision (run directly).**
+- Extracted every `#N` in the agent doc with N>7 (necessarily a model-layer
+  ref) plus every "model-layer (#N)" attribution. Audited each against the
+  owning model pattern's content.
+- **Fixed one genuine error:** agent #4's residency budget cited `#1's
+  swap_cost` — Mate-in-One (#1) has no swap-cost concept. The true owner is
+  **#12 Markowitz** (its single-box analysis: "on one GPU the pattern degrades
+  toward #7 plus swap cost, which the latency number has to include"). Now
+  `#12's swap_cost`, consistent with the agent #6 fallback arm which already
+  cites #12 for the same serial-VRAM-swap cost.
+- Re-verified accurate: #6 Brute-Force caps its fan (cap N) ✓; #16 Straggler
+  ✓; #18 Canary "admits a model" ✓; #24 probes unknown models in idle ✓; #26
+  slack-stealing ✓; #2/#11 family independence ✓.
+- Markdown balanced; 7 agent headers intact. No diagram change.

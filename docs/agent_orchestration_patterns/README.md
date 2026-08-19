@@ -844,7 +844,7 @@ whichever is shorter); preemption = *a live request lands and only a
 background session holds the seat it needs — evict to snapshot and hand
 over*; residency = *the live roster's working set, probe battery capped at
 the VRAM left after the live sessions*. These are examples to tune, not laws —
-the live-node inventory is what turns them, and #1's `swap_cost`, into the
+the live-node inventory is what turns them, and #12's `swap_cost`, into the
 numbers the budget actually gates on. And give the snapshot a home in #7's
 off-box store, not a second un-exported pile.
 
