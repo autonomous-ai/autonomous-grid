@@ -184,6 +184,8 @@ fixed and mean the same thing in every pattern:
   version of its promise.
 - **Refinements** — how to build it: the concrete rules that keep the promise
   honest (present where the pattern has implementation guidance to separate).
+- **Sample Code** — a short, runnable-in-spirit sketch of the shape, so the
+  mechanism isn't left to prose (illustrative, not the shipped stack).
 - **On the Grid stack** — one concrete local build, to keep the economics
   honest. **Related Patterns** ends each entry and points at the same family.
 
@@ -319,6 +321,16 @@ scope the read surface or treat what it read as exposed. And the actor's
 `round_id` action-replay key so a re-run of the same request lands the same
 effect once, never twice.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+# N-1 readers propose; exactly one actor mutates, keyed by round_id.
+def settle(round_id, prompt, readers, pick_winner, actor, mutate):
+    proposals = [r.reason(prompt) for r in readers]      # read-only; no creds
+    winner = pick_winner(proposals)                      # purple: decide
+    effect = apply_once(mutate, key=f"round:{round_id}") # green: act once
+    return proposals, effect
+```
+
 **On the Grid stack.** A code-fix request fans to three drafters on **three
 different lanes**, so each reader's read-only gate belongs to its own harness:
 A drafts on **OpenClaw** (gated by the router's quorum — its act step is never
@@ -413,6 +425,28 @@ don't build a universal session format no harness will read. And make kill the
 fan's exit path: a fan that cannot cancel its losing lanes is a fan that holds
 the seat hostage after it has won.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+class Seat:  # the resident harness + model runtime
+    def __init__(self, snap_home):
+        self.session = None
+        self.snap_home = snap_home
+    def spawn(self, prompt):            # cold start on a free seat
+        self.session = self._load(prompt)
+        return self.session
+    def warm(self, prompt):             # stay resident, reuse context
+        return self.session.resume(prompt)
+    def handoff(self, prompt):          # freeze to snapshot, then move
+        self._persist(); self.session = self._load(prompt)
+        return self.session
+    def kill(self):                     # always preceded by the snapshot
+        self._persist(); self.session = None
+    def _persist(self):                 # fsync before the seat frees
+        write(self.snap_home, self.session.snapshot()); fsync()
+    def _load(self, prompt):
+        return Session(prompt)
+```
+
 **On the Grid stack.** On a 1–2-seat box the `seat` is the one resident model
 + harness, so the four transitions are the whole scheduler. Warm/resume is the
 hot path — the fan in #1 reads the same `qwen3-coder` seat three times by
@@ -488,6 +522,22 @@ the fan pairs OpenClaw with an open-weight coder, act step gated behind the
 router's quorum, never the worker's; and the escalation seat — reached only
 when local judgment runs dry — pairs Grid Enterprise with a cross-vendor
 model, full act-gate, the only one that opens an externally-observable action.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+# role -> lane -> the act-gate that lane can enforce.
+ROUTES = {                       # role: (lane, gate)
+    "verifiable": ("hermes-acp", "tool-scope, read-only"),
+    "open":       ("claude-code", "--no-tools"),
+    "script":     ("codex",      "sandbox / read-only flag"),
+    "fan":        ("openclaw",   "router quorum, never the worker"),
+}
+def route(role, residents):
+    lane, gate = ROUTES[role]
+    if lane not in residents:        # residency first
+        return defer(role)           # stage a swap; don't force the task
+    return lane, gate
+```
 
 **On the Grid stack.** Every task on this box arrives at the table first:
 the test-that-must-be-right lands on Hermes ACP read-only (its voluntary
@@ -568,6 +618,17 @@ the live-node inventory is what turns them, and #1's `swap_cost`, into the
 numbers the budget actually gates on. And give the snapshot a home in #7's
 off-box store, not a second un-exported pile.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+def scheduler(live, background):
+    while True:
+        if live.arriving_now():                # a deadline-bearing request
+            background.preempt_to_snapshot()   # fsync, then free the seat
+            yield live.run()
+        else:
+            yield background.run_until_idle_ms(IDLE_MS)  # fill the idle only
+```
+
 **On the Grid stack.** On this box the seat is the one resident
 model+harness pair. Shadow admission (#5) runs the new harness in the
 background row — it only gets the seat between live requests, and a live
@@ -635,6 +696,20 @@ what has no mechanical check, and never let the weak arm promote a harness to
 an act step. And run the shadow in the idle row of #4 — shadow traffic is
 background work, and a shadow that starves a live request has inverted the
 order the whole layer depends on.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+AUTHORIZED = set()          # harnesses that cleared the bar
+TRUST_BAR = 0.9
+
+def admit(harness, authority):
+    if harness in AUTHORIZED: return harness          # already trusted
+    shadow = harness.shadow()                          # read-only fan shells
+    score = authority.score(shadow)                    # vs ground-truth authority
+    if score >= TRUST_BAR:
+        AUTHORIZED.add(harness); return harness        # promote to act
+    return deny(harness)                               # stays read-only
+```
 
 **On the Grid stack.** A new coding engine lands on this box as an OpenClaw
 shadow: it runs the fan's read-only shells on live requests, its outputs scored
@@ -722,6 +797,16 @@ no model prior — the check grounds the verdict against a possibly imperfect
 artifact; blind-spot independence stays the property of live cross-vendor
 consensus, and that arm stays labeled (not) an authority.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+def certify(draft, check, consensus):
+    fact = check.fact(draft)             # a test/schema: deterministic, external
+    if fact is not None:
+        return fact, "grounded"          # only this arm may certify
+    verdict = consensus.propose(draft)   # two tails agreeing: the weak arm
+    return verdict, "proposed_by: consensus"  # may propose, never certify
+```
+
 **On the Grid stack.** A config change drafts on `qwen36-27b-mtp` over Hermes
 ACP; the verdict is certified by a **Codex (`exec --json`)** tool call that
 validates the result against the config schema and, where the change is code,
@@ -802,6 +887,14 @@ that the box gives up recoverability by choice. And route the agent layer's
 own persistence through that same off-box store, never a second un-exported
 pile: a second pile is a second truth in disguise, and the moment it exists
 nobody says which one is right.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
+```python
+def append(event, wal):     # every durable event -> one fsync'd log
+    wal.append(serialize(event))
+    fsync()                 # durable before we reply
+    wal.export_off_box()    # snapshots, rep, act log all fan out from here
+```
 
 **On the Grid stack.** This box's WAL is one append-only log next to the
 seat. The act log records each `git push` with its `round_id`, actor lane, and
