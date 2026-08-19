@@ -205,9 +205,10 @@ happens, where a decision is made, and which edges loop back.
 - **Purple boxes** are *decisions*: the select, the score, the gate — where
   the shape is decided, not executed. A green box never decides; a purple box
   never does the work.
-- **Arrows** run forward along the answer. A **dashed** arrow is a return
-  path — a shadow, a resume, an eviction — the edge that makes a pattern
-  stateful.
+- **Arrows** run forward along the answer. A **dashed** arrow is a stateful or
+  boundary edge — a shadow, a resume, an eviction, a may-not-cross constraint
+  (like the verifier's proposed-only loop). It signals "this edge does not
+  proceed forward; it loops, restores, or fences."
 - **A stacked deck** is the one durable object on the box — the WAL, the
   off-box store. Everything else in a figure is a session or a step.
 - **Every green worker carries its harness × model tag.** The harness is the
@@ -368,9 +369,12 @@ resident session that is never killed is a politely-named resource leak on a
 restore in a context swap instead of paying a cold start.
 
 **Structure.** Coral `job` in, one green `seat` (the resident session) at the
-center, and its four transitions fanned out: `warm` (restore), `handoff`
-(duplicate context), `kill` (free the seat) — all green — and `snapshot` (the
-`round_id`-frozen, off-box state) they flow toward.
+center, and the four transitions as purple decisions fanned out above and
+below it: `warm` (the layer's cache, same harness), `handoff` (duplicate
+context, same harness), `kill` (cancel, frees the seat) — all flowing toward
+the stacked `snapshot` deck (the `round_id`-frozen, off-box state). The
+terminal `free` exits the killed seat, and a dashed `restore` edge brings the
+seat back from the snapshot.
 
 **Mechanics.** The four transitions and what each is *not*:
 
@@ -522,11 +526,13 @@ lands. On a 1–2-seat box there is no such machine until the seat itself is the
 executor, with preemption and a residency bound. No agent-layer pattern that
 promises background work is real until this exists.
 
-**Structure.** Two rows. The live row: coral `job` → green `live request`
-(deadline-bearing) → coral `answer`. The background row: green `background`
-(shadow · warm · probe) → purple `preempt` (evict to snapshot, fsync first)
-→ a dashed arrow down into the live row — background *yields to snapshot*,
-never to bare kill.
+**Structure.** Two rows. The live row on top: coral `job` → green `live`
+(request, deadline-bearing) → coral `answer`. The background row beneath:
+green `background jobs` (shadow · warm · probe — one pool, varies by job) →
+purple `preempt` (evict to snapshot, fsync first) → a dashed arrow **up**
+into the live row — background *yields to snapshot*, never to bare kill. A
+second dashed edge runs from `job` down to the background pool, labelled
+*spawned when idle*, marking the only door into background work.
 
 **Mechanics.** Background work claims the seat only in the idle — *no live
 request for N ms, or a deadline horizon*. When a live request lands on a seat
@@ -569,7 +575,7 @@ code-fix that lands mid-shadow evicts the shadow to its `round_id` snapshot
 (fsync'd to the off-box store) before taking the seat. The shadow resumes from
 that snapshot on the next idle, so admission progress survives preemption
 instead of restarting. The probe battery for a new model is capped at whatever
-VRAM the live seat leaves, so a resident `qwen36-35b-a3b-mtp` can keep serving
+VRAM the live seat leaves, so a resident `qwen36-35b` can keep serving
 while a smaller probe runs in the remainder — and when it can't, the battery
 waits, it never evicts the live roster.
 
@@ -836,14 +842,16 @@ and worth managing like state.
 
 This is one concrete multi-agent system, end to end, and it is the catalog in
 one figure: every node is a named harness × model pairing, every pattern does
-one job, and the economics are the *local* ones — free tokens, no rate limit,
-fast on your own GPU.
+one job, the state layer is rendered (the WAL deck, the off-box export, and the
+dashed resume edge), and the economics are the *local* ones — free tokens, no
+rate limit, fast on your own GPU.
 
-**The problem.** The fleet's shared repo has a nightly-timeout defect in the
-agent dispatcher; the box's fan-out is producing intermittent lockups in
-production. A single model asked cold will hallucinate a "fix" for what it
-half-remembered. So we fan out, gate the write, and certify by fact — all on
-one box, no provider, no token bill.
+**The problem.** `dispatcher.acquire()` holds the seat lock past the 30 s
+nightly-batch deadline; the flaky repro is `test_dispatch_batch_timeout`, which
+hangs at 96 s on 3 of 50 runs — intermittent dispatch lockups in production. A
+single model asked cold will hallucinate a "fix" for what it half-remembered.
+So we fan out, gate the write, and certify by fact — all on one box, no
+provider, no token bill.
 
 **The fan (#3 route, #1 act-gate).** A `defect` request enters and an
 **OpenClaw** fan (the fan-shaped lane) dispatches three read-only shells, each
@@ -851,10 +859,10 @@ in its own git worktree so they never step on each other's working tree:
 
 | Step | Harness | Model | What it does |
 |------|---------|-------|--------------|
-| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen36-27b` | Reproduces the timeout with a minimal harness script — can't write anything but its own worktree |
+| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen36-27b` | Reproduces the 96 s hang with a minimal harness script — can't write anything but its own worktree |
 | fix A | **Hermes ACP** (ACP/JSON-RPC), read-only by default | `deepseek-v4-flash` | Drafts the dispatcher patch against the repro |
 | fix B | **OpenCode** | `qwen36-35b` | A second, independent draft from a fully different harness+model tail — real divergence, not twin priors |
-| reviewer | **Polly**-style cross-vendor pass | — | Routes *each* diff to a reviewer from a **different** harness than the one that wrote it (Codex's patch, if any, is reviewed by Hermes; Hermes' by OpenCode) — Omnigent's Polly rule, and exactly #6's "weak arm diverges on purpose" |
+| reviewer | cross-vendor pass — never itself | — | Routes *each* diff to a reviewer from a **different** harness than the one that wrote it: fix A (Hermes) is reviewed on the **OpenCode** lane; fix B (OpenCode) on the **Hermes** lane. That is Omnigent's Polly rule and exactly #6's "weak arm diverges on purpose" |
 
 Every worker is read-only. The `reviewer` is purple — it proposes; it never
 writes.
@@ -864,22 +872,32 @@ select **one** actor — **Claude Code** (stream-json, tools *enabled*) running
 `qwen36-35b` — and that single seat performs the one world-touching step. It
 is idempotent and `round_id`-keyed, so a retry of the same request applies the
 same patch once, never twice. N−1 agents read; exactly one acts. That is the
-whole gate.
+whole gate. **Converge** has a rule: accept when *both* diffs pass the Codex
+test/schema arm, or when one diff is selected on ≥1 green deterministic run and
+the other is explicitly discarded. **Non-convergence** has a path, not a stare:
+either escalates to #6's off-box authority (a human or a fresh independent
+lane), or the patch is dropped and the failed round is logged with its repro.
 
 **The certify (#6 verifier).** The patch is not trusted because an agent said
-so. It is certified by a **Codex `exec --json`** tool call that runs the
-actual test suite and validates against the schema — a deterministic external
-fact that shares none of the writer's model prior. The `shipped fix` exit is
-only reached after that pass is green; if no mechanical check can certify a
-judgment call, the consensus arm proposes-and-logs it but never certifies (see
-#6).
+so. It is certified by a **Codex `exec --json`** tool call (`qwen36-27b · test`
+— the runner is deterministic, its act is a fact) that runs the actual test
+suite and validates against the schema — a deterministic external fact that
+shares none of the writer's model prior. The `shipped fix` exit is only reached
+after that pass is green; if no mechanical check can certify a judgment call,
+the consensus arm proposes-and-logs it but never certifies (see #6). The whole
+run owes one concrete budget on the write: the gate refuses a fan whose
+`swap_cost × (distinct model loads)` — a real seat-seconds number from the
+box's live-node inventory, not a constant — exceeds the request's
+depth-of-thought budget.
 
-**The state (#2 lifecycle, #7 ledger).** Between requests the box keeps the
-worktrees and a `round_id`-frozen snapshot warm (#2), so the next defect
-resumes instead of cold-starts. Every event — the fan dispatch, the review,
-the `git push`, the certification — appends to the one ledger (#7) and
-exports to the NAS on a cadence, so a wiped consumer box loses a day, not the
-audit of what the fleet touched.
+**The state (#2 lifecycle, #7 ledger).** The fan's `round_id`-keyed snapshot
+is written to the **WAL deck** before any act, fsync first, and exported one
+copy per round to the **NAS** (off the box, it outlives the box). Between
+requests the box keeps the worktrees warm (#2), and the dashed resume edge
+brings a wiped or preempted seat back from the last snapshot instead of
+cold-starting. Every event — the fan dispatch, the review, the `git push`, the
+certification — appends to the one ledger (#7), so a wiped consumer box loses
+a day, not the audit of what the fleet touched.
 
 **Why this is local.** On hosted Claude/OpenAI/Codex this exact system is
 billable per token and capped per minute, so the fan stays small, the

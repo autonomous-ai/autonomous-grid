@@ -81,52 +81,58 @@ def lifecycle():
     d.place("seat", "Claude Code", "work", row=1, stage=1,
             sub="qwen36-35b · resident", w=wfit("Claude Code", "qwen36-35b · resident"),
             note="resident session")
-    d.place("warm", "Hermes ACP", "work", row=0, stage=2,
-            sub="glm-4.6 · warm", w=wfit("Hermes ACP", "glm-4.6 · warm"),
-            note="the layer's cache")
-    d.place("hand", "Codex", "work", row=1, stage=2,
-            sub="qwen3-coder · hand", w=wfit("Codex", "qwen3-coder · hand"),
-            note="same harness only")
-    d.place("kill", "OpenClaw", "work", row=2, stage=2,
-            sub="qwen3-coder · kill", w=wfit("OpenClaw", "qwen3-coder · kill"),
-            note="frees the seat")
-    d.place("snap", "snapshot", "work", row=1, stage=3,
+    d.place("warm", "warm", "decide", row=0, stage=2,
+            note="the layer's cache · same harness")
+    d.place("hand", "handoff", "decide", row=1, stage=2,
+            note="duplicate context · same harness")
+    d.place("kill", "kill", "decide", row=2, stage=2,
+            note="cancel · frees the seat")
+    d.place("snap", "snapshot", "deck", row=0, stage=3,
             note="round_id-frozen, off-box")
+    d.place("free", "freed", "terminal", row=2, stage=3)
     d.edge("job", "seat", "spawn (cold)")
     d.edge("seat", "warm", "resume")
     d.edge("seat", "hand", "duplicate context")
     d.edge("seat", "kill", "cancel")
-    d.edge("warm", "snap", "freeze")
-    d.edge("hand", "snap", "checkpoint")
+    d.edge("warm", "snap", "snapshot (round_id)")
+    d.edge("hand", "snap")
+    d.edge("kill", "free")
+    d.edge("snap", "seat", "restore", dashed=True)
     return d
 
 
 def lanes():
     d = Diagram("Route across harness lanes — role → lane → gate")
     d.place("job", "job", "terminal", row=1, stage=0)
-    d.place("pick", "pick lane", "decide", row=1, stage=1, note="residency first")
-    d.place("l1", "Codex", "work", row=0, stage=2,
+    d.place("role", "role", "decide", row=1, stage=1,
+            note="task mutability: read-only / write")
+    d.place("pick", "pick lane", "decide", row=1, stage=2, note="residency first")
+    d.place("l1", "Codex", "work", row=0, stage=3,
             sub="qwen36-27b · exec", w=wfit("Codex", "qwen36-27b · exec"),
             note="bounded coding")
-    d.place("l2", "Claude Code", "work", row=1, stage=2,
+    d.place("l2", "Claude Code", "work", row=1, stage=3,
             sub="qwen36-35b · stream", w=wfit("Claude Code", "qwen36-35b · stream"),
             note="open work")
-    d.place("l3", "Hermes ACP", "work", row=2, stage=2,
+    d.place("l3", "Hermes ACP", "work", row=2, stage=3,
             sub="laguna-s-2.1 · ACP", w=wfit("Hermes ACP", "laguna-s-2.1 · ACP"),
             note="verifiable")
-    d.place("l4", "OpenClaw fan", "work", row=3, stage=2,
-            sub="qwen3-coder · N copies", w=wfit("OpenClaw fan", "qwen3-coder · N copies"),
+    d.place("l4", "OpenClaw fan", "work", row=3, stage=3,
+            sub="qwen3-coder · worker pool", w=wfit("OpenClaw fan", "qwen3-coder · worker pool"),
             note="N copies")
-    d.place("ans", "answer", "terminal", row=1, stage=3)
-    d.edge("job", "pick", "each request")
-    d.edge("pick", "l1", "act contract binds", lp=(470, 74))
+    d.place("gate", "gate", "decide", row=1, stage=4,
+            note="enforceable act contract")
+    d.place("ans", "answer", "terminal", row=1, stage=5)
+    d.edge("job", "role", "each request")
+    d.edge("role", "pick")
+    d.edge("pick", "l1")
     d.edge("pick", "l2")
     d.edge("pick", "l3")
     d.edge("pick", "l4")
-    d.edge("l1", "ans")
-    d.edge("l2", "ans")
-    d.edge("l3", "ans")
-    d.edge("l4", "ans")
+    d.edge("l1", "gate")
+    d.edge("l2", "gate")
+    d.edge("l3", "gate")
+    d.edge("l4", "gate")
+    d.edge("gate", "ans", "act contract binds")
     return d
 
 
@@ -137,15 +143,16 @@ def seat_exec():
             sub="qwen36-35b · live", w=wfit("Claude Code", "qwen36-35b · live"),
             note="deadline-bearing")
     d.place("ans", "answer", "terminal", row=0, stage=2)
-    d.place("bg", "OpenClaw fan", "work", row=2, stage=1,
-            sub="qwen3-coder · pool", w=wfit("OpenClaw fan", "qwen3-coder · pool"),
-            note="shadow · warm · probe")
+    d.place("bg", "background jobs", "work", row=2, stage=1,
+            sub="varies by job · pool", w=wfit("background jobs", "varies by job · pool"),
+            note="shadow · warm · probe — one background pool")
     d.place("pre", "preempt", "decide", row=2, stage=2,
             note="evict to snapshot, fsync first")
     d.edge("job", "live")
+    d.edge("job", "bg", "spawned when idle", dashed=True, lp=(170, 160))
     d.edge("live", "ans")
     d.edge("bg", "pre")
-    d.edge("pre", "live", "yields to snapshot", below=40)
+    d.edge("pre", "live", "yields to snapshot", dashed=True, below=40)
     return d
 
 
@@ -154,12 +161,13 @@ def admission():
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("inc", "Claude Code", "work", row=0, stage=1,
             sub="qwen36-35b · resident", w=wfit("Claude Code", "qwen36-35b · resident"))
-    d.place("can", "Hermes ACP", "work", row=2, stage=1,
-            sub="laguna-s-2.1 · shadow", w=wfit("Hermes ACP", "laguna-s-2.1 · shadow"),
+    d.place("can", "OpenClaw", "work", row=2, stage=1,
+            sub="qwen3-coder · shadow", w=wfit("OpenClaw", "qwen3-coder · shadow"),
             note="read-only shells only")
     d.place("cmp", "score", "decide", row=1, stage=2,
-            note="vs the ground-truth authority")
-    d.place("gate", "gate", "decide", row=1, stage=3, note="≥N wins at ≥X%")
+            note="vs Codex exec --json test/schema")
+    d.place("gate", "gate", "decide", row=1, stage=3,
+            note="≥N wins at ≥X% — new harness only")
     d.place("ans", "act step", "terminal", row=1, stage=4)
     d.edge("job", "inc", "live traffic")
     d.edge("job", "can", "shadow", dashed=True)
@@ -175,30 +183,31 @@ def verifier():
     d.place("job", "job", "terminal", row=1, stage=0)
     d.place("draft", "Hermes ACP", "work", row=1, stage=1,
             sub="qwen36-27b · draft", w=wfit("Hermes ACP", "qwen36-27b · draft"))
-    d.place("check", "Codex exec", "work", row=1, stage=2,
-            sub="test · schema — a fact", w=wfit("Codex exec", "test · schema — a fact"))
+    d.place("check", "Codex exec", "decide", row=1, stage=2,
+            note="test · schema — a fact")
     d.place("cons", "consensus", "work", row=3, stage=2,
-            sub="glm-4.6 · two tails", w=wfit("consensus", "glm-4.6 · two tails"),
+            sub="glm-4.6 over Codex · two tails", w=wfit("consensus", "glm-4.6 over Codex · two tails"),
             note="two tails agree")
     d.place("ans", "answer", "terminal", row=1, stage=3)
     d.edge("job", "draft", "one try")
     d.edge("draft", "check")
     d.edge("check", "ans", "certified")
-    d.edge("draft", "cons", "no fact to offer", lp=(760, 470))
-    d.edge("cons", "check", "proposed only", dashed=True, lp=(985, 385))
+    d.edge("draft", "cons", "no fact to offer", lp=(620, 182))
+    d.edge("cons", "check", "proposed only", dashed=True, lp=(919, 160))
     return d
 
 
 def ledger():
-    d = Diagram("Only one ledger — the fsync'd box is the only truth")
+    d = Diagram("Only one ledger — the fsync'd box is the only truth", m_l=170)
     d.place("e1", "Claude Code", "work", row=0, stage=0,
             sub="qwen36-35b · act", w=wfit("Claude Code", "qwen36-35b · act"))
     d.place("e2", "Hermes ACP", "work", row=1, stage=0,
-            sub="glm-4.6 · graduate", w=wfit("Hermes ACP", "glm-4.6 · graduate"))
+            sub="glm-4.6 · graduation", w=wfit("Hermes ACP", "glm-4.6 · graduation"))
     d.place("e3", "OpenClaw", "work", row=2, stage=0,
-            sub="qwen3-coder · deny", w=wfit("OpenClaw", "qwen3-coder · deny"))
+            sub="qwen3-coder · denial", w=wfit("OpenClaw", "qwen3-coder · denial"))
     d.place("app", "append", "decide", row=1, stage=1, note="round_id-stamped events")
     d.place("wal", "WAL", "deck", row=1, stage=2, sub="one box",
+            w=wfit("WAL", "one box"),
             note="append-only · no replication")
     d.place("exp", "export", "work", row=1, stage=3, note="different medium")
     d.edge("e1", "app")
@@ -216,11 +225,11 @@ def e2e():
     same repo in parallel worktrees; the act-gate lets one Claude Code seat
     write; the verifier is ground truth. No cloud, no rate limit, free tokens.
     """
-    d = Diagram("One local box — a defect, N agents, one writer")
+    d = Diagram("One local box — a defect, N agents, one writer", m_l=86)
     d.place("job", "defect", "terminal", row=1, stage=0)
     d.place("fan", "OpenClaw", "work", row=1, stage=1,
             sub="qwen3-coder · fan", w=wfit("OpenClaw", "qwen3-coder · fan"),
-            note="N read-only shells, own worktree")
+            note="3 read-only shells, one worktree each")
     d.place("a1", "Codex", "work", row=0, stage=2,
             sub="qwen36-27b · repro", w=wfit("Codex", "qwen36-27b · repro"))
     d.place("a2", "Hermes ACP", "work", row=1, stage=2,
@@ -228,15 +237,21 @@ def e2e():
     d.place("a3", "OpenCode", "work", row=2, stage=2,
             sub="qwen36-35b · fix", w=wfit("OpenCode", "qwen36-35b · fix"))
     d.place("rev", "reviewer", "decide", row=1, stage=3,
-            sub="cross-vendor", w=wfit("reviewer", "cross-vendor"),
-            note="a different lane than the fix, never itself")
+            sub="cross-vendor · never itself",
+            w=wfit("reviewer", "cross-vendor · never itself"),
+            note="a different lane than the fix")
     d.place("act", "Claude Code", "work", row=1, stage=4,
             sub="qwen36-35b · the one writer", w=wfit("Claude Code", "qwen36-35b · the one writer"),
             note="round_id-keyed, fsync first")
     d.place("ver", "Codex exec", "work", row=1, stage=5,
-            sub="test · is a fact", w=wfit("Codex exec", "test · is a fact"))
+            sub="qwen36-27b · test · is a fact",
+            w=wfit("Codex exec", "qwen36-27b · test · is a fact"))
     d.place("ans", "shipped fix", "terminal", row=1, stage=6,
             note="tokens free · no rate limit · on your box")
+    d.place("wal", "WAL", "deck", row=3, stage=4, note="round_id keys, one box")
+    d.place("exp", "NAS", "work", row=3, stage=5,
+            sub="one copy per round", w=wfit("NAS", "one copy per round"),
+            note="off the box · outlives the box")
     d.edge("job", "fan")
     d.edge("fan", "a1")
     d.edge("fan", "a2")
@@ -247,6 +262,9 @@ def e2e():
     d.edge("rev", "act", "the one")
     d.edge("act", "ver", "the write step")
     d.edge("ver", "ans", "certified")
+    d.edge("act", "wal", "fsync first")
+    d.edge("wal", "exp", "one entry per round")
+    d.edge("exp", "fan", "resume", dashed=True, below=14)
     return d
 
 

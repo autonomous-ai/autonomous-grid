@@ -46,12 +46,13 @@ def esc(s):
 
 # --- the layout --------------------------------------------------------------
 class Diagram:
-    def __init__(self, title=None):
+    def __init__(self, title=None, m_l=None):
         self.nodes = {}
         self.edges = []
         self._stage = 0
         self._row = 0
         self.title = title
+        self.m_l = M_L if m_l is None else m_l   # left margin (widen if a stage-0 node is wide)
 
     def next(self, stage=None, row=None):
         """Advance cursor; returns (stage,row)."""
@@ -82,7 +83,7 @@ class Diagram:
         stages = sorted({n["stage"] for n in ns.values()})
         stage_w = {st: max(n["w"] for n in ns.values() if n["stage"] == st)
                    for st in stages}
-        x, cx = {}, M_L
+        x, cx = {}, self.m_l
         for st in stages:
             x[st] = cx
             cx += stage_w[st] + STAGE
@@ -93,9 +94,12 @@ class Diagram:
             cy += ROW
         self._x, self._y, self._sw = x, y, stage_w
         right = max(x[st] + stage_w[st] / 2 for st in stages) + M_R
+        for n in ns.values():
+            if n.get("note"):
+                right = max(right, x[n["stage"]] + text_w(n["note"], EDGE_FS - 2) / 2 + 24)
         bottom = max(y[r] + H / 2 for r in rows) + M_B
         if self.title:
-            right = max(right, text_w(self.title, EDGE_FS) + 2 * M_L)
+            right = max(right, text_w(self.title, EDGE_FS) + 2 * self.m_l)
         W = int(round(right))
         Hh = int(round(bottom))
         W += W % 2
@@ -132,7 +136,7 @@ class Diagram:
         p.append("  </defs>")
         p.append(f'  <rect width="{W}" height="{Hh}" fill="#fff"/>')
         if self.title:
-            p.append(f'  <text x="{M_L}" y="{M_T - 58}" text-anchor="start" '
+            p.append(f'  <text x="{self.m_l}" y="{M_T - 58}" text-anchor="start" '
                      f'fill="{INK}" font-size="{EDGE_FS}" font-weight="700">'
                      f'{esc(self.title)}</text>')
         for e in self.edges:
@@ -240,13 +244,27 @@ class Diagram:
     # --- verification -------------------------------------------------------
     def verify(self):
         """Crude but real checks: text fits its node; nodes don't collide."""
-        self._geom()
         problems = []
+        W, Hh = self._geom()
         for nid, n in self.nodes.items():
             if n["kind"] in ("work", "decide", "terminal", "deck"):
                 tl = text_w(n["label"], NODE_FS)
                 if tl + 8 > n["w"]:
                     problems.append(f"{nid}: label too wide for node")
+                if n.get("sub"):
+                    ts = text_w(n["sub"], EDGE_FS)
+                    if ts + 8 > n["w"]:
+                        problems.append(f"{nid}: subline too wide for node")
+                # nothing may leave the canvas (stage-0 left clip, wide notes)
+                x0, y0 = self.xl(nid), self.top(nid)
+                x1, y1 = self.xr(nid), self.bottom(nid)
+                if n.get("note"):
+                    tw = text_w(n["note"], EDGE_FS - 2) / 2
+                    x0, x1 = min(x0, self.cx(nid) - tw), max(x1, self.cx(nid) + tw)
+                if n["kind"] == "deck":
+                    x0, y0 = x0 - 16, y0 - 16
+                if x0 < 0 or y0 < 0 or x1 > W or y1 > Hh:
+                    problems.append(f"{nid}: clipped by viewBox")
         seen = []
         for nid, n in self.nodes.items():
             box = (self.xl(nid), self.top(nid), self.xr(nid), self.bottom(nid))
@@ -271,6 +289,8 @@ class Diagram:
             bh = 26
             bw = text_w(e["label"], EDGE_FS) + 8
             lbox = (lx - bw/2, (ly-18) - bh/2, lx + bw/2, (ly-18) + bh/2)
+            if lbox[0] < 0 or lbox[1] < 0 or lbox[2] > W or lbox[3] > Hh:
+                problems.append(f"label '{e['label']}' clipped by viewBox")
             for nid in self.nodes:
                 if nid in (a, b):
                     continue
@@ -546,7 +566,7 @@ def straggler():
     d.edge("job", "worker", "one try")
     d.edge("worker", "ans", "a single answer")
     d.edge("worker", "back", "overdue", dashed=True, v=True)
-    d.edge("back", "ans", "first to finish", lp=(560, 420))
+    d.edge("back", "ans", "first to finish", lp=(560, 156))
     return d
 
 def materialized():

@@ -599,7 +599,7 @@
   <text x="208" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one try</text>
   <text x="539" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
   <text x="368" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">overdue</text>
-  <text x="560" y="402" text-anchor="middle" fill="#2b2b29" font-size="23">first to finish</text>
+  <text x="560" y="138" text-anchor="middle" fill="#2b2b29" font-size="23">first to finish</text>
   <path d="M 120 92 C 208 92, 208 92, 296 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 92 C 539 92, 539 92, 638 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 368 125 C 368 151, 368 151, 368 177" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
