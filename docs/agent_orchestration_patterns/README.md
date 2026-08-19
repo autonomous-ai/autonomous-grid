@@ -67,12 +67,79 @@ Two routing rules hold across the whole layer:
   residency actually allows. Spawn `min(N, free seats)` parallel, queue the
   rest — the model-layer rule, now applied to sessions.
 
-**A word on the examples.** Every `On the Grid stack` block is an
-*illustrative* concrete build, not a shipped configuration. Real model names
-(`qwen36-27b-mtp`, `glm-4.6`) and hardware sizes ("24 GB NVIDIA") are
-placeholders for "whatever is resident on your box" — parameters, not a
-billable stack. Treat them as worked examples of the shape, not as the shape
-itself.
+**A word on the examples — and what "local" gets you.** Every `On the Grid
+stack` block, and every harness × model tag drawn on a figure's worker nodes,
+is an *illustrative* concrete build, not a shipped configuration. Real model
+names (`qwen36-27b-mtp`, `qwen3-coder`, `glm-4.6`, `deepseek-v4-flash`) and
+hardware sizes ("24 GB NVIDIA") are placeholders for "whatever is resident on
+your box" — parameters, not a billable stack. Treat them as worked examples of
+the shape, not as the shape itself.
+
+The hardware claim, though, is not a placeholder — it is the point of this
+catalog. This is a **local** multi-agent system: the box is yours, and it
+changes the economics against a cloud multi-agent stack (OpenAI/Claude/Codex
+hosted) in three ways that the patterns lean on:
+
+- **Tokens are free.** No per-token metering, so a fan of N readers and a
+  red-team pass and a cross-vendor consensus arm cost nothing to *run* — the
+  only price is seats and wall-clock. Patterns can afford redundancy the cloud
+  bills for.
+- **There is no rate limit.** A resident model on a box you own is not quota
+  -- it is a 24/7 worker. Fan-out is bounded by VRAM residency, not by an API
+  RPM cap, so "N agents" means what the GPU's working set allows, not what a
+  provider lets you send.
+- **Compute is fast and close.** Inference runs on your own RTX 6000 Ada
+  (48 GB) or RTX 5090 (32 GB), a Mac at 32 GB unified, or a server of B300s
+  (288 GB) — latency off the critical path of a remote provider, and a big
+  enough working set that several resident models can co-reside. The patterns
+  treat this as the normal case.
+
+None of this removes the bind this catalog is really about — the *seat* is
+still scarce, and *actions* are still risky, so every pattern is discipline on
+top of free compute. But the economics are the opposite of a cloud multi-agent
+system: the cost to avoid is not tokens, it is load-and-swap wall-clock and
+unbounded world-touching writes.
+
+**Where this sits in the multi-agent landscape.** A meta-harness — a layer
+that wraps several coding-agent CLIs and SDKs (Claude Code, Codex, Cursor,
+OpenCode, OpenClaw, Pi, Devin, and the rest) behind one session API — is now
+a solved, cloud-shaped problem. **Omnigent** (Databricks / Matei Zaharia,
+Apache-2.0, `github.com/omnigent-ai/omnigent`) is the clearest working example:
+agents are YAML files; a runner sandboxes each session and a server holds
+policies and shared history; **Polly** is an orchestrator that writes no code
+and dispatches per-vendor sub-agents into parallel git worktrees; and its
+**Polly/Debby** moves are the interesting ones — route each diff to a
+*reviewer from a different vendor than the one that wrote it* (cross-vendor
+verifier as policy), run a two-head debate to convergence, and hold a
+three-level ALLOW/DENY/ASK policy stack where the session level wins. That is
+the cloud-side version of the same discipline this catalog describes.
+
+This catalog is deliberately **not** the meta-harness. It is the *local*
+version, and it holds three positions the cloud meta-harness does not:
+
+- **The spine is the box, not the provider.** Omnigent is cloud-shaped — it
+  is one more gateway on top of hosted agents and hosted inference (Ollama /
+  vLLM show up as *an option*, not the spine). Here the GPU is resident on the
+  user's own hardware and the session cache lives next to it. The model layer
+  is the spine the agent layer runs on; the meta-harness is a layer *above*
+  Grid, not a replacement for it.
+- **We are the agents, not the platform.** Omnigent is infrastructure that
+  *manages* anonymous sessions. This catalog is the routing and trust model of
+  *named, personified* products (Intern, Harness, the fleet) that already have
+  a body and a job — the pattern's worker is a product, not a row in a policy
+  table.
+- **The physical layer is the moat.** A YAML agent that writes no code can be
+  re-won by a better gateway. A local, seat-bound, round_id-keyed trust model
+  running on hardware the user owns, wired to the physical products, is the
+  part that cannot be commoditized by shipping a better FastAPI server.
+
+So this catalog takes what is good and drops what is not: the **cross-vendor
+verifier as policy** (Omnigent's Polly/Debby) is #6's strong-arm principle
+lifted to admission (#5); the **three-level, session-wins ALLOW/DENY/ASK**
+policy stack is the act-gate (#1) made a policy hierarchy; and the
+**LLM-classifier routing** is #3's *pick the lane* decision, made explicit.
+What it does not do is re-win the meta-harness race — that ship has sailed
+cloud-side, and the differentiator here is the box.
 
 **Key terms for the outside reader.** *Grid* is a local-first,
 OpenAI-compatible inference router: one endpoint, dispatch by model name to
@@ -143,8 +210,15 @@ happens, where a decision is made, and which edges loop back.
   stateful.
 - **A stacked deck** is the one durable object on the box — the WAL, the
   off-box store. Everything else in a figure is a session or a step.
+- **Every green worker carries its harness × model tag.** The harness is the
+  node's label — Claude Code, Codex, Hermes ACP, OpenClaw, OpenCode, a fan —
+  and the model it runs is the smaller line beneath it (`qwen3-coder`,
+  `glm-4.6`, `deepseek-v4-flash`). That pairing *is* the routing decision, so
+  the figure draws it on the node instead of leaving it to prose. The model
+  names are an illustrative roster, not a billable stack (see *A word on the
+  examples*).
 
-The same roles and edge types appear in all seven figures; `docs/DIAGRAMS.md`
+The same roles and edge types appear in all eight figures; `docs/DIAGRAMS.md`
 is the formal register, and this block is the field guide.
 
 ## The one sentence per pattern
@@ -182,7 +256,7 @@ binds is the one that decides:
 
 ## The catalog, as one figure
 
-![Local AI orchestration patterns — the agent layer: seven patterns on one token set](images/index.svg)
+![Local AI orchestration patterns — the agent layer: seven patterns and the end-to-end system on one token set](images/index.svg)
 
 ---
 
@@ -753,6 +827,70 @@ act, and share one GPU. The model layer makes the *answer* reliable; the
 agent layer makes the *action* reliable. That is the boundary: samples are
 free, but actions — and the sessions that take them — are scarce, durable,
 and worth managing like state.
+
+---
+
+## The whole system, one box, one defect
+
+![One local box — a defect, N agents, one writer](images/e2e.svg)
+
+This is one concrete multi-agent system, end to end, and it is the catalog in
+one figure: every node is a named harness × model pairing, every pattern does
+one job, and the economics are the *local* ones — free tokens, no rate limit,
+fast on your own GPU.
+
+**The problem.** The fleet's shared repo has a nightly-timeout defect in the
+agent dispatcher; the box's fan-out is producing intermittent lockups in
+production. A single model asked cold will hallucinate a "fix" for what it
+half-remembered. So we fan out, gate the write, and certify by fact — all on
+one box, no provider, no token bill.
+
+**The fan (#3 route, #1 act-gate).** A `defect` request enters and an
+**OpenClaw** fan (the fan-shaped lane) dispatches three read-only shells, each
+in its own git worktree so they never step on each other's working tree:
+
+| Step | Harness | Model | What it does |
+|------|---------|-------|--------------|
+| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen36-27b` | Reproduces the timeout with a minimal harness script — can't write anything but its own worktree |
+| fix A | **Hermes ACP** (ACP/JSON-RPC), read-only by default | `deepseek-v4-flash` | Drafts the dispatcher patch against the repro |
+| fix B | **OpenCode** | `qwen36-35b` | A second, independent draft from a fully different harness+model tail — real divergence, not twin priors |
+| reviewer | **Polly**-style cross-vendor pass | — | Routes *each* diff to a reviewer from a **different** harness than the one that wrote it (Codex's patch, if any, is reviewed by Hermes; Hermes' by OpenCode) — Omnigent's Polly rule, and exactly #6's "weak arm diverges on purpose" |
+
+Every worker is read-only. The `reviewer` is purple — it proposes; it never
+writes.
+
+**The write (#1 act-gate).** Only after the reviewers converge does the router
+select **one** actor — **Claude Code** (stream-json, tools *enabled*) running
+`qwen36-35b` — and that single seat performs the one world-touching step. It
+is idempotent and `round_id`-keyed, so a retry of the same request applies the
+same patch once, never twice. N−1 agents read; exactly one acts. That is the
+whole gate.
+
+**The certify (#6 verifier).** The patch is not trusted because an agent said
+so. It is certified by a **Codex `exec --json`** tool call that runs the
+actual test suite and validates against the schema — a deterministic external
+fact that shares none of the writer's model prior. The `shipped fix` exit is
+only reached after that pass is green; if no mechanical check can certify a
+judgment call, the consensus arm proposes-and-logs it but never certifies (see
+#6).
+
+**The state (#2 lifecycle, #7 ledger).** Between requests the box keeps the
+worktrees and a `round_id`-frozen snapshot warm (#2), so the next defect
+resumes instead of cold-starts. Every event — the fan dispatch, the review,
+the `git push`, the certification — appends to the one ledger (#7) and
+exports to the NAS on a cadence, so a wiped consumer box loses a day, not the
+audit of what the fleet touched.
+
+**Why this is local.** On hosted Claude/OpenAI/Codex this exact system is
+billable per token and capped per minute, so the fan stays small, the
+cross-vendor reviewers cost real money, and a long red-team pass is priced
+like a premium feature. On the user's own RTX 6000 Ada (48 GB) / RTX 5090
+(32 GB) / Mac (32 GB unified) / B300 server (288 GB), tokens are free, there
+is no RPM ceiling, and inference rounds-trips in milliseconds on the same
+board the sessions live on. The only real costs left — the ones every pattern
+above exists to manage — are the scarce seat and the risk of an agent *acting*
+on the world. Fan it wide, write once, certify by fact: that is the local
+multi-agent system.
 
 ---
 

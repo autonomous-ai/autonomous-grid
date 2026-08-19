@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3156 4400" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
-<rect width="3156" height="4400" fill="#fff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3226 4400" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="3226" height="4400" fill="#fff"/>
 <g transform="translate(30,40)">
 
   <defs>
@@ -272,7 +272,7 @@
   <text x="858" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex exec</text>
   <text x="858" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">test · schema — a fact</text>
   <rect x="705" y="177" width="306" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="858" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Debby</text>
+  <text x="858" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">consensus</text>
   <text x="858" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-4.6 · two tails</text>
   <text x="858" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">two tails agree</text>
   <rect x="1332" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
@@ -339,21 +339,21 @@
     <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
     <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="3076" height="450" fill="#fff"/>
+  <rect width="3146" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">One local box — a defect, N agents, one writer</text>
-  <text x="1532" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the one</text>
-  <text x="2133" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the write step</text>
-  <text x="2643" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
+  <text x="1601" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the one</text>
+  <text x="2202" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the write step</text>
+  <text x="2712" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
   <path d="M 142 210 C 208 210, 208 210, 273 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 552 210 C 648 210, 648 92, 744 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 552 210 C 665 210, 665 210, 778 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 552 210 C 631 210, 631 210, 709 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 552 210 C 655 210, 655 328, 757 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1036 92 C 1155 92, 1155 210, 1275 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1001 210 C 1138 210, 1138 210, 1275 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1022 328 C 1149 328, 1149 210, 1275 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1485 210 C 1532 210, 1532 210, 1579 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 1996 210 C 2133 210, 2133 210, 2270 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M 2535 210 C 2643 210, 2643 210, 2751 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1036 92 C 1190 92, 1190 210, 1344 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1070 210 C 1207 210, 1207 210, 1344 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1022 328 C 1183 328, 1183 210, 1344 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1554 210 C 1601 210, 1601 210, 1648 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2065 210 C 2202 210, 2202 210, 2339 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2604 210 C 2712 210, 2712 210, 2820 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <rect x="-2" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
   <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defect</text>
   <rect x="273" y="177" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
@@ -363,26 +363,26 @@
   <rect x="744" y="59" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="890" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex</text>
   <text x="890" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-27b · repro</text>
-  <rect x="778" y="177" width="223" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <rect x="709" y="177" width="361" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="890" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
-  <text x="890" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-4.6 · fix</text>
+  <text x="890" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">deepseek-v4-flash · fix</text>
   <rect x="757" y="295" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
   <text x="890" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenCode</text>
   <text x="890" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · fix</text>
-  <rect x="1275" y="177" width="210" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="1380" y="201" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">reviewer</text>
-  <text x="1380" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">cross-vendor</text>
-  <text x="1380" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">a different lane than the fix, never itself</text>
-  <rect x="1579" y="177" width="417" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="1788" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
-  <text x="1788" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · the one writer</text>
-  <text x="1788" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-keyed, fsync first</text>
-  <rect x="2270" y="177" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="2403" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex exec</text>
-  <text x="2403" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">test · is a fact</text>
-  <rect x="2751" y="177" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="2866" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">shipped fix</text>
-  <text x="2866" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">tokens free · no rate limit · on your box</text>
+  <rect x="1344" y="177" width="210" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1449" y="201" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">reviewer</text>
+  <text x="1449" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">cross-vendor</text>
+  <text x="1449" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">a different lane than the fix, never itself</text>
+  <rect x="1648" y="177" width="417" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1857" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="1857" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen36-35b · the one writer</text>
+  <text x="1857" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-keyed, fsync first</text>
+  <rect x="2339" y="177" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2472" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex exec</text>
+  <text x="2472" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">test · is a fact</text>
+  <rect x="2820" y="177" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="2935" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">shipped fix</text>
+  <text x="2935" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">tokens free · no rate limit · on your box</text>
 
 </g>
 </svg>

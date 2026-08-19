@@ -177,8 +177,8 @@ def verifier():
             sub="qwen36-27b · draft", w=wfit("Hermes ACP", "qwen36-27b · draft"))
     d.place("check", "Codex exec", "work", row=1, stage=2,
             sub="test · schema — a fact", w=wfit("Codex exec", "test · schema — a fact"))
-    d.place("cons", "Debby", "work", row=3, stage=2,
-            sub="glm-4.6 · two tails", w=wfit("Debby", "glm-4.6 · two tails"),
+    d.place("cons", "consensus", "work", row=3, stage=2,
+            sub="glm-4.6 · two tails", w=wfit("consensus", "glm-4.6 · two tails"),
             note="two tails agree")
     d.place("ans", "answer", "terminal", row=1, stage=3)
     d.edge("job", "draft", "one try")
@@ -224,7 +224,7 @@ def e2e():
     d.place("a1", "Codex", "work", row=0, stage=2,
             sub="qwen36-27b · repro", w=wfit("Codex", "qwen36-27b · repro"))
     d.place("a2", "Hermes ACP", "work", row=1, stage=2,
-            sub="glm-4.6 · fix", w=wfit("Hermes ACP", "glm-4.6 · fix"))
+            sub="deepseek-v4-flash · fix", w=wfit("Hermes ACP", "deepseek-v4-flash · fix"))
     d.place("a3", "OpenCode", "work", row=2, stage=2,
             sub="qwen36-35b · fix", w=wfit("OpenCode", "qwen36-35b · fix"))
     d.place("rev", "reviewer", "decide", row=1, stage=3,
