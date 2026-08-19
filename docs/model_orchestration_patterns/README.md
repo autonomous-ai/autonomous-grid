@@ -888,6 +888,8 @@ weakest link, and *errors are not caught* — nothing loops back (that's #8's
 job; this pattern deliberately has no gate). A bad `scout` poisons the whole
 pipeline and it ships anyway.
 
+**Known Uses.** Chained LLM calls: topic→draft→summarize and tool pipelines where each step consumes the last output. MapReduce summarization and most 'agent workflows' that string discrete transforms are Pipeline, including the single-threaded local case this catalog warns about.
+
 **Failure mode.** Silent compounding — a small error at the front is
 serialized and magnified through every later step, with no check to break
 the chain.
@@ -974,6 +976,8 @@ than the fan-out launched. And if the surviving pool is under-populated, **absta
 rather than ship** an answer from a pool too small to call diverse: "could not form
 a diverse set" is a legal refuse-exit, not a forced answer.
 
+**Known Uses.** Forced-divergence prompt sets and adversarial diversity: prompting with deliberately different framing/role/persona so independent models don't converge on one shared blind spot — the LLM version of red-teaming and 'two hard votes' used in calibration work.
+
 **Failure mode.** The diversity metric is a proxy, not the truth — two
 answers far apart in embedding can still both be wrong for correlated reasons.
 Diversity by construction reduces the shared prior; it does not remove it.
@@ -1043,6 +1047,8 @@ covariance, not by warm-body count. The costs: it needs the outcome data to
 estimate correlation (ask #13's error ledger / #14's pheromone table), and its
 output is a weight vector — a pooling extension the pick/vote/average/
 gate/loop menu had no slot for until now.
+
+**Known Uses.** Correlation-aware ensembling: weighting ensemble members by their (measured) covariance so correlated echoes don't double-count — portfolio variance in finance, and weight-interpolation/merging methods that blend models with a covariance penalty.
 
 **Failure mode.** Correlation estimates are only as good as the outcome
 ledger that produced them. On a brand-new model family with no history, the
@@ -1119,6 +1125,8 @@ controlled variable. The costs: it needs the confidence-proxy measurement that
 #2/#8 produce, and its I and D terms require the per-request-class history
 that only the stateful patterns (#14, #16) accumulate. It is the controller
 that sits *around* the other patterns, not one more shape.
+
+**Known Uses.** Adaptive feedback control: a proportional-integral-derivative controller adjusting spend/step-size from an error signal is PID literally; policy-gradient and adaptive-sampling loops that tune their own budget respond the same way.
 
 **Failure mode.** Garbage in the confidence-proxy. If the verifier or vote
 that feeds "measured error" is itself rubber-stamping (#8's failure), the loop
@@ -1208,6 +1216,8 @@ drift — the difference between classify-and-freeze and learn-and-track. The
 costs: it only learns from *verified* outcomes (garbage in, garbage out), and
 decay tuning is a real knob — too slow and it never forgets, too fast and it
 churns on noise.
+
+**Known Uses.** Ant-colony optimization and decay-based learn-to-route: ants reinforce trails that decay, so stale winners stop being reinforced — the same shape as A/B testing with exponential time-decay favouritism in recommendation systems.
 
 **Failure mode.** Verifier garbage poisons the weights. If "verified" is a
 rubber-stamp (#8's failure), the router learns to reinforce the wrong shape
@@ -1324,6 +1334,8 @@ doesn't double the latency of every fan-out like #4 does. The cost: the
 noise-vs-Byzantine classification can itself be wrong, and mis-scattering a
 Byzantine disagreement as noise re-admits the shared error at majority speed.
 
+**Known Uses.** Byzantine fault tolerance: PBFT and other consensus protocols assume up to f replicas may lie, and replicate to survive them — the distributed-systems ancestor of 'adjudicate when disagreement looks systematic and adversarial.'
+
 **Failure mode.** The two-camp signature is missed or delayed — disagreement
 detected *after* the majority already shipped a correlated-wrong answer. The
 classifier has to fire before the vote commits, not after. And classification
@@ -1402,6 +1414,8 @@ live per-node latency stats, and speculating on an already-correct worker
 wastes one node (cancel the backup the moment the original finishes, plus a
 process-group kill).
 
+**Known Uses.** Speculative execution: MapReduce and Spark duplicate only the overdue task on another node and take first-to-finish (Google's straggler mitigation) — Straggler Backup is that exact policy on the fan-out join.
+
 **Failure mode.** The expected-time budget is mis-set — too tight and every
 fast worker gets needlessly duplicated; too loose and the straggler still sets
 the pace. The budget has to come from a live latency percentile, not a
@@ -1471,6 +1485,8 @@ back as a side effect of every adjudicated request, so the cache fills itself.
 only helps *repeat* retrieval-shaped work, and the semantic-key hash can
 miscollide (serving a stale answer as if current) — the invalidation
 fingerprint is the whole integrity story.
+
+**Known Uses.** Cache-with-invalidation and memoization: a verified answer is served from a store until its freshness or confidence decays — CDNs, TTL caches, and LRU-with-recompute are Materialized Answer under different names.
 
 **Failure mode.** Two ways the cache lies. A fingerprint that doesn't change
 when content does — the cache serves a confidently-stale answer because the git
@@ -1585,6 +1601,8 @@ calibrated (agreement with the incumbent is a consistency signal, not truth).
 It only helps when you actually *admit* new members for cheap tokens; for the
 "always use the same trusted model" case it's pure overhead.
 
+**Known Uses.** Canary deployments / gradual rollouts: SRE shadows a fraction of live traffic onto a new binary and only promotes on health metrics — Canary Trust-Equity is canary for a model, earned on real trust rather than a staging pass.
+
 **Failure mode.** The shadow canary and the incumbent share the *same* prior
 and the verifier rubber-stamps both — day-zero agreement that's confidence-in-
 the-prior, not earned trust. The equity bar must be set against an independent
@@ -1666,6 +1684,8 @@ and CVaR just wastes tokens on a quantile that isn't riskier). It needs enough
 history per class that the tail estimate is a measurement, not a guess — on
 cold start it must degrade to the plain mean (#19 meets #12's `weighting:
 unmeasured|measured` rule).
+
+**Known Uses.** Tail-risk sizing: risk-averse RL and CVaR optimization allocate by the worst-case tail of the return distribution, and portfolio management sizes bets by tail loss — CVaR Budgeting applies the same rule to token spend.
 
 **Failure mode.** A class with a *thin* bad tail — one catastrophic example in
 a thousand — gets the tail premium on nothing, while the mean under-budgets
