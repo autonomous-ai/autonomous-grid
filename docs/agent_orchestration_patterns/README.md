@@ -777,7 +777,7 @@ code-fix that lands mid-shadow evicts the shadow to its `round_id` snapshot
 (fsync'd to the off-box store) before taking the seat. The shadow resumes from
 that snapshot on the next idle, so admission progress survives preemption
 instead of restarting. The probe battery for a new model is capped at whatever
-VRAM the live seat leaves, so a resident `qwen38-35b` can keep serving
+VRAM the live seat leaves, so a resident `qwen38-35b-a3b-mtp` can keep serving
 while a smaller probe runs in the remainder — and when it can't, the battery
 waits, it never evicts the live roster.
 
@@ -1099,9 +1099,9 @@ in its own git worktree so they never step on each other's working tree:
 
 | Step | Harness | Model | What it does |
 |------|---------|-------|--------------|
-| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen38-27b` | Reproduces the 96 s hang with a minimal harness script — can't write anything but its own worktree |
+| repro | **Codex** `exec --json`, sandboxed/read-only | `qwen38-27b-mtp` | Reproduces the 96 s hang with a minimal harness script — can't write anything but its own worktree |
 | fix A | **Hermes ACP** (ACP/JSON-RPC), read-only by default | `deepseek-v4-flash` | Drafts the dispatcher patch against the repro |
-| fix B | **OpenCode** | `qwen38-35b` | A second, independent draft from a fully different harness+model tail — real divergence, not twin priors |
+| fix B | **OpenCode** | `qwen3-coder` | A second, independent draft from a fully different harness+model tail — real divergence, not twin priors |
 | reviewer | cross-vendor pass — never itself | — | Routes *each* diff to a reviewer from a **different** harness than the one that wrote it: fix A (Hermes) is reviewed on the **OpenCode** lane; fix B (OpenCode) on the **Hermes** lane. That is Omnigent's Polly rule and exactly #6's "weak arm diverges on purpose" |
 
 Every worker is read-only. The `reviewer` is purple — it proposes; it never
@@ -1109,7 +1109,7 @@ writes.
 
 **The write (#1 act-gate).** Only after the reviewers converge does the router
 select **one** actor — **Claude Code** (stream-json, tools *enabled*) running
-`qwen38-35b` — and that single seat performs the one world-touching step. It
+`qwen38-35b-a3b-mtp` — and that single seat performs the one world-touching step. It
 is idempotent and `round_id`-keyed, so a retry of the same request applies the
 same patch once, never twice. N−1 agents read; exactly one acts. That is the
 whole gate. **Converge** has a rule: accept when *both* diffs pass the Codex
@@ -1119,7 +1119,7 @@ either escalates to #6's off-box authority (a human or a fresh independent
 lane), or the patch is dropped and the failed round is logged with its repro.
 
 **The certify (#6 verifier).** The patch is not trusted because an agent said
-so. It is certified by a **Codex `exec --json`** tool call (`qwen38-27b · test`
+so. It is certified by a **Codex `exec --json`** tool call (`qwen38-27b-mtp · test`
 — the runner is deterministic, its act is a fact) that runs the actual test
 suite and validates against the schema — a deterministic external fact that
 shares none of the writer's model prior. The `shipped fix` exit is only reached
