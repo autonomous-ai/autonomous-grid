@@ -77,7 +77,11 @@ home bases:
   sessions, and swaps providers freely — Hermes Agent (Nous Research) is the
   home base. It is model-agnostic (OpenRouter, NVIDIA NIM, Hugging Face, and
   the OpenAI/Anthropic endpoints are interchangeable backends), and it is
-  strongest where failures are *context* failures, not reasoning failures. Its
+  strongest where failures are *context* failures, not reasoning failures. (It is
+  also channel-native — Telegram, Discord, Slack, WhatsApp, Signal, CLI, from one
+  gateway process, on local/Docker/SSH or a serverless VM — so the layer pick is
+  about which value is *distinctive*, not which is exclusive: OpenClaw wins when the
+  task lives in the channel, Hermes when the value has to *remember*.) Its
   weakness is that self-improvement needs review: you must be able to state
   what it learned and why before it keeps the memory.
 - **Desktop layer — Claude Cowork.** If the worker is a non-technical
