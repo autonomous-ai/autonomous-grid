@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 
 from shared import logging_setup, paths
+from shared.models import gguf
 
 
 MIN_LLAMA_SERVER_BUILD = 9240
@@ -182,7 +183,10 @@ def start_llm(
             "--no-context-shift",
         ]
     )
-    if Path(model_file).name.lower().startswith("qwen3.6"):
+    # Filename alone can't tell: unsloth ships a `Qwen3.6-35B-A3B-Q8_0.gguf` in both an
+    # MTP repo and a plain one, byte-identical name, only one with the fused draft head.
+    # Read the file's own header instead of trusting the name.
+    if gguf.has_mtp_head(model_path):
         cmd.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", str(profile.spec_draft_n_max)])
 
     proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh)
