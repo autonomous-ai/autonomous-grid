@@ -68,3 +68,31 @@ remaining candidate work is cross-catalog symmetry and a final holistic read of
 both front matters (the model layer already has the figure legend, decision
 order, and catalog map; the agent layer should re-check the same aids), plus
 re-running the diagram beauty pass on both catalogs.
+
+---
+
+## Round 15 — cross-catalog verification + figure-count correction
+
+**Critique (architecture lens).** The agent layer's "How to read the figures"
+claimed the visual language appeared in "all eight figures," but the catalog
+shapes only **seven** pattern figures (the `index.svg` map and the `e2e.svg`
+whole-system figure are auxiliary, exactly as the model layer counts its 27
+pattern figures against its 28 SVGs). A mis-stated figure count is the kind of
+small factual drift the panel exists to catch.
+
+**Changes applied.** Corrected the legend to "all seven figures." Re-ran both
+diagram generators: model 27/27 `verok`, agent 7/7 `verify ok`, regenerated
+SVGs byte-identical (no drift, `git status` clean). Ran a single cross-catalog
+verification: section order uniform on the 12-element skeleton; `ast.parse`
+clean on all python fences (27 model + 7 agent); backticks balanced; all 28
+model + 9 agent image refs resolve; blank-line hygiene clean.
+
+**Verification.** Pure corrections — no prose or figure re-edited. The false
+"order failures" some scripts report for the model layer are the 12 patterns
+that intentionally lack `Refinements` (guidance is already cohesive narrative),
+which is the announced "where guidance separates" rule and not a defect.
+
+**Round 15 finding.** Both catalogs are internally consistent and verified;
+the plateau is stable. Remaining high-leverage (non-churn) candidates are a
+final human read of the assembled front matters end to end and, if more beauty
+is wanted, an optional palette/typography revision with fresh PNG renders.
