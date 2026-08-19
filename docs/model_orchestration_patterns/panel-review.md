@@ -524,3 +524,27 @@ same label-to-label and label-vs-node collision class the agent layer recently
 fixed — and a read of the two sample-code blocks against `STYLE.md`.
 
 **Commit:** (R34 — this commit).
+
+## Round 36 — style pass: normalize "-ly adverb" hyphenation (both layers)
+
+**Critique.** Word-by-word review turned up inconsistent hyphenation of
+compound modifiers built from an adverb ending in `-ly`. Per standard English
+style (Chicago/AP), an adverb ending in `-ly` is never hyphenated onto the
+word it modifies, so these were genuine errors, not voice choices.
+
+**Changes applied (model layer, 14 sites):** `confidently wrong mean` /
+`median`, `negatively correlated pairs` (×2), `differently initialized
+models`, `mutually exclusive camps` (×2) / `readings`, `speculatively
+cancelled waste`, `confidently stale answer` (×2), `newly admitted model`,
+`newly good arm`, `genuinely evaluative ones`. Coined terms of art were left
+intact: `exactly-once`, `atomically-or-nothing`, `early-exit`, `reply-count`,
+`Early-return`.
+
+**Changes applied (agent layer, 1 site):** `externally observable action`.
+Left the compound noun `nightly-batch deadline` intact.
+
+**Verification.** Markdown balanced (backtick + bold even) both layers;
+structure intact (27 + 7 patterns, 27 + 7 Intent). Diff was pure
+hyphenation normalization, meaning preserved.
+
+**Commit/push.** (R36 — this commit).

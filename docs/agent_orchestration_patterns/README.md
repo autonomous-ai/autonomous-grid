@@ -715,7 +715,7 @@ pairs Hermes with a local pin, where test-pass is the gate and tool-scope is
 the fan pairs OpenClaw with an open-weight coder, act step gated behind the
 router's quorum, never the worker's; and the escalation seat — reached only
 when local judgment runs dry — pairs Grid Enterprise with a cross-vendor
-model, full act-gate, the only one that opens an externally-observable action.
+model, full act-gate, the only one that opens an externally observable action.
 
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter, per "A word on the examples".)*
 ```python

@@ -696,7 +696,7 @@ answers. The costs: it only applies where averaging is a sensible reduction
 the shared-bias problem — if every sample is biased the same way, the mean
 is confidently wrong with small variance (the classic underestimation trap).
 
-**Known Uses.** Averaging across ensemble members: ensemble distillation and weight/response averaging across checkpoints (and across differently-initialized models) is Ensemble at the top of the stack.
+**Known Uses.** Averaging across ensemble members: ensemble distillation and weight/response averaging across checkpoints (and across differently initialized models) is Ensemble at the top of the stack.
 
 **Failure mode.** Averaging bakes in the bias. Low variance is *not* the same
 as accuracy — an ensemble of correlated erring answers has beautiful dials
@@ -1076,7 +1076,7 @@ measured error-correlation so the mean actually reduces variance.
 **Also Known As.** correlation-weighted averaging; portfolio selection
 
 **Motivation.** #7's documented failure is averaging correlated erring samples
-into a confidently-wrong mean — "beautiful dials, wrong needle." Averaging
+into a confidently wrong mean — "beautiful dials, wrong needle." Averaging
 only helps if the errors are independent *and* unbiased, and neither holds for
 models that share training. Markowitz adds the ingredient #7 provably needs:
 correlation structure as the selection lever.
@@ -1092,7 +1092,7 @@ purple `weighted mean` (label: *correlation-weighted*) → terminal.
 **Mechanics.** Maintain a crude cross-model error-correlation estimate from
 past disagreement rates on shared request classes. Choose both the member set
 and the *weights* that minimize the estimated variance of the mean — favor
-negatively-correlated pairs, downweight models that track each other's
+negatively correlated pairs, downweight models that track each other's
 errors. The pooling rule stays "mean"; only the composition becomes
 optimized. The decision node is purple but its act is arithmetic over a
 measured covariance matrix. Critically, the covariance must be computed over
@@ -1124,7 +1124,7 @@ buildability truths: the min-observation gate has to be a *number* (say
 it sits the label-source question — a consumer box has no oracle, so the
 "labeled outcomes" covariance depends on a human spot-review of a sample;
 until that feed exists the weights never leave `unmeasured`, which is honest.
-And if no negatively-correlated pair exists (the realistic case for two
+And if no negatively correlated pair exists (the realistic case for two
 same-family local builds), the weight lever has no purchase and the pattern
 *is* #7's average — say so, don't quietly degrade. One more premise correction
 for a single box: the whole point is a cross-vendor pair (*same-family builds
@@ -1394,7 +1394,7 @@ purple `classify` (label: *noise vs byzantine split*) → terminal.
 
 **Mechanics.** Look at the fan-out's divergence: if answers scatter randomly,
 majority-vote with a small N (crash logic — a little extra helps); if they
-cluster into two confident, mutually-exclusive camps with no middle, escalate —
+cluster into two confident, mutually exclusive camps with no middle, escalate —
 raise the replica requirement and pull in a *structurally divergent* judge
 (#4, with #11's forced divergence), the f+1-copies-plus-trusted-arbiter rule.
 The divergence *shape* is the decision, and it's deterministic to compute —
@@ -1507,7 +1507,7 @@ hand-tuned constant.
 1. **Report the waste.** First-to-finish means the backup can return a
    *different answer* than the canceled original, and both are billable — so
    report `usage.runs_useful` vs `usage.runs_cancelled`, or the token count
-   silently hides speculatively-cancelled waste behind the "free tokens"
+   silently hides speculatively cancelled waste behind the "free tokens"
    framing.
 2. **Gate on a real second node.** "Different node" presupposes a free node —
    gate the pattern on the live node inventory, and do not advertise it on a
@@ -1553,7 +1553,7 @@ Grid's cheapest possible answer, faster than even #1.
 **Applicability.** The same expensive verified answer keeps recurring
 across requests — a summarize-the-repo, a what-changed, an
 explain-this-function. Avoid it when you can't fingerprint the content's
-actual change: a stale fingerprint serves a confidently-stale answer, and a
+actual change: a stale fingerprint serves a confidently stale answer, and a
 rubber-stamped write-back serializes that error to every future requester.
 
 **Structure.** Terminal → purple `hash` (label: *semantic key*) → green
@@ -1576,7 +1576,7 @@ fingerprint is the whole integrity story.
 **Known Uses.** Cache-with-invalidation and memoization: a verified answer is served from a store until its freshness or confidence decays — CDNs, TTL caches, and LRU-with-recompute are Materialized Answer under different names.
 
 **Failure mode.** Two ways the cache lies. A fingerprint that doesn't change
-when content does — the cache serves a confidently-stale answer because the git
+when content does — the cache serves a confidently stale answer because the git
 hash or mtime never budged (invalidation is a measured property of the data, not
 a fall-through). And a write-back that serializes a verification error
 globally: one rubber-stamped "verified" entry (#8's failure) serves that wrong
@@ -1963,7 +1963,7 @@ believe, and who disagrees and why." Because the median by construction cannot
 win a held-firm but correct outlier (the one-man right answer still loses to
 the median), when the spread has closed but a surviving outlier's defense is
 strong, the tight median must be able to **escalate** — to an arbiter, a
-tool check, or a human — rather than ship a confidently-wrong median with an
+tool check, or a human — rather than ship a confidently wrong median with an
 apology attached.
 
 **Consequences.** Costs multiple rounds of latency — it is the slowest pattern in
@@ -2398,7 +2398,7 @@ tallies correlated echoes). A cyclic preference set is real — the fallback is
 where this pattern can quietly degrade into plurality by another name
 (report `usage.pooling: pairwise|borda|copeland` so the caller sees when the
 Condorcet promise wasn't met). For its narrow trigger — a genuinely ambiguous
-request that splits **three or more mutually-exclusive camps** on a box that
+request that splits **three or more mutually exclusive camps** on a box that
 holds enough independent models — pair it with #8's or #23's gate: the
 tournament must not crown the most fluent camp over the most correct one.
 Hold it as a **non-default leaf behind #5**, selected only for that trigger,
@@ -2433,7 +2433,7 @@ def condorcet_pool(request, voters, candidates):
     return top[0][0], usage(pooling="borda")              # report which rule shipped, never hide the fallback
 ```
 
-**On the Grid stack.** Three models land three mutually-exclusive readings of
+**On the Grid stack.** Three models land three mutually exclusive readings of
 a genuinely ambiguous request — `qwen38-27b-mtp` takes the literal parse, the
 bigger `qwen38-35b-a3b-mtp` the contextual one, `glm-5.2` a third — 4/3/3,
 where the plurality lead is not the group's preferred answer. Instead of
@@ -2559,7 +2559,7 @@ def slack_scheduler(real_jobs, idlers, vram):
 
 **On the Grid stack.** A box holds `qwen38-27b-mtp` (24GB NVIDIA) and its Apple
 occupant; the GPU's single seat belongs to live traffic. #24's probe bank wants
-to learn whether a newly-admitted model is reliable — it can only run in the
+to learn whether a newly admitted model is reliable — it can only run in the
 slack: the router polls the live-node inventory, finds no deadline-bearing
 request scheduled for ~40 seconds, starts a probe on the seat, and the moment a
 real request lands, cancels it mid-generation and checkpoints the partial run.
@@ -2651,7 +2651,7 @@ same box has too little traffic for most arms to ever steepen a posterior —
 scope the arms/classes, and **persist lazily**: only arms actually touched get
 durable keys, or the replay substrate becomes heavier than the routing it
 serves. On non-stationary classes (the request mix drifts, the best arm moves),
-a plain Beta keeps an old winner's mass and strangles the newly-good arm — use
+a plain Beta keeps an old winner's mass and strangles the newly good arm — use
 the sliding-window / non-stationary variant so a stale winner's weight rots to
 zero and the fresh arm gets pulled despite little history. The posterior is
 only as good as its labels: a corrupt verifier (#8's rubber-stamp) poisons the
@@ -2744,7 +2744,7 @@ patterns spend real redundancy on green workers and trust single purple nodes
 (the ranker, the vote, the planner, the judge, `best`, the check) on faith.
 Make decision nodes deterministic where possible — a majority vote is
 arithmetic, a mean is arithmetic, best-of-N is a comparison — and calibrate
-the genuinely-evaluative ones (judge, verifier, strategy) against outcome
+the genuinely evaluative ones (judge, verifier, strategy) against outcome
 ledgers: did this node's call turn out right? Measure it or don't trust it.
 And do not mistake a *metric* for arithmetic: #15's divergence-shape test and
 #11's embedding diversity are still estimators, and belong in the

@@ -677,3 +677,13 @@ unpublished in the front-matter provenance — still the largest outstanding
 piece; a full write is the next substantive candidate.
 
 **Commit/push.** (R35 — this commit).
+
+## Round 36 — style pass: "-ly adverb" hyphenation (cross-layer)
+
+Same word-by-word normalization as the model layer: adverb+modifier
+compounds formed from an `-ly` adverb are unhyphenated. Agent layer fixed one
+site — `externally observable action`; `nightly-batch deadline` kept as a
+compound noun. See the model-layer log for the shared rationale and the 14
+model-layer sites. Verified markdown balanced and structure intact.
+
+**Commit/push.** (R36 — this commit).
