@@ -375,7 +375,7 @@ What the passthrough contract means for the app, in plain language:
 - **Requests leave the grid for the vendor** (OpenAI), forwarded by the member whose seat serves
   them — and **spend that member's own monthly Codex allowance**.
 - **The vendor is forced stateless**: the relay refuses `store: true`, `previous_response_id`, and
-  `conversation` up front (in the vendor's own error shape), so every turn resends the full
+  `conversation` up front (in the vendor's own error shape), so every task resends the full
   history — exactly how the Codex CLI already behaves. A long session therefore grows toward the
   relay's request body-size cap, which is the practical session bound.
 - **The relay still retains stream chunks for its task TTL** — like every other grid endpoint —
@@ -952,23 +952,23 @@ another's, and a 403 would confirm the project exists.
 
 ### Each conversation has a branch, and the trunk is where work lands
 
-A turn is cut from — and settles back onto — **`wip/<conversation-id>`**, the branch of the
+A task is cut from — and settles back onto — **`wip/<conversation-id>`**, the branch of the
 conversation it belongs to. A member does not have a branch; each of their conversations has one.
 That is what lets several conversations of one person run at the same time without their results
 racing for a single ref, and it is why `grid project commit` and `grid project wip reset` are
 addressed by a conversation rather than by a member.
 
-**A turn settles onto that branch whether it succeeded or failed**, which is the part worth knowing.
-A failed turn is not thrown away: the next message you send in that conversation starts from where
+**A task settles onto that branch whether it succeeded or failed**, which is the part worth knowing.
+A failed task is not thrown away: the next message you send in that conversation starts from where
 the last one broke, which is the state the conversation's own transcript remembers. The trunk is the
-ref that is success-only — a turn reaches it by succeeding, and by nothing else.
+ref that is success-only — a task reaches it by succeeding, and by nothing else.
 
 A project's `main` therefore has to **exist before its first task**: a project created with no
 commits refuses task creation with a message saying so. Three things give it one — `grid project
 create --empty`, which does it in the same request; `grid project init`, for a project that already
 exists; and `grid project import`, for a repository that already exists. **The relay is `main`'s
 only writer** — a `git push` of `main` is refused whatever state the project is in — so those three
-create it, the relay's own apply of each finished turn moves it afterwards, and nothing else touches
+create it, the relay's own apply of each finished task moves it afterwards, and nothing else touches
 it.
 
 ### Cloning a project onto your own machine
@@ -985,14 +985,14 @@ written into `.git/config` once would expire in place. The helper reads only you
 store: `git pull` keeps working when the control plane is unreachable.
 
 You are put on **the project's trunk**, which is everybody's work: the grid applies every successful
-turn to it, so a clone that follows it holds what the whole team has done, including your own. It
+task to it, so a clone that follows it holds what the whole team has done, including your own. It
 used to check out `wip/<your key>` instead, because under the old release model work stopped on each
 member's branch until somebody promoted it and the trunk could hold none of yours. The trunk is now
 the answer to "give me the project", which is what this command is for.
 
 **`git push` is refused**, and that is the design rather than a permission to ask for. The project is
 written by the grid alone, which is what stops work running right now having the ground moved under
-it: a push holds nothing, so it could fast-forward a branch while a turn cut from it is still going.
+it: a push holds nothing, so it could fast-forward a branch while a task cut from it is still going.
 To land work from a clone: `grid project commit <conversation-id>` for files, or `grid task create`
 for an agent.
 
@@ -1031,7 +1031,7 @@ the branch tracks nothing; HEAD is detached.
 
 "The grid does not have this branch" has two opposite histories, and the command does not guess
 between them: a conversation's branch is not there until work lands on it, and a `task/<id>` branch
-is collected again once its turn is over. From inside a clone the two look identical.
+is collected again once its task is over. From inside a clone the two look identical.
 
 Diverging deserves a note, because it is the only one where the obvious next step is wrong. `git
 pull` there "works" by making a merge commit you can never push — members do not push — so refresh
@@ -1084,7 +1084,7 @@ Nothing undoes it — not `grid project delete`, which refuses a project that ha
 
 `grid project init <project-id>` is the same operation for a project that is already there, and it
 is what to run if `--empty` was not passed and no import is coming. Both make **one empty root
-commit** and hold **no files**: work reaches `main` by being applied there — a turn, or `grid project
+commit** and hold **no files**: work reaches `main` by being applied there — a task, or `grid project
 commit` — and never by a bootstrap, so a request carrying files is refused rather than quietly
 ignored.
 
@@ -1133,7 +1133,7 @@ depends on a repository's conventions has to say so.
 
 ### Your work appears by itself
 
-There is nothing to run after a turn finishes. **The grid applies every successful turn to the
+There is nothing to run after a task finishes. **The grid applies every successful task to the
 project itself** — fast-forward when it can, a merge commit when git can combine the two, and (from
 issue 42) a merge step in the conversation that caused the collision when it cannot.
 
@@ -1147,10 +1147,10 @@ Two consequences worth knowing:
 
 - **The trunk has no known-good property left.** Nothing asserts it builds or runs — and nothing did
   before either, except a person's judgement at promote time.
-- **A conversation of five turns puts four intermediate states into the project.** Colleagues used to
-  see each other's work when somebody thought it was ready; they now see it at every turn.
+- **A conversation of five tasks puts four intermediate states into the project.** Colleagues used to
+  see each other's work when somebody thought it was ready; they now see it at every task.
 
-The apply runs **outside** the request that reports a turn finished, so "done" and "in the project"
+The apply runs **outside** the request that reports a task finished, so "done" and "in the project"
 are a moment apart rather than the same instant. That is deliberate: the provider stops renewing its
 lease before it reports, so anything the relay did inside that request would be spending a budget
 nobody is watching.
@@ -1163,7 +1163,7 @@ has to be readable by a program: a document on stdout, a code it can branch on, 
 Mobile is out of scope by construction; iOS and Android sandboxes forbid executing a separate binary.
 
 `tests/e2e_cross_repo/app_flow.sh` is the worked example, run as a test on every change: it opens a
-conversation, sends two more messages into it, follows the whole conversation across the turn
+conversation, sends two more messages into it, follows the whole conversation across the task
 boundary, reads the outcome and branches on it — using only `--json` and exit codes.
 
 **Every command an application drives takes `--json`**, and each prints exactly one document on
@@ -1181,7 +1181,7 @@ they are the only place git vocabulary appears at all. A test sweeps every other
 and help text for it (`tests/test_application_surface.py`).
 
 **Exit codes.** `0` completed · `1` ended badly, and any refusal · `2` not finished yet.
-`2` is the only code a poller may read as "ask again": `1` covers both a failed turn and a relay that
+`2` is the only code a poller may read as "ask again": `1` covers both a failed task and a relay that
 could not be reached, and `0` would say "fine" about an outcome nobody has reached.
 
 ```sh
@@ -1225,7 +1225,7 @@ grid task list --project abc123 --all   # every member's, in one project
 grid project files    <project-id> [<path>]
 grid project file     <project-id> <path> [--output <file>]
 grid project download <project-id> [--output <file>]
-grid task    diff     <turn-id>
+grid task    diff     <task-id>
 ```
 
 These need **no git on your machine** and no clone. They read the project as it stands now — the
@@ -1313,13 +1313,13 @@ knows the work is a better place to settle it than an automatic reversal.
 grid project status <project-id>
 ```
 
-`grid project status` shows where the project's trunk is, which of your turns are in flight and since
+`grid project status` shows where the project's trunk is, which of your tasks are in flight and since
 when, and how deep the project's queue is. Before it, "what is holding my slot" meant attempting a
 create and reading the refusal — a write, used as a question.
 
-It also says **how many of your turns are running, and how many may** — the grid caps how much of the
+It also says **how many of your tasks are running, and how many may** — the grid caps how much of the
 fleet one person can hold at once, so your colleague's single message is never stuck behind twenty of
-yours. Nothing is ever refused because of it: a turn over the cap simply waits for one of your own to
+yours. Nothing is ever refused because of it: a task over the cap simply waits for one of your own to
 finish, and starts by itself. At the cap the status says so in as many words, because that is the one
 state where the queue and provider numbers below it are **not** the explanation — the fleet may be
 completely idle, and adding a provider to it would change nothing.
@@ -1331,13 +1331,13 @@ from a withdrawn one, and those need three different actions — wait, run `grid
 named time. Nothing is printed when the whole fleet is serving.
 
 `grid project status` is also how an application notices the project changed without running
-`git fetch`, and it got simpler when the grid started applying turns itself: **the trunk's commit
+`git fetch`, and it got simpler when the grid started applying tasks itself: **the trunk's commit
 moves whenever anybody's work lands**, so one id is the whole signal. It used to take one id per
 member, because work stopped on each member's own branch until somebody promoted.
 
-One case is not a moved commit, and it is the one that runs longest: a turn whose result collides
+One case is not a moved commit, and it is the one that runs longest: a task whose result collides
 with somebody else's moves no ref, because a person has to be asked (issue 42). That shows up as a
-held turn — `active_turns`, and the member's `active_task_ids`, both **lists** since ADR 0034 D-b —
+held task — `active_turns`, and the member's `active_task_ids`, both **lists** since ADR 0034 D-b —
 so an application watching only the commit id would see nothing for the whole time somebody is
 waiting on it.
 
@@ -1356,16 +1356,16 @@ grid project commit <conversation-id> -m "drop the dead module" --delete src/leg
 **It commits into a conversation**, not into a project — so it takes a conversation id and no
 project id at all, and the branch it writes is that conversation's. That is what makes it the fix for
 the answer you just read: the next message you send there starts from what you committed. The id is
-printed by `grid task create` and `grid task send`, and `grid task get <turn-id> --json` reports the
-conversation a turn belongs to.
+printed by `grid task create` and `grid task send`, and `grid task get <task-id> --json` reports the
+conversation a task belongs to.
 
-**Its change reaches the project by itself**, exactly as a finished turn's does — the grid applies
+**Its change reaches the project by itself**, exactly as a finished task's does — the grid applies
 it, and there is nothing to run afterwards. Under the old release model this command ended by telling
 you to promote.
 
 **It is not a way to push.** The write still goes through the grid, still lands on exactly one ref,
 and the grid still serializes it against work that is running. So it is refused while that
-conversation has a turn in flight, and the refusal names the turn. Your other conversations are
+conversation has a task in flight, and the refusal names the task. Your other conversations are
 unaffected — the lock is the conversation's, not yours.
 
 **Executable bits look after themselves.** Editing a file the project already holds as executable
@@ -1390,21 +1390,21 @@ grid project wip reset <project-id> <conversation-id> --commit <oid>
 ```
 
 `wip reset` moves a **conversation's** branch back to a commit you name — the way out of the one
-state nothing else can undo. If a turn's result is written into git but its completion is then
-interrupted, that conversation's branch is left ahead of the turn branch, every retry is refused as a
-non-fast-forward, and the conversation's *next* turn would be cut from the lost attempt's work.
-`grid task get <id> --json` reports the `base_commit` a turn was cut from, which is usually the commit
+state nothing else can undo. If a task's result is written into git but its completion is then
+interrupted, that conversation's branch is left ahead of the task branch, every retry is refused as a
+non-fast-forward, and the conversation's *next* task would be cut from the lost attempt's work.
+`grid task get <id> --json` reports the `base_commit` a task was cut from, which is usually the commit
 to reset to.
 
 **It survives the release commands that were deleted, and that is deliberate.** The grid applying
-turns for you does not put this state out of reach: the apply moves the trunk, never a conversation's
+tasks for you does not put this state out of reach: the apply moves the trunk, never a conversation's
 branch, so a settle interrupted halfway still leaves one ahead. It remains the documented recovery
 because nothing else moves a branch backwards — members do not push, the apply writes only the trunk,
 and there is no revert.
 
 Any member may reset any conversation's branch — someone who leaves the team otherwise strands
 everything their conversations were holding, since nothing can adopt or transfer one. It is refused
-while **that conversation** has a turn running, because moving the base out from under an attempt in
+while **that conversation** has a task running, because moving the base out from under an attempt in
 flight would fail its result for a reason nobody caused. That is narrower than the rule it replaces,
 which refused while the *member* had anything running at all.
 
@@ -1426,7 +1426,7 @@ has already started, use `grid task cancel`.
 `grid project delete <id>` removes the project, its members and its repository, and **cannot be
 undone**. It is refused unless the project has never had a trunk and has never had a task — in that
 state there is provably nothing in it to lose, because a conversation's branch is only ever created
-by pointing at `main` and a turn branch only exists for a turn. Anything else is refused, naming `archive`. It asks
+by pointing at `main` and a task branch only exists for a task. Anything else is refused, naming `archive`. It asks
 before it acts; `--yes` skips the prompt, and is required from a script because a non-terminal stdin
 counts as declining.
 
@@ -1454,7 +1454,7 @@ Both are the project **owner's**, like archive and delete.
 Someone outside a private project is refused with exactly the answer they would get for a project id
 that does not exist — the same words, the same code. That is deliberate: the id is the only thing
 standing between one team's source and another's, so a refusal that told them the project was real
-would turn every project route into a way to test ids.
+would task every project route into a way to test ids.
 
 Writes are included, not just reads: someone reaching a project this way can create tasks, commit
 files and reset a conversation's branch in it, exactly as a member added by hand can. That is what
@@ -1493,16 +1493,16 @@ close your laptop in between.
 
 `create` starts a **conversation** and sends its first message; `send` sends the next one into a
 conversation that already exists, so the agent still knows what you were talking about. The
-conversation id is printed by `create` and appears on every turn `get` and `list` report — it is a
-different id from the turn's, which is what `get`, `follow`, `fetch` and `cancel` address.
+conversation id is printed by `create` and appears on every task `get` and `list` report — it is a
+different id from the task's, which is what `get`, `follow`, `fetch` and `cancel` address.
 
 Messages inside one conversation run **in the order you sent them, one at a time**, so you can type
 ahead without waiting; conversations of yours run alongside each other. Only the person who started
-a conversation can send into it — a colleague can read its turns, and works alongside you by
+a conversation can send into it — a colleague can read its tasks, and works alongside you by
 starting their own with `create`.
 
 > ⚠️ A message sent **while an earlier one is still running** is accepted and queued, but it starts
-> from the project as it stood before that earlier turn, so the two do not yet combine and the
+> from the project as it stood before that earlier task, so the two do not yet combine and the
 > second may end `retries_exhausted`. Until that is fixed, reply after the previous answer comes
 > back.
 
@@ -1515,28 +1515,28 @@ per line for a script to consume.
 
 ### Watching a whole conversation
 
-`grid task follow <task-id>` watches **one turn** and ends when that turn does. `grid task follow
+`grid task follow <task-id>` watches **one task** and ends when that task does. `grid task follow
 --conversation <conversation-id>` watches the **whole conversation** instead — message, agent
 working, result, next message — as one continuous thing, with one sequence and one cursor.
 
-It is not the same as watching each turn in turn, and the difference is what it is for: it carries
-turns that did not exist when you attached. When your work collides with a colleague's, the grid
+It is not the same as watching each task in turn, and the difference is what it is for: it carries
+tasks that did not exist when you attached. When your work collides with a colleague's, the grid
 adds a step to your conversation to combine the two — nobody asks for it — and it simply appears in
-this stream. Watching turn by turn, you would be looking at a finished screen while that step ran.
+this stream. Watching task by task, you would be looking at a finished screen while that step ran.
 
-The stream **ends when the conversation goes quiet**: no turn running, and nothing left for the grid
+The stream **ends when the conversation goes quiet**: no task running, and nothing left for the grid
 to do by itself. Send the next message and follow again — your cursor still means what it meant, so
 nothing is replayed. It exits `0` when it was watched to that end and non-zero if the connection was
-lost or the grid refused; it does **not** report a turn's outcome, because a conversation does not
-have one. `grid task get` and `grid task follow <turn-id>` are what answer that.
+lost or the grid refused; it does **not** report a task's outcome, because a conversation does not
+have one. `grid task get` and `grid task follow <task-id>` are what answer that.
 
 `--after-seq` applies to whichever you are following, but the two numbers are **not the same
-number** — a turn's sequence starts again at `0` for every turn, and a conversation's runs across
+number** — a task's sequence starts again at `0` for every task, and a conversation's runs across
 all of them. Do not pass one to the other.
 
-With `--json`, each line is `{"seq": …, "task_id": …, "event": {…}}` — `task_id` says which turn the
+With `--json`, each line is `{"seq": …, "task_id": …, "event": {…}}` — `task_id` says which task the
 event came from, so an application can group them, and it is `null` on the final
-`{"type": "conversation.idle"}` line, which belongs to no turn. The per-turn stream's `--json` shape
+`{"type": "conversation.idle"}` line, which belongs to no task. The per-task stream's `--json` shape
 is unchanged.
 
 `list` shows tasks oldest first. Give it a project and it shows that project's; **give it none and
@@ -1624,7 +1624,7 @@ one command where leaving it out is not an error: the task then runs in your own
 own, and only an id ever reaches the relay. If you do not have one, nothing is created and the
 command says which project it needs; a project you never asked for, discoverable only through the
 error line that followed it, was worse than being asked. `list` may also leave it out and means
-something different by it: your own turns across every project you can reach, which is the
+something different by it: your own tasks across every project you can reach, which is the
 application's home screen — a **wider** answer, never a substituted one, so there is nothing to
 discover after the fact.
 
@@ -1632,32 +1632,32 @@ discover after the fact.
 `grid project init` followed by `grid task create`, for work that starts from nothing. It is
 **one-way**: a project that has a trunk can never import an existing repository, so reach for
 `grid project import` instead if you have one. Your uploaded files go on the new conversation's
-branch and reach the trunk when the turn succeeds, exactly as on any other task — the trunk it
+branch and reach the trunk when the task succeeds, exactly as on any other task — the trunk it
 creates is empty until then. Passing it at a project that already has a trunk is not an error; there
 is simply nothing to initialize and the task runs.
 
 A project with no trunk refuses tasks, and the refusal names both ways forward with your own prompt
 and `--file` arguments already in them, so the fix is one paste rather than a retype.
 
-**One turn of a conversation runs at a time**, and that is the only sequencing there is: turns of one
+**One task of a conversation runs at a time**, and that is the only sequencing there is: tasks of one
 conversation are strictly ordered, each starting from the last one's result, while your other
 conversations run alongside it and so does everybody else's work. **Creating work never fails for want
-of capacity**: a turn that cannot start yet waits in the project's queue rather than being refused,
+of capacity**: a task that cannot start yet waits in the project's queue rather than being refused,
 and `grid project status` is where you see how deep that queue is.
 
-`grid task cancel <task-id>` ends a turn that has not finished. Its **conversation survives**: the
+`grid task cancel <task-id>` ends a task that has not finished. Its **conversation survives**: the
 next message you send continues where it left off, because cancelling stops a run and a conversation
 has no state to end.
 Before it existed the only way out of a run nobody wanted any more was to wait for its deadline —
 an hour if it was running, and up to four if it was still waiting for a provider. **Any member may
-cancel any turn in the project**, which is the point on a shared one: the colleague whose run has
+cancel any task in the project**, which is the point on a shared one: the colleague whose run has
 been stuck all afternoon is often the person who needs to stop it, and the event log records who did.
 
-The conversation is free to take its next turn immediately; the agent itself stops within about half
+The conversation is free to take its next task immediately; the agent itself stops within about half
 a minute, on the provider's next lease renewal. Against a provider that has not been updated yet it simply runs to completion
 with nothing waiting on it — harmless, and the reason this needs no particular rollout order.
-**Nothing is rewound**: the turn's branch is left exactly where the agent got to, so
-`grid task fetch` still works on a cancelled turn.
+**Nothing is rewound**: the task's branch is left exactly where the agent got to, so
+`grid task fetch` still works on a cancelled task.
 
 ### Sending files with a task
 
@@ -1697,8 +1697,8 @@ An empty folder is refused by name, and so is one every file of which is ignored
 `.gitignore`, because reporting a visibly-full directory as empty reads as a bug.
 
 The files travel in the **same request** as the prompt, and that ordering is the guarantee, not a
-convenience: each project is a git repository the relay owns, and creating a turn cuts `task/<id>`
-from its conversation's branch, commits the input, and only *then* makes the turn claimable.
+convenience: each project is a git repository the relay owns, and creating a task cuts `task/<id>`
+from its conversation's branch, commits the input, and only *then* makes the task claimable.
 "The task exists" and "its input is in git" are one event, so a provider can never claim a task and
 check out before the files arrive — which would run the agent against missing input with nothing to
 say why the answer is wrong. `get --json` reports the `input_commit` the files landed on.
@@ -1735,8 +1735,8 @@ a marker the command writes itself, not the presence of a `.git`, because your o
 one of those too.
 
 **The result lands on the conversation's branch either way — success or failure — and reaches the
-project only on success.** The branch is the conversation's memory, so a failed turn stays on it and
-the next message continues from there rather than from before it; the trunk is what a turn has to
+project only on success.** The branch is the conversation's memory, so a failed task stays on it and
+the next message continues from there rather than from before it; the trunk is what a task has to
 succeed to reach, and the grid applies it there without being asked. A failed attempt still commits
 and still pushes its own `task/<id>` branch, so you can fetch it, read what the agent did before it
 broke, and cherry-pick what was right — `get --json` reports the `result_commit` for both outcomes.
@@ -1788,15 +1788,15 @@ produces a confidently wrong answer.
 
 **A workspace belongs to one *conversation*** — `<root>/projects/<project_id>/<member>/<conversation>/workspace`.
 Both levels below the project are the same argument made twice. A project can have several people in
-it, and bringing a workspace to a turn's input starts with `reset --hard` and `clean -ffdx`, so
-sharing one directory between two members would mean each one's turn wiped the other's. And one
+it, and bringing a workspace to a task's input starts with `reset --hard` and `clean -ffdx`, so
+sharing one directory between two members would mean each one's task wiped the other's. And one
 member can hold several conversations, which are several Claude Code sessions — and since a session's
 transcript directory is derived from the working directory, one directory can only ever be one
 session. Two conversations sharing a workspace would each resume the other's.
 
 The relay names both the member and the conversation on the claim. A provider that is not told
-either **refuses to run the turn**, terminally and with a message saying which key is missing,
-rather than building a shorter path — a guess would put the conversation somewhere the next turn
+either **refuses to run the task**, terminally and with a message saying which key is missing,
+rather than building a shorter path — a guess would put the conversation somewhere the next task
 never looks, and every other signal would read healthy while it happened.
 
 **A member's conversations share one copy of the project's history.** Each workspace is a git
@@ -1812,11 +1812,11 @@ workspace, and it is the one thing a task's agent can reach outside its own dire
 and it will also keep deleting while free space is below that line. When a member's last workspace
 goes, so does their copy of the history. Two things are worth knowing:
 
-- **A turn is never refused for disk.** A provider over its bound makes room and runs; it does not
-  decline work, because a declined turn is somebody's message left unanswered for a reason nothing
+- **A task is never refused for disk.** A provider over its bound makes room and runs; it does not
+  decline work, because a declined task is somebody's message left unanswered for a reason nothing
   can report to them.
 - **An evicted conversation loses nothing.** Its transcript is on the relay
-  (`refs/grid/agent/<conversation>`) and its files are in the project, so the next turn rebuilds the
+  (`refs/grid/agent/<conversation>`) and its files are in the project, so the next task rebuilds the
   workspace and carries on in the same session. What it costs is one fetch. A workspace a worker is
   actually using is never touched — it is skipped, never waited for.
 
@@ -1845,20 +1845,20 @@ If the renewals stop — the provider was killed, lost power, or its agent died 
 report — the lease lapses and the relay **reclaims** the task: it goes back to the queue, its branch
 is reset to exactly the input you uploaded, and the next provider to claim it starts from there. You
 see this in `grid task follow` as a retry line, and it is careful about what the reset does and does
-not cover: **the turn's own branch is reset; anything the lost attempt did outside git is not.** The
+not cover: **the task's own branch is reset; anything the lost attempt did outside git is not.** The
 one case it cannot undo is a settle interrupted between its git write and its terminal record —
 that work is already on the conversation's branch and stays there — so the line names the recovery
 too, `grid project wip reset <project-id> <conversation-id> --commit <base>`. The event log keeps one
-sequence across the whole turn, so a client attached across a retry loses nothing and never sees its
+sequence across the whole task, so a client attached across a retry loses nothing and never sees its
 cursor come to mean something else.
 
-Retries are capped (3 attempts by default). A turn that exhausts them fails with
-`retries_exhausted`, and its conversation is free to take the next one. A retried turn goes back
+Retries are capped (3 attempts by default). A task that exhausts them fails with
+`retries_exhausted`, and its conversation is free to take the next one. A retried task goes back
 onto the *queue* clock, so time spent waiting for a second provider is not charged to the run budget
 the first one was using — and if nobody picks it up, it ends as `queue_expired` rather than being
 blamed for running too long.
 
-Separately, any turn that outlives whichever budget applies to it — including one sitting `queued` on
+Separately, any task that outlives whichever budget applies to it — including one sitting `queued` on
 a grid with no provider at all, which is given the longer of the two — is ended as `timed_out`, so a
 conversation can never be held indefinitely by work nothing is doing.
 
@@ -1870,7 +1870,7 @@ Once the workspace is ready the task spawns **Claude Code** in print mode agains
 `stream-json` output is republished as the task's events while it runs: `task.session` (the
 conversation id), `task.tool_use` (a tool name and the file it targets), `task.tool_result` (how
 that call ended), `task.output` (what the agent says), `task.stderr`, and `task.result` (the agent's
-own account of the run — turns and duration). `follow` prints a `task.tool_result` **only when the
+own account of the run — tasks and duration). `follow` prints a `task.tool_result` **only when the
 call failed**: one arrives for every tool call, and a task makes hundreds, so narrating the
 successful ones would bury the output under an id nobody can act on. Two more bracket the start of a
 follow-up task:
@@ -1894,8 +1894,8 @@ keeps the workers it did start.
 > ⚠️ **Anything above 1 is unverified.** No value greater than 1 has been run against a real relay,
 > and the specific unknown is **two Claude Code children sharing one `CLAUDE_CONFIG_DIR`** — the
 > issue-01 spike listed it as an open question and never measured it. The parts that can be reasoned
-> about hold: a workspace belongs to a (project, member, conversation) triple, and only one turn of a
-> conversation ever runs at a time, so two concurrent turns are always in different directories. What
+> about hold: a workspace belongs to a (project, member, conversation) triple, and only one task of a
+> conversation ever runs at a time, so two concurrent tasks are always in different directories. What
 > has not been observed is the agent itself under concurrency. Raise this only on a provider you can watch, and
 > expect to be the first to find out.
 
@@ -1923,7 +1923,7 @@ Three properties of that are worth knowing:
 The third bound is **disk**, and it behaves differently from the other two on purpose: it never stops
 a provider claiming. `GRID_TASK_MAX_WORKSPACES` (8) is how many conversations keep a working
 directory on this machine, and `GRID_TASK_MIN_FREE_GB` (off) is a floor under free space. A provider
-over either one deletes the least recently used workspaces at the start of the next turn and then
+over either one deletes the least recently used workspaces at the start of the next task and then
 runs it. Nothing is lost by that — see [What a provider actually
 runs](#what-a-provider-actually-runs) — and a workspace in use is never touched. Sizing it is
 arithmetic an operator can do: on the repository these figures were measured against, each extra
@@ -1961,7 +1961,7 @@ The mechanism is the repository. Claude Code keeps a session's transcript — an
 `memory/` — in a folder named after its working directory, and it writes through a symlink, so the
 provider points that folder at `.grid/agent/<member>/` inside that conversation's workspace. The
 transcript is then published to **`refs/grid/agent/<conversation>`**, a ref of its own that the
-provider holding the conversation's lease pushes at the end of every turn, and fetches before the
+provider holding the conversation's lease pushes at the end of every task, and fetches before the
 next one starts. This is why every provider must agree on `GRID_TASK_ROOT` — the folder's name is
 derived from the *absolute* path, so a different root is a different conversation.
 
@@ -1971,8 +1971,8 @@ it, and no colleague receives it. Nothing about a conversation reaches the proje
 
 Two consequences worth knowing:
 
-- **A failed turn's conversation is published, but an automatic retry does not inherit it.** What
-  the agent did is kept, so the next thing you type continues from it. A retry of the same turn is
+- **A failed task's conversation is published, but an automatic retry does not inherit it.** What
+  the agent did is kept, so the next thing you type continues from it. A retry of the same task is
   different: it resets to the conversation as it stood *before* the attempt that failed, rather than
   re-reading whatever confused the agent into failing.
 - **If the transcript is missing or unreadable, the task starts a fresh session rather than
@@ -1982,13 +1982,13 @@ Two consequences worth knowing:
   survives everything: progress events stop if the provider loses the task's lease mid-run, so the
   reason is also carried on the final report and recorded by the relay.
   This covers a conversation that genuinely has no transcript yet. It does **not** cover a provider
-  that was told one exists and could not fetch it — that turn is left for another provider to retry
+  that was told one exists and could not fetch it — that task is left for another provider to retry
   rather than quietly starting over, because the two are indistinguishable from the workspace and
   only one of them is harmless.
 
 A conversation's transcript is kept while the conversation is in use and collected once it has been
 idle for `TASK_CONVERSATION_RETENTION_SECONDS` (30 days by default; `0` keeps them forever). It is
-measured from the conversation's most recent turn, never from any single turn ending — a
+measured from the conversation's most recent task, never from any single task ending — a
 conversation has no "finished" state.
 
 The conversation is written only by the provider: the relay refuses any uploaded file under
@@ -2092,7 +2092,7 @@ Nothing else is needed on Ubuntu 24.04. It restricts unprivileged user namespace
 (`kernel.apparmor_restrict_unprivileged_userns=1`), which stops the sandbox nesting the namespace it
 uses to run each command — the provider handles that in the policy it sends, and it was measured on
 a 24.04 host that a task can then read its workspace, install a dependency from PyPI, and still not
-read a file outside the workspace. **Do not** turn that sysctl off to "fix" a task that fails to run
+read a file outside the workspace. **Do not** task that sysctl off to "fix" a task that fails to run
 commands; check `bubblewrap` and `socat` first.
 
 The environment variables that tune a provider, all optional:
@@ -2102,8 +2102,8 @@ The environment variables that tune a provider, all optional:
 | `GRID_TASKS` | off | `1` to claim tasks at all |
 | `GRID_MAX_TASKS` | `1` | how many tasks this provider runs at once. **Anything above 1 is unverified** — two Claude Code children sharing one config directory has never been measured (see [How much a provider takes on](#how-much-a-provider-takes-on)). No upper limit is imposed: the ceiling that actually binds is the provider's own Claude subscription, which is read at runtime rather than guessed at. A value that is not a positive whole number falls back to `1` and says so |
 | `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree (`<root>/projects/<project_id>/<member>/<conversation>/workspace`). **Keep it short** — the whole path becomes one directory name and grid adds ~126 characters below the root. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
-| `GRID_TASK_MAX_WORKSPACES` | `8` | how many conversations keep a working directory on this provider. Past this, the least recently used are deleted at the start of the next turn — never by refusing work, and never one a worker is using. An evicted conversation rebuilds itself on its next turn at the cost of one fetch. A value that is not a positive whole number falls back to `8` and says so |
-| `GRID_TASK_MIN_FREE_GB` | off | a floor under free space on the filesystem holding `GRID_TASK_ROOT`. Set it and the provider keeps evicting workspaces while free space is below it. Off by default because it is a promise about a disk the provider does not own alone: a machine already below the line for reasons of its own would evict everything on every turn and re-fetch it |
+| `GRID_TASK_MAX_WORKSPACES` | `8` | how many conversations keep a working directory on this provider. Past this, the least recently used are deleted at the start of the next task — never by refusing work, and never one a worker is using. An evicted conversation rebuilds itself on its next task at the cost of one fetch. A value that is not a positive whole number falls back to `8` and says so |
+| `GRID_TASK_MIN_FREE_GB` | off | a floor under free space on the filesystem holding `GRID_TASK_ROOT`. Set it and the provider keeps evicting workspaces while free space is below it. Off by default because it is a promise about a disk the provider does not own alone: a machine already below the line for reasons of its own would evict everything on every task and re-fetch it |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |
 | `GRID_TASK_PERMISSION_MODE` | `acceptEdits` | any mode `claude --permission-mode` accepts, **except `bypassPermissions` while the sandbox is on** — the provider refuses that combination. Measured: with that mode the agent reads files outside its workspace even with the whole policy in force, because the `Read` tool runs inside Claude Code, which the sandbox does not confine |
 | `GRID_TASK_SANDBOX` | on | `0` runs agents **unconfined** — no filesystem or network confinement, and the Claude Code version check is skipped with it |
@@ -2176,7 +2176,7 @@ set of request data that leaves the grid; the full conversation never does.
 | Field | What it is | Bound |
 |---|---|---|
 | system head | head of the first `system` message, truncated | ≤ 500 chars |
-| recent user tails | tails of the **last 3 `user` messages** (oldest→newest), each truncated — so a terse final message still carries the task context set in the turns leading up to it | ≤ 2000 chars each |
+| recent user tails | tails of the **last 3 `user` messages** (oldest→newest), each truncated — so a terse final message still carries the task context set in the tasks leading up to it | ≤ 2000 chars each |
 | message count | number of messages in the request | integer |
 | approx input size | total characters across all message content | integer |
 | tool names | declared function **names** only — never arguments or JSON schemas | list of names |
@@ -2197,7 +2197,7 @@ set of request data that leaves the grid; the full conversation never does.
   reached **through the platform's LLM proxy** — you never hold, store, or hand out an advisor key or URL.
 - **On whose account** — the ranking call runs on the platform's advisor-proxy key (not your key, and
   not the consumer's); the served request is billed to the consumer as the chosen model.
-- **Never sent** — the full conversation, `assistant`/`tool` turns, `user` turns older than the last
+- **Never sent** — the full conversation, `assistant`/`tool` tasks, `user` tasks older than the last
   three, tool-call arguments or schemas, raw image/audio bytes or URLs, per-engine
   pricing/capacity/throughput, or any API key.
 
