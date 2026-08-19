@@ -24,10 +24,16 @@ def short_task_root():
     so `link_transcript` refuses, and every test that spawns an agent would fail on a limit no real
     deployment meets. `/var/grid` flattens to **135**.
 
-    Under `/private/tmp` rather than `/tmp` so the path is already its own realpath: on macOS `/tmp`
-    is a symlink, and a root that resolves elsewhere is the issue-06 trap this suite has met once.
+    Resolved, so the path is already its own realpath: on macOS `/tmp` is a symlink to
+    `/private/tmp`, and a root that resolves elsewhere is the issue-06 trap this suite has met once.
+
+    ⚠️ **`/tmp` then `.resolve()`, never `/private/tmp` directly.** `/private` exists only on macOS,
+    so naming it made every agent-spawning test a `FileNotFoundError` on Linux — 125 errors, on a
+    suite that is green on the developer's own machine. `resolve()` gives the identical
+    `/private/tmp/gt-…` on macOS and leaves `/tmp/gt-…` on Linux, so both are short and both are
+    their own realpath.
     """
-    root = Path(tempfile.mkdtemp(prefix="gt-", dir="/private/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="gt-", dir="/tmp")).resolve()
     try:
         yield root
     finally:
