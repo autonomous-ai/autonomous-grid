@@ -883,3 +883,20 @@ for the #2-class defect (code contradicting its own prose) — both are clean.
 **Verified.** backticks/bold balanced, 7/7 agent skeletons intact, decision
 order steps 1–6 present, no dangling "A word on the examples" reference
 (defined at README line 231), geometry still `TOTAL ISSUES 0`.
+
+## Round 45 — verifier-≠-generator check closed; #5 sample-code bar made cumulative
+
+**Lens: code-review / architecture (run directly).**
+- Confirmed the canonical generator's inline `verify()` (imported into the agent
+  catalog from the model `Diagram`) enforces all four overlap classes the user
+  screenshotted: node-label width overflow, label clipped by viewBox,
+  label-vs-node, and label-vs-label. Both builders re-run clean (27 model
+  `verok`, 8 agent `verify ok`); standalone `/tmp/diag4.py` reports
+  `TOTAL ISSUES 0`. The inviolate guarantee is real — no generator gap.
+- **Fixed a code/prose contradiction in #5 Staged admission's `admit` sketch:**
+  prose sets a cumulative bar ("≥ 20 labeled wins"), but the code scored a
+  single shadow run (`score.wins`). Now `wins = ledger.cumulative_wins(harness)
+  + run.wins`, consistent with the replay-from-the-log pattern the sketch
+  already uses (`ledger.stage`) and with #7's append-only ledger. Bounded→full
+  now also consumes the accumulated count. Zero diagram change.
+- Markdown re-verified balanced (fences 14, backticks/bold even, 7 headers).
