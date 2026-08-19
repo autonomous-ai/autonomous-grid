@@ -490,3 +490,37 @@ Kept `deepseek-v4-flash` and `qwen3-coder`.
 
 **Verification.** Backticks and bold balanced; zero residual old tokens; prose
 family references ("the Qwen tail") untouched. No structural change.
+
+---
+
+## Round 34 — GoF lens: model layer lacked per-pattern Applicability
+
+**Critique (GoF lens).** GoF's canonical skeleton places **Applicability** — a
+crisp "use it when / avoid it when" fork — immediately after *Motivation*, and
+the model layer (unlike the agent layer, Round 33) had none of it as a
+per-pattern section. The one-sentence table held every positive half in the
+front matter; a reader landing mid-pattern had only the abstract Motivation,
+with the "when to actually pick this" left implicit.
+
+**Changes applied.** Added **Applicability** to all 27 model patterns, after
+*Motivation* and before *Structure*. Each section is sourced from two things
+already in the doc: the positive ("Use it when") from that pattern's own
+one-sentence-table row, and the negative ("Avoid it when") from that pattern's
+own *Failure mode* — e.g. #2 fan-out's unanimous-but-wrong, #7's baked-in bias
+(→ #12), #8's rubber-stamping verifier, #13's ungrounded confidence proxy,
+#22's pre-registration-as-theater, #26's non-preemptible background work.
+Added **Applicability** to the model layer's "How to read a pattern" skeleton
+announcement so the announced skeleton matches reality. Wrapped all inserted
+lines to the catalog's ~76-char toolwidth and normalized blank-line spacing.
+
+**Verification.** 27 pattern sections intact; every pattern now carries the
+annotated skeleton with Applicability between Motivation and Structure
+(script-checked, order bad: 0 across all 27); markdown globally balanced
+(backtick/bold); collapsed stray triple blank lines.
+
+**Open items.** Both layers now carry the full GoF skeleton with Applicability.
+Next target: the model layer's diagram **edge-label clearance** audit — the
+same label-to-label and label-vs-node collision class the agent layer recently
+fixed — and a read of the two sample-code blocks against `STYLE.md`.
+
+**Commit:** (R34 — this commit).

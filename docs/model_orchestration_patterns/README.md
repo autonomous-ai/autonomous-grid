@@ -68,6 +68,8 @@ fixed and mean the same thing in every pattern:
   it by what you already call it.
 - **Motivation** — the concrete pressure that makes the pattern worth having;
   the failure it answers.
+- **Applicability** — the crisp “use it when / avoid it when” test, so you
+  can apply the pattern without first reading the whole entry.
 - **Structure** — the diagram and the parts it names.
 - **Mechanics** — how the parts collaborate: who decides, who waits, what
   crosses which edge.
@@ -231,6 +233,12 @@ every candidate costs money and seconds. When one model can do the job, the
 optimal move is to *not* run the other nineteen. That logic stays true
 locally — it is just no longer the *only* true answer.
 
+**Applicability.** You know the answer is cheap and single, and the
+request's class is well-mapped — not running the other nineteen is the
+whole move. Avoid it when the classification is genuinely uncertain or
+untested: a confident-wrong SIMPLE call ships silently with no second read,
+and there is no fallback in the loop.
+
 **Structure.** A coral terminal where the request enters, a purple `rank`
 that holds the decision, one green worker, a coral terminal where the answer
 leaves.
@@ -249,7 +257,6 @@ whole answer is wrong, silently. There is no second read.
 
 **Failure mode.** The ranker is confident and wrong. Familiar: a
 classification that looks right in training data and fails on the tail.
-
 
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
@@ -285,6 +292,11 @@ cheap answers are trustworthy" is true only across genuinely different reads,
 not across N runs of the same prior. Remote routers can't afford the
 redundancy; a local router can, and it converts "is this answer trustworthy?"
 from a guess into a measurement.
+
+**Applicability.** Tokens are free and the answer is worth checking, and
+you can field genuinely different reads. Avoid it when you cannot — three
+samples sharing one corpus tail agree happily wrong, and the vote certifies
+internal agreement, not truth.
 
 **Structure.** Terminal → a dot where the fan splits → three green workers
 in a column → a purple `vote`. On a tie, a purple `expand` pulls a better
@@ -366,6 +378,11 @@ research project.
 them. A planner buys the divide-and-conquer win: you stop running one
 generalist on everything and let each specialist do its own one thing.
 
+**Applicability.** The job is many jobs wearing one coat, with a clean,
+nameable split between parts. Avoid it when the seam is arbitrary — a
+miscut plan makes the merge reconcile parts never meant to join, and plan
+quality is the whole bet.
+
 **Structure.** Terminal → purple `planner` (label: *plan + split*) → two
 green specialist lanes (*specialists*: writer, thinker) → purple `merge` →
 terminal.
@@ -393,7 +410,6 @@ mismatched parts.
 
 **Failure mode.** The planner miscuts the seam and the merge has to reconcile
 parts that were never meant to go together. Plan quality is the whole bet.
-
 
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
@@ -424,6 +440,11 @@ the confident wrongness of #1 and the unanimous wrongness of #2. Adversarial
 is the correction: instead of voting for agreement, you *train a
 disagreement* and let disagreement force the system to look again. It is the
 only pattern whose whole point is surfacing what the others hide.
+
+**Applicability.** A wrong answer is costly and two independent careful
+reads can genuinely disagree. Avoid it when both reads share the same
+prompt and frame — disagreement that never surfaces is inherited by the
+judge, and adversarial thwarts slips, not shared bias.
 
 **Structure.** Terminal → dot → two green reads (`read A`, `read B`,
 distinct lanes, label *careful disagreement*) → purple `judge` → terminal.
@@ -462,7 +483,6 @@ tool-grounded check over a bigger same-family judge: it is the one output
 that breaks the shared prior for free (the judge shares the reads' family and
 therefore their blind spot).
 
-
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
 def adversarial(request, read_a, read_b, judge):
@@ -497,6 +517,11 @@ a master/slave; a consequential answer wants adversarial. The `auto` name in
 Grid's ADR 0013 already gestures at this — the router chooses a model — but it
 chooses *among models*, not *among strategies*.
 
+**Applicability.** The request mix is varied enough that no single pattern
+wins on every request, and you can price the cost of picking wrong. Avoid
+it when the cost heuristic itself is untrustworthy — a request that looks
+cheap but is a trap gets routed to a single model that misses it.
+
 **Structure.** Terminal → purple `choose plan` (label: *each request*) → three
 green leaves in a column (`1 model`, `N models`, `debate` — one per pattern it
 may select, label *cost × speed × needs*) → a single terminal for whatever
@@ -521,7 +546,6 @@ default when uncertain; the default is what we ship today.
 **Failure mode.** The cost heuristic itself is wrong — a request that looks
 cheap but is a trap, silently routed to a single model that misses it. The
 strategy layer needs the same humility it gives the layers below.
-
 
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
@@ -564,6 +588,11 @@ here is the weaker (and sufficient) one — best-of-N ≤ top-sample is never wo
 than one greedy draw, trivially, independent of iid. Keep the two un-blurred:
 self-consistency's vote has the fancy citation; Brute-Force's pick has the
 floor bound.
+
+**Applicability.** Brute coverage beats cleverness — open a path and the
+first N tries that stumble onto it are as good as any planner's guess, and
+tokens are free. Avoid it when the answer is uniformly hard: the best of N
+bad tries is still a bad try, and coverage only raises the floor.
 
 **Structure.** Terminal → dot → a **stack** (a deck of workers, drawn as one
 node several sheets deep — the count is a knob you don't have to name) →
@@ -648,6 +677,11 @@ mean**: averaging assumes all error is symmetric noise, and a single outlier
 (NaN, a hallucinated huge number) drags an arithmetic mean the way it cannot
 drag a median. Voting discards the distribution; a robust average keeps it.
 
+**Applicability.** The answer is numeric and noise-averaging helps — a
+forecast, a score, a coordinate where independent samples average down.
+Avoid it when the errors are correlated: averaging bakes in the bias,
+giving beautiful dials and the wrong needle (→ #12 instead).
+
 **Structure.** Terminal → dot → three green workers (`same prompt`) → purple
 `mean` (`average the answers`) → terminal.
 
@@ -710,6 +744,11 @@ one local allows: you can afford to *retry on a failed check*, because a
 failed check costs nothing extra. Remote routers retry sparingly (each retry
 is paid); local can treat "the verifier said no" as a signal to loop, not a
 rare emergency.
+
+**Applicability.** Checking is far cheaper than getting it wrong — one
+draft, a cheap deterministic check, retry on fail. Avoid it when the check
+can't actually see the error: a rubber-stamping heuristic burns tokens
+politely confirming the same wrong draft.
 
 **Structure.** Terminal → green `draft` → purple `check` → terminal, plus a
 **dashed elbow** that drops under both nodes and comes back into the draft —
@@ -788,6 +827,11 @@ once and is settled by whoever's framing was more convincing. A fiction that
 a *second* read (of the other's objection) would have broken. Rounds buy
 convergence — the reads keep sharpening each other until they either agree or
 the judge rules on a position that has actually been stress-tested.
+
+**Applicability.** A single adversary isn't enough and a second read of the
+objection would have brokered the disagreement. Avoid it when both reads
+share the same primed wrongness — K rounds of agreement then certify that
+shared error as fake convergence.
 
 **Structure.** Terminal → dot → two green reads (`careful disagreement`) →
 purple `judge` → terminal, plus a dashed elbow from the judge back into
@@ -871,6 +915,12 @@ to get the seam wrong, just a chain where each link is a well-scoped
 specialist. First-principles-before-analogy: don't add a planner to a job
 whose shape is already a sequence.
 
+**Applicability.** The job has a natural order of operations — you can't
+write before you know the subject, you can't check before you write — and a
+fixed sequence is simpler than a planner. Avoid it when an error can't be
+contained at each seam: one small error serializes and compounds through
+every later step.
+
 **Structure.** Terminal → `scout` → `write` → `check` (all green, one lane)
 → terminal. Caption on the arrows: *each step consumes the last*. The
 eval-pass contract check is a real node, not a caption: the manifest is a
@@ -947,6 +997,11 @@ selects the *input population* to be structurally divergent, so the
 disagreement the judge sees is a real one — difference is checked
 deterministically (embedding distance, sampling temperature, prompt-template
 dissimilarity) before any probabilistic pooling.
+
+**Applicability.** Agreement hides a shared blind spot — the model pool
+shares a corpus prior and you need divergence before you judge. Avoid it
+when the diversity metric is a proxy you don't trust: embeds far apart can
+still both be wrong for correlated reasons.
 
 **Structure.** Terminal → dot → three green workers (label: *same prompt*) →
 purple `select diverse` (label: *drop clones, force divergence*) → purple
@@ -1025,6 +1080,11 @@ into a confidently-wrong mean — "beautiful dials, wrong needle." Averaging
 only helps if the errors are independent *and* unbiased, and neither holds for
 models that share training. Markowitz adds the ingredient #7 provably needs:
 correlation structure as the selection lever.
+
+**Applicability.** You are about to average correlated erring samples and
+that would bake in bias. Avoid it when you can't measure the error
+correlation honestly — the weights are only as good as the covariance you
+feed them.
 
 **Structure.** Terminal → dot → three green workers (label: *same prompt*) →
 purple `weighted mean` (label: *correlation-weighted*) → terminal.
@@ -1105,6 +1165,11 @@ that *re-commands N continuously from measurement* — it reacts to the current
 confidence gap, remembers that a request-class keeps silently failing, and
 notices when confidence is dropping across rounds before grinding to a
 wasted K.
+
+**Applicability.** One request-class keeps silently failing and you need
+sample spend re-commanded from measured confidence error, not fixed up
+front. Avoid it when the confidence proxy is ungrounded — a self-report or
+rubber-stamp feeds the loop garbage it converges on confidently.
 
 **Structure.** Terminal → purple `set spend` (label: *setpoint*) → green
 `samples` → purple `check` (label: *confidence gap*) → terminal, with a dashed
@@ -1199,6 +1264,12 @@ the router follows the live signal instead of entrenching on yesterday's
 winning shape. No existing pattern has a learning term at all; this is the
 first.
 
+**Applicability.** You don't yet know which pattern wins a request-class,
+and you can score verified outcomes with decay to track drift. Avoid it
+when 'verified' is a rubber-stamp (#8's failure) — learning amplifies a
+systematic error — or when determinism is non-negotiable and you can't
+freeze the learned policy.
+
 **Structure.** Terminal → purple `choose` (label: *learned weights*) → three
 green leaves in a column (`1 model`, `N models`, `debate`) → terminal, with a
 dashed elbow `verified → reinforce, others decay` from the answer terminal
@@ -1277,7 +1348,6 @@ learns*, not a new pattern):
   reinforce-the-winner would. (Costly at large N — use the estimator, and it's
   metric-deterministic, not arithmetic: pin + calibrate it.)
 
-
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
 def pheromone_router(request, weights):
@@ -1312,6 +1382,12 @@ honest judge settles it. Neither asks *what kind* of disagreement this is. A
 model family sharing a training corpus is Byzantine-ish — wrong in the same
 direction, not at random — and a plain vote lets that shared wrongness win.
 #15 makes the replica count a *function of suspected adversarialness*.
+
+**Applicability.** Disagreement clusters instead of scattering — a model
+family sharing a training corpus is Byzantine in the same direction, and a
+plain vote lets that shared wrongness win. Avoid it when the disagreement
+can only be classified after the majority already shipped — the escalation
+doubles latency without telling the caller.
 
 **Structure.** Terminal → dot → three green workers (label: *same prompt*) →
 purple `classify` (label: *noise vs byzantine split*) → terminal.
@@ -1396,6 +1472,11 @@ tail is the real cost — "tokens free" does not mean "time free." Straggler
 backup targets *latency to converge*, spending the one signal the current
 router is blind to: live per-node inventory.
 
+**Applicability.** One node on the tail is blocking the group and live
+per-node inventory is visible. Avoid it when the expected-time budget can't
+come from a live latency percentile — a hand-tuned constant mis-sets it in
+both directions.
+
 **Structure.** Terminal → green `worker` → terminal, plus a parallel green
 `backup` box below it, with a vertical dashed arrow *over budget → spawn* down
 into the backup and a dashed *first to finish* arrow from the backup up to the
@@ -1468,6 +1549,12 @@ repeatable — "summarize this repo," "explain this function," "what changed
 since X." The whole catalog is stateless per-request (§1–#16 each run inside
 one request); #17 is the first that is *across* requests. A cache hit is
 Grid's cheapest possible answer, faster than even #1.
+
+**Applicability.** The same expensive verified answer keeps recurring
+across requests — a summarize-the-repo, a what-changed, an
+explain-this-function. Avoid it when you can't fingerprint the content's
+actual change: a stale fingerprint serves a confidently-stale answer, and a
+rubber-stamped write-back serializes that error to every future requester.
 
 **Structure.** Terminal → purple `hash` (label: *semantic key*) → green
 `pattern` → terminal, with a dashed elbow `verified → cache` from the answer
@@ -1555,6 +1642,11 @@ candidate in *shadow* (invisible to the caller) on real traffic, compare its
 answers to the incumbent's adjudication, and let trust be **earned per
 request-class, not granted on admission**. The name is the idea — a canary
 that hasn't earned equity doesn't vote.
+
+**Applicability.** You're admitting a model you don't trust yet and it can
+shadow live traffic to earn its vote. Avoid it when the shadow and the
+incumbent share the same prior and the verifier rubber-stamps both —
+day-zero agreement is confidence in the prior, not earned trust.
 
 **Structure.** Coral terminal → dot → green `incumbent` worker + dashed green
 `canary` worker (dashed = shadow mode) → purple `compare` → purple `gate` →
@@ -1650,6 +1742,11 @@ question is not "how hard is this class normally" but **"how bad is the worst
 5% of this class, and what does it cost to hand them more samples?"** A router
 that prices the tail buys insurance exactly where insurance is cheap.
 
+**Applicability.** A rare request is hard *and* costly to get wrong — you
+want the worst tail-sized spend, not the mean. Avoid it when the bad tail
+is so thin it gets the premium on nothing, or so bimodal the mean
+under-budgets the genuinely catastrophic class.
+
 **Structure.** Coral terminal → green `budget` (label: *shape, not mean*) →
 purple per-class cost model → three green workers of differing weights
 (drawn taller = more spend) → purple `pool` → coral terminal.
@@ -1694,7 +1791,6 @@ CVaR estimate is a model, not arithmetic: it needs the metric-determinism
 treatment (pin + calibrate the estimator, snapshot the historicals for
 replays).
 
-
 **Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
 ```python
 def cvar_budget(request, cls, priced_loss, histories, alpha=0.95):
@@ -1731,6 +1827,11 @@ loops with no common brake. #20 is the common brake: detect the failing
 member, **stop feeding it**, and serve a degraded-but-honest answer (or
 refuse/escalate) rather than let one bad node eat the budget and the wall-clock.
 
+**Applicability.** A toxic node or class is eating the budget and fast-fail
++ quarantine beats spending more under duress. Avoid it when the drop in
+samples is ordinary contention — the breaker trips on noise, not signal,
+and serves degraded answers for a healthy-but-busy grid.
+
 **Structure.** Coral terminal → green `trip` (label: *error rate, not single
 failure*) → split: a coral `degraded` answer *and* green `quarantine` box
 (isolated lane) → a purple replacement rejoin on recovery → coral terminal.
@@ -1763,7 +1864,6 @@ must be a *measured* percentile over history (the same ledger #19 reads),
 never an absolute. And on a single-node deployment a bulkhead is a fiction —
 there's no second lane; the breaker should know the live inventory and refuse
 to "quarantine onto nothing" (#20 leans on #16's gate).
-
 
 **Refinements.** Five build rules keep the promise honest:
 1. **Trip on a measured threshold, never on noise.** Trip on consecutive
@@ -1834,6 +1934,12 @@ toward the anchor before it's ever defended. The Delphi shape exists
 specifically to break that: **anonymity removes the social pressure to
 conform, and iteration lets a defensible outlier pull the group instead of
 being averaged down in one pass.**
+
+**Applicability.** The answer is a number that gates real spend — a
+forecast, deadline, or landed cost — and you want anonymous rounds until
+the spread closes. Avoid it when the workers share one mistaken
+conventional prior — the IQR narrows on the wrong anchor and reports
+confident consensus that is really correlated.
 
 **Structure.** Coral terminal → a stacked column of green workers each in its
 own round (label: *write, see the spread, revise*) → a purple `aggregate`
@@ -1941,6 +2047,11 @@ cloud router can't is the ability to *actually accumulate enough evidence
 before declaring a winner* — #22 is what tells the learner how much "enough"
 is, and forbids it to front-run.
 
+**Applicability.** A runner-up looks good on a lucky streak and you want
+the learner to win only once N verified outcomes are met. Avoid it when the
+bar can be re-estimated after a favorable early peek — pre-registration
+becomes theater and inflates the threshold to pass.
+
 **Structure.** Coral terminal → a dot → green `challenger` and green
 `incumbent` workers → a purple `N verified` ledger (label: *N set a priori,
 not by streak*) → a purple `promote?` gate (label: *wider each look*) → coral
@@ -2045,6 +2156,11 @@ action at 55% is a disaster. The same confidence number means different things
 depending on what's on the line — so the router needs a consequence-priced
 bar, not a number.
 
+**Applicability.** Acting and omitting have very different costs and the
+proof threshold should scale with the cheaper-mistake direction. Avoid it
+when the cost shelf goes stale — drifting into irreversible territory while
+the label lags ships past-the-beyond-reasonable doubt.
+
 **Structure.** Coral terminal → purple `class of cost` rank (label: *which
 error is worse?*) → three green shelf lanes labeled `preponderance`,
 `clear-and-convincing`, `beyond-reasonable-doubt` → coral answer. Caption:
@@ -2131,6 +2247,11 @@ it. Canary answers "is this safe on real load"; screening answers "what kind
 of model is this." Because local tokens are free and boxes sleep between
 requests, the exam costs nothing but idle compute.
 
+**Applicability.** You're allocating real work to models you don't know and
+can probe their type in idle, before you trust them. Avoid it when the
+probes become a signaling game — models that pattern-match the exam's tells
+score high on known-answer without real capacity.
+
 **Structure.** Coral terminal → dot → a green probe bank + a green `model`
 worker (caption: *idle, off the critical path*) → purple `update prior` (label:
 *hit rate → type bucket*) → purple `allocate` (label: *sort before real
@@ -2160,7 +2281,6 @@ that no longer means what it says. The probe bank's discriminating power
 (hit-rate actually predicting real outcomes) must be re-validated the same
 way #22 re-validates its beta — otherwise screening is astrology with a
 likelihood attached.
-
 
 **Refinements.** Five build rules keep the picture honest:
 1. **Rotate the exam.** Probes refresh on a term (#14's decay) so a model
@@ -2236,6 +2356,11 @@ preferred answer. #7 can't run on non-numeric answers; #11 forces divergence
 but still pools by vote. Condorcet is the one pooling rule built for this
 failure, with Arrow's impossibility as an honest warrant: no aggregation is
 perfect, so choose the aggregation by request shape.
+
+**Applicability.** N models split a request into 3+ camps and head-to-head
+beats plurality. Avoid it when the camps aren't truly independent — a
+correlated pair plus the incumbent's echo still hands the win to a shared
+blind spot.
 
 **Structure.** Coral terminal → dot → three green `answer` boxes (label:
 *3+ camps*) → purple `pairwise` node (label: *beats every rival*) → coral
@@ -2368,6 +2493,11 @@ catalog's gap analysis keeps calling for by name and never specifies. It's
 also the only pattern whose whole job is *not choosing an answer*: it makes
 choosing answers possible without contending with them.
 
+**Applicability.** Learners, probes, and shadows assume an idle executor
+that doesn't exist — you need background work only in preemptible idle.
+Avoid it when background work isn't actually preemptible — at the first
+traffic spike, low-priority 'load' steals VRAM from the live request.
+
 **Structure.** Two lanes into one GPU. Foreground: a coral request terminal →
 green live workers (each with a deadline) → coral answer terminal. Background:
 green idler tasks (probe, learner, shadow) that run only inside the slack gap
@@ -2472,6 +2602,11 @@ principled fix: it makes the *probing itself* be the posterior update (#24's
 Bayesian type-map), and it gives the router an exploration force with a priced,
 self-ending budget.
 
+**Applicability.** #14's greedy learner ratchets into a local optimum and
+never escapes — you want to sample each model's posterior, not argmax.
+Avoid it when the labels feeding the posterior are wrong — a rubber-stamped
+verifier concentrates confidence on the shared prior, not the truth.
+
 **Structure.** Coral request terminal → a bank of `posterior` purple nodes (one
 per candidate arm, each a Beta distribution) → a `sample` draw node (pull each
 posterior, route to the highest sample) → green worker(s) → verified-outcome
@@ -2570,7 +2705,6 @@ mass to zero and B's fresh wins get pulled again. Exploration is accounted
 its discriminating power the way #22 re-validates its beta.
 
 ---
-
 
 **Related Patterns.** Pheromone (#14) is the greedy learner #27 escapes; Trial Sequential Analysis (#22) locks in the evidence #27 concentrates; Screening (#24) seeds the priors it samples.
 
