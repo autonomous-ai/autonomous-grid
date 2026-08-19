@@ -1109,7 +1109,8 @@ writes.
 
 **The write (#1 act-gate).** Only after the reviewers converge does the router
 select **one** actor — **Claude Code** (stream-json, tools *enabled*) running
-`qwen38-35b-a3b-mtp` — and that single seat performs the one world-touching step. It
+`qwen38-35b-a3b-mtp` — and that single seat performs the one
+world-touching step. It
 is idempotent and `round_id`-keyed, so a retry of the same request applies the
 same patch once, never twice. N−1 agents read; exactly one acts. That is the
 whole gate. **Converge** has a rule: accept when *both* diffs pass the Codex
