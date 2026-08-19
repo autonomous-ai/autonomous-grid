@@ -1,0 +1,767 @@
+# Local AI Orchestration Patterns — the agent layer
+
+The second half of the catalog. The
+[model layer](../model_orchestration_patterns/README.md) routes and combines
+*local inference*; this one routes and combines **agents** — harness
+frameworks running as workers. Where the model layer asks *how many samples
+does a request deserve, and how are they pooled*, the agent layer asks *which
+agent gets the task — and how do agents sharing one box stay honest about
+what they touch*. Read the model layer first; it is the foundation every
+entry here runs on, and the cross-references are numbered by its catalog.
+
+**What changes when the worker is an agent.** The model-layer patterns treat
+a worker as a stateless read: sample in, answer out, discard. An **agent** is
+not that. An agent is a *session* — a harness framework pinned to a model,
+holding a working directory, a context window, tool access, and credentials,
+and able to do things that *persist*: write files, run code, call an API, send
+a message, mutate state that outlives the request. That changes the
+economics in exactly three ways:
+
+1. **The scarce thing is the seat, not the tokens.** A model read is free
+   locally; an agent session occupies a seat (a resident, VRAM-backed model +
+   harness runtime) for its whole lifetime. Fan-out in the model layer is N
+   reads; fan-out in the agent layer is N sessions, and N sessions that can
+   *act* is N executions the box has to pay for in wall-clock and in risk.
+2. **Side effects are the risk surface, not the answer.** A wrong model read
+   costs tokens. A wrong agent write costs you a file, an API call, a sent
+   message. The agent layer's whole discipline is that *only one worker may
+   act* — every redundant agent runs read-only, and a single selected agent
+   carries the world-touching step.
+3. **State is the product, and it's durable.** An agent's value is largely
+   its context — the session that remembers the codebase, the customer, the
+   six prior turns. That context is crash-recoverable state on a local box,
+   and unlike a model read it must be *managed*: spawned, warmed, handed off,
+   resumed, killed. This catalog is as much about session lifecycle as about
+   routing.
+
+**The harness lanes (the agent layer's "models").** Where the model layer
+routes across model families, the agent layer routes across **harness
+frameworks** — the engines the router can drive as workers. Each is a lane
+with a different act contract:
+
+Lane                | Runs on          | May it act?                          | Observability
+--------------------|------------------|--------------------------------------|----------------------------
+Hermes (ACP)        | ACP / JSON-RPC   | read-only by default; tool scope is voluntary | structured tool calls
+Claude Code         | stream-json      | `--no-tools` for read-only           | token-stream per tool step
+Codex               | `exec --json`    | sandbox / read-only flag              | per-tool JSON events
+OpenClaw            | fan-out worker   | each copy is a full agent, act step gated by the router | N parallel sessions
+
+The coding-agent engines (Cursor, OpenCode, Pi, Command Code, Devin, Muse
+Code, Amp) sit in the same seat pool — Pi is a Fleet coding-engine, *not* a
+model and *not* a lane; it joins the fan when a task is agent-shaped, never
+when the router is just picking model reads.
+
+Two routing rules hold across the whole layer:
+
+- **The harness adds a tooling reflex, not a training tail.** Two agents on
+  the same harness + same model share one training tail *because they share
+  the model*; the harness contributes the reflex (prompt, tool schema, exec
+  behavior), nothing to the tail. "Different lane" is a real divergence when
+  *either* the harness *or* the model tail differs — but same-model,
+  different-harness is reflex divergence only, which is weak compared to the
+  family independence the model layer (#2/#11) buys with different families.
+- **The fan shape is computed from live seats, not named.** A 1-seat box holds
+  ~1–2 resident sessions; a 3-agent fan is queued serial swaps on the
+  critical path, each costing seconds of load. Those are parameters, not
+  measurements — the live-node inventory reports what a given box's VRAM
+  residency actually allows. Spawn `min(N, free seats)` parallel, queue the
+  rest — the model-layer rule, now applied to sessions.
+
+**A word on the examples.** Every `On the Grid stack` block is an
+*illustrative* concrete build, not a shipped configuration. Real model names
+(`qwen36-27b-mtp`, `glm-4.6`) and hardware sizes ("24 GB NVIDIA") are
+placeholders for "whatever is resident on your box" — parameters, not a
+billable stack. Treat them as worked examples of the shape, not as the shape
+itself.
+
+**Key terms for the outside reader.** *Grid* is a local-first,
+OpenAI-compatible inference router: one endpoint, dispatch by model name to
+the engines you chose. A *seat* is the agent layer's scarce resource — one
+resident, VRAM-backed model + harness runtime that a session occupies for its
+lifetime. A *session* is a harness framework pinned to a model, holding a
+working directory, context, tool access, and credentials, able to act in ways
+that persist. A *lane* is one harness route (Hermes ACP, Claude Code
+stream-json, Codex `exec --json`, an OpenClaw worker pool). An *actor* is the
+single selected session permitted to act; every other member of a fan is a
+*reader*. A *round_id* is the key stamped on every session, snapshot, and
+ledger event, so a replay reproduces the actual path a request took. A *WAL*
+is the write-ahead log that backs the state ledger. These recur throughout;
+where a term is loaded before it is defined here, the definition lives in
+this block.
+
+Read the register before you draw or write. The figure style the diagrams in
+this catalog follow is written up in `docs/STYLE.md` and `docs/DIAGRAMS.md`;
+the canonical standard that vendors them is
+`autonomous-org/knowledge/diagram-style.md` (and its companion
+`technical-writing-style.md`), which you may not have locally. The agent
+figures are generated from the *same token set* as the model layer's —
+imported, not copied — so the two catalogs share one geometry, one palette,
+one type scale, and cannot drift apart.
+
+---
+
+**How to read a pattern.** Every pattern below is documented under the same
+skeleton, so the catalog can be scanned and then read deep. The headings are
+fixed and mean the same thing in every pattern:
+
+- **Intent** — the shape in one sentence, and what it buys.
+- **Also Known As** — the other names the idea travels under, so you can find
+  it by what you already call it.
+- **Motivation** — the concrete pressure that makes the pattern worth having;
+  the failure it answers.
+- **Structure** — the diagram and the parts it names.
+- **Mechanics** — how the parts collaborate: who decides, who waits, what
+  crosses which edge.
+- **Consequences** — what the pattern costs and what it forgives.
+- **Failure mode** — the specific way this pattern goes wrong, and the honest
+  version of its promise.
+- **Refinements** — how to build it: the concrete rules that keep the promise
+  honest (present where the pattern has implementation guidance to separate).
+- **On the Grid stack** — one concrete local build, to keep the economics
+  honest. **Related Patterns** ends each entry and points at the same family.
+
+Read the **one-sentence table** first to choose a shape, then a pattern's
+**Intent** to confirm, then its **Failure mode** before you build it — the
+liability is where a pattern is actually decided. The patterns are numbered
+and cross-reference each other by `#number`; where a pattern lifts from the
+model layer it is named with its model-layer `#`, and where it needed a
+re-cut for agents the re-cut is flagged.
+
+**How to read the figures.** Every figure uses one fixed visual language, so
+any diagram is readable at a glance — where a request enters, where compute
+happens, where a decision is made, and which edges loop back.
+
+- **Coral pills** are the request's entry (`job`) and its exit (`answer`) —
+  the two points where the pattern touches the outside world.
+- **Green boxes** are *work*: a reader, a draft, a snapshot, a checkpoint —
+  a unit that occupies a seat.
+- **Purple boxes** are *decisions*: the select, the score, the gate — where
+  the shape is decided, not executed. A green box never decides; a purple box
+  never does the work.
+- **Arrows** run forward along the answer. A **dashed** arrow is a return
+  path — a shadow, a resume, an eviction — the edge that makes a pattern
+  stateful.
+- **A stacked deck** is the one durable object on the box — the WAL, the
+  off-box store. Everything else in a figure is a session or a step.
+
+The same roles and edge types appear in all seven figures; `docs/DIAGRAMS.md`
+is the formal register, and this block is the field guide.
+
+## The one sentence per pattern
+
+| # | Pattern | The move | Use it when |
+|---|---------|----------|-------------|
+| 1 | **The act-gate** | N−1 agents read, one selected agent acts — one `round_id`-keyed mutation | a fan must grow without its risk growing with it |
+| 2 | **Session lifecycle** | four transitions — spawn, warm, handoff, kill — keep one resident session alive | the session's context must outlive the request, and the crash |
+| 3 | **Route across harness lanes** | pick the lane by the act contract, then residency, then model | the task is agent-shaped and the harness is part of the decision |
+| 4 | **The seat is the executor** | background work preempts to snapshot and yields to the deadline-bearing request | canaries, warming, and probes assume an idle executor that isn't built yet |
+| 5 | **Staged admission** | a new harness shadows read-only until it beats the ground-truth authority | you're admitting a harness you don't trust yet |
+| 6 | **The verifier is ground truth** | a test is a fact, a session is a report | a label changes routing, equity, or admission |
+| 7 | **Only one ledger** | every durable event appends to one fsync'd log, exported off-box | the act log must survive the box that wrote it |
+
+**Choosing a pattern — the decision order.** The table lists the *what*; this
+is the *which* — the order in which to ask, because the first question that
+binds is the one that decides:
+
+1. **Will this task touch the world?** → #1 before anything else. Every fan
+   spawns N−1 read-only readers and one actor; if no enforceable act-gate
+   exists on the resident box, the task routes elsewhere — not onto a
+   weaker lane.
+2. **Which harness owns the task, and is it resident?** → #3. Residency
+   first; stage a lane swap only when the task genuinely needs a harness the
+   box isn't running.
+3. **Does the plan assume background work?** → #4. If the box can't name the
+   idle threshold, the preemption trigger, and the residency bound, the
+   "runs in the background" promise isn't real yet.
+4. **Is the harness new, or the verdict trust-affecting?** → #5 to earn the
+   act step, #6 to certify the label — consensus may propose, but only a
+   deterministic fact (or the escalation seat) certifies.
+5. **Will anything have to survive this box dying?** → #7. Snapshots,
+   reputation, and the act log all append to one log, exported to a
+   different medium on a cadence.
+
+## The catalog, as one figure
+
+![Local AI orchestration patterns — the agent layer: seven patterns on one token set](images/index.svg)
+
+---
+
+## 1. The act-gate — only one worker may act
+
+![The act-gate — N−1 read-only, one actor](images/act_gate.svg)
+
+**Intent.** Any fan that spawns N agents spawns **N−1 read-only sessions and
+one actor**; the selected agent carries the world-touching step, and that step
+is one idempotent, checkable mutation. This is the agent layer's first law.
+
+**Also Known As.** single-writer discipline; one-actor fan-out; the
+constitution
+
+**Motivation.** The model layer (#6 Brute-Force) already caps its fan to
+"only the selected worker may act." At the agent layer that is not a
+refinement — it is the constitution. A wrong model read costs tokens; a wrong
+agent write costs a file, an API call, a sent message. Every redundant agent
+that *can* act is an N× risk multiple you did not price, so the fan's risk
+must be independent of its size.
+
+**Structure.** Coral `job` in, a dot where the fan splits, N−1 green
+read-only sessions, a purple `select`, one green `actor` below it, and the
+coral exit is the one `act` step — a single idempotent mutation, keyed by
+`round_id`.
+
+**Mechanics.** The losing agents simulate, reason, and propose — they may not
+write a file, run a mutating command, or call an external API. Selection is a
+decision (purple); acting is work (green), and there is exactly one of it.
+"Simultaneous" is the wrong mental model on a 1–2-seat box: the fan is
+*serial swaps*, the sessions don't co-reside, so the gate is enforced
+per-invocation and the N is a scheduler choice, not N parallel seats. The
+losers are not cheap shells either — each is a full session: warm,
+context-bearing, VRAM-resident, seat-holding. The act-gate's economics rest on
+that: read them as free-and-light and the fan's seat cost quietly under-counts
+N−1 seats as expensive as the actor's.
+
+**Consequences.** Risk decouples from fan size — three readers and three
+hundred readers expose the same world surface. The price is N−1 seats of
+warm-session cost and the scheduler's serial-swap time, so the gate must be
+paired with a budget that prices it.
+
+**Failure mode.** The gate is *asserted* in a prompt instead of *enforced* by
+a mechanism. Read-only that can't be mechanically enforced is a hope, and a
+losing agent that can `git push` makes the whole fan N× actors wearing N−1
+masks.
+
+**Refinements.** Two halves make the gate real. (1) **Mutate-path gating** —
+force the readers read-only with a lane's actual mechanism, and name which one
+per lane: Claude Code `--no-tools` / read-only mode, Codex's sandbox /
+read-only flag, Hermes ACP's voluntary tool-scope. Then state what stops what
+a compliant harness won't gate — a `git push`, an API call — network egress
+rules, read-only working-tree mounts, a no-credential session. (2)
+**Disclose-path honesty** — read-only governs *mutation*, not what a reader
+can *see*. A read-only session that reads a credential or a secret tree can
+exfiltrate through its own reads the instant its output returns to the router;
+scope the read surface or treat what it read as exposed. And the actor's
+"one idempotent mutation" needs a key, not a sentiment: scope it to a
+`round_id` action-replay key so a re-run of the same request lands the same
+effect once, never twice.
+
+**On the Grid stack.** A code-fix request fans to three drafters on **three
+different lanes**, so each reader's read-only gate belongs to its own harness:
+A drafts on **OpenClaw** (gated by the router's quorum — its act step is never
+its own), B re-derives on **Codex** (sandbox / read-only flag), C red-teams the
+diff on **Hermes ACP** (tool-scope, read-only by default). They need not share
+a model — A and B can each be `qwen3-coder` on the resident seat (a
+same-model read costs a context swap, not a VRAM load) while C is `glm-4.6`
+for a genuinely independent read. Only then does the router pass one concrete
+patch through to **Claude Code (stream-json)** with tools enabled for the one
+write step, and only that actor holds the approval to open the network for the
+one `git push`. The fan is N=4: three readers plus a separate actor — the N−1
+arithmetic is 3 losing + 1, one seat, serial swaps. Give the readers no
+credential-bearing mounts; that bounds the credential path, not the whole leak
+surface, so treat anything they read as exposed. The `git push` is the one
+idempotent mutation, `round_id`-keyed so a retry pushes once. And the fan
+needs a number or "fan it" has no bound an operator can trust overnight: a
+**seat-seconds / serial-swap budget keyed on distinct model loads, not worker
+count** — `swap_cost × (distinct models touched)`, because same-model members
+swap context (cheap) and it is the distinct resident-model loads that pay the
+expensive VRAM swap. `swap_cost` comes from the live-node inventory, not
+from a constant; the router refuses a fan that exceeds the request's
+depth-of-thought budget and logs the refusal, so a later review sees the cheap
+path was chosen because the expensive one was priced out, not because nobody
+priced it.
+
+---
+
+**Related Patterns.** Session lifecycle (#2) is what makes the N−1 readers
+cheap enough to run; Route across harness lanes (#3) picks which lanes carry
+them; Only one ledger (#7) stamps the `round_id` this gate keys on.
+
+## 2. Session lifecycle — the cache is the session
+
+![Session lifecycle — four transitions, one resident session](images/lifecycle.svg)
+
+**Intent.** A model read has no lifecycle; a session does. The router manages
+four transitions — **spawn, warm, handoff, kill** — as scheduled work, not as
+an afterthought, because the session's context is the agent layer's best asset
+and the only thing that compounds across requests.
+
+**Also Known As.** session residency management; the warm-state cache
+
+**Motivation.** State is the product and it's durable: the session that
+remembers the codebase, the customer, the six prior turns is worth more than
+any single read it performs. Left unmanaged, that state is a leak — a
+resident session that is never killed is a politely-named resource leak on a
+1-seat box. Managed, it is a cache: a `round_id`-frozen snapshot you can
+restore in a context swap instead of paying a cold start.
+
+**Structure.** Coral `job` in, one green `seat` (the resident session) at the
+center, and its four transitions fanned out: `warm` (restore), `handoff`
+(duplicate context), `kill` (free the seat) — all green — and `snapshot` (the
+`round_id`-frozen, off-box state) they flow toward.
+
+**Mechanics.** The four transitions and what each is *not*:
+
+- **Spawn** — a fresh session on a free seat; costs a VRAM load + context cold
+  start. The expensive path the other three exist to avoid.
+- **Warm / resume** — restore a `round_id`-frozen session snapshot (working
+  tree + context) instead of starting cold. Cheaper than spawn; this is where
+  the agent layer's cache actually lives.
+- **Handoff** — the model-layer #16 straggler re-cut for sessions, and the one
+  transition that must not over-claim. *Duplicate the overdue agent's context
+  onto the other seat* only works **within the same harness**. Session context
+  is harness-specific — a Claude Code session file, Hermes ACP JSON-RPC state,
+  a Codex exec blob — and no harness exposes replaying another harness's live
+  context. Cross-lane "handoff" is not context transfer; it is a *restart from
+  the checkpoint artifact* — name it that and price the cold start.
+- **Kill / cancel** — the cheapest primitive, and the one a fan needs most:
+  stop the straggler, cancel the losing lanes, free the seat. It pairs with
+  warm — a killed session is worth something only if its state was snapshotted
+  first.
+
+**Consequences.** The session becomes a first-class resource with a cost model
+(load, swap, restore) instead of a fire-and-forget call. Warm/resume converts
+most requests from cold-start into context-swap, which is what makes the
+N−1-reader fan in #1 affordable at all.
+
+**Failure mode.** Handoff over-claiming. The moment a router treats
+cross-harness handoff as a free context move, it will route an overdue Claude
+Code session onto a Codex seat and get a cold restart back — slower than the
+straggler it was trying to escape. Same-harness resume is the real primitive;
+cross-lane is a restart, priced as one.
+
+**Refinements.** Freeze every snapshot by `round_id`, not by wall clock, so a
+replay and a warm restore land on the same state. Keep the snapshot format
+per-harness and restore through that harness's own `--resume`-equivalent —
+don't build a universal session format no harness will read. And make kill the
+fan's exit path: a fan that cannot cancel its losing lanes is a fan that holds
+the seat hostage after it has won.
+
+**On the Grid stack.** On a 1–2-seat box the `seat` is the one resident model
++ harness, so the four transitions are the whole scheduler. Warm/resume is the
+hot path — the fan in #1 reads the same `qwen3-coder` seat three times by
+swapping context, not by loading three models. Handoff never crosses a lane in
+this build: an overdue Claude Code reader is restored onto the same Claude Code
+seat, and if it must move to Codex, that is a restart from the snapshot,
+priced as one. Kill is what frees the seat between requests, and it is always
+preceded by the snapshot in #4's preemption, so the warm cache survives the
+session.
+
+---
+
+**Related Patterns.** The seat is the executor (#4) is the machine that
+schedules these transitions; The act-gate (#1) is why kill is a fan's exit
+path; Only one ledger (#7) exports the snapshots this pattern freezes.
+
+## 3. Route across harness lanes — role → lane → gate
+
+![Route across harness lanes — role → lane → gate](images/lanes.svg)
+
+**Intent.** The model layer's #1/#5 pick a *model*; the agent layer adds a
+decision on top — **which harness** owns this task — and the two are the same
+decision point. Pick the role, that names the lane, that names the act-gate
+the router must be able to enforce.
+
+**Also Known As.** harness routing; act-contract matching
+
+**Motivation.** A unit test that must be right goes to the deterministic,
+verifiable lane; open-ended research goes to the deep streaming interpreter;
+a bounded, scriptable coding task goes to the exec seat. The *model* inside
+the lane is the second question. Route by the model and you'll put a
+verifiable job on a lane whose act-gate you can't actually enforce.
+
+**Structure.** Coral `job` in, a purple `pick lane` (residency first), four
+green lanes — Codex exec (bounded coding), Claude Code (open work), Hermes ACP
+(verifiable), OpenClaw fan (N copies) — each flowing to the coral `answer`.
+
+**Mechanics.** Three rules decide the lane, in order:
+
+- **Match the act contract to the task's mutability.** Read-only research can
+  go anywhere; anything that writes must go to a lane whose act-gate you can
+  actually enforce. A role with no enforceable gate on the resident box is a
+  reason to route elsewhere, not a job to force onto the wrong harness.
+- **Residency first.** On a single box the lane you *want* may not be the
+  lane that's resident. Prefer the resident session; stage a lane swap only
+  when the task genuinely needs a harness the box isn't running.
+- **Exploration lives off the critical path.** Trying a new or untested
+  harness is #4's slack work, never the hot path — the same rule the model
+  layer applies to probing unknown models (#24).
+
+**Consequences.** The decision becomes checkable: every task can be stated as
+*role → lane → the gate that lane enforces*, and any one of the three missing
+is a mis-route caught before dispatch. The harness stops being an
+implementation detail and becomes part of the routing decision it always was.
+
+**Failure mode.** The lane table read as a menu of warm seats. A five-lane
+table on a 1-GPU/Apple box is not five resident lanes — the box holds ~1–2
+resident models and swaps the rest on demand, and the three build-family
+members (`27b` + `35b-a3b` + `qwen3-coder`) do not co-reside. Read a row as
+"role → lane → the model that fits *if* it is the resident one," and let the
+scheduler, not the table, decide which rows are warm.
+
+**Refinements.** Keep the role language — "deterministic, verifiable lane",
+"deep streaming interpreter", "exec seat" — bound one-to-one to the lane
+names, so a builder doesn't have to reverse it by hand. The pairing
+(harness × model) is per-lane guidance, not a law; an illustrative roster:
+the exec seat pairs Codex with `qwen36-27b-mtp` (24 GB NVIDIA, sandbox /
+read-only flag on the `exec` step); the deep interpreter pairs Claude Code
+with `qwen36-35b-a3b-mtp` (32 GB Apple, `--no-tools`); the verifiable lane
+pairs Hermes with a local pin, where test-pass is the gate and tool-scope is
+*voluntary* — route write-possible work off it, use it read-only by default;
+the fan pairs OpenClaw with an open-weight coder, act step gated behind the
+router's quorum, never the worker's; and the escalation seat — reached only
+when local judgment runs dry — pairs Grid Enterprise with a cross-vendor
+model, full act-gate, the only one that opens an externally-observable action.
+
+**On the Grid stack.** Every task on this box arrives at the table first:
+the test-that-must-be-right lands on Hermes ACP read-only (its voluntary
+tool-scope is exactly why write-possible work stays off it); the open refactor
+lands on the resident Claude Code stream-json seat; the bounded scriptable fix
+lands on Codex `exec --json` with the sandbox on; the N-copy fan lands on
+OpenClaw. Residency first means the same role can land on different lanes on
+different nights — whichever of the listed models is actually resident wins —
+and a lane the box isn't running only gets staged when the task genuinely
+needs it.
+
+---
+
+**Related Patterns.** The act-gate (#1) is the contract this pattern matches;
+The seat is the executor (#4) supplies the residency the rules trade on;
+Staged admission (#5) is how a lane that fails this match earns a second
+chance.
+
+## 4. The seat is the executor — background only in the idle
+
+![The seat is the executor — background only in the idle](images/seat.svg)
+
+**Intent.** The model layer's #26 slack-stealing scheduler is named there as
+the machine the learners assume and none build. At the agent layer it is not
+optional: **the seat is the session's runtime.** A box cannot serve live
+requests and run canary shadows, warming sessions, and probe batteries until
+there is an idle scheduler with a definition of idle, preemption, and a
+residency bound. Build it first.
+
+**Also Known As.** slack stealing, re-cut; the seat scheduler
+
+**Motivation.** Every other pattern in this catalog that says "in the
+background" — #5's shadow admission, #3's off-critical-path exploration, #2's
+warm cache — assumes an executor that can be *taken back* when a deadline
+lands. On a 1–2-seat box there is no such machine until the seat itself is the
+executor, with preemption and a residency bound. No agent-layer pattern that
+promises background work is real until this exists.
+
+**Structure.** Two rows. The live row: coral `job` → green `live request`
+(deadline-bearing) → coral `answer`. The background row: green `background`
+(shadow · warm · probe) → purple `preempt` (evict to snapshot, fsync first)
+→ a dashed arrow down into the live row — background *yields to snapshot*,
+never to bare kill.
+
+**Mechanics.** Background work claims the seat only in the idle — *no live
+request for N ms, or a deadline horizon*. When a live request lands on a seat
+held by a background session, the router evicts that session **to its
+`round_id` snapshot, fsyncs it, then frees the seat** — snapshot-persist-then-kill,
+not kill. That order is the whole pattern: killing a background session bare
+throws away the warm/resume cache #2 is built around, and only buys back a
+seat at the cost of the layer's best asset. Residency is bounded in bytes: a
+model stays resident only while its working set fits the GPU with the live
+roster, and the probe battery never exceeds the VRAM left after the live
+sessions.
+
+**Consequences.** "Background" becomes a schedulable, preemptible,
+VRAM-bounded state instead of a wish. Live work gets the seat with a bounded
+cost (a snapshot write); background work gets the idle it was always going to
+use. The scheduler has four numbers an operator actually sets — the idle
+threshold, the preemption trigger, the residency bound, and the snapshot's
+home.
+
+**Failure mode.** A policy statement with no numbers. Until the idle
+threshold, preemption trigger, residency bound, and snapshot destination are
+filled in, "background work runs when idle" is a mandate, not a spec — and the
+box either starves the live request (background never yields) or starves the
+cache (everything yields to bare kill).
+
+**Refinements.** A concrete starting point for one box: idle = *no live
+request for a few seconds* (or the request's `predicted_deadline` horizon,
+whichever is shorter); preemption = *a live request lands and only a
+background session holds the seat it needs — evict to snapshot and hand
+over*; residency = *the live roster's working set, probe battery capped at
+the VRAM left after the live sessions*. These are examples to tune, not laws —
+the live-node inventory is what turns them, and #1's `swap_cost`, into the
+numbers the budget actually gates on. And give the snapshot a home in #7's
+off-box store, not a second un-exported pile.
+
+**On the Grid stack.** On this box the seat is the one resident
+model+harness pair. Shadow admission (#5) runs the new harness in the
+background row — it only gets the seat between live requests, and a live
+code-fix that lands mid-shadow evicts the shadow to its `round_id` snapshot
+(fsync'd to the off-box store) before taking the seat. The shadow resumes from
+that snapshot on the next idle, so admission progress survives preemption
+instead of restarting. The probe battery for a new model is capped at whatever
+VRAM the live seat leaves, so a resident `qwen36-35b-a3b-mtp` can keep serving
+while a smaller probe runs in the remainder — and when it can't, the battery
+waits, it never evicts the live roster.
+
+---
+
+**Related Patterns.** Session lifecycle (#2) is the cache this pattern
+protects; Staged admission (#5) is the background work that queues for it;
+Only one ledger (#7) is where the snapshots land and are exported.
+
+## 5. Staged admission — earn the right to act
+
+![Staged admission — shadow before it may act](images/admission.svg)
+
+**Intent.** A harness must **shadow before it is allowed to take a real
+request's act step** — run the fan's read-only shells, get scored against the
+ground-truth authority, and clear the bar before the router lets it act on
+live traffic.
+
+**Also Known As.** canary trust-equity, re-cut; shadow-then-promote
+
+**Motivation.** The model layer admits a *model* this way (#18). The agent
+layer admits a *harness* and a *session class* the same way, because the thing
+being admitted can now touch the world. A new coding engine that gets an act
+step on day one is an N× risk multiple with no reputation — the exact thing
+#1 exists to prevent, at admission time instead of per-request.
+
+**Structure.** Coral `job` in, splitting into a green `resident` (live
+traffic) and a green `new harness` (shadow, read-only shells only, dashed
+edge) — both flowing to a purple `score` (against the ground-truth authority),
+then a purple `gate` (≥ N wins at ≥ X%), then the coral `act step` exit.
+
+**Mechanics.** The new harness runs only the read-only side of the fan — #1's
+N−1 shells — on live traffic's requests. Its outputs are scored against the
+verifier (#6) for every request, not self-graded. Only when it clears the bar
+does the router promote it: shadow → bounded act (its act step gated behind
+the router's quorum, as OpenClaw's already is) → full act. The same rule gates
+a new credential scope and a new tool-sink — first shadow, then bounded act,
+then full act.
+
+**Consequences.** Trust becomes earned, measured state instead of a trust
+boundary you configure once and hope. A new harness (or a new scope) enters the
+box at the same read-only risk level every fan already accepts, and only climbs
+as the evidence says. The admission bar itself is a number the builder sets
+from its own verifier run — N wins at X% agreement with the authority — not a
+universal threshold.
+
+**Failure mode.** The bar set before the verifier is trustworthy. If #6's
+authority is an ungrounded vote, the shadow is scoring against noise and "≥ N
+wins" certifies nothing — you've automated the promotion of whatever flatters
+the verifier. Admission is only as sound as the authority it scores against.
+
+**Refinements.** Keep the three stages visible in the ledger (#7) as
+`shadow → bounded → full` events, so a replay shows exactly when a harness
+crossed each line. Score on the ground-truth arm first: where a test or schema
+can certify the shadow's output, use it; reserve the weak consensus arm for
+what has no mechanical check, and never let the weak arm promote a harness to
+an act step. And run the shadow in the idle row of #4 — shadow traffic is
+background work, and a shadow that starves a live request has inverted the
+order the whole layer depends on.
+
+**On the Grid stack.** A new coding engine lands on this box as an OpenClaw
+shadow: it runs the fan's read-only shells on live requests, its outputs scored
+by the deterministic arm (#6 — the Codex `exec --json` schema/test call)
+against what the resident Claude Code seat ships. It gets the seat only in the
+idle (#4), evicted to snapshot the moment a live request lands. After its
+admission run clears the bar the router sets for it — say ≥ 20 labeled wins at
+≥ 90% agreement, numbers this box's own verifier run produced, not a borrowed
+threshold — the engine moves to bounded act (its act step gated behind the
+router's quorum) and, later, to the full act step with a `round_id`-keyed
+mutation and a credential scope it earned. Each crossing is a ledger event, so
+a replay answers "when did this harness earn the right to push?"
+
+---
+
+**Related Patterns.** The verifier is ground truth (#6) is the authority it
+scores against; The seat is the executor (#4) is the idle the shadow runs in;
+The act-gate (#1) is the contract the promoted harness inherits.
+
+## 6. The verifier is ground truth, not a session
+
+![The verifier is ground truth, not a session](images/verifier.svg)
+
+**Intent.** A test is a fact; a session is a report. One independent,
+tool-grounded authority certifies every trust-affecting label — and it **must
+not be an agent you also fan out**.
+
+**Also Known As.** the deterministic-authority branch; fact-over-report
+
+**Motivation.** The model layer's cross-cut already says no pattern may issue
+a trust-affecting label from an ungrounded model vote. The agent layer
+sharpens it, because the tempting fallback is *an agent*: an agent verifier is
+a session with the same tool callouts, the same working tree, the same prior
+as the workers — it confirms the shared session, not the fact. Where the layer
+can, verify against a deterministic external fact — a test pass, a schema
+check. Those anchor the verdict outright; they do not depend on the model's
+prior.
+
+**Structure.** Coral `job` in, a green `draft` (one try), a purple `check`
+(test · schema — a fact) on the main row to the coral `answer` (certified).
+Below, a green `consensus` (two tails agree) reached by a solid edge from the
+draft when no fact is to offer, and a **dashed** edge from consensus back to
+check labeled *proposed only* — the loop that can never certify.
+
+**Mechanics.** Two arms, deliberately unequal. **The strong arm** — a passing
+test or conformance check — grounds the verdict against a deterministic
+external fact, and it is the only arm that may certify. **The weak arm** —
+route the second read to a *different* harness+model tail so the divergence is
+real — is labeled weaker on purpose: two independent tails agreeing is
+error-correlation, not ground truth; they can share the same training data and
+the same task, so winning agreement only lowers the odds of *shared* prior
+failure and never certifies the fact. The consensus arm may **propose but
+never certify**: when no test, schema, or lookup exists, two agreeing tails
+produce a *proposed* verdict logged `proposed_by: consensus`. A
+**non-trust-affecting** label may be adopted as a low-confidence read with no
+trust score; a **trust-affecting** label — one that changes routing, equity,
+or staged admission — can never be adopted from two models' agreement and
+escalates to the real authority instead.
+
+**Consequences.** Every "verified / correct / error" label in the system has
+a named ground, and a replay can tell a fact-forced verdict from a consensus
+guess. The weak arm buys coverage where no mechanical check exists — and
+nothing more, which is exactly why it stays a proposal.
+
+**Failure mode.** The verifier as a session. The moment a fan's own sibling —
+same harness, same working tree, same prior — is allowed to certify, "the
+verifier passed" means "two runs of one prior agreed," which is the unanimous
+but wrong (#2, model layer) failure in a lab coat. Same hazard in the weak
+arm: calling a live API response or a git-diff *review* "deterministic" — a
+live response is external but not reproducible, and a diff review pairs a fact
+with a judgment. Each is a useful check; neither is the deterministic anchor.
+Keep the strong label for the core two.
+
+**Refinements.** Keep the escalation honest: it is an **off-box, paid**
+action — the Grid Enterprise escalation seat (or ultimately a human) needs
+network reachability, a provisioned account, and credentials on the node. A
+box that walks away overnight trusting that trust labels get reviewed is
+implicitly trusting that dependency — state its availability and cost up
+front, or accept that a disconnected single node degrades to the weaker
+"accept as low-confidence, never certify" arm and *logs the escalation it
+could not make*. And own the blind-spot caveat even on the strong arm: a
+schema or test is an authored artifact, and an author who framed the task the
+same way the draft was framed can share the draft's blind spot while sharing
+no model prior — the check grounds the verdict against a possibly imperfect
+artifact; blind-spot independence stays the property of live cross-vendor
+consensus, and that arm stays labeled (not) an authority.
+
+**On the Grid stack.** A config change drafts on `qwen36-27b-mtp` over Hermes
+ACP; the verdict is certified by a **Codex (`exec --json`)** tool call that
+validates the result against the config schema and, where the change is code,
+runs the test suite — a deterministic external fact that shares none of the
+draft's model prior. Only when no schema, test, or live API can certify — a
+judgment call with no mechanical check — does the router reach the weak arm,
+and it does **not** certify from it: a second read on the different tail,
+`glm-4.6` cross-vendor over Codex, yields a `proposed_by: consensus` verdict
+recorded in the ledger (#7) as ungrounded. A non-trust-affecting label may
+adopt it as a low-confidence read; a trust-affecting one escalates to the Grid
+Enterprise authority. And own the swap cost this arm pays on one box, exactly
+as the model layer's #12 does: `glm-4.6` is not resident beside the Qwen
+draft, so the fallback read is a serial VRAM swap on the critical path —
+priced there, and only reached when the deterministic arm really has nothing
+to offer.
+
+---
+
+**Related Patterns.** Staged admission (#5) scores against this authority;
+Only one ledger (#7) records which arm certified each label; The act-gate (#1)
+is the act step these labels govern.
+
+## 7. Only one ledger — the fsync'd box is the only truth
+
+![Only one ledger — the fsync'd box is the only truth](images/ledger.svg)
+
+**Intent.** All durable events — act, graduation, denial — append to **one**
+fsync'd, `round_id`-stamped log, and the log is exported to a different
+medium on a cadence. One truth, append-only, no replication — but *not* one
+point of total loss.
+
+**Also Known As.** the WAL; the single truthful log
+
+**Motivation.** The model layer's closing rule stands unmodified: one state
+ledger, append-only, keyed by request-class, and on a single fsync'd box the
+ledger is the only truth; there is no replication. The agent layer inherits it
+with new state the sessions introduce — context snapshots, the reputation
+ledger per harness+class, the act log — all `round_id`-stamped events in that
+one truthful log. A session's action, a canary graduation, an act-gate denial
+are *events*, not silent state mutations; a replay must reproduce the actual
+path a request took, including which agent acted and when.
+
+**Structure.** Three green events — `act`, `graduation`, `denial` — converging
+on a purple `append` (round_id-stamped events), into a stacked-deck `WAL`
+(append-only, one box, no replication), with a green `export` off to the
+right: the one edge that leaves the box, on a cadence.
+
+**Mechanics.** Every durable thing in the layer is an append, not a mutation:
+#1's act and its denials, #5's shadow→bounded→full crossings, #2's and #4's
+snapshots, the per-harness+class reputation. `round_id` keys all of it, so a
+replay reproduces the *actual* path, not a plausible one. The ledger has one
+edge that crosses the box: a **periodic export to a different physical
+medium** — a second disk, a NAS, the Personal AI Rig, object storage — with a
+stated retention. #4's "fsync it first" preemption snapshot and #2's
+warm/resume snapshots export under the same cadence, so a preempted session's
+cache and the audit of what it did survive the box, not just the session.
+
+**Consequences.** "Only truth" stays true: one log, one writer, one key, and
+a replay that answers "what actually happened, in what order." The export
+buys recoverability — the one upgrade the single-box rule allows — without
+introducing a second truth that could diverge from the first.
+
+**Failure mode.** "Only truth" read as "only copy." On a single box the WAL
+*is* the node, so a disk wipe silently destroys the very state the layer
+prices highest — the warm-context cache #2/#4 build around, plus the act log
+that is the whole audit of what an agent touched the world with — and
+replay-from-log is impossible when the log itself died. The tell is an export
+that lands on the same disk it protects: on a consumer 1-disk node that is not
+an export at all.
+
+**Refinements.** The export must land on a **different physical medium** than
+the box it protects. On a consumer 1-disk node — the exact box this pattern
+is about — no second medium exists until the operator provisions one, so the
+honest stance is: a single-disk box accepts a single point of total loss for
+its warm cache and act log *unless* the operator points the export at object
+storage, which needs network and an account — price that dependency, or state
+that the box gives up recoverability by choice. And route the agent layer's
+own persistence through that same off-box store, never a second un-exported
+pile: a second pile is a second truth in disguise, and the moment it exists
+nobody says which one is right.
+
+**On the Grid stack.** This box's WAL is one append-only log next to the
+seat. The act log records each `git push` with its `round_id`, actor lane, and
+the `round_id`-keyed replay proof; the graduation log records when a harness
+crossed shadow→bounded→full in #5; the snapshot store holds the #2/#4
+session freezes. All three export on the box's cadence — here, to the
+Personal AI Rig over the LAN, a genuinely different medium — so a wiped
+consumer box loses its day, not its history. On a true 1-disk node the
+README's honest line applies verbatim: no second medium until one is
+provisioned, and a disconnected box that can't reach object storage logs the
+export it could not make, the same way #6 logs the escalation it could not
+make.
+
+---
+
+**Related Patterns.** Every pattern feeds this ledger: The act-gate (#1)
+stamps its acts, Session lifecycle (#2) and The seat is the executor (#4)
+export their snapshots, Staged admission (#5) records its crossings, and The
+verifier is ground truth (#6) records which arm certified each label.
+
+## The one decision an agent router makes
+
+Strip every pattern away and the agent layer reduces to one choice per
+request: **which agent — which harness, which model tail, which session —
+gets the task, and is that agent permitted to act or only to read?**
+Everything else — the fan, staged admission, the scheduler, the act-gate, the
+ledger — exists to make that one choice safe on a box where sessions persist,
+act, and share one GPU. The model layer makes the *answer* reliable; the
+agent layer makes the *action* reliable. That is the boundary: samples are
+free, but actions — and the sessions that take them — are scarce, durable,
+and worth managing like state.
+
+---
+
+**Related catalog.** The model layer
+[../model_orchestration_patterns/README.md](../model_orchestration_patterns/README.md)
+is the foundation this one runs on; its entries are the `#` references used
+here.
+
+**Read with.** `ROUTER.md` (what the naive router does today),
+`router-execution.md` (how the router executes the model layer's machinery) —
+both in `autonomous-org/projects/grid-orchestration/`. Draw before you write:
+`knowledge/diagram-style.md`, `knowledge/technical-writing-style.md`.

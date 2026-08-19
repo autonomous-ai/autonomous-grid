@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1222 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1222" height="450" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Session lifecycle — four transitions, one resident session</text>
+  <text x="216" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">spawn (cold)</text>
+  <text x="523" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">resume</text>
+  <text x="510" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">duplicate context</text>
+  <text x="523" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">cancel</text>
+  <text x="840" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">freeze</text>
+  <text x="853" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">checkpoint</text>
+  <path d="M 120 210 C 216 210, 216 210, 312 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 424 210 C 523 210, 523 92, 622 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 424 210 C 510 210, 510 210, 596 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 424 210 C 523 210, 523 328, 622 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 733 92 C 840 92, 840 210, 948 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 758 210 C 853 210, 853 210, 948 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="312" y="177" width="111" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">seat</text>
+  <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">resident session</text>
+  <rect x="622" y="59" width="111" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="677" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">warm</text>
+  <text x="677" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">the layer's cache</text>
+  <rect x="596" y="177" width="162" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="677" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">handoff</text>
+  <text x="677" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">same harness only</text>
+  <rect x="622" y="295" width="111" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="677" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">kill</text>
+  <text x="677" y="397" text-anchor="middle" fill="#2b2b29" font-size="21">frees the seat</text>
+  <rect x="948" y="177" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1037" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">snapshot</text>
+  <text x="1037" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-frozen, off-box</text>
+</svg>

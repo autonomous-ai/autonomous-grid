@@ -10,7 +10,8 @@ money and starts being the point.
 This is the **model-layer** half of the catalog — the shape of routing and
 combining *local inference*: how many samples a request deserves and how the
 samples are pooled into an answer. It pairs with
-`agents.md`, the **agent-layer** half — orchestrating *harness
+[`agent_orchestration_patterns/README.md`](../agent_orchestration_patterns/README.md),
+the **agent-layer** half — orchestrating *harness
 frameworks as workers* (act-gates, session lifecycles, harness routing, and a
 single fsync'd ledger): sessions that hold context and credentials, tool calls
 that touch the world, and the rule that only one worker may act. The two
@@ -24,9 +25,10 @@ decision runs on top of.
 The companion documents (`ROUTER.md`, `router-execution.md`) live in the
 sibling research doc at
 `autonomous-org/projects/grid-orchestration/` and are cited here for
-provenance; `agents.md` is the agent-layer half, not yet published — where it
-ships it will open the layer above this one. Treat the bare names in the text
-as pointers to that role, not to files in this catalog.
+provenance. The agent-layer half is published at
+[`agent_orchestration_patterns/`](../agent_orchestration_patterns/README.md)
+and opens the layer above this one. Treat the bare names in the text as
+pointers to that role, not to files in this catalog.
 
 This is the "redesign the router" document. `ROUTER.md` analyzes the current
 naive router; this file is the design space it should grow into — the original
@@ -2473,12 +2475,14 @@ This is a **design catalog, not a library** — there is no binary to install.
 The patterns assume you already have a local, OpenAI-compatible inference
 endpoint that can dispatch by model name (Grid and similar routers do this, as
 do llama.cpp / vLLM servers behind a compatible shim) and, for the
-agent-layer shapes in `agents.md`, harnesses that expose an act-gate (Codex
-sandbox, Claude Code `--no-tools`, a tool-scoped ACP harness). Reading the
+agent-layer shapes in
+[`agent_orchestration_patterns/`](../agent_orchestration_patterns/README.md),
+harnesses that expose an act-gate (Codex sandbox, Claude Code `--no-tools`, a
+tool-scoped ACP harness). Reading the
 shape is the point here; reproducing a specific number (`min(N, free seats)`,
 a fan budget) requires your own live-node inventory reporting what your box
 actually holds. The figures in this folder are vector `.svg` renders, generated from
-`build_figures.py` in the source repo.
+`build_diagrams.py` in this folder.
 
 ---
 
@@ -2492,7 +2496,9 @@ those is the right economics.
 
 This is the model layer — it makes the *answer* reliable. When the "worker"
 is a harness session that can hold context and act on the world, the routing
-question changes: see `agents.md`, the companion document that re-cuts these
+question changes: see
+[`agent_orchestration_patterns/`](../agent_orchestration_patterns/README.md),
+the companion catalog that re-cuts these
 patterns for agent workers and adds the ones that only a session makes real
 (the act-gate, session lifecycle, staged admission).
 
