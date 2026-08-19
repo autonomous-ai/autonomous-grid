@@ -509,7 +509,13 @@ def _add_project(sub) -> None:
     # should find it where they were just sent.
     starter = project_sub.add_parser(
         "init",
-        help="Give an empty project a trunk, so tasks can run in it",
+        # ⚠️ No git word in the SUMMARY, and `test_project_inits_summary_speaks_the_same_words`
+        # keeps it that way. `init` is GIT_PLANE — its long description below may say `trunk`, and
+        # does — but this one line is different twice over: it is what `grid project --help` shows
+        # everybody who is merely browsing, and `_no_trunk_message` sends a brand-new person here
+        # BY NAME with the words "give it something to start from". Two registers for one step,
+        # one sentence apart, and the person reading them has never heard of a trunk.
+        help="Give an empty project a starting point, so tasks can run in it",
         description=(
             "Create the project's `main` at a single empty root commit.\n\n"
             "A project has no trunk when it is created, and a task cannot be cut from nothing. "

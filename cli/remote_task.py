@@ -1493,8 +1493,12 @@ def _task_list(args: argparse.Namespace) -> int:
     `--all` widens it from the caller's own runs to every member's, which is the point on a shared
     project: a team wants to see what the team ran, and the relay fences the answer on membership.
 
-    **Without a project it lists the caller's own turns across every project they can reach**, which
-    is the application's home screen. The relay refuses `--all` there — see `relay.list_tasks` — so
+    **Without a project it lists the caller's own tasks across every project they can reach** — the
+    rows an application's home screen is built FROM, which is not the same as being one. This prints
+    one row per TASK, in time order and ungrouped, so a five-task conversation is five rows and not
+    a thread. Grouping by `conversation_id` is the client's job and `docs/FE-integration.md` says so;
+    the flat log is the right shape for a terminal and for a script, and a CLI that grouped would owe
+    both of them a `--flat` to undo it. The relay refuses `--all` there — see `relay.list_tasks` — so
     every row on that page is the caller's own, which is why the MEMBER column becomes PROJECT
     rather than being added beside it: a column whose every cell is the same value costs 36
     characters to say nothing, and which project a conversation is in is the one thing a
