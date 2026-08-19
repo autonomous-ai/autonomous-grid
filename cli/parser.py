@@ -509,7 +509,13 @@ def _add_project(sub) -> None:
     # should find it where they were just sent.
     starter = project_sub.add_parser(
         "init",
-        help="Give an empty project a trunk, so tasks can run in it",
+        # ⚠️ No git word in the SUMMARY, and `test_project_inits_summary_speaks_the_same_words`
+        # keeps it that way. `init` is GIT_PLANE — its long description below may say `trunk`, and
+        # does — but this one line is different twice over: it is what `grid project --help` shows
+        # everybody who is merely browsing, and `_no_trunk_message` sends a brand-new person here
+        # BY NAME with the words "give it something to start from". Two registers for one step,
+        # one sentence apart, and the person reading them has never heard of a trunk.
+        help="Give an empty project a starting point, so tasks can run in it",
         description=(
             "Create the project's `main` at a single empty root commit.\n\n"
             "A project has no trunk when it is created, and a task cannot be cut from nothing. "
@@ -655,7 +661,7 @@ def _add_project(sub) -> None:
     # push, the apply writes only `main`, and there is no revert — so without this the
     # conversation's NEXT turn is silently cut from a lost attempt's work.
     wip = project_sub.add_parser(
-        "wip", help="Work on a conversation's branch — the ref its turns are cut from")
+        "wip", help="Work on a conversation's branch — the ref its tasks are cut from")
     wip_sub = wip.add_subparsers(dest="wip_action", required=True)
 
     wip_reset = wip_sub.add_parser(
@@ -667,11 +673,11 @@ def _add_project(sub) -> None:
     # `test_a_refusal_only_ever_offers_a_command_that_really_works`, which is what that test is for.
     project_arg.add_conversation(
         wip_reset,
-        help="Which conversation's branch to move. `grid task get <turn-id>` prints the "
-             "conversation a turn belongs to.")
+        help="Which conversation's branch to move. `grid task get <task-id>` prints the "
+             "conversation a task belongs to.")
     wip_reset.add_argument(
         "--commit", required=True,
-        help="Where to put the branch. `grid task get <id>` prints the `base_commit` a turn was "
+        help="Where to put the branch. `grid task get <id>` prints the `base_commit` a task was "
              "cut from, which is usually the commit you want.")
     wip_reset.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     wip_reset.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
@@ -685,10 +691,10 @@ def _add_project(sub) -> None:
         help="Where the project is: what it holds, what is running, and who can serve it",
         description=(
             "Where the project is.\n\n"
-            "What is holding your turns was answerable before only by attempting a create and "
+            "What is holding your tasks was answerable before only by attempting a create and "
             "reading the refusal. It is a read now, and it costs nothing.\n\n"
             "It is also how an application notices the project changed without running `git fetch`: "
-            "the grid applies every finished turn to the project itself, so what the project "
+            "the grid applies every finished task to the project itself, so what the project "
             "holds changes whenever anybody's work lands."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     project_arg.add_project(status)
@@ -923,9 +929,10 @@ def _add_task(sub) -> None:
     project_arg.add_project(
         create, required=False,
         help="Project id to run in, from `grid project list` (default: your own project named "
-             "'default', created on first use). You may run as many conversations in a project as "
-             "you like and they run alongside each other; the messages inside one conversation run "
-             "in the order you sent them. A colleague's work never blocks yours.")
+             "'default', when you already have one — it is never created for you). You may run "
+             "as many conversations in a project as you like and they run alongside each other; "
+             "the messages inside one conversation run in the order you sent them. A colleague's "
+             "work never blocks yours.")
     create.add_argument(
         "--file", action="append", default=None, metavar="LOCAL[:DEST]",
         help="File to upload with the task; repeatable. Committed with the task before any "
@@ -979,10 +986,10 @@ def _add_task(sub) -> None:
             "Send a follow-up message into a conversation. It runs after whatever that "
             "conversation is already doing — your messages inside one conversation run in the "
             "order you sent them, and you can type ahead without waiting.\n\n"
-            "The conversation id is printed by `grid task create`, and is on every turn that "
+            "The conversation id is printed by `grid task create`, and is on every task that "
             "`grid task get` and `grid task list` report.\n\n"
             "Only the person who started a conversation can send into it. A colleague can read "
-            "its turns; to work alongside them, start your own with `grid task create`."),
+            "its tasks; to work alongside them, start your own with `grid task create`."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     send.add_argument(
         "conversation_id",
@@ -991,7 +998,7 @@ def _add_task(sub) -> None:
     send.add_argument(
         "--file", action="append", default=None, metavar="LOCAL[:DEST]",
         help="File to upload with the message; repeatable. Committed before any provider can claim "
-             "the turn, so the agent always finds it. Placed at the file's own name unless you give "
+             "the task, so the agent always finds it. Placed at the file's own name unless you give "
              "a destination (e.g. ./conf.toml:config/conf.toml).")
     send.add_argument(
         "--dir", action="append", default=None, metavar="LOCAL[:DEST]",
@@ -1000,10 +1007,10 @@ def _add_task(sub) -> None:
              "`.git/`, `.grid/`, `.claude/`, `.mcp.json` and symlinks are skipped and reported.")
     send.add_argument(
         "--follow", action="store_true",
-        help="Watch the turn after sending it, and exit with its outcome — 0 completed, non-zero "
+        help="Watch the task after sending it, and exit with its outcome — 0 completed, non-zero "
              "otherwise, exactly as `grid task follow` does. Ctrl-C stops the watching, not the "
-             "turn. A message waiting for an earlier one in the same conversation simply shows "
-             "nothing until its turn comes.")
+             "task. A message waiting for an earlier one in the same conversation simply shows "
+             "nothing until the earlier one finishes.")
     send.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     send.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     send.set_defaults(handler=cmd_remote_task)
@@ -1042,7 +1049,10 @@ def _add_task(sub) -> None:
             "`--json` prints exactly what it always did; only the exit status is new. To watch a "
             "task instead of asking once, use `grid task follow`."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    get.add_argument("task_id", help="Task id returned by `grid task create`.")
+    get.add_argument(
+        "task_id",
+        help="Task id, from `grid task create` or `grid task list`. Not the conversation id "
+             "— that one goes to `grid task send`.")
     get.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     get.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     get.set_defaults(handler=cmd_remote_task)
@@ -1057,21 +1067,25 @@ def _add_task(sub) -> None:
     follow = task_sub.add_parser("follow", help="Watch a task's output as it runs")
     what = follow.add_mutually_exclusive_group()
     what.add_argument("task_id", nargs="?", default=None,
-                      help="Turn id, as reported by `grid task get` and `grid task list`.")
+                      help="Task id, from `grid task create` or `grid task list`. Not the "
+                           "conversation id — that one goes to --conversation.")
     what.add_argument(
         "--conversation", default=None, metavar="<conversation-id>",
-        help="Watch a whole conversation instead of one turn — every turn's output in order, "
+        help="Watch a whole conversation instead of one task — every task's output in order, "
              "including steps the grid added itself. Ends when the conversation goes quiet.")
     follow.add_argument(
         "--after-seq", type=int, default=-1, dest="after_seq",
         help="Resume after this event sequence number (default: -1, from the start). "
-             "A conversation's sequence is its own and is not a turn's.")
+             "A conversation's sequence is its own and is not a task's.")
     follow.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     follow.add_argument("--json", action="store_true", help="Emit one JSON event per line.")
     follow.set_defaults(handler=cmd_remote_task)
 
     fetch = task_sub.add_parser("fetch", help="Fetch a finished task's result into a directory")
-    fetch.add_argument("task_id", help="Task id returned by `grid task create`.")
+    fetch.add_argument(
+        "task_id",
+        help="Task id, from `grid task create` or `grid task list`. Not the conversation id "
+             "— that one goes to `grid task send`.")
     fetch.add_argument(
         "--into", default=None, metavar="DIR",
         help="Where to put the result (default: ./<task-id>). Created if missing; an existing "
@@ -1121,7 +1135,7 @@ def _add_task(sub) -> None:
             "Stop a task that has not finished.\n\n"
             "Until this existed the only way out of a task nobody wanted any more was to wait for "
             "its deadline — an hour if it was running, and up to four if it was still waiting for "
-            "a provider. A turn the grid queued to resolve a collision — one nobody typed — is the "
+            "a provider. A task the grid queued to resolve a collision — one nobody typed — is the "
             "usual reason to reach for it.\n\n"
             "The CONVERSATION survives. Cancelling stops this run and nothing else, so the next "
             "message you send continues where it left off — there is no way to end a conversation, "
@@ -1136,7 +1150,10 @@ def _add_task(sub) -> None:
             "Nothing is rewound: whatever the agent had already done is kept, so "
             "`grid task fetch` still works on it."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    cancel.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    cancel.add_argument(
+        "task_id",
+        help="Task id, from `grid task create` or `grid task list`. Not the conversation id "
+             "— that one goes to `grid task send`.")
     cancel.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     cancel.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     cancel.set_defaults(handler=cmd_remote_task)
@@ -1155,7 +1172,10 @@ def _add_task(sub) -> None:
             "details kept, which is also an answer rather than a problem.\n\n"
             "To take a change back out, `grid task undo <task-id>`."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    diff.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    diff.add_argument(
+        "task_id",
+        help="Task id, from `grid task create` or `grid task list`. Not the conversation id "
+             "— that one goes to `grid task send`.")
     diff.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     diff.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     diff.set_defaults(handler=cmd_remote_task)
@@ -1179,7 +1199,10 @@ def _add_task(sub) -> None:
             "This is not the same as `grid task cancel`, which stops a task that is still running "
             "and changes nothing."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    undo.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    undo.add_argument(
+        "task_id",
+        help="Task id, from `grid task create` or `grid task list`. Not the conversation id "
+             "— that one goes to `grid task send`.")
     undo.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
     undo.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     undo.set_defaults(handler=cmd_remote_task)

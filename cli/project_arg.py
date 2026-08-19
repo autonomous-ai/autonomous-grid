@@ -40,7 +40,7 @@ _FORMS = "_project_forms"
 
 _LIST_HINT = "`grid project list` shows the ids you are a member of."
 _MEMBER_HINT = "`grid project member list` prints the key for each member."
-_CONVERSATION_HINT = ("`grid task get <turn-id>` prints the conversation a turn belongs to, and "
+_CONVERSATION_HINT = ("`grid task get <task-id>` prints the conversation a task belongs to, and "
                       "`grid task create` prints the one it opened.")
 
 
@@ -129,7 +129,7 @@ def add_path(parser: argparse.ArgumentParser, *, help: str) -> None:
 
 
 def add_conversation(parser: argparse.ArgumentParser, *,
-                     help: str = "Conversation id from `grid task get <turn-id>`.") -> None:
+                     help: str = "Conversation id from `grid task get <task-id>`.") -> None:
     """Register both spellings of a conversation id, and mark the parser as a two-positional shape.
 
     The third shape beside `add_member` and `add_directory`, added by ADR 0034 D-e (issue 41) when

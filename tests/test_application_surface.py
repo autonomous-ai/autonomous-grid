@@ -128,6 +128,24 @@ _GIT_PLANE_FUNCTIONS = frozenset({
 _REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
+def _subparser(parser, name, *, summary=False):
+    """The named subparser, or — with `summary=True` — the one-line help the PARENT prints for it.
+
+    The summary lives on the parent's choice map, not on the child, which is exactly why the
+    per-command `GIT_PLANE` exemption reaches it: `_leaves` reads the child.
+    """
+    for action in parser._actions:
+        if not hasattr(action, "_name_parser_map") or name not in action._name_parser_map:
+            continue
+        if not summary:
+            return action._name_parser_map[name]
+        for choice in action._get_subactions():
+            if choice.dest == name:
+                return choice.help or ""
+        return ""
+    raise AssertionError(f"no subcommand called {name!r}")
+
+
 def offences(text: str) -> list[str]:
     """The git words in `text`, lowercased. Public so issue 41's E2E can use the same reading."""
     return [match.group(0).lower() for match in _PATTERN.finditer(text or "")]
@@ -174,6 +192,29 @@ def test_the_surface_an_application_drives_speaks_no_git():
         "git vocabulary on the surface an application drives (ADR 0034 D-m). Reword it, or — if the "
         "word really is being used in its ordinary English sense — add it to `ALLOWED` with the "
         "reason:\n  " + "\n  ".join(sorted(found)))
+
+
+def test_project_inits_summary_speaks_the_same_words_that_send_people_to_it():
+    """`grid project init` is GIT_PLANE, and its summary line still may not say `trunk`.
+
+    The exemption in `GIT_PLANE` is per COMMAND, so it covers a subcommand's whole `--help` — which
+    is right for the long description (somebody who chose to read it is doing git-shaped work) and
+    wrong for exactly one line. The summary is what `grid project --help` prints to everybody who is
+    only browsing the list, and `init` is the single GIT_PLANE command a brand-new person is sent to
+    BY NAME: `_no_trunk_message` offers it with the words "give it something to start from",
+    deliberately git-free (ADR 0034 D-m, issue 46). It said "trunk" one sentence later.
+
+    Narrow on purpose — this pins `init` and not every summary. `wip` and `commit` are git words in
+    the COMMAND NAME, chosen for people who have git, and no wording fixes those.
+    """
+    from cli.parser import build_parser
+
+    project = _subparser(build_parser(), "project")
+    summary = _subparser(project, "init", summary=True)
+
+    assert summary, "grid project init lost its summary line"
+    assert not offences(summary), (
+        f"the line every browser of `grid project --help` reads: {summary!r} -> {offences(summary)}")
 
 
 def test_the_scan_really_walked_the_surface():

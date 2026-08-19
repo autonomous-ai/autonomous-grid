@@ -700,7 +700,7 @@ def _project_status(args: argparse.Namespace) -> int:
     if running:
         # The whole point of "what am I waiting on, and since when". Without the id there is nothing
         # to wait on, read or follow.
-        print(f"\nYou have {len(running)} turn(s) in flight:")
+        print(f"\nYou have {len(running)} task(s) in flight:")
         for turn in running:
             since = turn.get("created_at")
             print(f"  {turn['id']} ({turn.get('state') or 'unknown'}"
@@ -781,7 +781,7 @@ def _print_your_running_cap(answer: dict) -> None:
         # a body no healthy relay can produce: `config.validate_task_budgets` refuses to boot below
         # 1. Saying nothing is the right answer for a reply that contradicts its own server.
         return
-    print(f"\nyour running turns: {running} of {limit}")
+    print(f"\nyour running tasks: {running} of {limit}")
     if running >= limit:
         # The one sentence that is worth printing, and it exists to STOP a reading. Everything below
         # this line is about the fleet, and at the cap the fleet is not what the member is waiting
