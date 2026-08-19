@@ -245,7 +245,8 @@ class Diagram:
                 anchor = "middle"
             baseline = my - 18
             boxes.append([mx, baseline, text_w(e["label"], EDGE_FS) + 8, 26, anchor])
-        for _ in range(60):
+        GAP = 8.0  # minimum clearance between any two labels
+        for _ in range(80):
             moved = False
             for i in range(len(boxes)):
                 if boxes[i] is None:
@@ -254,18 +255,22 @@ class Diagram:
                     if boxes[j] is None:
                         continue
                     bi, bj = boxes[i], boxes[j]
-                    ox = (bi[2] + bj[2]) / 2 - abs(bi[0] - bj[0])
-                    oy = (bi[3] + bj[3]) / 2 - abs(bi[1] - bj[1])
-                    if ox > 0 and oy > 0:
+                    dx = bj[0] - bi[0]
+                    dy = bj[1] - bi[1]
+                    gx = abs(dx) - (bi[2] + bj[2]) / 2
+                    gy = abs(dy) - (bi[3] + bj[3]) / 2
+                    if gx < GAP and gy < GAP:
                         moved = True
-                        if ox < oy:
-                            sgn = 1 if bi[0] <= bj[0] else -1
-                            bi[0] -= sgn * ox / 2
-                            bj[0] += sgn * ox / 2
+                        if (GAP - gx) <= (GAP - gy):
+                            sgn = 1 if dx >= 0 else -1
+                            mov = (GAP - gx) / 2
+                            bi[0] -= sgn * mov
+                            bj[0] += sgn * mov
                         else:
-                            sgn = 1 if bi[1] <= bj[1] else -1
-                            bi[1] -= sgn * oy / 2
-                            bj[1] += sgn * oy / 2
+                            sgn = 1 if dy >= 0 else -1
+                            mov = (GAP - gy) / 2
+                            bi[1] -= sgn * mov
+                            bj[1] += sgn * mov
             if not moved:
                 break
         for box in boxes:
