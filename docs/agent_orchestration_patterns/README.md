@@ -101,6 +101,15 @@ harness that most literally matches this catalog's "you are the router"
 stance. Its weakness is the flip side: nothing is handed to you, so governance,
 planning, and sub-agent splitting are all yours to build.
 
+**And when *not* to reach for each home.** Knowing which base fits the work is half the decision; the other half is knowing which one is the *wrong* base for it, so the guide closes each home with the case that should send you elsewhere:
+
+- **OpenClaw** — *not* when the job has no channel boundary and no tool span: a single bounded code change is one Claude Code / Codex session, and OpenClaw's orchestration muscle and its "governance is yours" cost are wasted on a one-shot ask you cannot also audit.
+- **Hermes Agent** — *not* for a deterministic, single-shot answer with no accumulated context (you pay for a memory layer that does nothing), and *not* when you cannot review what it "learned" — self-improvement without review is how a persistent model of you quietly goes stale.
+- **Claude Cowork** — *not* for anything you must retain, script, or audit in CI, and *never* for regulated workloads (Anthropic is explicit); it is a managed GUI app, not a composable worker you can drive as a lane.
+- **Claude Code** — *not* the base for *many* agents across *many* repos you don't own: it is a single-developer workspace, not a fleet supervisor, and its ergonomics assume you supply the permission hygiene.
+- **Codex** — *not* for a one-file, one-session task a thin harness resolves faster (worktrees and PR pipelines are overhead on one bounded change), and *not* where you want the thinnest auditable seat — that home is Pi.
+- **Pi** — *not* when you want the harness to hand you planning, sub-agents, or governance: Pi deliberately ships none of those, so pick it only when you are ready to build and own the loop.
+
 Two routing rules hold across the whole layer:
 
 - **The harness adds a tooling reflex, not a training tail.** Two agents on
