@@ -203,6 +203,14 @@ def test_prune_drops_old_days_only():
     old.parent.mkdir(parents=True, exist_ok=True)
     old.write_text('{"id":"x"}\n', encoding="utf-8")
     capture.record("today", "answer", model="m")
+    # ⚠️ Appends go to a BACKGROUND writer (`capture._append`), so today's file does not exist the
+    # instant `record` returns — the autouse `_flush_writes` fixture only runs at teardown, which is
+    # after every assertion below. Every other test in this file that reads back what it wrote
+    # flushes by hand; this one did not, and failed on CI (3.12) while passing on a developer's Mac.
+    #
+    # It also made the last assertion VACUOUS in the other direction: with nothing on disk, `prune`
+    # was never actually asked to spare today's file, which is the whole thing this test is for.
+    capture.flush()
     assert capture.prune() == 1
     assert not old.exists()
     assert list(capture.capture_dir().glob("traffic-*.jsonl"))   # today's file survived
