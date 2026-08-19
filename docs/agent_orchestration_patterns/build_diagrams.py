@@ -90,7 +90,7 @@ def lifecycle():
     d.place("snap", "snapshot", "deck", row=0, stage=3,
             note="round_id-frozen, off-box")
     d.place("free", "freed", "terminal", row=2, stage=3)
-    d.edge("job", "seat", "spawn (cold)")
+    d.edge("job", "seat", "spawn")
     d.edge("seat", "warm", "resume")
     d.edge("seat", "hand", "duplicate context")
     d.edge("seat", "kill", "cancel")
@@ -296,7 +296,8 @@ def build_index():
     total_w = max(widths) + 80
     total_h = cursor + 40
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total_w} {total_h}" '
-           f'font-family="{FONT}">']
+           f'font-family="{FONT}" role="img" aria-labelledby="t">']
+    out.append("<title id=\"t\">agent orchestration patterns — all figures</title>")
     out.append(f'<rect width="{total_w}" height="{total_h}" fill="#fff"/>')
     out.extend(body)
     out.append('</svg>')

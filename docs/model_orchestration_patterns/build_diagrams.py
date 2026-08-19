@@ -119,7 +119,8 @@ class Diagram:
     def render(self):
         W, Hh = self._geom()
         p = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {Hh}" '
-             f'font-family="{FONT}">']
+             f'font-family="{FONT}" role="img" aria-labelledby="t">']
+        p.append("  <title id=\"t\">" + esc(self.title or "orchestration pattern figure") + "</title>")
         p.append("  <defs>")
         def marker(mid, color, size, sw, r):
             s = size
@@ -1026,7 +1027,8 @@ def build_index():
         widths.append(int(m2.group(1)))
     total_w = max(widths) + 2 * 40
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {total_w} {total_h}" '
-           f'font-family="{FONT}">']
+           f'font-family="{FONT}" role="img" aria-labelledby="t">']
+    out.append("<title id=\"t\">model orchestration patterns — all figures</title>")
     out.append(f'<rect width="{total_w}" height="{total_h}" fill="#fff"/>')
     out.extend(body)
     out.append('</svg>')
