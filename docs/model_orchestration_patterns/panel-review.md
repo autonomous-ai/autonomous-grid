@@ -414,3 +414,37 @@ are symmetric against the announced skeleton. Correctness note: 12 model
 patterns intentionally have no `Refinements` (their guidance is already
 narrative/cohesive), which is the announced "where guidance separates" rule,
 not an audit failure.
+
+---
+
+## Round 15 — diagram label-to-label collision, fixed everywhere (user report)
+
+**Report.** The user flagged pattern #2 (`fan-out`) as unreadable: the edge
+labels `a single answer` and `ties → expand` sat on edges that share the `vote`
+node, so their default midpoints landed at nearly the same coordinates and
+rendered as stacked, garbled text.
+
+**Root cause.** `Diagram.verify()` checked node-vs-label boxes and node-vs-node
+overlap but never **label-vs-label**. Both `fanout()` edges stem from `vote`,
+so the shared-vertex labels collided silently — the geometry verifier couldn't
+see it, so it shipped as "verok".
+
+**Fix (applied to the shared `Diagram` in `build_diagrams.py`, which both the
+model and agent catalogs import, so it propagates to all 27 + 7 + 2 aux
+figures).**
+- New `Diagram._label_boxes(W, Hh)`: computes every edge label's placement box
+  and **iteratively spreads colliding pairs** along their smallest-overlap axis
+  (up to 60 passes), then clamps boxes inside the viewBox.
+- `render()`/`_elabel()` now draw from these resolved boxes, so the SVG matches
+  the verified positions.
+- `verify()` now checks the rendered label boxes for **label-vs-label**
+  collisions (its safety net) as well as the existing viewBox/node checks.
+
+**Result.** After regeneration all 27 model and 7 agent figures report `verok` /
+`verify ok` with zero label-label overlaps. In `fanout.svg`, `a single answer`
+(mid) and `ties → expand` (right) are separated by a full line height instead of
+stacked. Fresh PNGs re-rendered at true aspect ratio for eyeballing.
+
+**Panel note.** The 4-lens live sub-agent runtime still fails to persist
+(`not_found`), so this round ran the GoF/architecture "diagram legibility" lens
+directly and is logged as usual.

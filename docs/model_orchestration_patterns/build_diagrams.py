@@ -139,9 +139,10 @@ class Diagram:
             p.append(f'  <text x="{self.m_l}" y="{M_T - 58}" text-anchor="start" '
                      f'fill="{INK}" font-size="{EDGE_FS}" font-weight="700">'
                      f'{esc(self.title)}</text>')
-        for e in self.edges:
+        lbl = self._label_boxes(W, Hh)
+        for i, e in enumerate(self.edges):
             if e["label"]:
-                self._elabel(p, e, W, Hh)
+                self._elabel(p, e, lbl[i])
         for e in self.edges:
             self._edge(p, e)
         for nid, n in self.nodes.items():
@@ -221,24 +222,64 @@ class Diagram:
         p.append(f'  <path d="{d}" fill="none" stroke="{color}" '
                  f'stroke-width="{sw}"{dash} marker-end="{self._mk(marker, color)}"/>')
 
-    def _elabel(self, p, e, W, Hh):
+    def _label_boxes(self, W, Hh):
+        """Compute every edge label's box; iteratively spread colliding pairs."""
+        boxes = []
+        for e in self.edges:
+            if not e["label"]:
+                boxes.append(None)
+                continue
+            a, b = e["a"], e["b"]
+            x1, y1 = self.xr(a), self.cy(a)
+            x2, y2 = self.xl(b), self.cy(b)
+            if e.get("lp"):
+                lp = e["lp"]
+                mx, my = lp[0], lp[1]
+                anchor = lp[2] if len(lp) > 2 else "middle"
+            elif e.get("below"):
+                floor = max(self.bottom(nid) for nid in self.nodes)
+                mx, my = self.xl(b) - 16, floor + e["below"]
+                anchor = "end"
+            else:
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                anchor = "middle"
+            baseline = my - 18
+            boxes.append([mx, baseline, text_w(e["label"], EDGE_FS) + 8, 26, anchor])
+        for _ in range(60):
+            moved = False
+            for i in range(len(boxes)):
+                if boxes[i] is None:
+                    continue
+                for j in range(i + 1, len(boxes)):
+                    if boxes[j] is None:
+                        continue
+                    bi, bj = boxes[i], boxes[j]
+                    ox = (bi[2] + bj[2]) / 2 - abs(bi[0] - bj[0])
+                    oy = (bi[3] + bj[3]) / 2 - abs(bi[1] - bj[1])
+                    if ox > 0 and oy > 0:
+                        moved = True
+                        if ox < oy:
+                            sgn = 1 if bi[0] <= bj[0] else -1
+                            bi[0] -= sgn * ox / 2
+                            bj[0] += sgn * ox / 2
+                        else:
+                            sgn = 1 if bi[1] <= bj[1] else -1
+                            bi[1] -= sgn * oy / 2
+                            bj[1] += sgn * oy / 2
+            if not moved:
+                break
+        for box in boxes:
+            if box is None:
+                continue
+            bw, bh = box[2], box[3]
+            box[0] = min(max(box[0], bw / 2 + 2), W - bw / 2 - 2)
+            box[1] = min(max(box[1], bh / 2 + 2), Hh - bh / 2 - 2)
+        return boxes
+
+    def _elabel(self, p, e, box):
         lab = e["label"]
-        a, b = e["a"], e["b"]
-        x1, y1 = self.xr(a), self.cy(a)
-        x2, y2 = self.xl(b), self.cy(b)
-        if e.get("lp"):
-            lp = e["lp"]
-            mx, my = lp[0], lp[1]
-            anchor = lp[2] if len(lp) > 2 else "middle"
-        elif e.get("below"):
-            floor = max(self.bottom(nid) for nid in self.nodes)
-            my = floor + e["below"]
-            mx = self.xl(b) - 16
-            anchor = "end"
-        else:
-            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-            anchor = "middle"
-        p.append(f'  <text x="{mx:.0f}" y="{my-18:.0f}" text-anchor="{anchor}" '
+        mx, baseline, bw, bh, anchor = box
+        p.append(f'  <text x="{mx:.0f}" y="{baseline:.0f}" text-anchor="{anchor}" '
                  f'fill="{INK}" font-size="{EDGE_FS}">{esc(lab)}</text>')
 
     # --- verification -------------------------------------------------------
@@ -272,32 +313,37 @@ class Diagram:
                 if o[0] < box[2] and box[0] < o[2] and o[1] < box[3] and box[1] < o[3]:
                     problems.append(f"overlap {nid} & {o[4]}")
             seen.append((*box, nid))
-        # edge labels must not sit on top of an unrelated node
-        for e in self.edges:
+        # edge labels: use the same resolved positions as the render, check
+        # viewBox clipping, node overlap, and label-vs-label collision.
+        lboxes = self._label_boxes(W, Hh)
+        for i, e in enumerate(self.edges):
             if not e["label"]:
                 continue
-            a, b = e["a"], e["b"]
-            if e.get("lp"):
-                lx, ly = e["lp"][0], e["lp"][1]
-            elif e.get("below"):
-                floor = max(self.bottom(nid) for nid in self.nodes)
-                lx, ly = self.xl(b) - 16, floor + e["below"]
-            else:
-                lx = (self.xr(a) + self.xl(b)) / 2
-                ly = (self.cy(a) + self.cy(b)) / 2
-            # approximate the label's glyph box (baseline at ly-18)
-            bh = 26
-            bw = text_w(e["label"], EDGE_FS) + 8
-            lbox = (lx - bw/2, (ly-18) - bh/2, lx + bw/2, (ly-18) + bh/2)
+            box = lboxes[i]
+            bw, bh = box[2], box[3]
+            lbox = (box[0] - bw / 2, box[1] - bh / 2, box[0] + bw / 2, box[1] + bh / 2)
             if lbox[0] < 0 or lbox[1] < 0 or lbox[2] > W or lbox[3] > Hh:
                 problems.append(f"label '{e['label']}' clipped by viewBox")
             for nid in self.nodes:
-                if nid in (a, b):
+                if nid in (e["a"], e["b"]):
                     continue
                 nbox = (self.xl(nid), self.top(nid), self.xr(nid), self.bottom(nid))
                 if (lbox[0] < nbox[2] and nbox[0] < lbox[2]
                         and lbox[1] < nbox[3] and nbox[1] < lbox[3]):
                     problems.append(f"label '{e['label']}' overlaps node {nid}")
+        for i in range(len(lboxes)):
+            if lboxes[i] is None:
+                continue
+            for j in range(i + 1, len(lboxes)):
+                if lboxes[j] is None:
+                    continue
+                bi, bj = lboxes[i], lboxes[j]
+                li = (bi[0] - bi[2] / 2, bi[1] - bi[3] / 2, bi[0] + bi[2] / 2, bi[1] + bi[3] / 2)
+                lj = (bj[0] - bj[2] / 2, bj[1] - bj[3] / 2, bj[0] + bj[2] / 2, bj[1] + bj[3] / 2)
+                if (li[0] < lj[2] and lj[0] < li[2]
+                        and li[1] < lj[3] and lj[1] < li[3]):
+                    problems.append(f"labels '{self.edges[i]['label']}' & "
+                                    f"'{self.edges[j]['label']}' overlap")
         return problems
 
 # =============================================================================

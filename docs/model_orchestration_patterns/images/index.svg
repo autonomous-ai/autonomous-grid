@@ -49,8 +49,8 @@
   <rect width="1520" height="568" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Fan-Out — same prompt, N answers, a vote</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="1172" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
-  <text x="1095" y="312" text-anchor="start" fill="#2b2b29" font-size="23">ties → expand</text>
+  <text x="1172" y="298" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
+  <text x="1095" y="324" text-anchor="start" fill="#2b2b29" font-size="23">ties → expand</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
