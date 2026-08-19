@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the orchestration-pattern diagrams.
 
-Every figure in docs/orchestration_patterns/images/ is generated from the token
+Every figure in docs/model_orchestration_patterns/images/ is generated from the token
 set below, so the whole family shares one geometry, one palette, one type scale,
 and cannot drift apart. A diagram is data: stages (columns) of nodes, edges
 between them, and the canvas is computed from what the drawing needs.
@@ -11,7 +11,7 @@ purple decides, coral is a terminal, arrows are warm grey, and there is no
 fourth hue and no decoration. The index is not a fourth drawing style -- it is
 the same figures composed onto one tall page, so it cannot disagree with them.
 
-Usage:  python3 docs/orchestration_patterns/build_diagrams.py
+Usage:  python3 docs/model_orchestration_patterns/build_diagrams.py
 """
 from __future__ import annotations
 import os
