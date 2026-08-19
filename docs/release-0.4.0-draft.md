@@ -81,6 +81,45 @@ same wall clock only because the weights moved often enough.
 - One unauthenticated request could stall a grid for 49 seconds before v0.4.0. It can't now
   (bounded quantifiers, clip-before-scan, a body cap, and a background writer).
 
+## ⚠️ Before you deploy: every existing project becomes grid-visible
+
+ADR 0034 D-k changes who can reach a project, and the change lands **on the deploy** rather than on
+anyone opting in.
+
+On a grid the control plane provisions per email domain, a project is now reachable by **anyone
+signed in to that grid** unless its owner marks it private. That applies to every project that
+already exists, because a project written before this release carries no visibility at all and no
+visibility means shared. **Imported repositories are included**, and they are the ones to think
+about: a company repository imported into a project last month is readable by everyone on the grid
+the moment this relay restarts.
+
+There is a per-project instrument — `grid project private <id>`, the owner's, reversible with `grid
+project share` — but it has to be run on each project somebody wants restricted, and it can only be
+run *after* the deploy. Plan for that rather than discovering it.
+
+Two things the RELAY cannot check for you, because they live in the control plane:
+
+- **`GRID_PRIVATE_DOMAIN_ENABLED` must be on.** It is off by default and strictly opt-in.
+- **`GRID_PRIVATE_DOMAIN_BLOCKLIST` must be non-empty** and must list the public mail providers.
+  Unset, `someone@gmail.com` provisions a grid shared by *every Gmail account*. Before this release
+  that misconfiguration cost a shared grid; after it, it costs shared source.
+
+What limits the blast radius is that the relay refuses to serve the rule at all unless **both** are
+true of itself: it is running in Grid mode, and its network type is the per-domain one. Every other
+relay behaves exactly as it did before this release — no new access, nothing to undo. If you are
+unsure which you are running, that is the thing to check first.
+
+Both halves matter. Grid mode is what makes the rule's premise true at all: there the relay accepts
+only a control-plane-signed token and refuses public API keys outright, so *signed in to this grid*
+really does mean *a colleague*. Outside it a relay accepts any API key it ever issued and any
+locally-signed token, neither carrying a domain — so a relay set to the per-domain network type
+without Grid mode would share every non-private project with every key holder. It does not, and
+that is checked rather than documented.
+
+**Roll the relay out before the CLI.** A CLI that has `grid project share` / `private` against a
+relay that does not is refused with a sentence saying so; the other way round is a relay serving the
+new rule with clients that cannot mark or change a project's visibility.
+
 ## Known limits
 
 - **Local-mode node auth is unresolved.** An unauthenticated `PUT /nodes/{id}` on a LAN means a

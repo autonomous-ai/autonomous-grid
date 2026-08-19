@@ -5886,6 +5886,76 @@ def test_sweep_orphans_never_targets_its_own_pid(monkeypatch):
     assert orphan_sweep.sweep_orphans("__remote-engine", "n1") == orphan_sweep.SweepResult((), (), ())
 
 
+# --- a second GRID_HOME on the same box (dev-VM finding E-03) ------------------------------------
+# The sweep's discriminator is the argv, and the argv is the identity of a *grid*, not of an
+# installation. Two accounts serving one grid from one provider box — the shared host ADR 0032 is
+# written for — spawn children that agree in every token, so one operator's leave reaped the other's
+# provider and said nothing. Reproduced live on the dev VM before it was reproduced here.
+
+def test_sweep_orphans_spares_a_child_that_belongs_to_another_grid_home(monkeypatch, capsys):
+    """A match we can PROVE runs from a different `GRID_HOME` is left alone, and named on stderr.
+
+    Both rows carry the same network id and the same marker; only the environment separates them.
+    Killing 222 is E-03: the other account's provider goes down mid-task, unregistered, with the
+    operator told only that their own grid was left.
+    """
+    from shared import orphan_sweep, process_home
+
+    ps = "\n".join([
+        "  111 /opt/grid-public/bin/grid __remote-engine n1 codex",   # ours
+        "  222 /opt/grid-public/bin/grid __remote-engine n1 claude",  # the other account's
+    ])
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output", lambda: ps)
+    monkeypatch.setattr(process_home, "home_of",
+                        {111: "/root/.grid-provider", 222: "/root/.grid-provider3"}.get)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid",
+                        lambda pid: pid != 222 or pytest.fail("swept another GRID_HOME's child"))
+
+    result = orphan_sweep.sweep_orphans("__remote-engine", "n1")
+    assert result.reaped == (111,)
+    assert result.survivors == () and result.foreign == ()  # spared, not failed — nothing is wrong here
+    err = capsys.readouterr().err
+    assert "222" in err and "/root/.grid-provider3" in err  # never silent: it names pid AND home
+
+
+def test_sweep_orphans_still_reaps_a_child_whose_home_it_cannot_read(monkeypatch):
+    """The positive control that keeps the fix from becoming a bigger bug than E-03.
+
+    macOS and Windows can read no process's environment at all (measured on macOS 26.6: `ps -E`
+    prints none even for the caller's own child), so `home_of` answers `None` for every match there.
+    Unknown must stay killable, or the record-less orphan this whole sweep exists to reap is stranded
+    on every platform but Linux — with `grid leave` reporting a clean teardown over it.
+    """
+    from shared import orphan_sweep, process_home
+
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  111 /bin/grid __remote-engine n1 codex")
+    monkeypatch.setattr(process_home, "home_of", lambda pid: None)
+    monkeypatch.setattr(orphan_sweep.run_records, "terminate_pid", lambda pid: True)
+
+    assert orphan_sweep.sweep_orphans("__remote-engine", "n1").reaped == (111,)
+
+
+def test_find_orphans_never_reports_another_grid_homes_child(monkeypatch):
+    """The detect-only half inherits the same rule, and it matters for a different reason.
+
+    `grid logout` reads this to decide which grids still have a live child before it deletes the
+    credentials that address them. Another account's provider is not this identity's to report, tear
+    down, or be warned about — the sign-out would refuse to complete over somebody else's process.
+    """
+    from shared import orphan_sweep, process_home, run_records
+
+    monkeypatch.setenv("GRID_HOME", "/root/.grid-provider")
+    monkeypatch.setattr(orphan_sweep, "_process_table_output",
+                        lambda: "  222 /bin/grid __remote-engine n1 claude")
+    monkeypatch.setattr(process_home, "home_of", lambda pid: "/root/.grid-provider3")
+
+    scan = orphan_sweep.find_orphans(run_records.REMOTE_ENGINE_MARKER, ["n1"])
+    assert scan.found == {}  # absent, not an empty tuple — callers write `if nid in found`
+    assert scan.scanned is True  # we read the table fine; there is simply nothing of ours on it
+
+
 # --- detect-only pass (grid-leave issue 13) ------------------------------------------------------
 # `grid logout` has to decide WHICH grids to tear down before it touches any of them, and a
 # record-less orphan is only visible in the process table. `find_orphans` answers that question for
@@ -10901,6 +10971,8 @@ def test_local_gate_message_is_byte_for_byte_for_a_command_with_no_reason(monkey
         "members": ["members", "list"],
         "price": ["price", "show"],
         "router": ["router", "status"],
+        "task": ["task", "get", "T1"],
+        "project": ["project", "list"],
     }
     # A reason must be None or real text. An empty one would be masked by the `or` in ``local_stub``
     # *and* skipped by the `is None` filter below — the one state that is invisible in both
@@ -11329,6 +11401,20 @@ def _mock_relay(monkeypatch, handler, _real=httpx.Client):
         "Client",
         lambda *a, **k: _real(*a, **{**k, "transport": httpx.MockTransport(handler)}),
     )
+
+
+def _default_project_listing(project_id="P1"):
+    """What `GET /relay/v1/projects` answers a `grid task create` that was given no `--project`.
+
+    Since ADR 0033 D-o / issue 26 that path LOOKS UP the caller's own project called `default`
+    instead of creating one, so a handler standing in for a projectless create has to answer this
+    shape — a canned task-shaped reply would be read as an unreadable listing and refused.
+
+    `role: "owner"` is not decoration: the lookup filters on it, because the listing also carries
+    projects belonging to other people.
+    """
+    return httpx.Response(200, json={"projects": [
+        {"id": project_id, "name": "default", "role": "owner"}]})
 
 
 def test_relay_register_node_puts_envelope_with_bearer(monkeypatch, tmp_path):
@@ -12652,6 +12738,436 @@ def test_serve_loop_worker_death_stops_engine(monkeypatch, tmp_path):
     assert state.stop.is_set()
 
 
+def test_serve_loop_starts_no_task_worker_by_default(monkeypatch, tmp_path):
+    """Task serving is opt-in. Without `GRID_TASKS` a provider behaves exactly as it did before this
+    feature existed — no extra thread, no extra relay traffic, no subscription spent."""
+    from remote import serve, tasks
+
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(tasks, "task_loop", lambda state: pytest.fail("task loop must not run"))
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    assert not any(t.name.startswith("task-worker") for t in threading.enumerate())
+
+
+def test_serve_loop_starts_one_task_worker_when_enabled(monkeypatch, tmp_path):
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.delenv("GRID_MAX_TASKS", raising=False)
+    names: list[str] = []
+    started = threading.Event()
+
+    def fake_task_loop(state):
+        names.append(threading.current_thread().name)
+        started.set()
+        state.tasks_stop.wait(30)
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: (started.wait(5), state.stop.set()))
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    # One by default — turning task serving on may not also change how much of the operator's
+    # subscription it spends. `GRID_MAX_TASKS` is the only thing that does.
+    assert names == ["task-worker-1"]
+    assert state.tasks_stop.is_set()  # teardown retires it, or the thread outlives the engine
+
+
+# --- issue 09: how many tasks at once -------------------------------------------------------------
+
+
+def _count_task_workers(monkeypatch, tmp_path):
+    """Start the task workers with the loop stubbed out, and report the thread names they ran under."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    names: list[str] = []
+    lock = threading.Lock()
+
+    def fake_task_loop(state):
+        with lock:
+            names.append(threading.current_thread().name)
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threads = serve._start_task_worker(state)
+    for thread in threads:
+        thread.join(timeout=5)
+    return names, state
+
+
+def test_a_provider_runs_as_many_tasks_at_once_as_it_was_configured_to(monkeypatch, tmp_path):
+    """The per-provider ceiling ADR 0032 calls for: configured by the operator who owns the
+    subscription, never benchmarked. It binds alongside the subscription's own signal — whichever
+    runs out first is the one that stops this provider claiming."""
+    monkeypatch.setenv("GRID_MAX_TASKS", "3")
+
+    names, _state = _count_task_workers(monkeypatch, tmp_path)
+
+    assert sorted(names) == ["task-worker-1", "task-worker-2", "task-worker-3"]
+
+
+@pytest.mark.parametrize("value", ["", "0", "-2", "lots", "1.5", "1e3000"])
+def test_a_misconfigured_task_ceiling_falls_back_instead_of_retiring_task_serving(
+        monkeypatch, tmp_path, capsys, value):
+    """Same rule as `tasks.task_timeout()`: a provider that refused to serve tasks because an
+    operator typed `three` would take task serving down for the life of the process, which is a far
+    worse answer than running with the default and saying so."""
+    monkeypatch.setenv("GRID_MAX_TASKS", value)
+
+    names, state = _count_task_workers(monkeypatch, tmp_path)
+
+    assert names == ["task-worker-1"]
+    assert not state.tasks_stop.is_set()
+    if value:
+        assert "GRID_MAX_TASKS" in capsys.readouterr().err
+
+
+def test_one_worker_that_cannot_start_does_not_cost_the_others(monkeypatch, tmp_path, capsys):
+    """`RuntimeError: can't start new thread` under exhaustion is the reason there is no upper clamp
+    on the count: the operator's number is honoured, and the machine's own limit is discovered rather
+    than guessed at. Discovering it must leave the workers that DID start running."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "3")
+    real_thread = threading.Thread
+    attempts = []
+
+    def flaky_thread(*args, **kwargs):
+        attempts.append(kwargs.get("name"))
+        if len(attempts) == 2:
+            raise RuntimeError("can't start new thread")
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(tasks, "task_loop", lambda state: None)
+    monkeypatch.setattr(serve.threading, "Thread", flaky_thread)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threads = serve._start_task_worker(state)
+
+    assert len(threads) == 2                     # the third and first started; the second did not
+    assert not state.tasks_stop.is_set()         # task serving is still on
+    assert "can't start new thread" in capsys.readouterr().err
+
+
+def test_task_serving_retires_only_when_no_worker_could_start(monkeypatch, tmp_path, capsys):
+    """Nothing is claiming, so saying so is the honest record — the same retirement a relay with no
+    tasks plane produces, and it still leaves inference alone."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "2")
+    monkeypatch.setattr(tasks, "task_loop", lambda state: None)
+    monkeypatch.setattr(serve.threading, "Thread", _raise(RuntimeError("can't start new thread")))
+    state = _serve_state(monkeypatch, tmp_path)
+
+    assert serve._start_task_worker(state) == []
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()
+
+
+def test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON(monkeypatch, tmp_path):
+    """Task capacity adds exactly ONE key to the heartbeat, and nothing the relay routes on.
+
+    ⚠️ **This test used to assert `state.load() == before`** — that capacity reached the wire at all
+    was the thing it pinned, and ADR 0033 D-l (issue 19b) overturned it: with several members on one
+    subscription, a provider's self-withdrawal has to be visible to the people waiting on it. What
+    survives is the half that was always the real point, and it is narrower than the old assertion
+    looked: the relay routes INFERENCE on `load`, and a provider out of TASK headroom is still a
+    perfectly good provider of inference. So every routing key must be byte-identical, and
+    `tasks_paused_until` must be the only difference.
+    """
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    before = state.load()
+    assert task_capacity.PAUSED_LOAD_KEY not in before
+
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+
+    assert gate.pause_seconds() > 0.0        # this provider really is out of task headroom
+    after = state.load()
+    assert set(after) - set(before) == {task_capacity.PAUSED_LOAD_KEY}
+    # ...and every key the relay ROUTES on is untouched, which is what the old assertion was for.
+    assert {k: v for k, v in after.items() if k != task_capacity.PAUSED_LOAD_KEY} == before
+
+
+def test_a_provider_out_of_task_headroom_says_when_it_comes_back(monkeypatch, tmp_path):
+    """The key a team reads. Issue 19a's `/status` could say how deep the queue was and not why
+    nothing was moving, because nothing published this."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+
+    published = state.load()[task_capacity.PAUSED_LOAD_KEY]
+
+    # ISO 8601, UTC, and parseable — the shape every other timestamp on this wire has. A float would
+    # make the relay guess at units, and the relay's half of this is a fail-open reader.
+    from datetime import datetime, timezone
+
+    parsed = datetime.fromisoformat(published)
+    assert parsed.tzinfo is not None
+    ahead = (parsed - datetime.now(timezone.utc)).total_seconds()
+    assert 3400.0 < ahead <= 3601.0, published
+
+
+def test_a_provider_that_came_back_stops_publishing_the_pause(monkeypatch, tmp_path):
+    """Absent is the wire's "nothing withheld" (ADR 0019's polarity corollary), so recovery is the
+    key disappearing rather than a second key saying it recovered. Without this a provider that came
+    back an hour ago still reads as withdrawn to every member of every project."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+    gate = task_capacity.TaskCapacity()
+    monkeypatch.setattr(task_capacity, "shared", lambda: gate)
+    state = _serve_state(monkeypatch, tmp_path)
+    gate.observe({"status": "rejected", "rateLimitType": "five_hour",
+                  "resetsAt": int(time.time() + 3600)})
+    assert task_capacity.PAUSED_LOAD_KEY in state.load()
+
+    gate.observe({"status": "allowed", "rateLimitType": "five_hour"})
+
+    assert task_capacity.PAUSED_LOAD_KEY not in state.load()
+
+
+def test_the_heartbeat_never_fails_over_a_capacity_reading(monkeypatch, tmp_path, capsys):
+    """The bound this key must not cross. `load()` is what the heartbeat is built from, and a
+    heartbeat that raises is a provider that TTLs out of the grid entirely — it would stop serving
+    inference over a telemetry value about tasks. So the fold is best-effort in the same way the
+    codex quota and the seat allowance already are."""
+    from shared.system import gpu
+
+    from remote import task_capacity
+
+    monkeypatch.setattr(gpu, "load_snapshot", lambda timeout=3.0: {})
+
+    class _Exploding:
+        def paused_until(self):
+            raise RuntimeError("the capacity gate is broken")
+
+    monkeypatch.setattr(task_capacity, "shared", _Exploding)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    load = state.load()
+
+    assert task_capacity.PAUSED_LOAD_KEY not in load
+    assert load["platform"] == "linux", "the rest of the heartbeat was lost with it"
+
+
+def test_a_provider_saturated_with_inference_can_still_take_a_task(monkeypatch):
+    """The other direction of the same independence. The task loop reads nothing from the inference
+    counters — a box with every poll slot busy is a box whose Claude subscription is untouched, and
+    the two ceilings are not the same ceiling (ADR 0032)."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    state.max_concurrency = 4
+    state.enter_inference = state.exit_inference = lambda: None
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=_scripted_gate([], []))
+
+    assert reported == ["T1"]
+
+
+def test_serve_loop_task_worker_death_does_not_stop_the_engine(monkeypatch, tmp_path):
+    """The deliberate counterpart to `test_serve_loop_worker_death_stops_engine`.
+
+    A dead POLL worker strands advertised inference capacity, so it stops the engine. A dead TASK
+    worker strands nothing that was advertised — the node keeps serving inference — so it must NOT.
+    This is the acceptance criterion "stopping one leaves the other serving", in the direction that
+    `_supervise` would silently get wrong.
+    """
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    polls = threading.Event()
+
+    def boom(state):
+        raise RuntimeError("task plane exploded")
+
+    def poll(state):
+        polls.wait(5)          # keep serving inference after the task worker has died
+        state.stop.set()
+
+    monkeypatch.setattr(tasks, "task_loop", boom)
+    monkeypatch.setattr(serve, "_poll_loop", poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threading.Timer(0.3, polls.set).start()
+    serve._serve_loop(state)
+
+    # The engine stopped because the POLL worker said so, not because the task worker died.
+    assert polls.is_set()
+
+
+def test_task_worker_that_fails_to_START_does_not_take_the_engine_down(monkeypatch, tmp_path, capsys):
+    """The one call in this feature that runs on the MAIN thread, outside every other guard.
+
+    `_start_task_worker` is invoked before `_serve_loop`'s own try/finally, so an exception there —
+    an import fault in `remote/tasks.py`, `RuntimeError: can't start new thread` under exhaustion —
+    would propagate out of `_serve_loop` to the top-level handler, unregister the node and kill the
+    process. A task-plane STARTUP fault must be as survivable as a task-plane runtime fault.
+    """
+    from remote import serve
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(serve, "_task_serving_enabled", _raise(RuntimeError("cannot start thread")))
+    monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)  # must return normally, not raise
+
+    assert "cannot start thread" in capsys.readouterr().err  # loud, but not fatal
+
+
+def test_task_worker_death_is_logged_and_retires_task_serving(monkeypatch, tmp_path, capsys):
+    """`task_loop` self-guards, so reaching here means a fault OUTSIDE its guard. The thread must
+    not simply vanish: an unguarded raise would strand task serving silently for the life of the
+    process — the exact failure `_supervise` exists to prevent, minus the engine teardown."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(tasks, "task_loop", _raise(RuntimeError("task plane exploded")))
+    state = _serve_state(monkeypatch, tmp_path)
+
+    threads = serve._start_task_worker(state)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    err = capsys.readouterr().err
+    assert "task-worker" in err and "task plane exploded" in err
+    assert state.tasks_stop.is_set()   # task serving is honestly marked as retired
+    assert not state.stop.is_set()     # ...and inference is untouched
+
+
+def test_serve_loop_task_stop_does_not_stop_inference(monkeypatch, tmp_path):
+    """Retiring the task loop (a relay with no tasks plane, a bad task credential) leaves the poll
+    workers serving — the other direction of the same independence."""
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    served: list[int] = []
+    retired = threading.Event()
+
+    def fake_task_loop(state):
+        state.tasks_stop.set()   # retire immediately, as the 404 path does
+        retired.set()
+
+    def poll(state):
+        retired.wait(5)
+        served.append(1)         # inference still dispatching after the task loop retired
+        state.stop.set()
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    monkeypatch.setattr(serve, "_poll_loop", poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    # Inference dispatched AFTER the task loop retired — that is the whole claim. (`state.stop` is
+    # set here by the poll worker's own exit, so asserting on it would prove nothing either way.)
+    assert served == [1]
+    assert state.tasks_stop.is_set()
+
+
+def test_serve_state_exposes_an_independent_task_stop_event(monkeypatch, tmp_path):
+    """Two events, not one: `stop` tears the engine down, `tasks_stop` retires task serving alone."""
+    state = _serve_state(monkeypatch, tmp_path)
+
+    state.tasks_stop.set()
+
+    assert not state.stop.is_set()
+
+
+def test_a_task_and_an_inference_job_are_in_flight_at_the_same_moment(monkeypatch, tmp_path):
+    """Issue 03's last criterion, asserted on the two planes being busy AT ONCE.
+
+    Its three siblings each RETIRE one plane and watch the other keep going — task loop retires and
+    inference still dispatches, inference saturates and a task is still claimable, a capacity pause
+    leaves inference untouched. Every one of them is a statement about a plane that has STOPPED, and
+    all three would still pass if the two planes ran strictly one after the other. What ADR 0032
+    actually claims is concurrency: a provider serves inference *while* a task is running, for the
+    hour that task takes.
+
+    The failure this closes is not hypothetical — issue 01's review found `_start_task_worker`
+    running unguarded on the main thread, ahead of `_serve_loop`'s try/finally. A task loop that
+    blocked there would starve inference completely, and nothing in the suite would have said so:
+    here the poll worker never observes a task in flight, and the test fails on a bounded wait
+    instead of hanging.
+
+    A two-way handshake, not a pair of flags. The obvious version — the poll worker checking that
+    the task "has not finished yet" — passes even when the planes ARE serialized: a task loop that
+    ran first and gave up on its own timeout has still never been marked finished, so the check reads
+    True with nothing overlapping. What must be recorded is the TASK's own observation that inference
+    reached it while it was still inside its loop, because that is the only statement a serialized
+    run cannot make.
+    """
+    from remote import serve, tasks
+
+    monkeypatch.setenv("GRID_TASKS", "1")
+    task_in_flight = threading.Event()
+    inference_dispatched = threading.Event()
+    recorded = threading.Event()
+    overlapped: list[bool] = []
+
+    def fake_task_loop(state):
+        task_in_flight.set()
+        # A task runs for minutes. Hold the plane open and see whether inference gets served here.
+        overlapped.append(inference_dispatched.wait(5))
+        recorded.set()
+        state.tasks_stop.set()
+
+    def poll(state):
+        if task_in_flight.wait(5):
+            inference_dispatched.set()
+        state.stop.set()
+
+    monkeypatch.setattr(tasks, "task_loop", fake_task_loop)
+    monkeypatch.setattr(serve, "_poll_loop", poll)
+    monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
+    state = _serve_state(monkeypatch, tmp_path)
+
+    serve._serve_loop(state)
+
+    # `_serve_loop` deliberately does NOT join the task thread — a task runs for minutes and the
+    # drain budget belongs to in-flight inference — so it can return before the observation above is
+    # recorded. Without this wait the test passes or fails on scheduling luck.
+    assert recorded.wait(5), "the task loop never finished recording what it saw"
+    assert overlapped == [True], (
+        "no inference was dispatched while the task loop was still running — the two planes are "
+        "taking turns, not running side by side")
+
+
 def test_serve_loop_drain_lets_inflight_job_finish(monkeypatch, tmp_path):
     """A job that finishes within the drain budget submits its result before _serve_loop returns —
     'drain', not 'kill on stop'."""
@@ -12756,6 +13272,281 @@ def test_relay_poll_malformed_body_raises_relay_error(monkeypatch):
     _mock_serve_engine(monkeypatch, lambda r: httpx.Response(200, content=b"<html>gateway hiccup</html>"))
     with pytest.raises(relay.RelayError):
         relay.poll("https://relay.example", "AT")
+
+
+# ---------------------------------------------------------------------------
+# Distributed tasks — the provider's claim client (remote/relay.py, ADR 0032)
+# ---------------------------------------------------------------------------
+
+def test_claim_task_posts_to_the_tasks_claim_endpoint(monkeypatch):
+    """A task is claimed on its OWN endpoint, never `/poll`: tasks are a durable queue claimed at
+    poll time, and putting them on the inference route would mix that with an ephemeral,
+    enqueue-time-routed one (ADR 0032 D-a). The path is a cross-repo lockstep value."""
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"task_id": "T1", "prompt": "hello"})
+
+    _mock_serve_engine(monkeypatch, handler)
+    job = relay.claim_task("https://relay.example", "AT")
+
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/claim")
+    assert seen["auth"] == "Bearer AT"
+    assert job == {"task_id": "T1", "prompt": "hello"}
+
+
+def test_claim_task_returns_none_on_204(monkeypatch):
+    """204 is "no work waiting", not a failure — the loop re-polls rather than backing off."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(204))
+    assert relay.claim_task("https://relay.example", "AT") is None
+
+
+def test_claim_task_malformed_body_raises_relay_error(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(200, content=b"<html>nope</html>"))
+    with pytest.raises(relay.RelayError):
+        relay.claim_task("https://relay.example", "AT")
+
+
+def test_claim_task_401_raises_relay_unauthorized(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(401, json={"detail": "nope"}))
+    with pytest.raises(relay.RelayUnauthorized):
+        relay.claim_task("https://relay.example", "AT")
+
+
+def test_claim_task_404_carries_the_status_so_the_loop_can_retire(monkeypatch):
+    """A relay with no tasks plane 404s. The loop needs the STATUS to tell that apart from a
+    transient fault, or an old relay produces an infinite retry storm."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(404, text="Not Found"))
+    with pytest.raises(relay.RelayError) as exc:
+        relay.claim_task("https://relay.example", "AT")
+    assert exc.value.status == 404
+
+
+def test_report_task_result_posts_the_terminal_state(monkeypatch):
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "T1", "state": "completed"})
+
+    _mock_serve_engine(monkeypatch, handler)
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="hi\n", error=None)
+
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/T1/result")
+    assert seen["body"] == {"state": "completed", "output": "hi\n", "error": None}
+
+
+def test_report_task_result_carries_the_session_id_when_there_is_one(monkeypatch):
+    """The terminal report is where the session id becomes durable — the relay stores it on the task
+    so the project's next task can `--resume` the same conversation (issue 06)."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda request: (
+        seen.update(body=json.loads(request.content)),
+        httpx.Response(200, json={}))[-1])
+
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="completed", output="hi", error=None,
+        session_id="012c9e09-abcd")
+
+    assert seen["body"]["session_id"] == "012c9e09-abcd"
+
+
+def test_report_task_result_omits_the_session_id_rather_than_sending_null(monkeypatch):
+    """Absent must mean "do not change it", not "clear it".
+
+    A run that died before the agent ever started has no session id, and sending `null` would erase
+    the project's conversation — every later task on that project would then silently start from
+    nothing. The relay reads absence the same way; this is the client half of that contract.
+    """
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda request: (
+        seen.update(body=json.loads(request.content)),
+        httpx.Response(200, json={}))[-1])
+
+    relay.report_task_result(
+        "https://relay.example", "AT", "T1", state="failed", output=None, error="no binary")
+
+    assert "session_id" not in seen["body"]
+
+
+def test_report_task_result_percent_encodes_the_task_id(monkeypatch):
+    """A task id reaches us over the wire; it interpolates into a PATH. Never trust its shape."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(
+        monkeypatch,
+        lambda r: (seen.update(raw=r.url.raw_path), httpx.Response(200, json={}))[1],
+    )
+    relay.report_task_result(
+        "https://relay.example", "AT", "../../nodes/evil", state="failed", output=None, error="x")
+
+    # `raw_path` is what goes on the wire; `URL.path` would show it already decoded and hide this.
+    assert seen["raw"] == b"/relay/v1/tasks/..%2F..%2Fnodes%2Fevil/result"
+
+
+def test_report_task_result_raises_on_failure(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(403, text="not your lease"))
+    with pytest.raises(relay.RelayError):
+        relay.report_task_result(
+            "https://relay.example", "AT", "T1", state="completed", output="x", error=None)
+
+
+def test_publish_task_events_posts_the_batch(monkeypatch):
+    """Events go up as a BATCH on their own endpoint (a cross-repo lockstep path). One POST per
+    line would be a fresh TCP+TLS handshake per line once a real agent is producing them."""
+    from remote import relay
+
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"first_seq": 0, "last_seq": 1, "count": 2})
+
+    _mock_serve_engine(monkeypatch, handler)
+    events = [{"type": "task.output", "text": "a"}, {"type": "task.output", "text": "b"}]
+    relay.publish_task_events("https://relay.example", "AT", "T1", events)
+
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/T1/events")
+    assert seen["body"] == {"events": events}
+
+
+def test_publish_task_events_percent_encodes_the_task_id(monkeypatch):
+    """Same trap as `report_task_result`: the id came off the wire and lands in a PATH."""
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(
+        monkeypatch,
+        lambda r: (seen.update(raw=r.url.raw_path), httpx.Response(200, json={}))[1],
+    )
+    relay.publish_task_events("https://relay.example", "AT", "../../nodes/evil", [])
+
+    assert seen["raw"] == b"/relay/v1/tasks/..%2F..%2Fnodes%2Fevil/events"
+
+
+def test_publish_task_events_401_raises_relay_unauthorized(monkeypatch):
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(401, json={"detail": "nope"}))
+    with pytest.raises(relay.RelayUnauthorized):
+        relay.publish_task_events("https://relay.example", "AT", "T1", [])
+
+
+def test_publish_task_events_carries_the_status_so_the_publisher_can_stop(monkeypatch):
+    """403 (the lease moved) and 404 (already terminal) are verdicts, not blips — the publisher
+    must be able to tell them apart from a transient fault and stop rather than spin."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(403, text="not your lease"))
+    with pytest.raises(relay.RelayError) as exc:
+        relay.publish_task_events("https://relay.example", "AT", "T1", [])
+    assert exc.value.status == 403
+
+
+def test_stream_task_events_yields_seq_and_payload(monkeypatch):
+    """The `id:` line IS the client's cursor — without it a reattach cannot say where it got to."""
+    from remote import relay
+
+    body = (
+        'id: 0\ndata: {"type": "task.output", "text": "a"}\n\n'
+        'id: 1\ndata: {"type": "task.terminal", "state": "completed"}\n\n'
+    )
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    got = list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+    assert got == [
+        (0, {"type": "task.output", "text": "a"}),
+        (1, {"type": "task.terminal", "state": "completed"}),
+    ]
+
+
+def test_stream_task_events_sends_the_cursor_and_encodes_the_id(monkeypatch):
+    from remote import relay
+
+    seen = {}
+    _mock_serve_engine(monkeypatch, lambda r: (
+        seen.update(raw=r.url.raw_path, query=dict(r.url.params)),
+        httpx.Response(200, text="", headers={"Content-Type": "text/event-stream"}),
+    )[1])
+
+    list(relay.stream_task_events("https://relay.example", "AT", "a/b", after_seq=7))
+
+    assert seen["query"] == {"after_seq": "7"}
+    assert b"/relay/v1/tasks/a%2Fb/events" in seen["raw"]
+
+
+def test_stream_task_events_skips_pings_and_unparseable_blocks(monkeypatch):
+    """`EventSourceResponse` interleaves `: ping` comments on an idle stream. A follower that
+    treated one as an event would render garbage; one that CRASHED on it would drop the stream."""
+    from remote import relay
+
+    body = (
+        ": ping\n\n"
+        'id: 0\ndata: {"type": "task.output"}\n\n'
+        "id: 1\ndata: not-json\n\n"
+        ": ping\n\n"
+        'id: 2\ndata: {"type": "task.terminal", "state": "failed"}\n\n'
+    )
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    got = list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+    assert [seq for seq, _p in got] == [0, 2]
+
+
+def test_stream_task_events_survives_a_payload_that_blows_the_recursion_limit(monkeypatch):
+    """`json.loads` raises `RecursionError` — a `RuntimeError`, NOT a `ValueError` — so a guard
+    written as `except ValueError` has a hole no malformed-input parametrize finds. The same trap
+    is already guarded two functions away in this file (`_task_error_message`). An escape here is
+    a raw traceback out of `grid task follow`: `_task_follow` catches `RelayError`, not this."""
+    from remote import relay
+
+    depth = 200_000
+    deep = '{"type":"task.output","n":' + '{"n":' * depth + 'null' + '}' * depth + '}'
+    body = f"id: 0\ndata: {deep}\n\n" + 'id: 1\ndata: {"type": "task.terminal"}\n\n'
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    got = list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+
+    # The unreadable event is skipped; the stream keeps going and still delivers the terminal.
+    assert [seq for seq, _p in got] == [1]
+
+
+def test_stream_task_events_maps_an_error_status(monkeypatch):
+    """410 (expired) and 403 (not yours) must reach the caller as a classified error, not as an
+    empty stream that reads exactly like "nothing has happened yet"."""
+    from remote import relay
+
+    _mock_serve_engine(monkeypatch, lambda r: httpx.Response(410, json={"detail": "expired"}))
+    with pytest.raises(relay.RelayError) as exc:
+        list(relay.stream_task_events("https://relay.example", "AT", "T1", after_seq=-1))
+    assert exc.value.status == 410
 
 
 def test_serve_node_id_comes_from_access_token_jwt():
@@ -21369,6 +22160,3866 @@ def test_relay_set_model_price_omits_unset_metadata(monkeypatch, tmp_path):
     assert set(seen["body"]) == {"model", "modality", "input_rate", "output_rate", "cache_rate"}
 
 
+# ---------------------------------------------------------------------------
+# `grid task` — the distributed-tasks client (ADR 0032)
+# ---------------------------------------------------------------------------
+
+def test_task_subcommands_are_wired_to_the_handler():
+    parser = cli.build_parser()
+
+    create = parser.parse_args(["task", "create", "--prompt", "say hello"])
+    assert create.handler is cli.cmd_remote_task
+    assert (create.subcommand, create.prompt) == ("create", "say hello")
+
+    get = parser.parse_args(["task", "get", "T1"])
+    assert get.handler is cli.cmd_remote_task
+    assert (get.subcommand, get.task_id) == ("get", "T1")
+
+
+def test_task_follow_is_wired_to_the_handler():
+    parser = cli.build_parser()
+
+    follow = parser.parse_args(["task", "follow", "T1"])
+    assert follow.handler is cli.cmd_remote_task
+    assert (follow.subcommand, follow.task_id, follow.after_seq) == ("follow", "T1", -1)
+
+
+def test_task_follow_takes_a_cursor():
+    """`--after-seq` is what makes reattaching after a lost connection lose nothing and repeat
+    nothing — the whole reason the log is sequenced."""
+    args = cli.build_parser().parse_args(["task", "follow", "T1", "--after-seq", "42"])
+    assert args.after_seq == 42
+
+
+def _sse(*blocks):
+    return "".join(blocks)
+
+
+def _block(seq, payload):
+    return f"id: {seq}\ndata: {json.dumps(payload)}\n\n"
+
+
+def test_task_follow_renders_events_as_they_arrive(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.attempt_started", "attempt": 1, "provider_id": "node-2"}),
+        _block(1, {"type": "task.output", "text": "hello world"}),
+        _block(2, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "hello world" in out
+    assert "completed" in out
+
+
+def test_task_follow_discloses_a_retry_and_keeps_one_unbroken_cursor(monkeypatch, tmp_path, capsys):
+    """A client attached across a reclaim sees the retry, and its cursor never means something else.
+
+    The disclosure is the point (ADR 0032 D-d). The relay resets the TASK's branch to the input
+    commit, but effects outside it are not undone, so a user watching an agent start over needs to
+    be told that is what is happening rather than left to infer it from the output repeating. On
+    stderr, beside the other diagnostics, so `grid task follow > out.txt` keeps the task's own
+    output clean.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.attempt_started", "attempt": 1, "provider_id": "node-2"}),
+        _block(1, {"type": "task.output", "text": "half a result"}),
+        _block(2, {"type": "task.retry", "reason": "lease_expired", "attempt": 1,
+                   "max_attempts": 3, "previous_provider_id": "node-2"}),
+        _block(3, {"type": "task.attempt_started", "attempt": 2, "provider_id": "node-9"}),
+        _block(4, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "retry" in captured.err.lower() or "retrying" in captured.err.lower(), captured.err
+    assert "lease" in captured.err.lower(), "the user is never told WHY the attempt was redone"
+    # The sequence continues across the retry rather than restarting, so a reattaching client's
+    # cursor still means what it meant.
+    assert "attempt 2 started" in captured.out
+
+
+def test_task_follow_no_longer_claims_a_lost_attempts_git_changes_are_undone(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-c makes the old sentence FALSE, and it was printed verbatim.
+
+    Under ADR 0032 the reaper's reset covered the only ref that mattered, so "Changes the lost
+    attempt made in git are undone" was true. Since D-c a turn also fast-forwards the branch it
+    settles onto — and the reaper resets `task/<id>` and never that — so an interrupted settle
+    leaves the lost attempt's work on the base the NEXT turn is cut from. Telling a user it was
+    undone is worse than saying nothing: it is the one line they would rely on when deciding
+    whether to re-run the work by hand.
+
+    ⚠️ **Re-keyed onto the CONVERSATION by ADR 0034 D-e/D-m (issue 41).** The branch left ahead is
+    `wip/<conversation_id>`, not `wip/<member_key>`, and the recovery this names — `grid project
+    wip reset` — is the one command that SURVIVES the clean break deleting promote and integrate.
+    So the assertions below moved with the vocabulary, and the last one is new: the recovery has to
+    be named in the form that actually parses, because `wip reset` now takes the conversation id as
+    a second positional and the old member-keyed form would refuse whoever retyped it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.retry", "reason": "lease_expired", "attempt": 1,
+                   "max_attempts": 3}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "in git are undone" not in captured.err, (
+        "the CLI still claims the lost attempt's git changes are undone; D-c made that false")
+    # What replaced it has to be MORE specific, not merely vaguer — a user who is told nothing
+    # about git is left with the same wrong assumption they started with.
+    assert "turn's own branch" in captured.err, captured.err
+    assert "conversation's branch" in captured.err, captured.err
+    # And the recovery is named in a form that PARSES. `wip reset` takes the conversation id as a
+    # second positional since issue 41, so a bare `grid project wip reset` would send the reader to
+    # a command that refuses them for the argument the message never mentioned.
+    assert "grid project wip reset <project-id> <conversation-id>" in captured.err, captured.err
+
+
+def test_task_follow_says_when_the_provider_hit_its_subscriptions_wall(monkeypatch, tmp_path, capsys):
+    """A user whose next task sits queued is owed the reason (ADR 0032 issue 09). The provider's own
+    `_warn` goes to the PROVIDER's log, which the person who submitted the task cannot read — so the
+    durable event log is the only copy that reaches them.
+
+    On stderr with the other diagnostics: this says nothing about the task's result, and
+    `grid task follow > out.txt` has to keep the task's own output clean.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.output", "text": "working"}),
+        _block(1, {"type": "task.rate_limit", "status": "rejected",
+                   "limit_type": "five_hour", "resets_at": 1785832800}),
+        _block(2, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    # "provider capacity", not "rate limit": the old wording opened with the words a reader takes as
+    # the verdict, which made even a HEALTHY reading look like a fault. The status is still verbatim.
+    assert "provider capacity" in captured.err.lower(), captured.err
+    assert "status=rejected" in captured.err, captured.err
+    assert "five_hour" in captured.err
+    assert "1785832800" not in captured.err, "a raw epoch is not a time anyone can read"
+    assert "working" in captured.out            # the task's own output is untouched
+
+
+def test_task_follow_renders_a_rate_limit_it_cannot_fully_read(monkeypatch, tmp_path, capsys):
+    """Every field on this event is optional — it is built from a subprocess's stdout. A follower
+    that raised on a null would take the whole stream down over a diagnostic."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.rate_limit", "status": None,
+                   "limit_type": None, "resets_at": None}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 0
+    # Still RENDERED, and that is the point of the null case: the provider drops only the reading it
+    # can positively identify as boring (`task_capacity.QUIET_STATUS`). A missing status is not that
+    # — it is news — so it reaches the follower and must not raise.
+    assert "provider capacity" in capsys.readouterr().err.lower()
+
+
+def test_task_follow_survives_a_reset_stamp_no_calendar_can_hold(monkeypatch, tmp_path, capsys):
+    """Reachable, not theoretical: the provider forwards the vendor's `resetsAt` to the client
+    UNBOUNDED — the 14-day sanity bound is the capacity gate's, and the event does not go through it.
+    A milliseconds-for-seconds stamp therefore arrives here intact, and `fromtimestamp` raises
+    `OverflowError` on it. A follower may never die on a diagnostic."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.rate_limit", "status": "rejected",
+                   "limit_type": "five_hour", "resets_at": 1785832800000}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+    err = capsys.readouterr().err
+
+    assert rc == 0
+    assert "five_hour" in err        # the rest of the line is still worth printing
+    assert "resets" not in err       # ...minus the part nobody could read
+
+
+def test_task_follow_exits_non_zero_when_the_task_failed(monkeypatch, tmp_path, capsys):
+    """The exit code is what a script watching a task branches on — a failed task that exits 0 is
+    a silent failure by any other name."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _block(0, {"type": "task.terminal", "state": "failed", "error": "exited 1"})
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 1
+    assert "exited 1" in capsys.readouterr().out
+
+
+def test_task_follow_sends_the_cursor_it_was_given(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (
+        seen.update(query=dict(r.url.params), path=r.url.path),
+        httpx.Response(200, text=_block(6, {"type": "task.terminal", "state": "completed"}),
+                       headers={"Content-Type": "text/event-stream"}),
+    )[1])
+
+    cli.main(["task", "follow", "T1", "--after-seq", "5"])
+
+    assert seen["path"] == "/relay/v1/tasks/T1/events"
+    assert seen["query"] == {"after_seq": "5"}
+
+
+def test_task_follow_reattaches_at_its_cursor_after_a_dropped_connection(
+        monkeypatch, tmp_path, capsys):
+    """The acceptance criterion, driven from the client: the stream dies mid-task and the follower
+    comes back asking for exactly what it has not seen — no gap, no repeat."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    cursors = []
+    attempts = {"n": 0}
+
+    def handler(request):
+        cursors.append(dict(request.url.params).get("after_seq"))
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # The relay answered, then the connection died two events in.
+            return httpx.Response(
+                200,
+                text=_sse(_block(0, {"type": "task.output", "text": "first"}),
+                          _block(1, {"type": "task.output", "text": "second"})),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(
+            200,
+            text=_sse(_block(2, {"type": "task.output", "text": "third"}),
+                      _block(3, {"type": "task.terminal", "state": "completed"})),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert cursors == ["-1", "1"], "the reattach must resume at the last seq actually seen"
+    assert out.count("first") == 1 and out.count("second") == 1, "no event may be repeated"
+    assert "third" in out, "no event may be lost"
+
+
+def test_task_follow_gives_up_rather_than_reconnecting_forever(monkeypatch, tmp_path, capsys):
+    """A relay that is simply gone must not turn a follow into an infinite loop."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        raise httpx.ConnectError("relay is gone")
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc != 0
+    assert attempts["n"] <= remote_task._RECONNECT_ATTEMPTS + 1
+
+
+def test_task_follow_stops_when_reattaching_keeps_yielding_nothing(monkeypatch, tmp_path, capsys):
+    """A clean end with no terminal event is ambiguous — the relay finishing and a proxy severing a
+    live stream look identical here. So it reattaches; what stops it is reattaching and learning
+    nothing new, not the first clean end."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(200, text="", headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 1
+    assert 1 < attempts["n"] <= remote_task._RECONNECT_ATTEMPTS + 1
+    # ⚠️ The wording changed with ADR 0034 D-m (issue 51) and the change is deliberate: this line is
+    # now printed about a conversation too, which has no "terminal event" — and "terminal event" was
+    # this system's vocabulary rather than the reader's either way.
+    assert "ended without saying it had finished" in capsys.readouterr().err
+
+
+def test_task_follow_keeps_following_while_a_severed_stream_still_makes_progress(
+        monkeypatch, tmp_path, capsys):
+    """Progress refills the reattach budget. A proxy that cuts a busy stream every few minutes must
+    not slowly starve a long task of retries and abandon it mid-run."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+    # More severed-but-productive rounds than the raw budget allows, so a test that passed without
+    # the refill would have to be passing for the wrong reason.
+    rounds = remote_task._RECONNECT_ATTEMPTS + 3
+
+    def handler(request):
+        attempts["n"] += 1
+        if attempts["n"] <= rounds:
+            return httpx.Response(
+                200, text=_block(attempts["n"] - 1, {"type": "task.output", "text": "tick"}),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(
+            200, text=_block(attempts["n"] - 1, {"type": "task.terminal", "state": "completed"}),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc == 0
+    assert capsys.readouterr().out.count("tick") == rounds
+
+
+def test_task_follow_does_not_retry_a_refusal(monkeypatch, tmp_path, capsys):
+    """403/404/410 are answers. Reconnecting cannot turn "not your task" into your task."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    attempts = {"n": 0}
+
+    def handler(request):
+        attempts["n"] += 1
+        return httpx.Response(410, json={"detail": "Task expired (past its deadline)"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert rc != 0
+    assert attempts["n"] == 1, "an answered refusal must not be retried"
+    assert "expired" in capsys.readouterr().err.lower()
+
+
+def test_task_follow_shows_a_coded_refusals_own_sentence_not_its_json(
+        monkeypatch, tmp_path, capsys):
+    """Since ADR 0033 D-l every 4xx in this plane carries `detail={"code","message",...}`.
+
+    The one-shot task routes already render `message`; the follow path builds its text from
+    `resp.text`, so the object arrives on the reader's terminal as raw JSON with the sentence the
+    relay wrote buried inside it. The sentence is the whole reason the relay writes one.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(410, json={"detail": {
+        "code": "task_expired", "message": "Task expired (past its deadline)"}}))
+    rc = cli.main(["task", "follow", "T1"])
+
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "Task expired (past its deadline)" in err
+    assert '"code"' not in err, f"the refusal object reached the reader verbatim:\n{err}"
+
+
+def test_task_follow_json_emits_one_object_per_line(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.output", "text": "a"}),
+        _block(1, {"type": "task.terminal", "state": "completed", "error": None}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1", "--json"])
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert [json.loads(ln)["seq"] for ln in lines] == [0, 1]
+    assert json.loads(lines[0])["event"]["text"] == "a"
+
+
+def test_task_follow_renders_an_event_type_it_has_never_heard_of(monkeypatch, tmp_path, capsys):
+    """Event types grow. A follower that only rendered known types would show a user nothing while
+    the relay faithfully streamed them the thing they asked for.
+
+    The fixture must be a type this build genuinely does not know, and picking a REAL one that has
+    not landed yet has now failed twice: `task.tree` stood in for it until issue 08 rendered it, and
+    `task.rate_limit` until issue 09 did. Each time the test kept passing while no longer reaching
+    the fallback at all. So the fixture is now a name no issue can ever claim.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.a_type_no_issue_will_ever_add", "detail": 1785832800}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "task.a_type_no_issue_will_ever_add" in out
+    assert "1785832800" in out, "the fields must be shown too, not just the type"
+
+
+def test_task_follow_shows_the_workspace_and_then_only_what_changed(monkeypatch, tmp_path, capsys):
+    """Issue 08's criterion at the CLIENT end: the user sees the file tree, and sees it grow.
+
+    The first snapshot is the listing, because a user attaching mid-run has no idea what is in there.
+    Every later one is a DELTA, because the provider re-sends the whole tree — it has to, since a
+    client can attach at any seq or a requeue can move the task to a provider that never saw the
+    earlier events — and reprinting two hundred unchanged paths every thirty seconds would bury the
+    tool-call lines a user is actually reading.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["README.md", "src/main.py"],
+                   "total": 2, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["README.md", "src/util.py"],
+                   "total": 2, "truncated": False, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "workspace: 2 files" in out
+    assert "README.md" in out and "src/main.py" in out
+    assert "+ src/util.py" in out
+    assert "- src/main.py" in out
+    assert out.count("README.md") == 1, "an unchanged path must not be reprinted on every snapshot"
+
+
+def test_task_follow_says_a_held_result_is_being_combined_rather_than_dumping_json(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g (issue 42). The turn this event lands on was reported COMPLETED, so nothing else
+    in the stream reads as a problem — and the fallback arm would print the raw payload, conflicting
+    file paths and all, at somebody who does not know what a conflict is.
+
+    The relay's event carries `conflicts` as DATA; the sentence a person reads is this repo's, which
+    is where ADR 0034 D-m's no-git-vocabulary rule can be enforced by a test.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.apply_blocked", "conflicts": ["src/main.py"],
+                   "source_commit": "a" * 40, "merge_turn_id": "m-1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err
+
+    assert "m-1" in everything, "nothing names the step that is going to resolve it"
+    for word in ("conflict", "merge", "branch", "refs/"):
+        assert word not in everything.lower(), (
+            f"git vocabulary reached a person's screen: {word!r}")
+
+
+def test_task_follow_tells_the_person_what_to_do_when_the_grid_could_not_combine_the_work(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g forbids leaving a person *"at a terminal failure they cannot act on"*.
+
+    ⚠️ **This is a different instruction from the event above, which is why it is a different
+    TYPE.** `task.apply_blocked` means a step is running and there is nothing to do; this one means
+    nothing more will happen unless they say something. Rendered the same way, an application shows
+    a dead end as progress for as long as it takes somebody to notice.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.apply_unresolved", "conflicts": ["src/main.py"],
+                   "source_commit": "a" * 40, "merge_turn_id": "m-1",
+                   "merge_turn_state": "failed"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err
+
+    assert "grid task send" in everything, "the person is told nothing they can do"
+    for word in ("conflict", "merge", "branch", "refs/"):
+        assert word not in everything.lower(), (
+            f"git vocabulary reached a person's screen: {word!r}")
+
+
+def test_task_follow_says_when_a_tree_was_truncated(monkeypatch, tmp_path, capsys):
+    """"500 files" and "500 of 12,431 files" are different facts, and only the second one tells a
+    user that what they are looking at is a dependency install rather than their project."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": 12431, "truncated": True, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "12431" in out
+    assert "truncated" in out.lower()
+
+
+def test_task_follow_never_reports_a_truncated_tree_as_deleted_files(monkeypatch, tmp_path, capsys):
+    """A delta is only honest between two COMPLETE snapshots.
+
+    A truncated snapshot shows a prefix, so a path that was in the last one and is not in this one
+    may simply be past the cap — and printing it as `- src/main.py` tells the user the agent deleted
+    their file. That is a worse failure than showing the listing again: it is a confident, wrong
+    statement about their work.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["README.md", "src/main.py"],
+                   "total": 2, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["README.md"],
+                   "total": 9000, "truncated": True, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "- src/main.py" not in out
+    assert "9000" in out
+
+
+def test_task_follow_shows_the_listing_again_after_a_truncated_tree(monkeypatch, tmp_path, capsys):
+    """The other side of the same rule: once the baseline is incomplete there is nothing honest to
+    diff against, so the next complete snapshot re-establishes one by listing itself."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py"],
+                   "total": 9000, "truncated": True, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": 2, "truncated": False, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "+ b.py" not in out, "there was no complete baseline to call b.py an addition against"
+    assert out.count("a.py") == 2, "the complete snapshot should list itself in full"
+
+
+def test_task_follow_never_calls_a_file_deleted_because_one_ENTRY_was_malformed(
+        monkeypatch, tmp_path, capsys):
+    """The same rule truncation already gets, extended to the case that reaches it sideways.
+
+    A snapshot with one non-string entry is a snapshot we have only PART of. Dropping the bad entry
+    and diffing the remainder against a complete baseline reports a file that still exists as
+    deleted — a confident, false claim about the user's work, and exactly what the truncated-baseline
+    rule exists to prevent.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py", "c.py"],
+                   "total": 3, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.tree", "paths": ["a.py", None, "c.py"],
+                   "total": 3, "truncated": False, "hash": "h2"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    assert "- b.py" not in capsys.readouterr().out
+
+
+def test_task_follow_does_not_claim_a_count_it_was_never_given(monkeypatch, tmp_path, capsys):
+    """`showing 2 of 2` under a `truncated` flag is a line that contradicts itself.
+
+    It comes from recovering an unusable `total` as `len(paths)` and then building the truncation
+    clause out of the recovered number. A count that was not reported must not be presented as one.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": "many", "truncated": True, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert "showing 2 of 2" not in out
+    assert "truncated" in out
+    assert "a.py" in out and "b.py" in out, "what we DO have should still be listed"
+
+
+def test_task_follow_does_not_print_a_wall_of_paths_for_a_huge_first_tree(
+        monkeypatch, tmp_path, capsys):
+    """A capped tree is still five hundred paths. The provider's cap protects the WIRE; this one
+    protects the terminal the user is trying to read tool calls in."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    paths = [f"generated/file{n:04d}.txt" for n in range(500)]
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": paths,
+                   "total": 500, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+    out = capsys.readouterr().out
+
+    assert len(out.splitlines()) < 100, "the listing was not bounded for the terminal"
+    assert "more" in out, "a bounded listing must say that it was bounded"
+
+
+def test_task_follow_json_still_carries_the_whole_tree(monkeypatch, tmp_path, capsys):
+    """`--json` is the machine surface and is not summarized: a script that wants the tree wants all
+    of it, and the delta view exists for the human one."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree", "paths": ["a.py", "b.py"],
+                   "total": 2, "truncated": False, "hash": "h1"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1", "--json"])
+    first = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][0])
+
+    assert first["event"]["paths"] == ["a.py", "b.py"]
+
+
+def test_task_follow_survives_a_tree_event_with_nothing_in_it(monkeypatch, tmp_path, capsys):
+    """The event came off the wire. A relay that is newer, older, or simply wrong must not be able to
+    turn `grid task follow` into a traceback — the same rule every other branch here follows."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tree"}),
+        _block(1, {"type": "task.tree", "paths": "not-a-list", "total": "many"}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    assert cli.main(["task", "follow", "T1"]) == 0
+    assert "workspace" in capsys.readouterr().out
+
+
+def test_task_follow_renders_tool_activity_as_a_tool_and_a_path(monkeypatch, tmp_path, capsys):
+    """Issue 03's acceptance criterion at the CLIENT end: the user sees what the agent is touching.
+
+    Rendered specially rather than falling through to the verbatim branch, because this is the line
+    a user reads most of — a task is minutes of tool calls and a sentence of prose.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.session", "session_id": "012c9e09"}),
+        _block(1, {"type": "task.tool_use", "tool": "Edit", "path": "src/app.py", "id": "t1"}),
+        _block(2, {"type": "task.tool_use", "tool": "Bash", "path": None, "id": "t2"}),
+        _block(3, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "Edit src/app.py" in out
+    assert "Bash" in out          # a tool with no path still says something happened
+    assert "012c9e09" in out
+
+
+def test_task_follow_stays_quiet_about_a_tool_that_worked(monkeypatch, tmp_path, capsys):
+    """A `task.tool_result` arrives for EVERY tool call, and a real task makes hundreds of them.
+
+    Falling through to the verbatim branch is not a data loss — issue 02 designed that fallback on
+    purpose — but it doubles the length of `grid task follow` with a line per tool call whose only
+    content is an opaque `toolu_…` id the user cannot act on, printed directly under the readable
+    `[n] Edit src/app.py` that already said what ran. The tool's identity is the `task.tool_use`
+    line's job; this event's only news is whether it FAILED.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tool_use", "tool": "Edit", "path": "src/app.py", "id": "t1"}),
+        _block(1, {"type": "task.tool_result", "id": "toolu_01ABCDEF", "is_error": False}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    captured = capsys.readouterr()
+    assert "Edit src/app.py" in captured.out
+    everything = captured.out + captured.err
+    assert "toolu_01ABCDEF" not in everything, (
+        "a tool call that succeeded is narrated with its internal id — that is one extra line per "
+        "tool call for the whole task")
+    assert "task.tool_result" not in everything
+
+
+def test_task_follow_says_which_tool_call_failed(monkeypatch, tmp_path, capsys):
+    """The one bit of news a tool result carries. On stderr with the other diagnostics.
+
+    Kept even though the terminal event reports the task's own outcome: a task can fail a dozen tool
+    calls and still complete, and without this the user watching sees an unbroken run of tool names
+    with no hint that any of them did not work.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.tool_use", "tool": "Bash", "path": None, "id": "t1"}),
+        _block(1, {"type": "task.tool_result", "id": "toolu_01ABCDEF", "is_error": True}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    err = capsys.readouterr().err
+    assert "failed" in err.lower()
+    assert "toolu_01ABCDEF" in err, "a failed tool call must be traceable to the call that made it"
+
+
+def test_task_follow_summarises_how_the_agent_finished(monkeypatch, tmp_path, capsys):
+    """`task.result` is the agent's own account of the run — one event, at the end.
+
+    Rendered rather than dumped as JSON because it answers the question a user asks the moment a
+    task ends: how many turns, how long, and did the agent itself think it went wrong. `is_error`
+    here is the AGENT's claim; the task's actual outcome is `task.terminal`'s, which prints after it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.result", "subtype": "success", "is_error": False,
+                   "num_turns": 12, "duration_ms": 34_500}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "12" in out and "turn" in out.lower()
+    assert "34.5" in out, f"the run's duration is not shown in seconds: {out!r}"
+    assert "duration_ms" not in out, "the raw wire field is being printed instead of a rendered line"
+
+
+def test_task_follow_renders_a_result_event_with_nothing_in_it(monkeypatch, tmp_path, capsys):
+    """Every field on the event is optional — it is built from a subprocess's JSON, and issue 09
+    already had `_resets_note` blow up on a field nobody bounded. A missing count must not become a
+    `None turns`, and it must never raise inside the render."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    body = _sse(
+        _block(0, {"type": "task.result"}),
+        _block(1, {"type": "task.result", "num_turns": "lots", "duration_ms": [1]}),
+        _block(2, {"type": "task.terminal", "state": "completed"}),
+    )
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        200, text=body, headers={"Content-Type": "text/event-stream"}))
+
+    cli.main(["task", "follow", "T1"])
+
+    out = capsys.readouterr().out
+    assert "None" not in out, f"a missing field is being printed as None: {out!r}"
+
+
+def test_task_follow_is_refused_in_local_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "follow", "T1"])
+    assert "remote" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# `grid task follow --conversation` — one stream for a whole conversation (ADR 0034 D-m, issue 51)
+# ---------------------------------------------------------------------------
+
+def _conv_block(seq, task_id, payload):
+    """One block of the CONVERSATION stream: the envelope that says which turn an event is from."""
+    return f"id: {seq}\ndata: {json.dumps({'task_id': task_id, 'event': payload})}\n\n"
+
+
+_IDLE = {"type": "conversation.idle"}
+
+
+def test_task_follow_takes_a_conversation_instead_of_a_turn():
+    """One verb, not two. `follow` already owns the cursor and the reconnect budget, and a second
+    command watching the same shape of stream is how the two drift."""
+    args = cli.build_parser().parse_args(["task", "follow", "--conversation", "C1"])
+    assert (args.subcommand, args.conversation, args.task_id) == ("follow", "C1", None)
+
+
+def test_task_follow_refuses_a_turn_and_a_conversation_at_once():
+    """They address different objects, so one of the two would have to be silently ignored."""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["task", "follow", "T1", "--conversation", "C1"])
+
+
+def test_task_follow_with_neither_says_which_it_needs(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["task", "follow"])
+
+
+def test_task_follow_conversation_reads_the_conversation_stream(monkeypatch, tmp_path, capsys):
+    """The tracer bullet: a whole conversation, rendered as one thing, ending when it goes idle."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    asked = []
+
+    def handler(request):
+        asked.append((request.url.path, dict(request.url.params)))
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(0, "T1", {"type": "task.output", "text": "first"}),
+                      _conv_block(1, "T1", {"type": "task.terminal", "state": "completed"}),
+                      _conv_block(2, "T2", {"type": "task.output", "text": "second"}),
+                      _conv_block(2, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    out = capsys.readouterr().out
+
+    assert asked[0] == ("/relay/v1/tasks/C1/stream", {"after_seq": "-1"})
+    assert "first" in out and "second" in out, (
+        "a turn ending must not end the stream — the next turn of the same conversation follows it")
+    assert rc == 0, "the conversation reached its end; nothing went wrong"
+
+
+def test_task_follow_conversation_reattaches_across_a_turn_boundary(monkeypatch, tmp_path, capsys):
+    """The cursor is one integer over the whole conversation, and it survives a dropped stream at
+    the exact place a per-turn cursor stops meaning anything."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    cursors = []
+    attempts = {"n": 0}
+
+    def handler(request):
+        cursors.append(dict(request.url.params).get("after_seq"))
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(
+                200,
+                text=_sse(_conv_block(0, "T1", {"type": "task.output", "text": "first"}),
+                          _conv_block(1, "T1", {"type": "task.terminal", "state": "completed"})),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(2, "T2", {"type": "task.output", "text": "second"}),
+                      _conv_block(2, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert cursors == ["-1", "1"], "the reattach resumed at the last seq actually seen"
+    assert out.count("first") == 1 and "second" in out
+
+
+def test_task_follow_conversation_json_says_which_turn_each_event_is_from(
+        monkeypatch, tmp_path, capsys):
+    """An application groups a conversation's events by turn, so the turn id has to be on the line.
+
+    The per-turn stream's `{"seq", "event"}` is unambiguous only while a stream is one turn.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(0, "T1", {"type": "task.output", "text": "first"}),
+                      _conv_block(1, "T2", {"type": "task.output", "text": "second"}),
+                      _conv_block(1, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "follow", "--conversation", "C1", "--json"])
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+
+    assert [(ln["seq"], ln["task_id"]) for ln in lines[:2]] == [(0, "T1"), (1, "T2")]
+    assert lines[-1]["event"] == _IDLE and lines[-1]["task_id"] is None
+
+
+def test_task_follow_conversation_exits_non_zero_when_the_stream_is_lost(
+        monkeypatch, tmp_path, capsys):
+    """A conversation has no outcome to borrow, so 0 means "watched it to its end" and nothing
+    else. A stream that stopped without saying so is not an end."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(200, text="", headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+
+    assert rc == 1
+
+
+def test_task_follow_conversation_against_an_older_relay_names_the_relay(
+        monkeypatch, tmp_path, capsys):
+    """A bare framework 404 reads as "the thing I asked for is gone". It means the opposite: the
+    relay has never heard of this route."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert "relay" in err.lower()
+    assert "grid task follow" in err, "it must name what still works on that relay"
+
+
+def test_task_follow_conversation_shows_a_real_refusals_own_words(monkeypatch, tmp_path, capsys):
+    """A relay that HAS the route and refuses for its own reason must not be reported as too old —
+    the same distinction `_task_oneshot`'s missing-route hint makes, keyed on the bare body."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(404, json={"detail": {"code": "no_such_task",
+                                                    "message": "Task not found"}})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    err = capsys.readouterr().err
+
+    assert rc == 1
+    assert "Task not found" in err
+    assert "too old" not in err.lower()
+
+
+def test_task_follow_conversation_ignores_an_idle_block_that_belongs_to_a_turn(
+        monkeypatch, tmp_path, capsys):
+    """The second of two locks on the one event a client ACTS ON.
+
+    A provider is authenticated, not trusted, and until this slice no event type was ever compared —
+    only rendered. `conversation.idle` stops this loop and reports 0, so a lease holder publishing
+    one on its own turn's log would end every watcher of that conversation with a success nobody
+    earned, while its turn ran on. The relay refuses such a publish; this is what makes the lie need
+    two failures rather than one, and the relay's own block is the only one with no turn id.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            text=_sse(_conv_block(0, "T1", {"type": "conversation.idle", "sneaky": True}),
+                      _conv_block(1, "T1", {"type": "task.output", "text": "still working"}),
+                      _conv_block(1, None, _IDLE)),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "--conversation", "C1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "still working" in out, (
+        "the follower stopped at a forged ending and never saw what came after it")
+
+
+def test_task_follow_of_a_turn_is_unchanged_by_the_conversation_stream(
+        monkeypatch, tmp_path, capsys):
+    """Issue 32's exit-code contract is built on the per-turn stream, and it does not move."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(remote_task, "_RECONNECT_BACKOFF_SECONDS", 0.001)
+
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.path)
+        return httpx.Response(
+            200,
+            text=_sse(_block(0, {"type": "task.terminal", "state": "failed"})),
+            headers={"Content-Type": "text/event-stream"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "follow", "T1"])
+
+    assert asked == ["/relay/v1/tasks/T1/events"]
+    assert rc == 1
+
+
+def test_task_selects_its_grid_with_a_flag_not_a_positional():
+    """`--grid`, like `price`/`router`.
+
+    The reason used to be given as "a leading optional positional would be ambiguous with the
+    free-form prompt that follows it". There is no free-form prompt — `--prompt` is a flag — and
+    since issue 28 `task create` HAS a leading optional positional, the project id. What is still
+    true is narrower: which GRID to act on is not a project-shaped thing, and a second optional
+    positional beside `project_id` would be the ambiguity this file measures elsewhere.
+    """
+    args = cli.build_parser().parse_args(
+        ["task", "create", "--prompt", "hello", "--grid", "team"])
+    assert args.grid == "team"
+
+
+def test_task_create_requires_a_prompt(capsys):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["task", "create"])
+
+
+def test_task_is_refused_in_local_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "get", "T1"])
+    assert "remote" in str(exc.value).lower()
+
+
+def test_task_create_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
+    """Full remote-mode round trip: parser -> dispatch -> cmd_remote_task -> relay POST /tasks."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "create", "--prompt", "say hello", "--project", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"], seen["auth"]) == ("POST", "/relay/v1/tasks", "Bearer AT")
+    assert seen["body"] == {"prompt": "say hello", "project_id": "P1"}
+    assert "T1" in capsys.readouterr().out
+
+
+def test_task_create_with_an_explicit_project_asks_the_relay_nothing_else(monkeypatch, tmp_path):
+    """`--project` takes an **id** and is used verbatim (ADR 0033 D-a, issue 10).
+
+    No name lookup, no id-vs-name heuristic: a name is unique per owner, so it was never an address
+    a second project member could use, and resolving one here is the shadow-project bug wearing a
+    convenience label.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--prompt", "x", "--project", "P1"])
+
+    assert paths == ["/relay/v1/tasks"], "an explicit id must not be looked up"
+
+
+def test_task_create_with_no_project_resolves_the_callers_own_default(monkeypatch, tmp_path):
+    """The default is resolved on the CLIENT, by name, against the caller's own projects.
+
+    The relay never resolves a name into a project for a task any more — that is what let member B
+    post `{"project": "acme"}` and silently get an empty project of their own. Here the name can
+    only ever name something of the caller's, because the lookup filters on the `owner` role.
+
+    Since ADR 0033 D-o / issue 26 the lookup READS rather than creates: the same one round trip,
+    against `GET /relay/v1/projects` instead of a create-or-get POST. Anyone who already has a
+    `default` project keeps their one-liner, which is the whole reason the convention was kept
+    rather than dropped.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, body))
+        if request.url.path == "/relay/v1/projects":
+            return httpx.Response(200, json={"projects": [
+                {"id": "P-default", "name": "default", "role": "owner"}]})
+        return httpx.Response(201, json={"id": "T1", "state": "queued",
+                                         "project_id": "P-default"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--prompt", "x"])
+
+    assert calls == [
+        ("GET", "/relay/v1/projects", None),
+        ("POST", "/relay/v1/tasks", {"prompt": "x", "project_id": "P-default"}),
+    ]
+
+
+def test_task_create_with_no_project_creates_nothing_and_asks_which_one(monkeypatch, tmp_path):
+    """The first command a new user runs, and it used to MINT a project as a side effect.
+
+    `_resolve_project` called `create_project(name="default")` unconditionally, so somebody who had
+    simply forgotten `--project` — or had never heard of projects — ended up owning one they did not
+    ask for, whose id appeared only in the error line that followed, with nothing saying it had just
+    been created or that `grid project list` would now show it. That is the main source of the junk
+    projects issue 33 otherwise has to clean up.
+
+    The refusal is framed on the ACTIONABLE fact. "You have no project named `default`" describes an
+    internal convention the user never chose; "a task needs a project and none was named" is the
+    thing they can do something about, so the message names the two commands that do it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"projects": []})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "add a retry to the upload path"])
+
+    message = str(caught.value)
+    assert "grid project list" in message, message
+    assert "grid project create" in message, message
+    assert calls == [("GET", "/relay/v1/projects")], (
+        f"a project was minted, or a task was posted, on the path that must do neither: {calls}")
+
+
+def test_task_create_never_borrows_a_default_project_somebody_else_owns(monkeypatch, tmp_path):
+    """The ADR 0033 D-a substitution bug, on the one path that has no `--project` to check against.
+
+    `GET /relay/v1/projects` lists every project the caller is a MEMBER of, and a colleague's is
+    just as likely to be called `default` as anyone's — the name is unique per OWNER, not per grid.
+    Taking it would silently run somebody's work in another person's project, which is the exact
+    class of failure this feature was built to remove.
+
+    So the lookup filters on the `owner` role, and a listing with no owned `default` in it is the
+    same "which project?" refusal as an empty one.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"projects": [
+            {"id": "P-theirs", "name": "default", "role": "member"}]})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    assert "grid project list" in str(caught.value), str(caught.value)
+    assert calls == [("GET", "/relay/v1/projects")], (
+        f"a task was posted into a project the caller does not own: {calls}")
+
+
+def test_task_create_does_not_read_an_unreadable_listing_as_an_empty_account(monkeypatch, tmp_path):
+    """A reply this command cannot read is NOT "you have no projects" — the house rule every sibling
+    in this plane already follows (`task list`, `project init`, `task cancel`, `promote`).
+
+    The two collapse in exactly the way that misleads: a body a proxy had stripped comes back as
+    `{}`, and somebody who has used their `default` project for months is told to create one — so
+    they do, and now they own two, with their work in the one the message did not mention.
+
+    Keyed on the PRESENCE of `projects`, never its truthiness: an empty list is a real answer and
+    gets the ordinary "which project?" refusal above.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    message = str(caught.value)
+    assert "--json" in message, message
+    assert "grid project create" not in message, (
+        f"an unreadable reply was reported as an empty account: {message}")
+    assert calls == [("GET", "/relay/v1/projects")], calls
+
+
+def _suggested_argv(message, marker="--init-project"):
+    """The one line of a refusal that is a COMMAND, split the way a shell would split it.
+
+    Asserting on the argv rather than on the sentence is the point: a suggestion the user is meant
+    to paste has to survive `shlex`, so a prompt carrying a space or an apostrophe must come back
+    out as ONE argument. Comparing substrings would pass for a line that pastes as four.
+    """
+    import shlex
+
+    lines = [line for line in message.splitlines() if marker in line]
+    assert len(lines) == 1, f"expected exactly one line carrying {marker!r}: {message}"
+    return shlex.split(lines[0])
+
+
+def test_task_create_on_a_trunkless_project_hands_back_the_command_that_fixes_it(
+        monkeypatch, tmp_path):
+    """Case B (ADR 0033 D-o, issue 26). The relay's own message is accurate and unusable.
+
+        > Project 9f3c1d84-… has no main yet … Import a repository into it and create the task
+        > again.
+
+    It is a DESCRIPTION, not a command — and it cannot be anything else, because the relay does not
+    know CLI syntax and should not. So the client says what it alone knows: the two ways forward,
+    spelled as commands, with the prompt and every `--file` the user already typed carried into the
+    suggestion. The alternative — "fix it and run the task again" — is a retype of a command that
+    may carry a long prompt and several uploads.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    first = tmp_path / "a.txt"
+    first.write_bytes(b"x")
+    second = tmp_path / "b.txt"
+    second.write_bytes(b"y")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "project_has_no_trunk",
+        "message": "Project abc123 has no main yet, so there is nothing to branch a task from. "
+                   "Import a repository into it and create the task again."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "add retry",
+                  "--file", str(first), "--file", f"{second}:x/b.txt"])
+
+    message = str(caught.value)
+    assert _suggested_argv(message) == [
+        "grid", "task", "create", "--project", "abc123", "--init-project",
+        "--prompt", "add retry",
+        "--file", str(first), "--file", f"{second}:x/b.txt"], message
+    # The other way forward, for somebody who has a repository rather than a blank page.
+    assert "grid project import . abc123" in message, message
+
+
+def test_a_trunkless_refusal_never_suggests_the_command_that_just_failed(monkeypatch, tmp_path):
+    """The refusal must not hand back `--init-project` to somebody who already passed it.
+
+    Reachable through the conflation `_task_create` names: grid-src's `resolve_branch` answers
+    `None` both for "no trunk" and for "this repository could not be read", so a relay-side read
+    failure is indistinguishable from a missing trunk. The init then reports success, the task is
+    still refused, and the old message told the user to re-run the identical command — which
+    `_ensure_trunk` now tolerates the 409 for, so it would fail the same way forever.
+
+    That is the "advice that is guaranteed not to work" this whole issue removes, and this was the
+    one place left that could still print it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        if request.url.path.endswith("/init"):
+            return _initialized()
+        return httpx.Response(422, json={"detail": {
+            "code": "project_has_no_trunk", "message": "Project P1 has no main yet."}})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"])
+
+    message = str(caught.value)
+    # Naming the flag in PROSE is fine and useful — what must not come back is a runnable line
+    # telling them to do it again.
+    assert not [line for line in message.splitlines()
+                if "grid task create" in line and "--init-project" in line], (
+        f"the refusal suggested the command that had just failed: {message}")
+    assert "grid project status P1" in message, message
+
+
+def test_task_create_survives_a_project_listing_that_is_not_an_object(monkeypatch, tmp_path):
+    """A 200 whose body is a JSON array or string — a proxy, a captive portal — must be a clean
+    refusal, not an `AttributeError` traceback out of `main()`.
+
+    `_task_oneshot` returns `resp.json()` verbatim, so the shape is whatever arrived. The hole is
+    older than this command and shared by every call site in the plane; it is guarded here because a
+    projectless `grid task create` is the most-run path in the CLI.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=["not", "an", "object"]))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    assert "--json" in str(caught.value), str(caught.value)
+
+
+def test_a_relay_refusal_still_exits_like_a_systemexit():
+    """`TaskRefusal` subclasses `SystemExit`, and `SystemExit.code` is ALREADY a thing: it is the
+    process exit status the interpreter reads when the exception reaches the top.
+
+    `cli.main` does not catch `SystemExit` — the console script is `sys.exit(main())`, so a refusal
+    is delivered to the interpreter, which prints `.code` and exits 1 when it is a string. An
+    attribute named `code` holding the relay's REFUSAL code silently overwrites that: the common
+    case is `None` (every relay that sends a plain-string `detail`), and `None` means **exit 0 with
+    nothing printed** — `grid task create` reporting success for a task that was never created,
+    which is the exact class of failure this whole slice exists to remove.
+
+    Measured, not reasoned about: the assertion below is on the interpreter's own behaviour.
+    """
+    import pathlib
+    import subprocess
+    import sys as _sys
+
+    from remote import relay
+
+    _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+    # The attribute the exception carries for the interpreter is untouched...
+    refusal = relay.TaskRefusal("Project 'default' already has an active task", status=409)
+    assert refusal.code == "Project 'default' already has an active task"
+    assert refusal.refusal_code is None
+
+    # ...and this is what a user actually gets.
+    done = subprocess.run(
+        [_sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r)\n"
+         "from remote import relay\n"
+         "raise relay.TaskRefusal('the relay refused', status=409)" % str(_REPO_ROOT)],
+        capture_output=True, text=True)
+    assert done.returncode == 1, f"a refusal exited {done.returncode}: {done.stderr!r}"
+    assert "the relay refused" in done.stderr, done.stderr
+
+
+def test_a_trunkless_refusal_without_a_code_degrades_to_the_relays_own_sentence(
+        monkeypatch, tmp_path):
+    """The rollout half. A relay predating ADR 0033 D-l sends a plain-STRING `detail`, so
+    `refusal_code` answers `None`, the branch does not fire, and the user sees exactly what they saw
+    before this slice — never a crash and never the wrong advice.
+
+    That is why the branch keys on the code and not on the sentence: a client that regex-matched
+    English is one relay rewording away from offering `--init-project` for something else entirely.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={
+        "detail": "Project abc123 has no main yet, so there is nothing to branch a task from."}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "p"])
+
+    message = str(caught.value)
+    assert message == (
+        "Project abc123 has no main yet, so there is nothing to branch a task from."), message
+    assert "--init-project" not in message
+
+
+def test_another_relay_refusal_with_the_same_status_is_not_read_as_a_missing_trunk(
+        monkeypatch, tmp_path):
+    """The other side of keying on the code: 422 is what the whole task plane answers for anything
+    a caller can fix, so a branch on the STATUS would hand somebody `--init-project` for a prompt
+    that was too long."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "invalid_request", "field": "prompt",
+        "message": "prompt exceeds 102400 bytes"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "p"])
+
+    message = str(caught.value)
+    assert message == "prompt exceeds 102400 bytes", message
+    assert "--init-project" not in message
+
+
+def test_the_suggested_command_keeps_the_grid_and_the_shell_quoting(monkeypatch, tmp_path):
+    """Two properties of a line meant to be pasted, both of which are wrong by omission.
+
+    **`--grid`** — dropped, the suggestion targets the ACTIVE grid rather than the one that just
+    refused, so somebody with a personal grid selected would initialize a trunk on the wrong grid and
+    then be told their project does not exist.
+
+    **The quoting** — a prompt is free-form English and routinely carries an apostrophe. Pasted
+    unquoted it becomes several arguments, or an unterminated string the shell sits waiting on.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)  # the seeded grid is called `team`
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "project_has_no_trunk", "message": "no main"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--grid", "team",
+                  "--prompt", "fix Bob's retry, then re-run"])
+
+    assert _suggested_argv(str(caught.value)) == [
+        "grid", "task", "create", "--project", "abc123", "--init-project",
+        "--grid", "team", "--prompt", "fix Bob's retry, then re-run"], str(caught.value)
+
+
+def test_the_suggested_command_keeps_the_dir_flags_too(monkeypatch, tmp_path):
+    """Wrong by omission, exactly like `--grid` above.
+
+    The line is meant to be pasted. A suggestion that silently drops `--dir` runs the retried task
+    against none of the files the user gathered — and it succeeds, so nothing ever says so.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fixtures"
+    folder.mkdir()
+    (folder / "a.json").write_bytes(b"{}\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "project_has_no_trunk", "message": "no main"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "abc123", "--prompt", "p",
+                  "--dir", f"{folder}:test/data"])
+
+    assert _suggested_argv(str(caught.value)) == [
+        "grid", "task", "create", "--project", "abc123", "--init-project",
+        "--prompt", "p", "--dir", f"{folder}:test/data"], str(caught.value)
+
+
+def _initialized(commit="a" * 40, created=True):
+    """What `POST /relay/v1/projects/{id}/init` answers (ADR 0033 D-o, issue 25)."""
+    return httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "status": "initialized",
+        "commit": commit, "created": created, "trunk": "main"})
+
+
+def test_init_project_creates_the_trunk_before_the_task(monkeypatch, tmp_path):
+    """`--init-project` is the one-call form ADR 0033 D-o promised: init the trunk, then run.
+
+    The ORDER is the whole contract — a task posted first is refused for the trunk that the second
+    call was about to create. And the init request carries **no body**: the relay refuses one with a
+    422 rather than dropping it, because `files` means something real on `POST …/{id}/commit` one
+    route along.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path, request.content))
+        if request.url.path.endswith("/init"):
+            return _initialized()
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"]) == 0
+
+    assert [(method, path) for method, path, _ in calls] == [
+        ("POST", "/relay/v1/projects/P1/init"),
+        ("POST", "/relay/v1/tasks"),
+    ], calls
+    assert calls[0][2] == b"", f"init takes no request body: {calls[0][2]!r}"
+
+
+def test_init_project_against_a_relay_without_the_route_creates_no_task(monkeypatch, tmp_path):
+    """A relay predating issue 25 answers the **bare framework 404** for `…/init`, which
+    `_task_oneshot`'s `missing_route_hint` turns into a sentence naming the relay.
+
+    The task must not then be posted anyway. It would be refused for the missing trunk a moment
+    later — but as the relay's own description, with the `--init-project` the user just typed
+    reported as though it had worked.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"])
+
+    assert "relay" in str(caught.value).lower(), str(caught.value)
+    assert calls == ["/relay/v1/projects/P1/init"], (
+        f"a task was posted against a relay that could not have initialized anything: {calls}")
+
+
+def test_init_project_runs_the_task_when_the_trunk_is_already_there(monkeypatch, tmp_path, capsys):
+    """The postcondition the flag asks for already holds, so the task goes ahead.
+
+    Refusing here would make Case B's own suggested command single-use: run it, have the task create
+    fail for any unrelated reason (a busy slot, a path the relay rejects), and the identical line now
+    complains about a trunk instead of running the task. `project_init` applies the same reading to
+    the swap it loses to an identical commit — an error for a state that is already correct sends
+    somebody to fix a thing that is not broken.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/init"):
+            return httpx.Response(409, json={"detail": {
+                "code": "project_already_has_trunk",
+                "message": "Project P1 already has a main (at 4f2a91c)."}})
+        return httpx.Response(201, json={"id": "T7", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"]) == 0
+
+    assert calls == ["/relay/v1/projects/P1/init", "/relay/v1/tasks"], calls
+    out = capsys.readouterr().out
+    assert "T7" in out
+    # The wording lost its git word in issue 46 (ADR 0034 D-m); what it REPORTS is unchanged.
+    assert "already has something to start from" in out, (
+        f"the skipped init was not reported: {out!r}")
+
+
+def test_any_other_init_refusal_stops_before_the_task(monkeypatch, tmp_path):
+    """The tolerance is keyed on the CODE, not on the 409. `project_status` and the membership fence
+    answer their own refusals from this route, and a task posted past one of those would run in a
+    project the caller was just told they cannot touch."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(404, json={"detail": {
+            "code": "no_such_project", "message": "No such project, or you are not a member of it."}})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x"])
+
+    assert str(caught.value) == "No such project, or you are not a member of it."
+    assert calls == ["/relay/v1/projects/P1/init"], calls
+
+
+def test_init_project_reports_the_trunk_on_stderr_under_json(monkeypatch, tmp_path, capsys):
+    """`--json` keeps stdout a single parseable document — by writing the init line ELSEWHERE, not
+    by saying nothing.
+
+    This is the one irreversible thing `task create` can do: a project given an empty trunk can
+    never `grid project import`. Suppressing the line entirely left the caller most likely to run it
+    unattended with no record that the door had been opened — and `create_task` can still fail after
+    the init lands (a busy slot, a rejected path), so the JSON consumer would see only that error and
+    nothing about the trunk that now exists.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        if request.url.path.endswith("/init"):
+            return _initialized()
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--project", "P1", "--init-project", "--prompt", "x", "--json"])
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"id": "T1", "state": "queued", "project_id": "P1"}
+    assert "a" * 40 in captured.err, (
+        f"the trunk this command created was reported nowhere: {captured.err!r}")
+
+
+def test_task_create_takes_no_init_project_by_default():
+    """A one-way door is never opened by omission: a project given an empty trunk can never import a
+    repository afterwards, and nothing undoes it."""
+    parser = cli.build_parser()
+    assert parser.parse_args(["task", "create", "--prompt", "x"]).init_project is False
+    assert parser.parse_args(
+        ["task", "create", "--prompt", "x", "--init-project"]).init_project is True
+
+
+def test_project_is_classified_and_remote_only(monkeypatch, tmp_path):
+    """`project` reaches the relay's own tables, which a local grid has neither of."""
+    assert "project" in dispatch.REMOTE_ONLY
+    assert not (set(dispatch.AGNOSTIC) & set(dispatch.REMOTE_ONLY))
+    assert not (set(dispatch.REMOTE_HANDLERS) & set(dispatch.REMOTE_ONLY))
+
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["project", "list"])
+    assert "remote" in str(exc.value).lower()
+
+
+def test_project_create_on_a_relay_too_old_to_know_the_route_says_so(monkeypatch, tmp_path):
+    """A relay predating ADR 0033 issue 10 has no `/relay/v1/projects` at all, and answers a **bare
+    framework 404** — `{"detail": "Not Found"}`, with no idea which route was missing.
+
+    Left alone the user's whole reward for upgrading the CLI first is the words "Not Found", which
+    reads as "my project is gone". This is the same trap the lease renewer already has to handle:
+    a bare 404 from an unmatched route is not the same thing as a 404 about the thing you asked
+    for, and the two are byte-identical.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme"])
+
+    message = str(caught.value)
+    assert "Not Found" != message, "the bare framework 404 reached the user unexplained"
+    assert "relay" in message.lower() and "project" in message.lower()
+
+
+def test_task_create_without_a_project_explains_an_old_relay_too(monkeypatch, tmp_path):
+    """The same 404, reached through the path every ordinary `grid task create` takes."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x"])
+
+    assert "relay" in str(caught.value).lower()
+
+
+def test_a_real_404_from_the_projects_route_is_not_masked(monkeypatch, tmp_path):
+    """The other half, and the reason the hint is keyed on the BARE detail: a relay that does know
+    the route and answers 404 about the project itself must have its own words shown, not be
+    reported as too old."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        404, json={"detail": "No such project"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "member", "list", "P1"])
+
+    assert str(caught.value) == "No such project"
+
+
+def test_task_create_refuses_to_report_success_for_the_wrong_project(monkeypatch, tmp_path):
+    """The one way this feature can fail SILENTLY, and it is the exact bug the feature exists to
+    kill (ADR 0033 D-a).
+
+    `POST /relay/v1/tasks` exists on an old relay too, so it answers 200 rather than 404 — and its
+    `_project_name` reads `body.get("project")`, gets `None` because this CLI now sends
+    `project_id`, and falls back to the caller's OWN project named `default`. So passing
+    `--project <id-of-a-shared-project>` at a relay that has not been updated lands the task in a
+    personal project with nothing said.
+
+    The task is already created by the time the answer comes back, so this cannot prevent it. What
+    it can do is refuse to call it a success, and name both projects — turning silently-wrong into
+    loudly-wrong, which is the whole difference.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    # An old relay's answer: 201, but the task landed somewhere else.
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "T1", "state": "queued", "project_id": "P-my-own-default"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x", "--project", "P-the-shared-one"])
+
+    message = str(caught.value)
+    assert "P-the-shared-one" in message and "P-my-own-default" in message
+    assert "T1" in message, "the task exists — the user needs its id to look at what happened"
+
+
+def test_task_create_is_happy_when_the_relay_echoes_the_project_it_was_given(monkeypatch, tmp_path):
+    """The positive control. Without it the check above passes for a `create_task` that refuses
+    every task ever created."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "T1", "state": "queued", "project_id": "P-the-shared-one"}))
+
+    assert cli.main(["task", "create", "--prompt", "x", "--project", "P-the-shared-one"]) == 0
+
+
+def test_task_create_refuses_an_empty_project(monkeypatch, tmp_path):
+    """`--project ""` used to fall through to the default project, which is the same class of
+    substitution as the bug above: the caller named something, and something else was used."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(500, json={"detail": "should never be called"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "x", "--project", "   "])
+
+    assert "--project" in str(caught.value)
+
+
+def test_project_create_prints_the_id_a_task_needs(monkeypatch, tmp_path, capsys):
+    """Creating a project is an explicit act now, and the id is its whole point — everything
+    downstream addresses a project by id (ADR 0033 D-a)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "P1", "name": "acme", "owner_id": "u1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "create", "--name", "acme"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects")
+    assert seen["body"] == {"name": "acme"}
+    assert "P1" in capsys.readouterr().out
+
+
+def test_project_create_empty_asks_the_relay_for_the_trunk_in_the_same_request(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-o / issue 48. One request, and the project is ready to talk to.
+
+    The test above is this one's negative control and stays unchanged: without `--empty` the body
+    is still exactly `{"name": …}`, so every relay that has ever answered this route keeps working.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={
+            "id": "P1", "name": "acme", "owner_id": "u1",
+            "bootstrap": {"status": "initialized", "commit": "a" * 40,
+                          "created": True, "trunk": "main"}})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects")
+    assert seen["body"] == {"name": "acme", "bootstrap": "empty"}
+    out = capsys.readouterr().out
+    assert "P1" in out
+    assert "a" * 40 in out, out
+    # The two "give it a trunk" hints are the whole point of NOT being printed here: it has one.
+    assert "project init" not in out, out
+    assert "project import" not in out, out
+
+
+def test_project_create_empty_on_a_relay_that_drops_the_key_refuses_and_names_the_fix(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-o / issue 48 — the degrade, and it is the reason this slice has a client guard.
+
+    grid-src's `create_project` reads only `name` and has no unknown-key check, so a relay that
+    predates this answers **201 for a trunkless project**: the flag is not refused, it is dropped.
+    That is the `project_id` echo-back shape from issue 10 — a new key on an EXISTING endpoint
+    degrades silently where a new ROUTE would have given a loud bare 404 the missing-route hint
+    could explain.
+
+    So the client checks the postcondition. It cannot prevent the create (already done); it can
+    stop it being reported as one that gave the project a trunk, which is the whole difference.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    # An old relay's answer, verbatim: the project, and no idea the key was there.
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    message = str(caught.value)
+    assert "P1" in message, message
+    # The fix must be the command the relay would have run, and it must be runnable as printed.
+    assert "grid project init P1" in message, message
+    # NOT `relay._OLD_RELAY`, which says the relay has no projects — it plainly does, it just
+    # answered, and sending somebody to check a working feature is its own bug.
+    assert "does not have projects yet" not in message, message
+    assert "Not Found" not in message, message
+    # The id still reached stdout: the project exists and that is the thing they need.
+    assert "P1" in capsys.readouterr().out
+
+
+def test_project_create_empty_json_still_emits_the_document_and_exits_non_zero(
+        monkeypatch, tmp_path, capsys):
+    """The `--json` half of the same degrade, decided with the product owner.
+
+    stdout stays ONE parseable document — the contract issue 32 landed — while the explanation goes
+    to stderr and the exit code carries the verdict. An application that got a zero here would have
+    a project it believes is ready and a first conversation that is about to be refused.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty", "--json"])
+
+    # `SystemExit` carrying a STRING exits the process 1 and writes that string to stderr —
+    # measured, not assumed, because `!= 0` alone would also pass for `SystemExit("")`, which exits
+    # 1 while telling the operator nothing. What is asserted is the message a person reads.
+    assert isinstance(caught.value.code, str) and caught.value.code.strip(), caught.value.code
+    assert "grid project init P1" in caught.value.code, caught.value.code
+    out = capsys.readouterr().out
+    # Parseable, and it is the relay's reply rather than a message about it. The explanation is NOT
+    # here — it goes to stderr with the exit code — or stdout would not be one document.
+    assert json.loads(out) == {"id": "P1", "name": "acme", "owner_id": "u1"}
+
+
+def test_project_create_empty_shows_the_relays_own_words_when_it_refuses_the_key(
+        monkeypatch, tmp_path):
+    """A relay NEW enough to validate the value refuses it with a code and a sentence of its own.
+
+    Distinct from the silent-drop case above and it must not be answered with the same home-made
+    prose: this relay knows about bootstraps and is saying something specific about the one it was
+    sent, so `_task_oneshot`'s own rendering is what a member needs to read.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "code": "invalid_request", "field": "bootstrap",
+        "message": "bootstrap must be one of empty, import, or left out entirely."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    message = str(caught.value)
+    assert "bootstrap must be one of empty, import" in message, message
+    assert "grid project init" not in message, message
+
+
+@pytest.mark.parametrize("block", [
+    {"status": "created", "commit": "a" * 40, "trunk": "main"},   # a status this cannot read
+    {"status": "initialized", "trunk": "main"},                    # initialized, but of what?
+    {"status": "initialized", "commit": "", "trunk": "main"},      # an empty oid is not one
+    "initialized",                                                  # not even a block
+])
+def test_project_create_empty_refuses_to_call_an_unreadable_reply_a_trunk(
+        monkeypatch, tmp_path, block):
+    """The house guard `grid project init` already applies, on the nested reply.
+
+    A trunk is created once and can never be created again, so "probably fine" is the one thing
+    this must not print: the next thing a member does is start a conversation against it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1", "bootstrap": block}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "create", "--name", "acme", "--empty"])
+
+    assert "grid project init P1" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("argv", [
+    ["project", "create", "--name", "acme"],
+    ["project", "create", "--name", "acme", "--json"],
+    ["project", "create", "--name", "acme", "--empty"],
+    ["project", "create", "--name", "acme", "--empty", "--json"],
+])
+def test_project_create_survives_a_reply_that_is_not_even_an_object(monkeypatch, tmp_path, argv):
+    """A 2xx whose body is a JSON array or string — a proxy, a captive portal — is a clean refusal.
+
+    `_task_oneshot` returns `resp.json()` verbatim, so the body reaches this handler unexamined and
+    an unguarded `.get()` escapes `main()` as a traceback, breaking this plane's "any failure is a
+    clean `SystemExit`" contract. The same hole is already closed one command at a time elsewhere in
+    this suite — `test_task_create_survives_a_project_listing_that_is_not_an_object` and
+    `test_task_get_json_still_prints_a_body_that_is_not_even_an_object`.
+
+    ⚠️ **Two of these four rows are a REGRESSION this slice caused and two are older.** `--json`
+    used to early-return before any `.get()` ran, and folding `--empty` into the handler replaced
+    that with a fall-through, so the `project_id` line began running on every path. The two
+    non-`--json` rows were broken before this slice as well; the guard fixes all four, and they are
+    parametrized together so nobody has to remember which was which.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(201, json=["not", "an", "object"]))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(argv)
+
+    # A sentence, not a traceback — and never an empty exit that reads as "the CLI is broken".
+    assert isinstance(caught.value.code, str) and caught.value.code.strip(), caught.value.code
+
+
+def test_project_init_posts_to_the_init_route_and_sends_no_body(monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-o end to end through `cli.main`. The second way a project gets a trunk, and the
+    only one available to somebody starting a new piece of work with no repository to import.
+
+    **No body**, like integrate: the trunk init creates is empty by design, so there is nothing for
+    a caller to put in one — and the relay refuses a body rather than dropping it, because `files`
+    means something real one route along.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "status": "initialized",
+            "commit": "a" * 40, "trunk": "main"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "init", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/init")
+    assert seen["body"] == b"", seen["body"]
+    out = capsys.readouterr().out
+    assert "main" in out and "a" * 40 in out
+
+
+def test_project_init_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A brand-new route, so a relay that predates it answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_a_real_404_from_the_init_route_is_not_masked(monkeypatch, tmp_path):
+    """The paired negative every route here carries: a relay that HAS the route and answers 404
+    about the project must show its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert str(caught.value) == "No such project"
+
+
+def test_project_init_shows_the_relays_own_words_when_the_project_already_has_a_trunk(
+        monkeypatch, tmp_path):
+    """The 409 needs no client code at all — `_task_error_message` reads the object `detail` and
+    prints its sentence. What this pins is that nothing here swallows or rewrites it: a trunk is
+    created once, so the reason it was refused is the whole of what a member can act on."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={
+        "detail": {"code": "project_already_has_trunk",
+                   "message": "Project P1 already has a main (at abc123).",
+                   "trunk_commit": "abc123"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert str(caught.value) == "Project P1 already has a main (at abc123)."
+
+
+def test_project_init_refuses_to_call_an_unreadable_reply_an_initialization(
+        monkeypatch, tmp_path):
+    """A 200 that does not say a trunk was created is not one. Reporting it as success is worse
+    here than elsewhere: the next thing a member does on that belief is create a task, and the
+    thing they would then be told is the thing they just ran a command to fix."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "init", "P1"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+def test_project_create_points_at_the_two_ways_to_get_a_trunk_not_at_a_task(
+        monkeypatch, tmp_path, capsys):
+    """`create`'s next step used to be `grid task create`, which is **guaranteed to fail**: the
+    project it had just made has no trunk, so the first thing a new user was told to do was the one
+    thing that could not work. Since issue 25 there are two ways to fix that and it names both."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"id": "P1", "name": "acme", "owner_id": "u1"}))
+
+    rc = cli.main(["project", "create", "--name", "acme"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "project init" in out and "project import" in out, out
+    assert "task create" not in out, "the next step is still the one that cannot work"
+
+
+def test_project_list_shows_every_project_you_are_a_member_of(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={"projects": [
+            {"id": "P1", "name": "acme", "role": "owner"},
+            {"id": "P2", "name": "shared", "role": "member"},
+        ]})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "list"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects")
+    out = capsys.readouterr().out
+    assert "P1" in out and "acme" in out and "P2" in out and "shared" in out
+
+
+def test_project_member_list_prints_the_key_a_removal_needs(monkeypatch, tmp_path, capsys):
+    """The member key is what `member remove` addresses, because `grid:<network>:<sub>` is not a
+    path segment. Printing it is what makes removal usable at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"members": [
+            {"user_id": "grid:n:1", "member_key": "abc123", "role": "owner",
+             "email": "alice@example.com", "name": "Alice"},
+        ]})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "member", "list", "P1"])
+
+    assert rc == 0
+    assert seen["path"] == "/relay/v1/projects/P1/members"
+    out = capsys.readouterr().out
+    assert "abc123" in out and "alice@example.com" in out
+
+
+def test_project_member_add_sends_the_email(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"user_id": "grid:n:2", "member_key": "def456",
+                                         "role": "member", "email": "bob@example.com"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "member", "add", "P1", "--email", "bob@example.com"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/members")
+    assert seen["body"] == {"email": "bob@example.com"}
+
+
+def test_project_member_remove_addresses_the_member_key(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={"removed": "def456"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "member", "remove", "P1", "def456"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == (
+        "DELETE", "/relay/v1/projects/P1/members/def456")
+
+
+def test_project_wip_reset_posts_the_commit_to_the_conversations_route(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-c's recovery path, end to end through `cli.main`.
+
+    ⚠️ **Addressed by the CONVERSATION since ADR 0034 D-e (issue 41)**, where it used to be the
+    member key. That is what names the branch now, and `wip reset` is the one project verb that
+    SURVIVES the clean break deleting promote and integrate (D-m) — the relay's own apply can still
+    leave a branch ahead of the turn that settled onto it, and nothing else moves one backwards.
+
+    The reply's `conversation_id` replaces its `member_key` for the same reason.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "branch": "wip/c-7", "conversation_id": "c-7",
+            "commit": "a" * 40, "previous_commit": "b" * 40})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "wip", "reset", "P1", "c-7", "--commit", "a" * 40])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == (
+        "POST", "/relay/v1/projects/P1/wip/c-7/reset")
+    assert seen["body"] == {"commit": "a" * 40}
+    out = capsys.readouterr().out
+    assert "wip/c-7" in out and "a" * 40 in out
+    # Where it came FROM is printed too: without it a user who reset to the wrong commit has no
+    # record of what to put back, and nothing else anywhere holds that value.
+    assert "b" * 40 in out
+
+
+def test_project_wip_reset_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path, capsys):
+    """A bare framework 404 from a relay that has never heard of this route reads as "the thing you
+    asked for is gone". The hint is keyed on FastAPI's own body, so a REAL 404 from a relay that
+    has the route still shows its own words — the distinction `remote/task_lease.py` also has to
+    make."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "wip", "reset", "P1", "c-7", "--commit", "a" * 40])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_wip_reset_shows_the_relays_own_words_for_a_real_refusal(
+        monkeypatch, tmp_path, capsys):
+    """The refusal that actually happens: the conversation has a turn running, so the reset would
+    move the base out from under it. It arrives as a D-l object — `{"code", "message"}` — and the
+    person at the terminal must be shown the MESSAGE, not the raw JSON.
+
+    Narrower than the rule it replaces since ADR 0034 D-e, and that narrowing is the re-key doing
+    its job: it is this CONVERSATION's turn that blocks the reset, not any turn the member happens
+    to have running elsewhere. The message and its code are the relay's own and are displayed
+    verbatim, so this side asserts only that the sentence arrives and the object does not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "member_has_active_task",
+        "message": "c-7 has an active task in this project (T7); resetting now would move the "
+                   "base out from under it.",
+        "task_id": "T7"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "wip", "reset", "P1", "c-7", "--commit", "a" * 40])
+
+    assert "active task" in str(caught.value), caught.value
+    assert "code" not in str(caught.value), (
+        "the raw refusal object reached the user instead of its sentence")
+
+
+def test_project_commit_posts_files_and_a_message_to_the_commit_route(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-j end to end through `cli.main`, re-keyed by ADR 0034 D-e (issue 41).
+
+    `grid project commit` is the answer to "the agent got it 90% right, let me fix the last line" —
+    the most frequent action of a working day, which the design otherwise answers with a paid agent
+    run.
+
+    ⚠️ **It names a CONVERSATION, and the ROUTE MOVED with it** — `POST /relay/v1/tasks/{id}/commit`,
+    not `POST /relay/v1/projects/{id}/commit`. A branch belongs to a conversation now, so the
+    request has to name one; and it is a new PATH rather than a new key on the old route precisely
+    so a relay that predates this answers a bare 404 instead of a cheerful 200 for a commit that
+    landed on a different branch. The path is asserted byte-for-byte here for that reason.
+    """
+    import base64
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "fix.py"
+    source.write_text("x = 2\n")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": ["fix.py"], "deletes": []})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "commit", "c-7", "-m", "fix the last line",
+                   "--file", f"{source}:src/fix.py"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/c-7/commit")
+    assert seen["body"]["message"] == "fix the last line"
+    assert seen["body"]["files"] == [
+        {"path": "src/fix.py", "content_b64": base64.b64encode(b"x = 2\n").decode()}]
+    out = capsys.readouterr().out
+    assert "wip/c-7" in out and "a" * 40 in out
+    # ⚠️ And it names NO next step, which is the feature (ADR 0034 D-d). This used to end by telling
+    # the member to run `grid project promote`; the grid applies the commit to the project itself
+    # now, so a trailer naming a deleted command would be the one line here nobody can act on.
+    assert "promote" not in out, out
+
+
+def test_project_commit_sends_the_executable_bit_only_to_set_it_never_to_clear_it(
+        monkeypatch, tmp_path, capsys):
+    """The wire carries a boolean, and this CLI is **set-only** (ADR 0033 D-j).
+
+    Absent means "keep whatever the project already has"; `false` means "make this a regular file".
+    Sending `false` for a local file that merely lost its bit — a zip, a Windows share, a `curl -O` —
+    would strip it server-side, which is the exact defect the field exists to fix.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    script = tmp_path / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    plain = tmp_path / "notes.md"
+    plain.write_text("hi\n")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": ["build.sh", "notes.md"], "deletes": []})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "commit", "c-7", "-m", "m",
+                   "--file", str(script), "--file", str(plain)])
+
+    assert rc == 0
+    by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
+    assert by_path["build.sh"]["executable"] is True
+    # The key is ABSENT, not `False`. `"executable" not in` rather than `.get(...) is not False`,
+    # because those two are the difference between inheriting and stripping.
+    assert "executable" not in by_path["notes.md"], by_path["notes.md"]
+
+
+def test_task_create_does_not_send_the_executable_key(monkeypatch, tmp_path):
+    """`grid task create`'s wire shape is byte-identical to before this slice, and that is a ROLLOUT
+    constraint rather than tidiness.
+
+    `task_files.parse_files` refuses unknown keys, so a relay predating this release answers 422
+    rather than dropping the field — sending it here would break a command that works today against
+    every un-upgraded relay. Task uploads still stop stripping executable bits, because that half is
+    the relay reading its own base tree and needs nothing from this side.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    script = tmp_path / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    seen = {}
+
+    def handler(request):
+        if request.url.path.endswith("/projects"):
+            return _default_project_listing()
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "create", "--prompt", "p", "--file", str(script)])
+
+    assert rc == 0
+    assert seen["body"]["files"] == [
+        {"path": "build.sh", "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], (
+        "task create's file entries gained a key an older relay would refuse")
+
+
+def test_project_commit_dir_preserves_executable_bits(monkeypatch, tmp_path):
+    """`--dir` reuses `_collect_files`' `mark_executable`, so a walked script keeps its bit exactly
+    as a `--file` one does — still SET-ONLY, so a plain file sends no key at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "scripts"
+    folder.mkdir()
+    script = folder / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    (folder / "notes.md").write_text("hi\n")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": ["scripts/build.sh", "scripts/notes.md"], "deletes": []})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "commit", "c-7", "-m", "m", "--dir", str(folder)]) == 0
+
+    by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
+    assert by_path["scripts/build.sh"]["executable"] is True
+    assert "executable" not in by_path["scripts/notes.md"], by_path["scripts/notes.md"]
+
+
+def test_task_create_dir_sends_no_executable_key_either(monkeypatch, tmp_path):
+    """The byte-for-byte body-shape pin, carried onto the new flag.
+
+    `task_files.parse_files` refuses unknown keys, so a relay predating ADR 0033 D-j answers 422
+    rather than dropping the field — sending it from `task create` would break a command that works
+    today against every un-upgraded relay. `--dir` must not be the back door that reintroduces it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "scripts"
+    folder.mkdir()
+    script = folder / "build.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert seen["body"]["files"] == [
+        {"path": "scripts/build.sh",
+         "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], (
+        "task create's file entries gained a key an older relay would refuse")
+
+
+def test_project_commit_posts_deletes_and_refuses_an_empty_request_locally(
+        monkeypatch, tmp_path, capsys):
+    """`--delete` rides the same request as `--file`, and a request naming neither never leaves.
+
+    Refused locally as well as by the relay because this one is answerable without a round trip, and
+    the message can name the flags rather than the wire fields.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "project_id": "P1", "conversation_id": "c-7", "branch": "wip/c-7",
+            "commit": "a" * 40, "previous_commit": "b" * 40,
+            "files": [], "deletes": ["dead.py"]})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "commit", "c-7", "-m", "drop it", "--delete", "dead.py"]) == 0
+    assert seen["body"]["deletes"] == ["dead.py"]
+    assert "files" not in seen["body"], "an empty files list was sent where the key should be absent"
+    assert "dead.py" in capsys.readouterr().out
+
+    seen.clear()
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "c-7", "-m", "nothing"])
+    assert "--file" in str(caught.value) and "--delete" in str(caught.value)
+    assert seen == {}, "an empty commit was sent to the relay anyway"
+
+
+def test_project_commit_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A bare framework 404 means the route is not there, and "Not Found" reads as "the thing I
+    asked for is gone". Keyed on the bare body, so a REAL 404 from a relay that has the route still
+    shows its own words.
+
+    ⚠️ **This is the whole reason issue 41 MOVED the route rather than adding a key to the old one**
+    (ADR 0034 D-e). `POST /projects/{id}/commit` still exists on an un-upgraded relay, so a
+    conversation id posted there would have been answered 200 for a commit that landed on the
+    member's branch — a branch nothing in this release reads. A new PATH makes that skew loud.
+
+    Its sentence is `relay._OLD_RELAY_NO_COMMIT`, deliberately NOT `_OLD_RELAY`: that one says the
+    relay has no projects, which is plainly false of one still serving `grid project status`, and
+    would send somebody to chase a working feature (`_OLD_RELAY_NO_CANCEL`'s reasoning).
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_text("x\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "c-7", "-m", "m", "--file", str(source)])
+
+    message = str(caught.value)
+    assert "relay" in message.lower(), message
+    assert "conversation" in message.lower(), (
+        "the hint does not say WHAT this relay is too old for, so it reads as the generic "
+        "'no projects here' sentence for a relay that plainly has them")
+    assert "nothing was committed" in message.lower(), (
+        "a refusal for a write must say whether the write happened")
+
+
+def test_project_commit_does_not_call_a_reply_it_cannot_read_a_commit(monkeypatch, tmp_path):
+    """The same rule `project status`, `create` and `import` follow — the promote and integrate that
+    used to be named here went with issue 41. Printing the success line by default is how a promote
+    once reported work as landed for a body a proxy had stripped, and it matters at least as much
+    now: what happens next on that belief is the GRID applying the commit to the project.
+
+    The refusal names the CONVERSATION rather than the project, because that is the id the caller
+    typed and the only one they can retry with.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_text("x\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "branch": "wip/c-7", "files": ["a.txt"]}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "c-7", "-m", "m", "--file", str(source)])
+
+    assert "c-7" in str(caught.value), caught.value
+
+
+def test_project_commit_shows_the_relays_own_words_when_a_task_is_running(monkeypatch, tmp_path):
+    """The 409 that matters day to day, and it is not the bare-404 hint: the relay holds the
+    caller's one task slot to make this write safe, so a task in flight refuses it — naming the
+    task, because an application cannot wait on one it has not been told the id of."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_text("x\n")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "member_has_active_task",
+        "message": "You already have an active task in project P1 (T7).",
+        "project_id": "P1", "task_id": "T7"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "commit", "c-7", "-m", "m", "--file", str(source)])
+
+    assert "T7" in str(caught.value), caught.value
+
+
+def test_project_commit_help_says_it_is_not_a_push_and_that_deletes_are_checked():
+    """Two things a user has to meet before they need them: this does not lift the push ban, and a
+    delete of a path that is not there is REFUSED — because git's own answer is to report success
+    and do nothing, which is what somebody would otherwise assume happened.
+
+    ⚠️ **The third claim is INVERTED by ADR 0034 D-d (issue 41), not merely reworded.** This help
+    used to have to say the command stops short of `main`, because landing the change there was a
+    separate `grid project promote` the member ran afterwards. The grid applies a commit to the
+    project itself now, so the honest disclosure is the opposite one — there is nothing to run
+    afterwards — and a help still promising a further step would send somebody to a deleted command.
+    Asserted positively so "stops short of main" cannot quietly come back.
+
+    The slot claim is re-keyed rather than dropped: the write still holds a slot, that conversation's
+    rather than the member's one task slot (ADR 0034 D-b/D-e).
+    """
+    parser = cli.build_parser()
+    committer = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["commit"]
+    help_text = committer.format_help().lower()
+
+    assert "conversation's slot" in help_text, (
+        "the help does not say it holds that conversation's slot")
+    assert "refused" in help_text and "not there" in help_text, (
+        "the help does not say a delete of a missing path is refused")
+    assert "afterwards" in help_text and "nothing else" in help_text, (
+        "the help does not say the change reaches the project with nothing else to run")
+    assert "main" not in help_text, (
+        "the help still talks about main; since D-d the member never touches it from here")
+
+
+def test_a_relay_refusal_object_is_rendered_as_its_sentence(monkeypatch, tmp_path, capsys):
+    """`_task_error_message` reads a `detail` that is an OBJECT (ADR 0033 D-l), and still reads one
+    that is a plain string — every endpoint this ADR did not touch still sends one, and issue 19 is
+    where the rest follow."""
+    from remote import relay as relay_mod
+
+    as_object = httpx.Response(422, json={"detail": {"code": "project_has_no_trunk",
+                                                     "message": "Import a repository first."}})
+    as_string = httpx.Response(422, json={"detail": "prompt is required"})
+    shapeless = httpx.Response(422, json={"detail": {"code": "no_message_key"}})
+
+    assert relay_mod._task_error_message(as_object) == "Import a repository first."
+    assert relay_mod._task_error_message(as_string) == "prompt is required"
+    # An object with no `message` is still a refusal we owe the user words for — the raw body,
+    # never a `KeyError` raised from inside an error path.
+    assert "no_message_key" in relay_mod._task_error_message(shapeless)
+
+
+def test_task_get_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "id": "T1", "state": "completed", "result_text": "say hello\n", "error": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "get", "T1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/tasks/T1")
+    out = capsys.readouterr().out
+    assert "completed" in out and "say hello" in out
+
+
+# --- issue 32: `grid task get` exits with the task's outcome --------------------------------------
+
+def test_task_get_exits_non_zero_when_the_task_failed(monkeypatch, tmp_path, capsys):
+    """`grid task get <id> && deploy.sh` must not deploy a failed task (issue 32).
+
+    `grid task follow` has ended with the task's own outcome since ADR 0032, and its docstring says
+    why — "so a script can branch on it… reporting unknown as success is the failure this guards".
+    `get` returned 0 whatever the state, and `get` is the one people reach for in a script: it is
+    the non-blocking one, the one you poll with. So the trap sat on the likelier path, and it failed
+    SILENTLY — a green script over a red task.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "error": "the agent reported an error"}))
+    rc = cli.main(["task", "get", "T1"])
+
+    assert rc == 1, "a failed task reported as success is what this slice exists to remove"
+    assert "failed" in capsys.readouterr().out, "the state is still reported in words"
+
+
+@pytest.mark.parametrize("active", ["preparing", "queued", "running"])
+def test_task_get_has_its_own_code_for_a_task_that_has_not_finished(
+        monkeypatch, tmp_path, capsys, active):
+    """A third code, and it is the row worth spelling out (issue 32).
+
+    Returning 0 for a task that has not finished says "fine" about an unknown outcome — the exact
+    thing `follow`'s docstring refuses to do — and returning 1 says it went wrong, which is a
+    verdict nobody has reached yet. So `2` means "ask again", and it is what makes a polling loop
+    expressible at all.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "T1", "state": active}))
+
+    assert cli.main(["task", "get", "T1"]) == 2, (
+        f"{active} is neither a success nor a failure; both readings are a confident wrong answer")
+    # The positive control for the disclosure below: an ordinary unfinished task is the common case
+    # and gets no warning. Without this row, a note that fired on every poll would pass that test.
+    assert capsys.readouterr().err == "", f"{active} is an ordinary state, not a surprise"
+
+
+@pytest.mark.parametrize("reply", [
+    {"id": "T1", "state": "teleported"},   # a state a newer relay invented
+    {"id": "T1"},                          # no state at all — a proxy that stripped the body
+    {"id": "T1", "state": None},
+    # NOT strings, and every one of them is `state` as some other JSON type. A frozenset membership
+    # test HASHES its left operand, so an object or an array raised `TypeError: unhashable type` —
+    # uncaught, all the way out of `main()`. Python exits 1 on an unhandled exception, which is
+    # numerically "the task failed": a CLI-side parsing crash reported to the script as a verdict on
+    # the task, which is the precise failure this whole slice exists to remove.
+    {"id": "T1", "state": {"weird": "object"}},
+    {"id": "T1", "state": ["queued"]},
+    {"id": "T1", "state": 7},
+    {"id": "T1", "state": True},
+    {"id": "T1", "state": ""},
+])
+def test_task_get_says_out_loud_when_it_cannot_read_the_state(monkeypatch, tmp_path, capsys, reply):
+    """`2` for a state this build cannot place, and a line on stderr naming it (issue 32).
+
+    2 is the conservative half: `_TERMINAL_STATES` already treats an unheard-of state as
+    not-finished, and reading it as 1 instead would report a healthy task as failed the day a relay
+    adds a new ACTIVE state. But 2 means "ask again", and a poller against a relay that added a new
+    TERMINAL state would then ask forever — so the one thing this must not be is quiet.
+
+    stderr, not stdout: `--json`'s contract is that stdout carries the relay's document and nothing
+    else, and this must not corrupt a `| jq`.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+    rc = cli.main(["task", "get", "T1"])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert "T1" in captured.err, f"nothing on stderr names the task:\n{captured.err}"
+    if reply.get("state") is not None:
+        # `str(...)`, because half these states are not strings — which is the point of the rows.
+        assert str(reply["state"]) in captured.err, (
+            f"the note does not name the state it could not place:\n{captured.err}")
+
+
+@pytest.mark.parametrize("state_name,expected", [
+    ("completed", 0),
+    ("failed", 1),
+    ("timed_out", 1),
+    ("preparing", 2),
+    ("queued", 2),
+    ("running", 2),
+])
+def test_task_get_returns_two_exactly_while_the_task_can_still_change(
+        monkeypatch, tmp_path, state_name, expected):
+    """The whole table in one place, because `2` is what makes a polling loop terminate.
+
+    Measured on bash, zsh and sh: the body of an `until` sees the condition's real status, so
+
+        until grid task get "$id"; do
+          rc=$?
+          [ "$rc" -eq 2 ] || exit "$rc"
+          sleep 30
+        done
+
+    waits while the task is running and stops the moment it is over, either way. If a terminal state
+    ever answered 2 that loop would never end; if an active one answered 0 or 1 it would act on a
+    verdict nobody has reached. The issue's own one-liner (`until grid task get $id; do sleep 30;
+    done`) does NOT do this — it exits only on 0, so it spins forever on a `failed` task, which is
+    why the documented loop reads the status.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "T1", "state": state_name}))
+
+    assert cli.main(["task", "get", "T1"]) == expected
+
+
+def test_task_get_json_is_byte_for_byte_what_it_was_and_only_the_status_moved(
+        monkeypatch, tmp_path, capsys):
+    """The breaking change is the exit status ALONE (issue 32).
+
+    An application reading `--json` must see the document it has always seen; only a shell branching
+    on `$?` sees anything new.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reply = {"id": "T1", "state": "failed", "error": "boom", "result_text": None}
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+    rc = cli.main(["task", "get", "T1", "--json"])
+
+    out = capsys.readouterr().out
+    assert json.loads(out) == reply
+    assert out == json.dumps(reply, indent=2) + "\n", "the rendering itself must not have moved"
+    assert rc == 1, "the failure has to reach the shell, or the whole slice buys nothing"
+
+
+def test_task_get_json_still_prints_a_body_that_is_not_even_an_object(monkeypatch, tmp_path, capsys):
+    """`--json` prints what the relay sent, whatever shape it is — the acceptance criterion.
+
+    `relay.get_task` returns `resp.json()` verbatim, so a 200 carrying an array or a string (a proxy,
+    a captive portal) reaches this command. Before issue 32 the `--json` path never touched the body
+    at all — it printed and returned 0 — and reading `state` ahead of that gate turned it into an
+    `AttributeError` traceback with NOTHING printed, which is both a regression and, at exit 1,
+    indistinguishable from a failed task.
+
+    The status is allowed to move (that is the whole slice); the document is not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = ["captive", "portal"]
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    rc = cli.main(["task", "get", "T1", "--json"])
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out) == body, "the relay's own document must still reach stdout"
+    assert rc == 2, "an answer this cannot read is not a finished task, and never a success"
+    assert "T1" in captured.err, "and it says so, rather than exiting 2 with no explanation"
+
+
+def test_task_get_says_a_body_it_cannot_read_is_not_a_task(monkeypatch, tmp_path, capsys):
+    """The human half of the same reply: a sentence, not a traceback.
+
+    Every sibling in this plane follows the rule already — `task list`, `project status`, `cancel` —
+    and it matters more here than it did before the exit codes: a traceback exits 1, which now MEANS
+    "the task ended badly", so the one thing a reader must not be told is being told to them.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=["captive", "portal"]))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "get", "T1"])
+
+    assert "T1" in str(caught.value)
+    assert "--json" in str(caught.value), "the way to see what arrived is not named"
+
+
+def test_task_get_help_documents_the_exit_codes():
+    """An exit status nobody can look up is not a contract (issue 32).
+
+    It is also the one part of this command's behaviour that leaves no trace on the screen, so
+    `--help` is where somebody writing a script has to be able to find it.
+    """
+    parser = cli.build_parser()
+    getter = parser._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["get"]
+    help_text = getter.format_help()
+
+    for code, state_name in (("0", "completed"), ("1", "failed"), ("2", "running")):
+        assert code in help_text and state_name in help_text, (
+            f"the help does not document exit {code} for {state_name}:\n{help_text}")
+    assert "timed_out" in help_text, "the second failing state is missing"
+    # The loop is the reason `2` exists at all; a table with no worked example leaves the reader to
+    # rediscover that `until <cmd>` alone spins forever on a failed task.
+    assert "until" in help_text, f"the polling idiom is not shown:\n{help_text}"
+    # `status=` is the trap, measured: in zsh — the default macOS shell — `status` is a READ-ONLY
+    # alias for `$?`, so the assignment fails, the comparison reads the assignment's own 1, and the
+    # loop exits on its FIRST poll blaming a task that is running perfectly. bash and sh accept it,
+    # so whoever "tidies" `rc` into the more descriptive name will see nothing wrong.
+    assert "status=$?" not in help_text, (
+        "the documented loop assigns to `status`, which zsh refuses — it would report a failure for "
+        "a running task on the default macOS shell")
+
+
+def test_task_fetch_refuses_a_task_that_has_not_finished(monkeypatch, tmp_path, capsys):
+    """Until the provider pushes, the branch still holds only the INPUT. Serving that would hand
+    the user their own uploaded files back as though they were the agent's result — a wrong answer
+    delivered confidently, which is the failure ADR 0032 keeps closing."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "running", "branch": "task/T1", "project_id": "p1",
+        "result_commit": None}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1"])
+
+    assert "running" in str(caught.value)
+    assert "follow" in str(caught.value)
+
+
+def test_task_fetch_says_a_pruned_branch_is_gone_rather_than_letting_git_be_confusing(
+        monkeypatch, tmp_path):
+    """A task whose ref the relay has collected is refused with the reason (ADR 0033 issue 16a).
+
+    Everything else about an old task still looks fetchable — `result_commit` and `branch` are both
+    still on the row — so without this the user's reward is git's own `couldn't find remote ref`,
+    which reads as corruption or as a permissions fault and sends them hunting for a break that is a
+    retention policy working correctly.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "a" * 40, "branch_pruned": True}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "dest")])
+
+    assert "no longer kept" in str(caught.value), caught.value
+    assert "T1" in str(caught.value)
+
+
+def test_task_fetch_on_a_relay_that_never_heard_of_pruning_still_fetches(
+        monkeypatch, tmp_path):
+    """The degrade direction. An older relay sends no `branch_pruned` key at all, and a missing key
+    must read as "not pruned" — that relay collects no branches, so every one of them is there.
+
+    Reading absence as `True` would refuse every fetch against every relay that has not redeployed,
+    which is the inversion of this repo's rule: an absent feature falls back to the OLD behaviour,
+    never to a new failure.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reached = {}
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "a" * 40}))
+    monkeypatch.setattr(
+        "remote.task_repo.checkout_result",
+        lambda dest, **kw: reached.update(kw))
+
+    rc = cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "dest")])
+
+    assert rc == 0
+    assert reached.get("branch") == "task/T1", reached
+
+
+def test_task_fetch_refuses_to_check_out_over_somebody_elses_directory(
+        monkeypatch, tmp_path, capsys):
+    """`--into` names a directory the USER chose, so a checkout that overwrote a same-named file
+    would be silent data loss. A directory a previous `grid task fetch` made is the one exception —
+    that is how a project's successive tasks are followed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    mine = tmp_path / "my-work"
+    mine.mkdir()
+    (mine / "notes.txt").write_text("mine")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(mine)])
+
+    # The exact refusal, not just "some refusal mentioning --into": the two guards here produce
+    # different messages that both name the flag, so a loose assertion passes whichever one fired.
+    assert "was not created by" in str(caught.value), str(caught.value)
+    assert (mine / "notes.txt").read_text() == "mine", "the user's own file was touched"
+
+
+def test_task_fetch_refuses_a_destination_that_is_the_users_own_git_repository(
+        monkeypatch, tmp_path):
+    """The dangerous case, and the one `.git`-exists could not see.
+
+    A user passing `--into ~/my-project` (or running the command inside one) hits a directory that
+    HAS a `.git` and is not ours. `checkout_result` would then `git checkout -- .` over it, which
+    overwrites a file of the same name without complaining — unlike `git checkout <branch>`, which
+    refuses. Nothing about the presence of `.git` distinguishes the user's repository from one this
+    command made, so a marker written by the fetch itself is what the guard reads.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    mine = tmp_path / "my-real-project"
+    (mine / ".git").mkdir(parents=True)
+    (mine / "fix.py").write_text("the user's own uncommitted work\n")
+
+    from remote import task_repo
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda *a, **k: pytest.fail("checked out over the user's own repository"))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(mine)])
+
+    assert "was not created by" in str(caught.value), str(caught.value)
+    assert (mine / "fix.py").read_text() == "the user's own uncommitted work\n"
+
+
+def test_task_fetch_updates_a_directory_it_made_before_for_the_same_project(
+        monkeypatch, tmp_path):
+    """The flip side, and the reason the guard is a marker rather than a blanket refusal: following
+    a project's successive tasks means fetching into the same directory again."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    ours = tmp_path / "result"
+    (ours / ".git").mkdir(parents=True)
+    (ours / ".git" / "grid-task-fetch").write_text("p1\n")
+    (ours / "from-task-1.py").write_text("earlier\n")
+    asked = {}
+
+    from remote import task_repo
+
+    monkeypatch.setattr(task_repo, "checkout_result", lambda dest, **kw: asked.update(kw))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T2", "state": "completed", "branch": "task/T2", "project_id": "p1",
+        "result_commit": "d" * 40}))
+
+    assert cli.main(["task", "fetch", "T2", "--into", str(ours)]) == 0
+    assert asked["commit"] == "d" * 40
+
+
+def test_task_fetch_refuses_a_directory_holding_a_different_project(monkeypatch, tmp_path):
+    """Two projects' results in one directory would interleave two unrelated histories, and the
+    second checkout would overwrite the first project's files by name."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    other = tmp_path / "result"
+    (other / ".git").mkdir(parents=True)
+    (other / ".git" / "grid-task-fetch").write_text("some-other-project\n")
+    (other / "kept.py").write_text("from the other project\n")
+
+    from remote import task_repo
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda *a, **k: pytest.fail("checked out one project's result over another's"))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(other)])
+
+    assert "some-other-project" in str(caught.value), str(caught.value)
+
+
+def test_task_fetch_defaults_the_destination_to_the_task_id(monkeypatch, tmp_path):
+    """So `grid task fetch <id>` on its own can never land in a directory holding other work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    asked = {}
+
+    from remote import task_repo
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda dest, **kw: asked.update(dest=str(dest), **kw))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["task", "fetch", "T1"])
+
+    assert rc == 0
+    # Resolved rather than compared as a string: the default is deliberately RELATIVE, because
+    # `fetched into T1` is what a user can act on and an absolute temp path is not.
+    from pathlib import Path
+
+    assert Path(asked["dest"]).resolve() == (tmp_path / "T1").resolve()
+    assert asked["branch"] == "task/T1"
+    assert asked["commit"] == "c" * 40
+    # The relay's git front, built from the SAME base the API calls use.
+    assert asked["url"].endswith("/relay/v1/git/p1")
+    assert asked["token"] == "AT"
+
+
+def test_task_fetch_serves_the_branch_of_a_task_that_recorded_no_result(
+        monkeypatch, tmp_path, capsys):
+    """Terminal with nothing pushed is a real state — a cancelled attempt whose agent was killed
+    before `commit_and_push` ran. This USED to be refused with "no result to fetch", and that made
+    `grid task cancel` a liar: it prints "Its branch is left where the agent got to:
+    `grid task fetch <id>`" while the branch sat on the relay holding the task's input.
+
+    The promise cannot be made conditional at its own end — cancel returns at once and the agent
+    does not die until the next lease beat, so nobody knows yet whether a result will land. So the
+    branch is served, and the output SAYS which of the two arrived. Refusing was one way to stop
+    "input" reading as "result"; saying so is the other, and it is the one that keeps the promise.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    checked = {}
+
+    def _checkout(dest, **kwargs):
+        checked.update(kwargs)
+        Path(dest).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(task_repo, "checkout_result", _checkout)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": None}))
+
+    assert cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "out")]) == 0
+
+    out = capsys.readouterr().out
+    assert "may hold only the task's input" in out, out
+    # The branch is what gets fetched, and no commit is invented to stand in for the missing one.
+    assert checked.get("branch") == "task/T1", checked
+    assert not checked.get("commit"), checked
+
+
+def test_task_fetch_still_refuses_a_task_with_no_branch_at_all(monkeypatch, tmp_path):
+    """The arm that is still a refusal, kept honest: no branch means nowhere to look.
+
+    Without this the change above would read as "fetch never refuses", and a relay that sent a task
+    with no branch would reach `checkout_result` to fail there with a git message instead.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "failed", "branch": None, "project_id": "p1",
+        "result_commit": None}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1"])
+
+    assert "no result to fetch" in str(caught.value)
+
+
+def test_task_fetch_resets_to_the_PINNED_commit_when_the_task_reported_one(
+        monkeypatch, tmp_path):
+    """The normal path must not drift to the branch tip.
+
+    `result_commit` is what THAT task produced; a branch can have moved since, because a retry
+    pushes the same ref. The tip is a fallback for the no-result case only.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    checked = {}
+
+    def _checkout(dest, **kwargs):
+        checked.update(kwargs)
+        Path(dest).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(task_repo, "checkout_result", _checkout)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "deadbee"}))
+
+    assert cli.main(["task", "fetch", "T1", "--into", str(tmp_path / "out")]) == 0
+
+    assert checked.get("commit") == "deadbee", checked
+
+
+def test_task_get_json_echoes_the_relay_reply(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reply = {"id": "T1", "state": "completed", "result_text": "hi\n", "error": None}
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+    cli.main(["task", "get", "T1", "--json"])
+
+    assert json.loads(capsys.readouterr().out) == reply
+
+
+def test_task_get_says_a_task_nobody_claimed_needs_providers_not_a_fix(
+        monkeypatch, tmp_path, capsys):
+    """`queue_expired` and `deadline_exceeded` are one word apart and call for opposite actions
+    (ADR 0033 D-k, issue 18). Printing the slug alone leaves the reader to know which is which."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "timed_out", "error": "queue_expired", "attempt": 0}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "error=queue_expired" in out, "the slug itself is still reported verbatim"
+    assert "provider" in out.lower(), (
+        "a task that expired waiting has to point at capacity — telling someone to fix a task "
+        f"that never ran is the failure this slice exists to remove:\n{out}")
+
+
+def test_the_queue_expired_sentence_is_true_of_a_retried_task_too(monkeypatch, tmp_path, capsys):
+    """`queue_expired` does not mean `attempt == 0`, and the sentence must not say it does.
+
+    A task whose provider died is requeued onto the queue clock (`claimed_at` cleared), so if
+    nobody picks it up again it ends `queue_expired` with `attempt = 1` — it DID run once. The slug
+    names the budget that was spent, which is the honest fact; a sentence claiming "no provider ever
+    claimed it" would be flatly false for that row, and it is the row a team is most likely to be
+    staring at when a fleet is flapping.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "timed_out", "error": "queue_expired", "attempt": 2}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out.lower()
+    # The exact overclaims, spelled out rather than a vague "never": the first draft of this test
+    # searched for a word the sentence did not contain and passed without looking at anything.
+    for overclaim in ("ever claimed", "never claimed", "never ran"):
+        assert overclaim not in out, (
+            f"the sentence says {overclaim!r}, which is false of a task that ran once and was then "
+            f"requeued — `queue_expired` names the budget, not the attempt count:\n{out}")
+    assert "provider" in out
+
+
+def test_task_get_does_not_blame_capacity_for_a_task_that_really_ran(
+        monkeypatch, tmp_path, capsys):
+    """The positive control. The advice must not fire on the reason that was already correct."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "timed_out", "error": "deadline_exceeded", "attempt": 1}))
+    cli.main(["task", "get", "T1"])
+
+    out = capsys.readouterr().out
+    assert "error=deadline_exceeded" in out
+    assert "no provider" not in out.lower()
+
+
+def test_task_follow_says_which_budget_a_timed_out_task_spent(capsys):
+    """The same distinction where a person actually watches a task end."""
+    from cli import remote_task
+
+    remote_task._render(9, {"type": "task.terminal", "state": "timed_out",
+                            "error": "queue_expired"}, as_json=False)
+
+    out = capsys.readouterr().out
+    assert "timed_out: queue_expired" in out, "the relay's own word, verbatim"
+    assert "provider" in out.lower()
+
+
+def test_task_get_percent_encodes_the_id_in_the_path(monkeypatch, tmp_path):
+    """The id is user input interpolated into a request path."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    _mock_relay(monkeypatch, lambda r: (seen.update(raw=r.url.raw_path), httpx.Response(200, json={}))[1])
+    cli.main(["task", "get", "../nodes/evil"])
+
+    assert seen["raw"] == b"/relay/v1/tasks/..%2Fnodes%2Fevil"
+
+
+# --- issue 32: `grid task create --follow` --------------------------------------------------------
+
+def _created_then_streamed(*blocks, task_id="T1", requests=None):
+    """A relay that answers `POST /tasks` with a created task and then streams its events.
+
+    Path-aware, and it records the ORDER of the requests: "no gap between creating and attaching" is
+    a claim about what happens between the two calls, so a handler that could not tell them apart
+    would leave it unmeasured.
+    """
+    def handler(request):
+        if requests is not None:
+            requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, text=_sse(*blocks),
+                                  headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(201, json={
+            "id": task_id, "state": "queued", "project_id": "p1"})
+    return handler
+
+
+def test_task_create_follow_watches_the_task_it_just_created(monkeypatch, tmp_path, capsys):
+    """create → watch in one command (issue 32).
+
+    Every use of `create` was create → copy the id → `grid task follow <id>`, and the id is the only
+    thing joining them. `--follow` attaches from `after_seq=-1`, so nothing that happened between
+    the POST returning and the stream opening is missed — the point of a sequenced log.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    requests: list[tuple[str, str]] = []
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.output", "text": "working on it"}),
+        _block(1, {"type": "task.terminal", "state": "completed"}),
+        requests=requests))
+    rc = cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "working on it" in out, f"the task was created but never watched:\n{out}"
+    assert requests == [("POST", "/relay/v1/tasks"), ("GET", "/relay/v1/tasks/T1/events")], (
+        f"something happened between creating the task and attaching to it: {requests}")
+
+
+def test_task_create_follow_attaches_from_the_very_first_event(monkeypatch, tmp_path, capsys):
+    """`after_seq=-1`, so the window between the POST returning and the stream opening holds nothing.
+
+    A provider can claim a task the instant it is queued, so attaching at "now" would lose whatever
+    it published first — which on a short task can be most of it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        if request.url.path.endswith("/events"):
+            seen["after_seq"] = request.url.params.get("after_seq")
+            return httpx.Response(
+                200, text=_sse(_block(0, {"type": "task.terminal", "state": "completed"})),
+                headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "p1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+
+    assert seen["after_seq"] == "-1", f"the stream did not start from the beginning: {seen}"
+
+
+@pytest.mark.parametrize("final,expected", [("completed", 0), ("failed", 1), ("timed_out", 1)])
+def test_task_create_follow_exits_with_the_tasks_outcome(
+        monkeypatch, tmp_path, capsys, final, expected):
+    """`grid task create … --follow && deploy.sh` is the whole point of the slice (issue 32).
+
+    Matching `grid task follow` exactly, including its TWO codes: a followed task has been watched to
+    the end of its stream, so `2` (not finished) is not one of the answers available here.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.terminal", "state": final, "error": None})))
+
+    assert cli.main(
+        ["task", "create", "--project", "p1", "--prompt", "go", "--follow"]) == expected
+
+
+def test_task_create_follow_prints_the_id_before_it_starts_watching(monkeypatch, tmp_path, capsys):
+    """The id first, then the stream — the order is what makes Ctrl-C survivable.
+
+    Somebody who stops watching a task they started needs the id to reattach, and the only place it
+    is ever shown is this command's own output. Printing it after the stream would mean the one case
+    where you need it is the one case where it never arrives.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.output", "text": "MARKER-EVENT"}),
+        _block(1, {"type": "task.terminal", "state": "completed"})))
+    cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+    out = capsys.readouterr().out
+
+    # The created-task REPORT, not merely the string "T1" — the follow banner names the id too, so
+    # asserting on the id alone went green with this line deleted (found by mutation).
+    created = next((i for i, line in enumerate(out.splitlines()) if "created on" in line), None)
+    event = next(i for i, line in enumerate(out.splitlines()) if "MARKER-EVENT" in line)
+    assert created is not None, f"the task was never reported as created:\n{out}"
+    assert created < event, f"the id has to be readable before the watching begins:\n{out}"
+    assert "Ctrl-C" in out and "cancel" in out, (
+        f"nothing says that stopping the watching does not stop the task:\n{out}")
+
+
+def test_task_create_follow_flushes_the_id_before_it_blocks_on_the_stream(tmp_path):
+    """The id has to be VISIBLE before the wait, not merely printed before it.
+
+    A real subprocess with stdout redirected to a file, because `capsys` cannot answer this question
+    at all: it swaps `sys.stdout` for an in-memory buffer, so it can prove the ORDER of the print
+    calls and is structurally blind to whether the file descriptor was flushed. Measured: CPython
+    block-buffers stdout whenever it is not a tty, so without an explicit flush the redirected file
+    held **zero bytes** for as long as the stream blocked — and a followed task is normally `queued`,
+    waiting for a provider, for exactly that long.
+
+    That defeats the guarantee in `_follow_created`'s own comment. `grid task create … --follow >
+    out.log &` with a `tail -f` — the CI shape this flag is for — showed nothing at all, including the
+    id needed to cancel or reattach.
+
+    The child is blocked on a file THIS test creates, so there is no sleep and no race: it cannot
+    proceed until the assertion below has been made.
+    """
+    import pathlib
+    import subprocess
+    import sys as _sys
+    import time
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    release = tmp_path / "go"
+    out_path = tmp_path / "out.log"
+    child = f"""
+import sys, os, time
+sys.path.insert(0, {str(repo_root)!r})
+import httpx
+from cli import _main, remote_task
+from remote import relay
+remote_task._resolve = lambda args: ("https://relay.example", "AT", "team")
+
+def handler(request):
+    if request.url.path.endswith("/events"):
+        while not os.path.exists({str(release)!r}):
+            time.sleep(0.05)
+        return httpx.Response(
+            200, text='id: 0\\ndata: {{"type": "task.terminal", "state": "completed"}}\\n\\n',
+            headers={{"Content-Type": "text/event-stream"}})
+    return httpx.Response(201, json={{"id": "T-42", "state": "queued", "project_id": "p1"}})
+
+_real = httpx.Client
+relay.httpx.Client = lambda *a, **k: _real(*a, **{{**k, "transport": httpx.MockTransport(handler)}})
+raise SystemExit(_main.main(
+    ["task", "create", "--project", "p1", "--prompt", "x", "--follow", "--remote"]))
+"""
+    env = {**os.environ, "GRID_HOME": str(tmp_path / "home")}
+    with open(out_path, "wb") as sink:
+        running = subprocess.Popen([_sys.executable, "-c", child], stdout=sink,
+                                   stderr=subprocess.DEVNULL, env=env)
+        try:
+            deadline = time.monotonic() + 25
+            seen = ""
+            while time.monotonic() < deadline:
+                seen = out_path.read_text(errors="replace")
+                if "T-42" in seen:
+                    break
+                if running.poll() is not None:
+                    break
+                time.sleep(0.1)
+            assert "T-42" in seen, (
+                "the task id was not on redirected stdout while the stream blocked, so a script "
+                f"watching the log has no id to cancel or reattach with. Saw: {seen!r}")
+        finally:
+            release.write_bytes(b"go")
+            assert running.wait(timeout=30) == 0, "the followed task did not complete"
+
+
+def test_task_create_follow_json_is_one_json_document_per_line(monkeypatch, tmp_path, capsys):
+    """A consumer reads the create payload and the events with the same `while read` (issue 32).
+
+    `create --json` alone stays `indent=2` — it has consumers today — but a pretty-printed object
+    followed by one-event-per-line is not line-parseable by anything, which would defeat the reason
+    for emitting both.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed(
+        _block(0, {"type": "task.output", "text": "hi"}),
+        _block(1, {"type": "task.terminal", "state": "completed"})))
+    rc = cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow", "--json"])
+
+    lines = capsys.readouterr().out.splitlines()
+    documents = [json.loads(line) for line in lines]   # raises if any line is not one document
+    assert rc == 0
+    assert documents[0]["id"] == "T1", f"the create payload is not the first line: {documents[0]}"
+    assert [d["event"]["type"] for d in documents[1:]] == ["task.output", "task.terminal"]
+
+
+def test_task_create_follow_says_the_task_is_still_running_when_it_loses_the_stream(
+        monkeypatch, tmp_path, capsys):
+    """A lost stream is not a failed task, and the difference is the whole of what to do next.
+
+    `_follow_stream` says what went wrong with the connection; it cannot say that a task was just
+    created and is still out there, because it does not know one was. Without that, a non-zero exit
+    from create-and-watch reads as "your task failed" and names nothing to try.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr("cli.remote_task._RECONNECT_BACKOFF_SECONDS", 0)
+
+    # A stream that opens, says nothing, and closes — every reattach the same, so the budget runs out.
+    _mock_relay(monkeypatch, _created_then_streamed())
+    rc = cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+    err = capsys.readouterr().err
+
+    assert rc != 0, "an unknown outcome must never read as success"
+    assert "still running" in err, f"nothing says the task outlived the watching:\n{err}"
+    assert "grid task follow T1" in err, f"nothing names the way back:\n{err}"
+
+
+def test_task_create_without_follow_names_the_command_that_watches(monkeypatch, tmp_path, capsys):
+    """The hint used to name `grid task get`, which answers once and returns (issue 32).
+
+    So somebody told to "watch it with" that command saw `state=queued`, once, and had to work out on
+    their own that a different verb existed. Both are named now, each with what it does.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, _created_then_streamed())
+    assert cli.main(["task", "create", "--project", "p1", "--prompt", "go"]) == 0
+    out = capsys.readouterr().out
+
+    assert "grid task follow T1" in out, f"the watcher is not named:\n{out}"
+    assert "grid task get T1" in out, f"the one-shot is no longer offered:\n{out}"
+    watch_line = next(line for line in out.splitlines() if "Watch it with" in line)
+    assert "follow" in watch_line, f"'watch' still names the one-shot: {watch_line!r}"
+    assert "--follow" in out, f"the flag that does this in one command is not mentioned:\n{out}"
+
+
+def test_task_create_follow_refuses_a_reply_it_cannot_attach_to(monkeypatch, tmp_path, capsys):
+    """A created task with no id is not a create-and-watch that succeeded.
+
+    The same rule every sibling in this plane follows: a reply this command cannot read is not the
+    outcome it was asked for. Exiting 0 here would report a watched task to a caller who watched
+    nothing — and `--follow` exists precisely so that `&& deploy.sh` can be trusted.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        201, json={"state": "queued", "project_id": "p1"}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "p1", "--prompt", "go", "--follow"])
+
+    assert "id" in str(caught.value) and "--follow" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("argv", [
+    ["task", "follow", "T1"],
+    ["task", "create", "--project", "p1", "--prompt", "go", "--follow"],
+])
+def test_a_revoked_token_mid_stream_is_a_sentence_not_a_traceback(monkeypatch, tmp_path, capsys, argv):
+    """A 401 while following is the one stream ending nothing used to say anything about.
+
+    `RelayUnauthorized` is a plain `Exception`, NOT a `RelayError` (`remote/relay.py:77` vs `:81`), so
+    the follower's `except relay.RelayError` never saw it and a revoked session — the grid token
+    pulled while a task runs — came out as a raw traceback. Every one-shot call in this plane folds a
+    401 into a worded `SystemExit` instead.
+
+    It matters more since the exit codes landed: an unhandled exception exits 1, and 1 now means "the
+    task ended badly". So the failure was reported as a verdict about somebody's task when the task
+    was fine and the credential was not. Pre-existing for `follow`; `create --follow` shares the same
+    loop, which is why both spellings are checked here.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        if request.url.path.endswith("/events"):
+            return httpx.Response(401, json={"detail": "token revoked"})
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "p1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(argv)
+    err = capsys.readouterr().err
+
+    assert rc == 1, "an unknown outcome is never a success"
+    assert "T1" in err and ("sign" in err.lower() or "token" in err.lower()), (
+        f"nothing on stderr explains that the credential was refused:\n{err}")
+
+
+def test_task_create_follow_is_wired_and_off_by_default():
+    args = cli.build_parser().parse_args(["task", "create", "--prompt", "p"])
+    assert args.follow is False, "watching must be something the caller asked for"
+    assert cli.build_parser().parse_args(
+        ["task", "create", "--prompt", "p", "--follow"]).follow is True
+
+
+def test_task_create_surfaces_a_busy_project_as_a_clean_error(monkeypatch, tmp_path):
+    """409 is the one-active-task-per-project invariant answering. The user gets a sentence, not a
+    traceback and not a raw status line."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    # Path-aware for the reason `test_task_create_shows_the_relays_rejection_of_a_path` is: a single
+    # canned 409 would be answered to the project lookup that runs first, and this would go green
+    # without a task ever having been posted.
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        return httpx.Response(
+            409, json={"detail": "Project 'default' already has an active task"})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "create", "--prompt", "hello"])
+    assert "already has an active task" in str(exc.value)
+
+
+def test_task_requires_sign_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")  # remote, but no credentials on disk
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "get", "T1"])
+    assert "signed in" in str(exc.value).lower()
+
+
+def test_task_unknown_subcommand_errors(monkeypatch, tmp_path):
+    """The parser blocks this path; the guard catches direct misuse of the handler."""
+    _seed_remote(monkeypatch, tmp_path,
+                 networks=[{"network_id": "n1", "name": "team"}], active="team")
+    with pytest.raises(SystemExit):
+        cli.cmd_remote_task(SimpleNamespace(subcommand="explode", grid=None, json=False))
+
+
+# `grid task send` — the second message into a conversation (ADR 0034 D-n, issue 47)
+#
+# Until this verb existed every `grid task create` minted a fresh conversation, so a person could
+# not continue one at all. `create` opens a conversation and sends its first message; `send` sends
+# the next one, into a conversation named by id.
+
+
+def test_task_send_end_to_end_through_cli_main(monkeypatch, tmp_path, capsys):
+    """The byte-for-byte body pin, the same one `task create` carries.
+
+    The body is the create's TURN half and nothing else: **no `project_id`**, because the
+    conversation already names its project and the relay refuses the key rather than dropping it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={
+            "id": "T2", "conversation_id": "C1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "send", "C1", "--prompt", "actually make it green"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"], seen["auth"]) == (
+        "POST", "/relay/v1/tasks/C1/turns", "Bearer AT")
+    assert seen["body"] == {"prompt": "actually make it green"}
+    assert "T2" in capsys.readouterr().out
+
+
+def test_task_send_json_names_the_turn_and_the_conversation(monkeypatch, tmp_path, capsys):
+    """An application branches on both ids, and they are two different objects.
+
+    `id` is the TURN — what `follow`, `get` and `cancel` address. `conversation_id` is what the
+    NEXT message is sent to. One spelling for both is how a client addresses the wrong one.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T2", "conversation_id": "C1", "state": "queued", "project_id": "P1"}))
+
+    rc = cli.main(["task", "send", "C1", "--prompt", "next", "--json"])
+
+    assert rc == 0
+    document = json.loads(capsys.readouterr().out)
+    assert (document["id"], document["conversation_id"]) == ("T2", "C1")
+
+
+def test_task_create_tells_you_the_conversation_to_reply_in(monkeypatch, tmp_path, capsys):
+    """⚠️ Where a person GETS a conversation id, and before this slice there was nowhere.
+
+    `conversation_id` reached exactly one payload — the provider's claim — so `task send` would
+    have had no address anybody could obtain. `create` is where a conversation begins, so it is
+    where its id has to be said.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T1", "conversation_id": "C1", "state": "queued", "project_id": "P1"}))
+
+    cli.main(["task", "create", "--prompt", "hi", "--project", "P1"])
+
+    out = capsys.readouterr().out
+    assert "conversation=C1" in out, out
+    assert "grid task send C1" in out, out
+
+
+def test_task_create_against_an_older_relay_advertises_no_conversation(
+        monkeypatch, tmp_path, capsys):
+    """*Absent ⇒ an old relay*, so the line is SKIPPED rather than printed as `unknown`.
+
+    A relay with no `conversation_id` has no follow-up route either, so naming an id it never sent
+    would advertise a command that answers 404.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T1", "state": "queued", "project_id": "P1"}))
+
+    cli.main(["task", "create", "--prompt", "hi", "--project", "P1"])
+
+    out = capsys.readouterr().out
+    assert "conversation" not in out, out
+    assert "T1" in out, out
+
+
+def _sent_then_streamed(*blocks, task_id="T2", requests=None):
+    """A relay that accepts a follow-up and then streams the turn's events."""
+    def handler(request):
+        if requests is not None:
+            requests.append((request.method, request.url.path))
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, text=_sse(*blocks),
+                                  headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(201, json={
+            "id": task_id, "conversation_id": "C1", "state": "queued", "project_id": "p1"})
+    return handler
+
+
+@pytest.mark.parametrize("final,expected", [("completed", 0), ("failed", 1), ("timed_out", 1)])
+def test_task_send_follow_exits_with_the_turns_outcome(
+        monkeypatch, tmp_path, capsys, final, expected):
+    """The same two-way rule `create --follow` and `follow` report, through the same watcher.
+
+    `send --follow` is not a second implementation: it hands `_follow_created` the id it already
+    has, so the cursor, the reconnect budget and the exit code are the ones already pinned.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, _sent_then_streamed(
+        _block(1, {"type": "task.output", "text": "working"}),
+        _block(2, {"type": "task.terminal", "state": final})))
+
+    rc = cli.main(["task", "send", "C1", "--prompt", "next", "--follow"])
+
+    assert rc == expected
+
+
+def test_task_send_follow_watches_the_turn_it_just_sent(monkeypatch, tmp_path, capsys):
+    """Two requests and nothing between them — no re-resolve, no project lookup."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    requests = []
+    _mock_relay(monkeypatch, _sent_then_streamed(
+        _block(1, {"type": "task.terminal", "state": "completed"}), requests=requests))
+
+    cli.main(["task", "send", "C1", "--prompt", "next", "--follow"])
+
+    assert requests == [
+        ("POST", "/relay/v1/tasks/C1/turns"), ("GET", "/relay/v1/tasks/T2/events")], requests
+
+
+def test_task_send_follow_json_is_one_json_document_per_line(monkeypatch, tmp_path, capsys):
+    """`--json` stays machine-readable when following, exactly as `create --follow` does."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, _sent_then_streamed(
+        _block(1, {"type": "task.output", "text": "working"}),
+        _block(2, {"type": "task.terminal", "state": "completed"})))
+
+    cli.main(["task", "send", "C1", "--prompt", "next", "--follow", "--json"])
+
+    documents = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert documents[0]["id"] == "T2"
+    assert [d["event"]["type"] for d in documents[1:]] == ["task.output", "task.terminal"]
+
+
+def test_task_send_refuses_a_reply_it_cannot_attach_to(monkeypatch, tmp_path):
+    """Accepted, but with nothing to address it by. `_task_create`'s guard, and its reason: saying 0
+    for a send-and-watch that only sent is the lie the exit codes exist to remove."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={"state": "queued"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next", "--follow"])
+
+    assert "--follow" in str(caught.value)
+
+
+def test_task_send_against_a_relay_without_the_route_names_the_relay(monkeypatch, tmp_path):
+    """A bare framework 404 becomes a sentence. **Roll the relay out before this CLI.**
+
+    Its OWN sentence, not `_OLD_RELAY`: that one says the relay has no projects, which is plainly
+    false of a relay that has been serving `grid task create`, and it would send somebody to check
+    a feature that works. The `_OLD_RELAY_NO_CANCEL` reasoning.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next"])
+
+    message = str(caught.value)
+    assert "relay" in message.lower(), message
+    assert "Not Found" not in message, message
+    # It says what did NOT happen, as all four of its siblings do.
+    assert "nothing was sent" in message.lower(), message
+
+
+def test_a_real_404_from_the_send_route_is_not_masked(monkeypatch, tmp_path):
+    """The other half, and the one that rots silently.
+
+    The hint is keyed on the bare `"Not Found"` body — a string FastAPI owns, not us — so a relay
+    that HAS this route and is refusing a conversation id must still show its own words. Without
+    this, an unknown conversation would be reported as "your relay is too old".
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next"])
+
+    assert str(caught.value) == "No such project", str(caught.value)
+
+
+def test_task_send_shows_the_relays_own_words_when_it_is_not_your_conversation(
+        monkeypatch, tmp_path):
+    """`not_your_conversation` is DISPLAYED, never compared.
+
+    The relay's message already names the command that goes forward (`grid task create`), so a
+    branch here would add nothing and would be a third parsed `detail` in this CLI — each one a
+    thing a reworded relay could break. The `task.retry` rule.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(403, json={
+        "detail": {"code": "not_your_conversation",
+                   "message": "That conversation belongs to another project member."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "send", "C1", "--prompt", "next"])
+
+    assert "another project member" in str(caught.value)
+
+
+def test_a_conversation_id_that_is_not_a_string_is_not_printed_as_advice(
+        monkeypatch, tmp_path, capsys):
+    """The `isinstance`-never-truthiness rule `relay.refusal_code` states, applied here.
+
+    The value is the RELAY's, and this one is interpolated into a command the person is told to
+    run. A truthy non-string — a dict from a mangling proxy, a number — would be printed as
+    `grid task send {'a': 1} --prompt <your message>`, which is advice that cannot work and reads
+    as the CLI being broken. Silence is the honest answer: it is the same reading an older relay
+    gets, and the turn id is still reported.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda request: httpx.Response(201, json={
+        "id": "T1", "conversation_id": {"not": "an id"}, "state": "queued", "project_id": "P1"}))
+
+    cli.main(["task", "create", "--prompt", "hi", "--project", "P1"])
+
+    out = capsys.readouterr().out
+    assert "grid task send" not in out, out
+    assert "conversation=" not in out, out
+    assert "T1" in out, out
+
+
+def test_task_send_is_wired_to_the_handler():
+    args = cli.build_parser().parse_args(["task", "send", "C1", "--prompt", "x"])
+    assert args.subcommand == "send"
+    assert args.conversation_id == "C1"
+    assert args.handler is cli.cmd_remote_task
+
+
+def test_task_send_takes_no_project(capsys):
+    """The subtraction IS the command: a conversation already names its project.
+
+    Absent rather than accepted-and-ignored, matching the relay, which refuses a `project_id` on
+    this route rather than dropping it. A flag that parsed and did nothing would be the same silent
+    no-op one layer up.
+    """
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["task", "send", "C1", "--prompt", "x", "--project", "P1"])
+
+
+def test_task_send_requires_a_conversation_and_a_prompt():
+    for argv in (["task", "send", "--prompt", "x"], ["task", "send", "C1"]):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(argv)
+
+
+def test_task_send_is_refused_in_local_mode(monkeypatch, tmp_path):
+    """Inherited from the top-level `task` word being in `REMOTE_ONLY` — asserted, not assumed."""
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("local")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["task", "send", "C1", "--prompt", "x"])
+    assert "remote" in str(exc.value).lower()
+
+
+def test_task_send_uploads_files_the_same_way_create_does(monkeypatch, tmp_path):
+    """The body's file half is the create's, byte for byte — `_collect_files` is shared.
+
+    ⚠️ And it must NOT carry `executable`: `task_files.parse_files` refuses unknown keys, so a key
+    this route sent that `task create` does not would be a 422 on every relay that has the route
+    but predates the key. The constraint `task create` already lives under.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "build.sh"
+    source.write_bytes(b"#!/bin/sh\n")
+    source.chmod(0o755)
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "T2", "conversation_id": "C1", "state": "queued"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "send", "C1", "--prompt", "x", "--file", str(source)])
+
+    assert seen["body"]["files"] == [
+        {"path": "build.sh", "content_b64": base64.b64encode(b"#!/bin/sh\n").decode()}], seen["body"]
+
+
 def test_price_set_end_to_end_through_cli_main(monkeypatch, tmp_path):
     """Full remote-mode round trip: parser -> dispatch -> cmd_remote_price -> relay PUT.
     A signed-in user with a running grid runs `grid price set` and we capture the wire body."""
@@ -21753,6 +26404,1492 @@ def _poll_loop_state_and_poll(job_then_none):
 
     monkey_targets = {"poll_once": fake_poll, "handle_job": lambda _s, _job: None}
     return serve, state, monkey_targets
+
+
+def _fast_task_backoff(monkeypatch):
+    """Collapse the claim back-off so retry-path tests don't sit through real 5s waits."""
+    from remote import tasks
+    monkeypatch.setattr(tasks, "_CLAIM_BACKOFF_SECONDS", 0.001)
+
+
+def _publisher_state(refresh=None):
+    """The slice of serve state a publisher touches: the relay base and the credential."""
+    return SimpleNamespace(
+        signaling_url="https://relay.example",
+        token=lambda: "AT",
+        refresh=refresh or (lambda stale_token=None: False),
+        tasks_stop=threading.Event(),
+    )
+
+
+def _capture_publishes(monkeypatch, responder=None):
+    """Record every batch the publisher sends. `responder(batch)` may raise to simulate the relay."""
+    from remote import task_events
+
+    sent = []
+
+    def fake_publish(_base, _token, _task_id, events):
+        sent.append(list(events))
+        if responder is not None:
+            return responder(list(events))
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", fake_publish)
+    return sent
+
+
+def test_publisher_coalesces_events_into_one_batch(monkeypatch):
+    """A per-event POST is a fresh connection per event. Buffering is what makes the channel
+    affordable once a real agent (issue 03) is producing output continuously."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    # Pin the age threshold out of the way: this test is about the SIZE path, and leaving the timer
+    # live would make it fail whenever the runner stalls 200ms between two statements.
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 3600.0)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.publish("task.output", text="b")
+    assert sent == [], "nothing should go out before a flush threshold or an explicit flush"
+
+    pub.flush()
+    assert sent == [[
+        {"type": "task.output", "text": "a"},
+        {"type": "task.output", "text": "b"},
+    ]]
+
+
+def test_publisher_flushes_a_buffer_that_has_been_waiting(monkeypatch):
+    """The other half of coalescing. Without an age bound, a task producing one line a minute would
+    show nothing at all until its buffer filled — the opposite of a progress stream."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    monkeypatch.setattr(task_events, "_FLUSH_AT_EVENTS", 10_000)  # the size path cannot fire
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 0.0)  # every event is already "old"
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+
+    assert sent == [[{"type": "task.output", "text": "a"}]]
+
+
+def test_publisher_flushes_on_its_own_once_the_buffer_fills(monkeypatch):
+    """Buffering without a ceiling is just a delay — a long-running task would show nothing until
+    it ended, which is the opposite of what a progress stream is for."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 3600.0)  # isolate the size path
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(task_events._FLUSH_AT_EVENTS):
+        pub.publish("task.output", text=str(i))
+
+    assert len(sent) == 1
+    assert len(sent[0]) == task_events._FLUSH_AT_EVENTS
+
+
+def test_publisher_says_whether_an_event_was_actually_accepted(monkeypatch):
+    """"Never raises" has two silent outcomes, and a caller that cannot tell them apart is wrong.
+
+    A publisher that has latched off after a verdict drops the event and returns normally — identical,
+    from the caller's side, to one that queued it. `WorkspaceTree` records a snapshot as DELIVERED on
+    that answer, so without a real one it would remember a tree the relay never saw and never send it
+    again.
+    """
+    from remote import task_events
+
+    _capture_publishes(monkeypatch)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    assert pub.publish("task.output", text="a") is True
+
+    pub._stop("latched off by a verdict")
+    assert pub.publish("task.output", text="b") is False
+
+
+def test_publisher_can_decline_to_wait_for_a_channel_that_is_busy(monkeypatch):
+    """The lease heartbeat publishes through this object, and waiting here costs the LEASE.
+
+    The lock is held across a POST bounded only by `_TASK_EVENT_TIMEOUT`, so a caller that blocked on
+    it could sit for 15 seconds — twice that if a refresh is retried — on the one thread whose whole
+    job is to renew before the relay reclaims the task. A snapshot skipped now is republished on the
+    next beat; a lease missed now is a task redone on another provider.
+    """
+    from remote import task_events
+
+    in_the_relay = threading.Event()
+    release = threading.Event()
+
+    def fake_publish(_base, _token, _task_id, _events):
+        in_the_relay.set()
+        release.wait(5.0)
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", fake_publish)
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 0.0)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    parked = threading.Thread(target=lambda: pub.publish("task.output", text="a"), daemon=True)
+    parked.start()
+    assert in_the_relay.wait(5.0)
+
+    started = time.monotonic()
+    accepted = pub.publish("task.tree", paths=[], blocking=False)
+    waited = time.monotonic() - started
+
+    release.set()
+    parked.join(timeout=5.0)
+
+    assert accepted is False, "a busy channel must be declined, not waited for"
+    assert waited < 1.0, f"the caller waited {waited:.1f}s for a lock it asked not to wait for"
+
+
+def test_publisher_serializes_two_threads_so_batches_cannot_overtake_each_other(monkeypatch):
+    """One publisher, two callers: the task thread and the lease heartbeat's tree beat (issue 08).
+
+    Before issue 08 this class was single-caller by convention — `tasks._drain` says so out loud —
+    and the convention was load-bearing: an unsynchronized `batch, self._buffer = self._buffer, []`
+    lets two flushes capture the SAME list, sending one batch twice and dropping whatever landed in
+    the other. The lock has to cover the wire call too, not just the buffer swap: the relay assigns
+    `seq` on arrival, so two batches released to overtake each other are two batches whose events are
+    numbered out of order — and out-of-order agent output is a real regression where an out-of-order
+    tree snapshot would not be.
+
+    Deterministic in both directions rather than timing-based: the relay's first call parks, the
+    second caller is released only once that has happened, and the batches record themselves as they
+    COMPLETE. Serialized, the order is first-in first-out; unserialized, the second batch finishes
+    first and the assertion says so.
+    """
+    from remote import task_events
+
+    in_the_relay = threading.Event()
+    release = threading.Event()
+    completed = []
+
+    def fake_publish(_base, _token, _task_id, events):
+        if not in_the_relay.is_set():
+            in_the_relay.set()
+            release.wait(5.0)
+        completed.append([event["text"] for event in events])
+        return {}
+
+    monkeypatch.setattr(task_events.relay, "publish_task_events", fake_publish)
+    monkeypatch.setattr(task_events, "_FLUSH_AFTER_SECONDS", 0.0)  # every publish flushes at once
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    first = threading.Thread(target=lambda: pub.publish("task.output", text="a"), daemon=True)
+    first.start()
+    assert in_the_relay.wait(5.0), "the first publish never reached the relay"
+
+    second = threading.Thread(target=lambda: pub.publish("task.output", text="b"), daemon=True)
+    second.start()
+    # The second caller is now either blocked on the lock (correct) or already on the wire (the bug).
+    # Either way the first one is parked, so releasing it settles the question by completion order.
+    second.join(timeout=0.5)
+    release.set()
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+
+    assert completed == [["a"], ["b"]], (
+        "the second batch overtook the first — the publisher's lock does not cover the wire call")
+
+
+def test_publisher_never_raises_when_the_relay_is_unreachable(monkeypatch, capsys):
+    """A lost progress event costs a line of output. Letting it escape would cost the RESULT, which
+    is the one thing on this path that is not disposable."""
+    from remote import relay, task_events
+
+    def boom(_batch):
+        raise relay.RelayError("connection refused")
+
+    _capture_publishes(monkeypatch, boom)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()   # must not raise
+    pub.close()   # must not raise
+
+    assert "T1" in capsys.readouterr().err
+
+
+def test_publisher_never_raises_on_a_system_exit(monkeypatch):
+    """SystemExit is this repo's clean-error idiom and is NOT an Exception — a guard that catches
+    only Exception lets it through and kills the task loop's thread."""
+    from remote import task_events
+
+    def boom(_batch):
+        raise SystemExit("clean error")
+
+    _capture_publishes(monkeypatch, boom)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+    pub.close()
+
+
+def test_publisher_stops_after_the_lease_moves_and_says_so_once(monkeypatch, capsys):
+    """403 is a verdict, not a blip: another provider holds the lease and every later batch will be
+    refused too. Retrying spends the task's time and floods the log."""
+    from remote import relay, task_events
+
+    def refused(_batch):
+        raise relay.RelayError("not your lease", status=403)
+
+    sent = _capture_publishes(monkeypatch, refused)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(5):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1, "publishing must stop after the first refusal, not retry every batch"
+    warnings = [line for line in capsys.readouterr().err.splitlines() if "T1" in line]
+    assert len(warnings) == 1, f"the refusal should be reported once, got {warnings}"
+
+
+def test_publisher_stops_after_the_task_already_ended(monkeypatch):
+    """404 means terminal. Nothing this publisher sends can ever land again."""
+    from remote import relay, task_events
+
+    def gone(_batch):
+        raise relay.RelayError("no longer running", status=404)
+
+    sent = _capture_publishes(monkeypatch, gone)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(3):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1
+
+
+def test_publisher_does_not_latch_off_on_a_refused_batch(monkeypatch, capsys):
+    """422 is a verdict about THIS BATCH, not about the lease or the task — unlike 403/404, which
+    are the only two the latch's own docstring justifies.
+
+    Reachable today: `create_task` accepts a prompt up to 100 KB, `/bin/echo` returns a
+    newline-free one as a SINGLE line, and the relay caps one event at 64 KiB. Latching on that
+    422 kills all progress narration for the rest of a task that is still running under a valid
+    lease — the live stream ADR 0032 D-f exists for, gone from the first flush onward."""
+    from remote import relay, task_events
+
+    calls = {"n": 0}
+
+    def refuse_first(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayError("an event exceeds 65536 bytes", status=422)
+        return {}
+
+    sent = _capture_publishes(monkeypatch, refuse_first)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="huge")
+    pub.flush()
+    pub.publish("task.output", text="next")
+    pub.flush()
+
+    assert len(sent) == 2, "a refused batch must not end publishing for the whole task"
+    assert "T1" in capsys.readouterr().err, "the dropped batch must still be reported"
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503])
+def test_publisher_keeps_going_on_a_status_that_decided_nothing(monkeypatch, status):
+    """A proxy's 408/429 and any 5xx are transient. Latching on them silences a healthy task."""
+    from remote import relay, task_events
+
+    calls = {"n": 0}
+
+    def flaky(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayError("transient", status=status)
+        return {}
+
+    sent = _capture_publishes(monkeypatch, flaky)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+    pub.publish("task.output", text="b")
+    pub.flush()
+
+    assert len(sent) == 2
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_publisher_still_latches_off_on_the_two_real_verdicts(monkeypatch, status):
+    """The narrowing must not go too far: 403 (the lease moved) and 404 (the task ended) really do
+    mean nothing this publisher sends can ever land again."""
+    from remote import relay, task_events
+
+    def verdict(_batch):
+        raise relay.RelayError("verdict", status=status)
+
+    sent = _capture_publishes(monkeypatch, verdict)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    for i in range(3):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1
+
+
+def test_a_long_output_line_is_truncated_below_the_relays_event_cap(monkeypatch):
+    """Second layer under the latch fix: without a client-side bound, EVERY batch carrying that
+    line 422s, so the stream is dead either way. The cap is a lockstep value — the provider must
+    respect the relay's `_MAX_EVENT_BYTES` (64 KiB), which is SMALLER than the prompt it echoes."""
+    import json as _json
+
+    from remote import task_events
+
+    published = []
+    _child(["/bin/sh", "-c", "printf 'x%.0s' $(seq 1 90000); printf '\\n'"],
+           publish=lambda event_type, **fields: published.append({"type": event_type, **fields}))
+
+    assert published, "the line should still be published, just bounded"
+    encoded = len(_json.dumps(published[0]).encode("utf-8"))
+    assert encoded <= task_events.MAX_EVENT_BYTES, f"event is {encoded} bytes"
+    assert published[0]["text"].startswith("xxx")
+
+
+def test_publisher_keeps_going_after_a_transient_failure(monkeypatch):
+    """The mirror of the two above: a 5xx or a transport fault decided nothing, so the next batch
+    must still be attempted. Treating every failure as terminal would silence a whole task on one
+    blip."""
+    from remote import relay, task_events
+
+    calls = {"n": 0}
+
+    def flaky(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayError("bad gateway", status=502)
+        return {}
+
+    sent = _capture_publishes(monkeypatch, flaky)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+    pub.publish("task.output", text="b")
+    pub.flush()
+
+    assert len(sent) == 2
+
+
+def test_publisher_refreshes_the_token_once_on_401(monkeypatch):
+    """Same single-retry rule as `claim_once` and `report_once` — one refresh, then give up."""
+    from remote import relay, task_events
+
+    refreshed = {"n": 0}
+
+    def refresh(stale_token=None):
+        refreshed["n"] += 1
+        return True
+
+    calls = {"n": 0}
+
+    def unauthorized_once(_batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise relay.RelayUnauthorized()
+        return {}
+
+    sent = _capture_publishes(monkeypatch, unauthorized_once)
+    pub = task_events.TaskEventPublisher(_publisher_state(refresh), "T1")
+
+    pub.publish("task.output", text="a")
+    pub.flush()
+
+    assert refreshed["n"] == 1
+    assert len(sent) == 2, "the batch is re-sent once with the refreshed token"
+
+
+def test_publisher_stops_when_the_token_cannot_be_refreshed(monkeypatch):
+    """No credential means no further batch can land — stop rather than 401 on every one."""
+    from remote import relay, task_events
+
+    def unauthorized(_batch):
+        raise relay.RelayUnauthorized()
+
+    sent = _capture_publishes(monkeypatch, unauthorized)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")  # refresh returns False
+
+    for i in range(3):
+        pub.publish("task.output", text=str(i))
+        pub.flush()
+
+    assert len(sent) == 1
+
+
+def test_publisher_close_flushes_whatever_is_buffered(monkeypatch):
+    """The last lines of a task are the ones that say how it went. Dropping the tail buffer would
+    lose exactly them."""
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.publish("task.output", text="last")
+    pub.close()
+
+    assert sent == [[{"type": "task.output", "text": "last"}]]
+
+
+def test_publisher_flush_with_an_empty_buffer_sends_nothing(monkeypatch):
+    from remote import task_events
+
+    sent = _capture_publishes(monkeypatch)
+    pub = task_events.TaskEventPublisher(_publisher_state(), "T1")
+
+    pub.flush()
+    pub.close()
+
+    assert sent == []
+
+
+def _task_loop_state(claims):
+    """A minimal serve state + a claim double yielding `claims`, then retiring the task loop.
+
+    Deliberately NOT the poll loop's state: the task loop must not touch `enter_job`/`exit_job` (a
+    task runs for minutes and has no place in the 5s drain budget) and must not read or write
+    `state.stop` except to observe it.
+    """
+    from remote import tasks
+
+    state = SimpleNamespace(
+        stop=threading.Event(),
+        tasks_stop=threading.Event(),
+        signaling_url="https://relay.example",
+        token=lambda: "AT",
+        refresh=lambda stale_token=None: False,
+    )
+    queue = list(claims)
+
+    def fake_claim(_state):
+        if queue:
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        _state.tasks_stop.set()  # nothing left to claim — let the loop retire
+        return None
+
+    return tasks, state, fake_claim
+
+
+def test_task_loop_claims_runs_and_reports(monkeypatch):
+    """The provider half of the round trip: claim → run → report a terminal state."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "say hello"}])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task",
+        lambda job, *_a, **_k: tasks.TaskOutcome("completed", "say hello\n", None, session_id="sess-1"))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks.task_loop(state)
+
+    # The session id rides the terminal report, which is the only durable record of it: the relay
+    # stores it on the task so the project's NEXT task can `--resume` the conversation (issue 06).
+    assert reported == [("T1", {"state": "completed", "output": "say hello\n", "error": None,
+                                "session_id": "sess-1", "result_commit": None,
+                                "session_reset_reason": None})]
+
+
+def test_task_loop_survives_a_task_that_raises(monkeypatch, capsys):
+    """A malformed or exploding task must not kill the loop — the next claim still happens."""
+    tasks, state, fake_claim = _task_loop_state([
+        {"task_id": "T1", "prompt": "boom"},
+        {"task_id": "T2", "prompt": "fine"},
+    ])
+    reported = []
+
+    def run(job, *_a, **_k):
+        if job["task_id"] == "T1":
+            raise RuntimeError("child exploded")
+        return tasks.TaskOutcome("completed", "fine\n", None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append((tid, kw)))
+
+    tasks.task_loop(state)
+
+    assert [tid for tid, _ in reported] == ["T1", "T2"]      # T1 still reported, as failed
+    assert reported[0][1]["state"] == "failed"
+    assert "child exploded" in reported[0][1]["error"]
+    assert not state.stop.is_set()                            # inference keeps serving
+
+
+def test_task_loop_survives_a_system_exit_from_a_task(monkeypatch):
+    """`SystemExit` is this repo's clean-error idiom, and it is not an `Exception`. A loop guarding
+    only `Exception` would die silently here and take task serving with it."""
+    tasks, state, fake_claim = _task_loop_state([
+        {"task_id": "T1", "prompt": "x"}, {"task_id": "T2", "prompt": "y"},
+    ])
+    seen = []
+
+    def run(job, *_a, **_k):
+        if job["task_id"] == "T1":
+            raise SystemExit("corrupt record")
+        seen.append(job["task_id"])
+        return tasks.TaskOutcome("completed", "", None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", run)
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state)
+
+    assert seen == ["T2"]
+    assert not state.stop.is_set()
+
+
+def test_task_loop_backs_off_on_a_transient_relay_error(monkeypatch):
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        relay.RelayError("relay hiccup"), {"task_id": "T1", "prompt": "x"},
+    ])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]           # recovered, did not exit
+    assert not state.stop.is_set()
+
+
+def test_task_loop_retires_against_a_relay_with_no_tasks_plane(monkeypatch, capsys):
+    """A relay that PERSISTENTLY 404s predates the tasks plane. Retire rather than retry forever —
+    and leave inference completely untouched."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state(
+        [relay.RelayError("nope", status=404)] * tasks_404_budget())
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+
+    tasks.task_loop(state)
+
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()      # the engine keeps serving inference
+
+
+def tasks_404_budget():
+    from remote import tasks
+    return tasks._MISSING_PLANE_404_BUDGET
+
+
+def test_task_loop_survives_a_transient_404(monkeypatch):
+    """A single 404 is NOT proof the tasks plane is missing.
+
+    `remote/serve.py` records the field incident this repeats: "a master mid-respawn answers 503 (or
+    404), and before this loop that single answer ended the child". A proxy blip or a relay redeploy
+    would otherwise retire task serving on every provider in the fleet at once, for the life of each
+    process, with one stderr line each.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        relay.RelayError("blip", status=404), {"task_id": "T1", "prompt": "x"},
+    ])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]           # recovered from the 404 and kept serving tasks
+    assert not state.stop.is_set()
+
+
+def test_task_loop_404_budget_resets_after_a_success(monkeypatch):
+    """Consecutive, not cumulative — otherwise a long-lived provider retires from unrelated blips
+    spread across days."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    budget = tasks_404_budget()
+    claims = ([relay.RelayError("blip", status=404)] * (budget - 1)
+              + [{"task_id": "T1", "prompt": "x"}]
+              + [relay.RelayError("blip", status=404)] * (budget - 1)
+              + [{"task_id": "T2", "prompt": "y"}])
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1", "T2"]     # never retired, despite 2*(budget-1) total 404s
+
+
+def tasks_403_budget():
+    from remote import tasks
+    return tasks._REFUSED_CLAIM_403_BUDGET
+
+
+def test_task_loop_retires_when_the_relay_refuses_this_provider(monkeypatch, capsys):
+    """A relay that PERSISTENTLY 403s has decided this node may not claim, and no amount of asking
+    changes that.
+
+    Every 403 `/tasks/claim` can answer is a permanent configuration fact — the caller is not a
+    registered provider, its token carries no node, or (ADR 0033 D-f, issue 24) this grid does not
+    serve its account's email domain. Before this the loop treated all three exactly as it treats a
+    500: warn, back off five seconds, ask again, forever. A misconfigured provider therefore wrote
+    one line to stderr every five seconds for the life of the process and nothing ever read it.
+
+    Keyed on the STATUS and not on a parsed refusal `code`, deliberately: the status already carries
+    the whole verdict here, so this stays clear of the rule that says the lease renewer's
+    `CANCELLED_CODE` is the ONE parsed `detail` this provider reads. A second reader would be a
+    second thing a reworded relay could break, bought for nothing.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    # A claimable job AFTER the budget, and the assertion is that it is never reached. Without it
+    # this test passes against the UNFIXED loop: `_task_loop_state` retires the loop itself once its
+    # script runs out, so `tasks_stop.is_set()` would be true for the fixture's reason, not the
+    # code's.
+    tasks, state, fake_claim = _task_loop_state(
+        [relay.RelayError("this grid does not serve your domain", status=403)]
+        * tasks_403_budget()
+        + [{"task_id": "T-after", "prompt": "x"}])
+    reported = []
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == []               # retired on the budget, never reached the work behind it
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()      # the engine keeps serving inference
+    # The relay's own words survive to the operator, because only the relay knows WHICH refusal.
+    assert "does not serve your domain" in capsys.readouterr().err
+
+
+def test_task_loop_survives_a_transient_403(monkeypatch):
+    """One 403 is not proof of a decision. An intermediary can answer 403 on its own account, and
+    retiring every provider in the fleet on a single proxy blip is the failure the 404 budget above
+    exists to avoid — the same reasoning, the same shape."""
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        relay.RelayError("blip", status=403), {"task_id": "T1", "prompt": "x"},
+    ])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]
+    assert not state.stop.is_set()
+
+
+def test_task_loop_403_budget_resets_after_a_success(monkeypatch):
+    """Consecutive, not cumulative: a SUCCESSFUL claim is what clears each counter here.
+
+    ⚠️ The two kinds are kept in separate runs on purpose, and an earlier version of this test did
+    not do that — it wrote `403, 403, 404, 404, success, 403, 403, success`, which reads as a
+    thorough interleave and proves less than it looks. The 404 branch clears the 403 counter on its
+    own, so those 404s did the resetting and the success reset was never load-bearing: deleting
+    `consecutive_404s = consecutive_403s = 0` from the success path left this test GREEN, which is
+    how it was found (dev-VM Phase G, G4). A test named for a reset must be arranged so nothing but
+    that reset can be doing the work.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    claims = ([relay.RelayError("blip", status=403)] * (tasks_403_budget() - 1)
+              + [{"task_id": "T1", "prompt": "x"}]
+              + [relay.RelayError("blip", status=403)] * (tasks_403_budget() - 1)
+              + [{"task_id": "T2", "prompt": "y"}]
+              + [relay.RelayError("blip", status=404)] * (tasks_404_budget() - 1)
+              + [{"task_id": "T3", "prompt": "z"}]
+              + [relay.RelayError("blip", status=404)] * (tasks_404_budget() - 1)
+              + [{"task_id": "T4", "prompt": "w"}])
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1", "T2", "T3", "T4"]
+
+
+@pytest.mark.parametrize("interruption", [
+    pytest.param(lambda relay: relay.RelayError("upstream unavailable", status=503), id="503"),
+    pytest.param(lambda relay: relay.RelayError("no status at all"), id="statusless-relay-error"),
+    pytest.param(lambda _relay: RuntimeError("something nobody anticipated"), id="unexpected"),
+])
+def test_task_loop_403_budget_is_cleared_by_ANY_other_claim_failure(monkeypatch, interruption):
+    """A 403 counter that only two branches can clear is a counter that lies on every other branch.
+
+    The 404 interleave below was found by review and fixed; the *generic* failure paths — a relay
+    error that is neither 403 nor 404, and an exception nobody anticipated — each carry their own
+    reset, and nothing measured them. Deleting `consecutive_403s = 0` from the generic
+    `RelayError` path left the whole suite green (dev-VM Phase G, G4).
+
+    503 is not a hypothetical shape, which is why it leads this list: restarting `grid-apis` on the
+    dev VM drops `grid_proxy` for a beat, and the provider's own log from that run shows nine
+    consecutive `claim failed (503)` lines immediately before the domain 403s started. A provider
+    behind a flapping intermediary sees `403, 503, 403, 503, 403` and, without the reset, retires
+    task serving announcing "3 consecutive 403s" with no two of them adjacent — the identical defect
+    the 404 branch was fixed for, on a branch nobody had checked.
+
+    The statusless case is its own row because `getattr(exc, "status", None)` is how both budgets are
+    keyed: a `RelayError` carrying no status must fall to the generic path, not to either counter.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    claims = []
+    for _ in range(tasks_403_budget() * 2):  # far past the budget if the reset does not happen
+        claims.append(relay.RelayError("refused", status=403))
+        claims.append(interruption(relay))
+    claims.append({"task_id": "T1", "prompt": "x"})
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]  # never retired: no two 403s were ever adjacent
+
+
+def test_task_loop_403_and_404_budgets_do_not_leak_into_each_other(monkeypatch):
+    """Interleaved refusals must clear each other's counter — in BOTH directions.
+
+    The 404 branch `continue`s, so it skips every line below it, including the `consecutive_403s = 0`
+    that guards the 403 check. A 403 clears the 404 counter (that reset sits above the branch) but a
+    404 did NOT clear the 403 one, so the reset was one-directional and "consecutive" was a lie on
+    one side: `403, 404, 403, 404, 403` retired the provider announcing "3 consecutive 403s" with no
+    two 403s adjacent.
+
+    `test_task_loop_403_budget_resets_after_a_success` could not catch it, because it puts a
+    SUCCESSFUL claim between the two runs — and a success resets both counters unconditionally, so
+    the missing reset never mattered. Interleaving with no success in between is the case that
+    separates them.
+
+    A load balancer or a relay mid-rollout answering a mix of the two is exactly this shape, and the
+    cost is a provider that stops claiming until somebody restarts the process.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay
+
+    claims = []
+    for _ in range(tasks_403_budget()):
+        claims.append(relay.RelayError("refused", status=403))
+        claims.append(relay.RelayError("blip", status=404))
+    claims.append({"task_id": "T1", "prompt": "x"})
+    tasks, state, fake_claim = _task_loop_state(claims)
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state)
+
+    assert reported == ["T1"]           # never retired: no two refusals of either kind were adjacent
+
+
+def test_task_loop_retires_when_the_token_is_rejected(monkeypatch):
+    """An unrefreshable 401 retires the TASK loop only. The poll loop stops the whole engine on the
+    same signal, but a task credential going bad is not a reason to stop serving inference."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([relay.RelayUnauthorized()])
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+
+    tasks.task_loop(state)
+
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()
+
+
+@pytest.mark.parametrize("claims, because", [
+    pytest.param(lambda relay: [relay.RelayUnauthorized()], "an unrefreshable token", id="401"),
+    pytest.param(lambda relay: [relay.RelayError("gone", status=404)] * 9, "no tasks plane", id="404"),
+    pytest.param(lambda relay: [relay.RelayError("refused", status=403)] * 9, "refused claims",
+                 id="403"),
+])
+def test_every_retirement_the_child_survives_names_how_to_come_back(monkeypatch, capsys, claims,
+                                                                    because):
+    """Retiring is one-way, and until now nothing said so (dev-VM finding G-02).
+
+    `state.tasks_stop` is set in eight places and cleared in none, and `_ServeState` is built once
+    per serve child — so no amount of fixing the cause re-arms task serving. Every condition here is
+    one somebody REPAIRS: a served-domain allowlist, a role, a relay that gains its tasks plane, a
+    credential. After Phase G I had to restart both providers by hand to get task serving back, and
+    the log gave no hint that was needed.
+
+    ⚠️ The remedy is `leave` **then** `join`, and the obvious shortcut does not work — measured on
+    the dev VM: a bare `grid join` against a live child answers *"Already serving on dt-multi;
+    nothing to append."* and leaves the pid untouched. So an operator whose grid has just been fixed
+    is told everything is fine while the fleet stays retired. That is why the sentence names both
+    commands and says what a re-join does.
+
+    Same class as G-01 and F-05: a message that states a fact and leaves out the one action that
+    follows from it.
+    """
+    _fast_task_backoff(monkeypatch)
+    from remote import relay, tasks as tasks_mod
+
+    tasks, state, fake_claim = _task_loop_state(claims(relay))
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+
+    tasks.task_loop(state)
+
+    err = capsys.readouterr().err
+    assert "retired" in err, because
+    assert tasks_mod.RESUME_HINT in err, f"{because}: retirement said nothing about coming back"
+    assert state.tasks_stop.is_set()
+
+
+def test_the_task_worker_supervisor_also_names_how_to_come_back(monkeypatch, capsys):
+    """The other unattended retirement, and the same one-way door.
+
+    A task worker that dies outside `task_loop`'s own guard retires task serving for the life of the
+    process. It is the one retirement here that is nobody's *configuration* — but the operator's
+    action is identical, and a caller who has to know which of two silences means "restart me" has
+    been given a puzzle instead of a message.
+    """
+    from remote import serve, tasks as tasks_mod
+
+    state = SimpleNamespace(tasks_stop=threading.Event(), stop=threading.Event())
+
+    def boom(_state):
+        raise RuntimeError("a fault outside the loop's own guard")
+
+    serve._supervise_tasks(boom, state)
+
+    err = capsys.readouterr().err
+    assert "stopped unexpectedly" in err
+    assert tasks_mod.RESUME_HINT in err
+    assert state.tasks_stop.is_set()
+    assert not state.stop.is_set()  # a task-plane fault must never take inference down with it
+
+
+def test_task_loop_stops_when_the_engine_stops(monkeypatch):
+    """`state.stop` retires the task loop too — teardown must not leave it running."""
+    tasks, state, _ = _task_loop_state([])
+    state.stop.set()
+    monkeypatch.setattr(
+        tasks, "claim_once",
+        lambda _s: pytest.fail("must not claim after the engine has stopped"))
+
+    tasks.task_loop(state)
+
+
+# --- issue 09: how many tasks a provider can actually take ---------------------------------------
+
+
+class _RecordingTaskStop(threading.Event):
+    """The task loop's stop event, recording what it was asked to wait for and never sleeping.
+
+    A capacity pause is a real five-hour window; a test that sat through one would be a test nobody
+    runs. Waiting for zero keeps the event's own semantics — `wait` still answers whether the loop
+    has been told to stop — while making the DURATION the loop chose the thing under test.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.waits = []
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return super().wait(0)
+
+
+def _scripted_gate(pauses, log):
+    """A capacity gate answering `pauses` in order, writing to `log` so the ORDER can be asserted."""
+    def pause_seconds():
+        value = pauses.pop(0) if pauses else 0.0
+        log.append(f"gate:{value}")
+        return value
+
+    return SimpleNamespace(pause_seconds=pause_seconds, observe=lambda _info: None)
+
+
+def test_a_spent_subscription_stops_the_provider_claiming_until_the_window_resets(monkeypatch):
+    """The provider withdraws by not asking. There is nothing to tell the relay: a task is claimed
+    from a durable queue at poll time (ADR 0032 D-a), so a provider that does not claim is simply not
+    given one, and the task waits for a provider that can run it."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    state.tasks_stop = _RecordingTaskStop()
+    log = []
+    reported = []
+
+    def claim(inner_state):
+        log.append("claim")
+        return fake_claim(inner_state)
+
+    monkeypatch.setattr(tasks, "claim_once", claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=_scripted_gate([1800.0], log))
+
+    # Not one claim while the window was spent, and the wait was the window the VENDOR named — not a
+    # poll interval of ours, which would ask the relay for work this provider still cannot do.
+    assert log[:3] == ["gate:1800.0", "gate:0.0", "claim"]
+    assert 1800.0 in state.tasks_stop.waits
+    assert reported == ["T1"]              # and it resumed on its own once the window reset
+
+
+def test_a_capacity_pause_never_stops_inference(monkeypatch):
+    """Task capacity and inference capacity are independent (ADR 0032). A provider with no task
+    headroom left is still a provider — `state.stop` tears the engine down and is never this
+    plane's to set, and `tasks_stop` retires task serving, which a pause is not."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    state.tasks_stop = _RecordingTaskStop()
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state, capacity=_scripted_gate([600.0], []))
+
+    assert not state.stop.is_set()
+
+
+def test_a_gate_that_cannot_answer_leaves_the_provider_claiming(monkeypatch, capsys):
+    """The fail-open rule reaches the LOOP, not only the gate's own reading. A provider that stopped
+    taking work because its own throttle had a bug would be capacity the grid lost silently — the one
+    outcome this feature may never produce."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    reported = []
+
+    def boom():
+        raise RuntimeError("gate exploded")
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=SimpleNamespace(pause_seconds=boom, observe=lambda _i: None))
+
+    assert reported == ["T1"]
+    assert "gate exploded" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("answer", [None, "1800", True, float("nan"), object()])
+def test_a_gate_that_answers_with_something_that_is_not_a_number_is_ignored(monkeypatch, answer):
+    """The other half of the same guard, and the half that would not raise anywhere useful: a gate
+    returning `None` compares fine against `> 0` in some Python versions and not others, and `True`
+    is an `int` — so "is it a number" has to be asked rather than assumed. Any answer that is not
+    one leaves the provider claiming, exactly as a raise does."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(tid))
+
+    tasks.task_loop(state, capacity=SimpleNamespace(
+        pause_seconds=lambda: answer, observe=lambda _i: None))
+
+    assert reported == ["T1"]
+
+
+def test_the_task_loop_defaults_to_the_processs_own_subscription_gate(monkeypatch):
+    """`serve.py` starts the workers and passes nothing; the loop finds the shared gate itself, which
+    is what makes N workers throttle on ONE reading of one subscription."""
+    from remote import task_capacity
+
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    seen = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(task_capacity.shared(), "pause_seconds", lambda: seen.append(1) or 0.0)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state)
+
+    assert seen                                 # the shared gate was the one consulted
+
+
+def test_the_gate_reaches_the_agents_stream(monkeypatch):
+    """The signal only exists inside a running agent's output, so the gate has to travel from the
+    loop all the way down to the translator or it never learns anything."""
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    gate = _scripted_gate([], [])
+    handed = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task",
+        lambda job, *_a, capacity=None, **_k: handed.append(capacity)
+        or tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: None)
+
+    tasks.task_loop(state, capacity=gate)
+
+    assert handed == [gate]
+
+
+def test_task_loop_reports_a_failed_run_without_raising(monkeypatch):
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    reported = []
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("failed", None, "exit 127"))
+    monkeypatch.setattr(tasks, "report_once", lambda _s, tid, **kw: reported.append(kw))
+
+    tasks.task_loop(state)
+
+    # `result_commit` is None because this job named no `input_commit`: there is no branch to push,
+    # so the relay reads nothing and the column is left as it is (the old-relay degrade).
+    assert reported == [
+        {"state": "failed", "output": None, "error": "exit 127", "session_id": None,
+         "result_commit": None, "session_reset_reason": None}]
+
+
+def test_task_loop_survives_a_failure_to_report(monkeypatch):
+    """Losing the report loses one task's result. It must not lose the loop as well."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([
+        {"task_id": "T1", "prompt": "x"}, {"task_id": "T2", "prompt": "y"},
+    ])
+    reported = []
+
+    def report(_s, tid, **kw):
+        if tid == "T1":
+            raise relay.RelayError("lease lost", status=403)
+        reported.append(tid)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert reported == ["T2"]
+    assert not state.stop.is_set()
+
+
+def test_a_transient_report_failure_is_retried_and_the_result_survives(monkeypatch, capsys):
+    """The one loss worth salvaging cheaply: the work is done and only the last message was lost.
+
+    A dead provider's task is recovered by the relay's reclaim, at the cost of a whole second
+    attempt on another provider. This recovers the much commoner case — the provider is alive and
+    the network blipped — for the price of two retries, which is the difference between spending a
+    fresh agent run and not.
+    """
+    from remote import relay, tasks as tasks_mod
+
+    monkeypatch.setattr(tasks_mod, "_REPORT_BACKOFF_SECONDS", 0.001)
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    attempts = []
+
+    def report(_s, tid, **kw):
+        attempts.append(kw)
+        if len(attempts) < 3:
+            raise relay.RelayError("connection reset", status=None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert len(attempts) == 3
+    assert attempts[-1] == {
+        "state": "completed", "output": "done", "error": None, "session_id": None,
+        "result_commit": None, "session_reset_reason": None}
+    assert "stuck" not in capsys.readouterr().err     # it landed; nothing was stranded
+
+
+@pytest.mark.parametrize("status", [403, 404, 422])
+def test_a_terminal_4xx_report_answer_is_not_retried(monkeypatch, capsys, status):
+    """403 (another provider holds the lease), 404 (already terminal), 422 (we sent nonsense) are
+    ANSWERS, not blips. Retrying them cannot change the outcome and only delays the loop."""
+    from remote import relay, tasks as tasks_mod
+
+    monkeypatch.setattr(tasks_mod, "_REPORT_BACKOFF_SECONDS", 0.001)
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    attempts = []
+
+    def report(_s, tid, **kw):
+        attempts.append(kw)
+        raise relay.RelayError("answered", status=status)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert len(attempts) == 1
+    assert str(status) in capsys.readouterr().err
+
+
+def test_a_report_that_never_lands_gives_up_after_a_bounded_number_of_attempts(monkeypatch, capsys):
+    from remote import relay, tasks as tasks_mod
+
+    monkeypatch.setattr(tasks_mod, "_REPORT_BACKOFF_SECONDS", 0.001)
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    attempts = []
+
+    def report(_s, tid, **kw):
+        attempts.append(kw)
+        raise relay.RelayError("still down", status=None)
+
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", report)
+
+    tasks.task_loop(state)
+
+    assert len(attempts) == tasks_mod._REPORT_ATTEMPTS   # bounded, not forever
+    # ...and honest about the outcome, which is now a RETRY rather than a stranding: renewal
+    # stopped before this loop began, so the lease lapses and the relay hands the task on.
+    assert "retr" in capsys.readouterr().err.lower()
+
+
+def test_a_lost_report_says_the_task_will_be_retried_not_that_an_operator_must_clear_it(
+        monkeypatch, capsys):
+    """The log must describe what THIS build does — and what it does changed under this test.
+
+    It used to be true that a lost report stranded the task `running` forever, locking its project,
+    so the message said "until an operator clears it" and this test asserted the word "requeued"
+    never appeared. Lease renewal and reclaim make the opposite true: renewal stopped before this
+    report was attempted, so the lease lapses, the relay reclaims the task and another provider
+    retries it. Sending an operator to clear a task that recovers on its own is now the misleading
+    half, which is why the assertion is inverted rather than deleted.
+    """
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("boom", status=None)))
+
+    tasks.task_loop(state)
+
+    err = capsys.readouterr().err
+    assert "T1" in err
+    assert "retries" in err.lower() or "retr" in err.lower(), err
+    assert "operator" not in err.lower(), "it still tells someone to go clear a self-healing task"
+
+
+def test_a_lost_report_records_which_kind_of_failure_it_was(monkeypatch, capsys):
+    """403 (someone else holds the lease — two providers may have run this) and a transport loss are
+    different incidents. The relay distinguishes them; the provider's log must not collapse them."""
+    from remote import relay
+
+    tasks, state, fake_claim = _task_loop_state([{"task_id": "T1", "prompt": "x"}])
+    monkeypatch.setattr(tasks, "claim_once", fake_claim)
+    monkeypatch.setattr(
+        tasks, "run_task", lambda job, *_a, **_k: tasks.TaskOutcome("completed", "done", None))
+    monkeypatch.setattr(tasks, "report_once", _raise(relay.RelayError("nope", status=403)))
+
+    tasks.task_loop(state)
+
+    assert "403" in capsys.readouterr().err
+
+
+def test_task_oneshot_maps_an_invalid_url_to_a_clean_exit(monkeypatch):
+    """`httpx.InvalidURL` is NOT an `HTTPError` subclass — the trap `deregister_node` records in this
+    same file. These CLI one-shots promise "any failure is a clean SystemExit", and their caller is
+    the one that classifies the exception, so the mapping is load-bearing here."""
+    from remote import relay
+
+    assert not issubclass(httpx.InvalidURL, httpx.HTTPError)  # pin the premise, not just the fix
+
+    with pytest.raises(SystemExit):
+        relay.get_task("http://[malformed", "AT", "T1")
+
+
+def test_task_error_message_survives_a_body_that_blows_the_recursion_limit(monkeypatch):
+    """`json` recurses, and `RecursionError` is a `RuntimeError`, not a `ValueError` — a narrow
+    except here would let it escape a function whose whole contract is 'clean SystemExit'."""
+    from remote import relay
+
+    class _Hostile:
+        status_code = 400
+        text = "deeply nested"
+
+        def json(self):
+            raise RecursionError("maximum recursion depth exceeded")
+
+    assert "400" in relay._task_error_message(_Hostile())
+
+
+# A `member_key` shaped like the relay's — 32 hex characters, `sha256(user_id)` truncated. Since
+# ADR 0033 D-g a task's workspace belongs to a (project, member) pair and `run_task` REFUSES a claim
+# without one, so every job dict below needs it even when the test is about something else.
+_TASK_MEMBER_KEY = "9f2b" * 8
+# The CONVERSATION a turn belongs to (ADR 0034 D-c). `run_task` REFUSES a claim without
+# one — a member-level workspace would be a second conversation's directory too — so
+# every job dict below needs it even when the test is about something else.
+_TASK_CONVERSATION_ID = "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f"
+
+
+def _child(argv, *, timeout=5.0, publish=None, translator=None):
+    """`_run_child` with the arguments that do not vary, so the pump's own tests stay about the pump.
+
+    These exercise `_run_child` directly rather than through `run_task`. Since issue 03 that function
+    resolves a binary and a workspace before spawning anything, and threading a fake agent through
+    every one of them would test the agent seam over and over instead of the thing each of these was
+    written for: the deadline, the kill, the decoding, and the publisher guard.
+    """
+    from remote import tasks
+
+    return tasks._run_child(
+        argv, timeout=timeout, publish=publish or (lambda *_a, **_kw: None),
+        translator=translator)
+
+
+def test_run_task_reports_failure_rather_than_raising(monkeypatch, tmp_path, short_task_root):
+    """Every failure mode of the child is a FAILED task, never an exception into the loop.
+
+    Patches `Popen` rather than `run`: the child is spawned and streamed now, so a spawn that
+    cannot even start is the failure this pins.
+
+    A real (temporary) workspace root rather than a stubbed `ensure_workspace`: preparing a
+    workspace is two steps now — the directory and the agent's transcript link — and stubbing only
+    the first left the second failing on `/var/grid` before the spawn was ever reached, so the test
+    passed on the wrong error. Letting both run for real keeps the child's failure the only one
+    available to assert on.
+    """
+    from remote import tasks
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(short_task_root))
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
+    monkeypatch.setattr(tasks.subprocess, "Popen", _raise(OSError("no such binary")))
+
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID,
+                              "prompt": "x"})
+
+    assert outcome.state == "failed"
+    assert "no such binary" in outcome.error
+
+
+def test_run_task_times_out_into_a_failed_state(monkeypatch, tmp_path, short_task_root):
+    """The fast unit form of the deadline. `test_a_child_that_writes_nothing_still_times_out`
+    proves it against a real wedged child; this one pins the mapping to a failed outcome."""
+    import subprocess as _subprocess
+
+    from remote import task_agent, tasks
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(short_task_root))
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "/opt/claude")
+    monkeypatch.setattr(
+        tasks, "_run_child", _raise(_subprocess.TimeoutExpired(cmd="claude", timeout=1)))
+
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID,
+                              "prompt": "x"})
+
+    assert outcome.state == "failed"
+    assert "timed out" in outcome.error.lower()
+
+
+def test_a_child_that_exits_non_zero_carries_its_stderr_out(monkeypatch):
+    """stderr needs its own reader thread — a child that fills that pipe while nobody drains it
+    blocks on write and is indistinguishable from a hang."""
+    from remote import tasks
+
+    with pytest.raises(tasks._ChildFailed) as excinfo:
+        _child(["/bin/sh", "-c", "echo boom >&2; exit 3"])
+
+    assert excinfo.value.returncode == 3
+    assert "boom" in excinfo.value.stderr
+
+
+def test_run_task_refuses_a_prompt_that_is_not_a_string(monkeypatch):
+    """The job dict came off the wire. A missing or non-string prompt is a failed task, not a
+    TypeError thrown into the loop's guard."""
+    from remote import tasks
+
+    for job in ({"task_id": "T1"}, {"task_id": "T1", "prompt": None}, {"task_id": "T1", "prompt": 7}):
+        outcome = tasks.run_task(job)
+        assert outcome.state == "failed", job
+        assert outcome.error
+
+
+def test_run_task_refuses_a_job_with_no_project(monkeypatch):
+    """Without a project there is no workspace, and the ADR path is the whole basis of resume.
+
+    Refused rather than defaulted: a task run in the wrong directory opens a session no later task
+    on that project can find, and nothing about the run would look wrong at the time.
+    """
+    from remote import tasks
+
+    outcome = tasks.run_task({"task_id": "T1", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID, "prompt": "x"})
+
+    assert outcome.state == "failed"
+    assert "could not start the agent" in outcome.error
+
+
+def test_the_pump_publishes_every_line_of_a_multi_line_child():
+    """Progress is PUBLISHED as the child produces it, not summarised after it exits (ADR 0032 D-f).
+
+    No translator here: this is the pump's own contract, that every line reaches the publisher in
+    order. What each line MEANS is `remote/task_stream.py`'s job, tested in `test_task_agent.py`.
+    """
+    published = []
+
+    returncode, output = _child(
+        ["/bin/sh", "-c", "printf 'a\\nb\\nc\\n'"],
+        publish=lambda event_type, **fields: published.append(fields.get("text")))
+
+    assert returncode == 0
+    assert published == ["a", "b", "c"]
+    assert output == "a\nb\nc\n"
+
+
+def test_a_child_that_writes_nothing_still_times_out():
+    """The regression a naive `for line in proc.stdout` would introduce: that loop blocks forever
+    on a child that produces no output, so the wall-clock budget silently stops existing. The old
+    `subprocess.run(timeout=)` could not fail this way, and neither may its replacement."""
+    import subprocess as _subprocess
+
+    started = time.monotonic()
+    with pytest.raises(_subprocess.TimeoutExpired):
+        _child(["/bin/sleep", "30"], timeout=0.3)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10, f"the deadline did not fire; took {elapsed:.1f}s"
+
+
+def test_a_child_that_writes_then_wedges_still_times_out():
+    """The subtler half: output resets nothing. A child that prints and then hangs must still be
+    bounded, or a single early line buys a task unlimited wallclock."""
+    import subprocess as _subprocess
+
+    published = []
+    started = time.monotonic()
+    with pytest.raises(_subprocess.TimeoutExpired):
+        _child(["/bin/sh", "-c", "echo started; sleep 30"], timeout=0.5,
+               publish=lambda event_type, **fields: published.append(fields.get("text")))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10, f"the deadline did not fire; took {elapsed:.1f}s"
+    assert published == ["started"], "the line it did emit should still have been published"
+
+
+def test_a_timed_out_child_is_killed_not_left_running(monkeypatch):
+    """A daemon reader thread does not reap the process. An abandoned child keeps the provider's
+    CPU and its agent subscription."""
+    import subprocess as _subprocess
+
+    from remote import tasks
+
+    spawned = []
+    real_popen = tasks.subprocess.Popen
+    monkeypatch.setattr(
+        tasks.subprocess, "Popen",
+        lambda *a, **k: spawned.append(real_popen(*a, **k)) or spawned[-1])
+
+    with pytest.raises(_subprocess.TimeoutExpired):
+        _child(["/bin/sleep", "30"], timeout=0.3)
+
+    assert spawned, "the child was never spawned"
+    assert spawned[0].poll() is not None, "the timed-out child is still running"
+
+
+def test_a_broken_publisher_never_costs_the_child_its_run(capsys):
+    """The publisher is documented as never raising — but `_run_child`'s contract is that NOTHING
+    escapes it, and a contract that relies on another module keeping its promise is not one.
+
+    Surviving is not enough: a publisher breaking its own contract is a BUG, and swallowing it in
+    silence means the stream goes quiet with nothing anywhere saying why. Once per run, though —
+    per-line would turn one broken publisher into a flood proportional to the task's output."""
+    def boom(*_a, **_kw):
+        raise RuntimeError("publisher exploded")
+
+    returncode, output = _child(["/bin/sh", "-c", "printf 'a\\nb\\nc\\nd\\n'"], publish=boom)
+
+    assert (returncode, output) == (0, "a\nb\nc\nd\n")
+    assert capsys.readouterr().err.count("publisher exploded") == 1
+
+
+def test_a_child_emitting_non_utf8_bytes_does_not_silently_truncate_the_output():
+    """`text=True` without `errors=` is STRICT utf-8: one bad byte raises `UnicodeDecodeError`
+    inside the reader thread, where the broad guard swallows it — the thread ends, EOF is queued,
+    and the run reports success with the output silently cut off at the bad byte.
+
+    This codebase already fixed the identical trap for `orphan_sweep`'s subprocess (`errors=
+    "replace"`). It matters more now that a real agent writes this stream, not `/bin/echo`."""
+    published = []
+
+    _returncode, output = _child(
+        ["/bin/sh", "-c", r"printf 'before\n\xff\xfe\nafter\n'"],
+        publish=lambda event_type, **fields: published.append(fields.get("text")))
+
+    assert "before" in output and "after" in output, f"output was truncated: {output!r}"
+    assert published[0] == "before" and published[-1] == "after"
+
+
+def test_run_task_without_a_publisher_still_works(monkeypatch, tmp_path, short_task_root):
+    """`publish` is optional so the loop, the tests, and any future caller can run a task without
+    wiring a channel — the child is the point, the stream is an observer."""
+    from remote import task_agent, tasks
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(short_task_root))
+    monkeypatch.setenv("GRID_TASK_TIMEOUT_SECONDS", "20")
+    script = tmp_path / "claude"
+    script.write_text(
+        "#!/bin/sh\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
+        "\"result\":\"solo\"}\\n'\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: str(script))
+
+    outcome = tasks.run_task({"task_id": "T1", "project_id": "p1", "member_key": _TASK_MEMBER_KEY,
+                              "conversation_id": _TASK_CONVERSATION_ID,
+                              "prompt": "solo"})
+
+    assert (outcome.state, outcome.error) == ("completed", None)
+    assert outcome.output == "solo"
+
+
+def _raise(exc):
+    def _boom(*_a, **_kw):
+        raise exc
+    return _boom
 
 
 def test_poll_loop_is_silent_on_success_by_default(monkeypatch, capsys):
@@ -25030,3 +31167,5663 @@ def test_launch_that_refreshes_writes_only_the_two_token_fields(monkeypatch, tmp
         if before["networks"][0].get(key) != after["networks"][0].get(key)
     }
     assert changed == {"access_token", "refresh_token"}
+
+
+# --- issue 04: `grid task create --file` ---------------------------------------------------------
+
+def test_task_create_uploads_a_file_at_its_basename(monkeypatch, tmp_path, capsys):
+    """The default placement. A client uploading `./build/report.txt` means the agent should find
+    `report.txt`, not a `build/` directory it never asked for."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "nested" / "report.txt"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"ZEBRA-4417\n")
+    seen = {}
+
+    # Path-aware, because `grid task create` with no `--project` is TWO requests since ADR 0033
+    # issue 10: resolve the caller's own `default` project to an id, then post the task to it. One
+    # canned answer for both would hand the task-create the project id `T1`, which `create_task`
+    # then correctly reports as a project mismatch.
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "create", "--prompt", "read it", "--file", str(source)])
+
+    assert rc == 0
+    assert seen["body"]["files"] == [
+        {"path": "report.txt", "content_b64": base64.b64encode(b"ZEBRA-4417\n").decode()}]
+
+
+def test_task_create_places_a_file_at_an_explicit_destination(monkeypatch, tmp_path):
+    """`LOCAL:DEST` is how a caller reproduces a source tree the agent expects to navigate.
+
+    The local name deliberately CONTAINS a colon. A colon is legal in a filename on every platform
+    this runs on, so the split has to take the last field and not the first — splitting on the
+    first would look for a file called `od` and report it missing. A plain path exercises neither
+    branch, so this is the only shape that tells the two apart.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "od:2026-08-04.toml"
+    source.write_bytes(b"k = 1\n")
+    seen = {}
+
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:config/conf.toml"])
+
+    assert [f["path"] for f in seen["body"]["files"]] == ["config/conf.toml"]
+
+
+def test_task_create_refuses_a_symlink_without_calling_the_relay(monkeypatch, tmp_path, capsys):
+    """The relay CANNOT catch this: the wire carries `{path, content}`, so a symlink is not
+    representable and there is nothing for it to detect.
+
+    So the rule has two halves and this is the client's. The relay's half is structural — it writes
+    mode `100644` and nothing else — which is what holds when a caller is not this CLI. Following
+    the link here and uploading its TARGET would be worse than refusing: it silently uploads a file
+    the user never named, and the classic target is a private key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY\n")
+    link = tmp_path / "innocent.txt"
+    link.symlink_to(secret)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(link)])
+
+    assert "symlink" in str(exit_info.value).lower()
+    assert str(link) in str(exit_info.value)
+    assert called == [], "the relay was contacted despite a local refusal"
+
+
+def test_task_create_refuses_a_directory(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "src"
+    folder.mkdir()
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(folder)])
+
+    assert "directory" in str(exit_info.value).lower()
+    assert called == []
+
+
+def test_task_create_refuses_a_missing_file_naming_it(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(tmp_path / "nope.txt")])
+
+    assert "nope.txt" in str(exit_info.value)
+    assert called == []
+
+
+def test_task_create_refuses_an_oversized_file_with_the_limit_stated(monkeypatch, tmp_path):
+    """Refused HERE rather than after a multi-megabyte upload that the relay then rejects."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (remote_task.MAX_FILE_BYTES + 1))
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(big)])
+
+    assert str(remote_task.MAX_FILE_BYTES) in str(exit_info.value)
+    assert called == []
+
+
+def test_task_create_without_files_sends_no_files_key(monkeypatch, tmp_path):
+    """An older relay must not receive a key it does not understand for a task that has no files."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": "P1"})
+
+    _mock_relay(monkeypatch, handler)
+    cli.main(["task", "create", "--prompt", "p"])
+
+    assert "files" not in seen["body"]
+
+
+def test_task_create_shows_the_relays_rejection_of_a_path(monkeypatch, tmp_path, capsys):
+    """The relay is the sole authority on path rules — this client deliberately does not
+    re-implement them, because two copies across two repos drift silently. So its 422 has to reach
+    the user as words rather than a traceback."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    source = tmp_path / "a.txt"
+    source.write_bytes(b"x")
+
+    # Path-aware, so the 422 comes from the TASK post. A single canned refusal would be answered to
+    # the project lookup that now runs first, and this test would pass without the task request ever
+    # being made — green for a path it no longer exercises.
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing()
+        return httpx.Response(
+            422, json={"detail": "path is inside a reserved directory ('.git')"})
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["task", "create", "--prompt", "p", "--file", f"{source}:.git/hooks/x"])
+
+    assert "reserved directory" in str(exit_info.value)
+
+
+# --- issue 27: `grid task create --dir` / `grid project commit --dir` ----------------------------
+
+def _dir_upload_handler(seen, project_id="P1"):
+    """The two requests a projectless `grid task create` makes, capturing the task body.
+
+    Path-aware for `test_task_create_uploads_a_file_at_its_basename`'s reason: since ADR 0033
+    issue 10 a create with no `--project` resolves the caller's own `default` project FIRST, and one
+    canned answer for both would hand the task-create a project id the reply then contradicts.
+    """
+    def handler(request):
+        if request.url.path == "/relay/v1/projects":
+            return _default_project_listing(project_id)
+        seen.update(body=json.loads(request.content))
+        return httpx.Response(201, json={"id": "T1", "state": "queued", "project_id": project_id})
+
+    return handler
+
+
+def _paths_sent(seen):
+    return [entry["path"] for entry in seen["body"]["files"]]
+
+
+def test_task_create_dir_uploads_every_file_under_the_folders_own_name(monkeypatch, tmp_path):
+    """The whole point of the flag: one argument where `--file` needed one per file.
+
+    DEST defaults to the FOLDER's basename, matching `--file ./conf.toml` → `conf.toml`. Placing a
+    folder's contents at the workspace root is deliberately not expressible.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fixtures"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "a.json").write_bytes(b'{"k": 1}\n')
+    (folder / "sub" / "b.txt").write_bytes(b"BEE\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    rc = cli.main(["task", "create", "--prompt", "read them", "--dir", str(folder)])
+
+    assert rc == 0
+    assert _paths_sent(seen) == ["fixtures/a.json", "fixtures/sub/b.txt"]
+    by_path = {entry["path"]: entry for entry in seen["body"]["files"]}
+    assert by_path["fixtures/sub/b.txt"]["content_b64"] == base64.b64encode(b"BEE\n").decode()
+
+
+def test_task_create_dir_places_the_tree_at_an_explicit_destination(monkeypatch, tmp_path):
+    """`LOCAL:DEST` reproduces a layout the agent expects to navigate, and the tree under it is
+    preserved rather than flattened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fixtures"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "a.json").write_bytes(b"{}\n")
+    (folder / "sub" / "b.txt").write_bytes(b"b\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", f"{folder}:test/data"]) == 0
+
+    assert _paths_sent(seen) == ["test/data/a.json", "test/data/sub/b.txt"]
+
+
+def test_task_create_dir_dot_uses_the_resolved_folders_own_name(monkeypatch, tmp_path):
+    """`Path('.').name` is `''`, so the obvious default would upload to the workspace ROOT — which
+    `--dir` deliberately cannot express. The resolved directory's real name is used instead."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    folder.mkdir()
+    (folder / "a.txt").write_bytes(b"a\n")
+    monkeypatch.chdir(folder)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", "."]) == 0
+
+    assert _paths_sent(seen) == ["assets/a.txt"]
+
+
+def _git_work_tree(folder):
+    """A real git work tree, because `--dir`'s ignore rules are asked of real git."""
+    import subprocess
+
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent"}
+    subprocess.run(["git", "init", "--quiet", "-b", "main", str(folder)],
+                   check=True, capture_output=True, env=env)
+
+
+def test_task_create_dir_honours_gitignore_inside_a_git_work_tree(monkeypatch, tmp_path):
+    """The single highest-value selection rule, and the reason `--dir` is usable on its first try.
+
+    A naive walk of any real directory blows past MAX_FILES immediately on `__pycache__/`,
+    `node_modules/`, `venv/`. Asked of git rather than hand-rolled: `--exclude-standard` IS the
+    project's own ignore rules, and a second implementation of gitignore semantics would be worse
+    and would fail silently — a file wrongly hidden looks exactly like a file that was never there.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / ".gitignore").write_text("__pycache__/\n*.log\n")
+    (folder / "__pycache__").mkdir()
+    (folder / "__pycache__" / "m.pyc").write_bytes(b"junk")
+    (folder / "debug.log").write_bytes(b"noise")
+    (folder / "app.py").write_bytes(b"x = 1\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["proj/.gitignore", "proj/app.py"]
+
+
+def test_task_create_dir_skips_reserved_and_agent_config_paths_and_still_uploads(
+        monkeypatch, tmp_path):
+    """Skipped, never fatal — and that distinction is the whole rule.
+
+    The relay refuses `.git/` and `.grid/` (`task_files._RESERVED_COMPONENTS`) and `.claude/` /
+    `.mcp.json` (ADR 0033 D-f, because a project-scope agent config is code execution on the
+    provider). Refusing the WHOLE upload because a folder happens to contain one of them is hostile:
+    the rule's purpose is that the config must not reach the workspace, and skipping satisfies it
+    exactly.
+
+    Walked WITHOUT a git work tree deliberately. `git ls-files` never lists `.git/` in the first
+    place, so a git-backed folder would pass this test with no filter written at all.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "bundle"
+    for part in (".git", ".grid", ".claude", "deep/.claude", "deep"):
+        (folder / part).mkdir(parents=True, exist_ok=True)
+    (folder / "ok.txt").write_bytes(b"ok\n")
+    (folder / "deep" / "keep.py").write_bytes(b"keep\n")
+    (folder / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    (folder / ".grid" / "state.json").write_bytes(b"{}\n")
+    (folder / ".claude" / "settings.json").write_bytes(b'{"hooks": {}}\n')
+    (folder / "deep" / ".claude" / "settings.json").write_bytes(b"{}\n")
+    (folder / ".mcp.json").write_bytes(b"{}\n")
+    (folder / "deep" / ".mcp.json").write_bytes(b"{}\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["bundle/deep/keep.py", "bundle/ok.txt"]
+
+
+def test_task_create_dir_never_follows_a_symlink_and_never_uploads_its_target(
+        monkeypatch, tmp_path):
+    """`--file`'s planted-symlink rule, carried through the walk.
+
+    `--file` REFUSES a symlink, and that is right because the user named that file. In a walk the
+    user named the directory, not the link, so aborting over an incidental one is the wrong
+    response — but the security property is unchanged: the link is never followed and its target is
+    never read. The classic target of a planted link is a private key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY\n")
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    (folder / "real.md").write_bytes(b"# real\n")
+    (folder / "link.md").symlink_to(secret)
+    # A symlinked DIRECTORY too: `os.walk(followlinks=False)` must not descend into it, or the
+    # target's whole tree is uploaded under a name the user never gave.
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "private.txt").write_bytes(b"PRIVATE\n")
+    (folder / "away").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["docs/real.md"]
+    body = json.dumps(seen["body"])
+    assert "PRIVATE KEY" not in base64.b64decode(
+        seen["body"]["files"][0]["content_b64"]).decode()
+    assert "private.txt" not in body and "id_rsa" not in body
+
+
+def test_task_create_dir_reports_what_it_skipped_rather_than_skipping_silently(
+        monkeypatch, tmp_path, capsys):
+    """A silent skip is how somebody discovers at runtime that the file they needed was never sent.
+
+    On **stderr**, not stdout: `--json` prints the payload on stdout and a skip line there would
+    corrupt it for the program reading it.
+
+    A symlink is reported WITH its target, because "a link was skipped" does not tell anyone whether
+    they were just protected from uploading a private key or lost a convenience alias.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY\n")
+    folder = tmp_path / "docs"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / "real.md").write_bytes(b"# real\n")
+    (folder / ".claude" / "settings.json").write_bytes(b"{}\n")
+    (folder / "link.md").symlink_to(secret)
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    err = capsys.readouterr().err
+    assert "skipped 2 paths" in err, err
+    assert "docs/.claude/" in err, err
+    assert "docs/link.md" in err and "id_rsa" in err, err
+    assert _paths_sent(seen) == ["docs/real.md"]
+
+
+def test_task_create_dir_keeps_json_stdout_parseable_while_it_reports_skips(
+        monkeypatch, tmp_path, capsys):
+    """The reason the report goes to stderr. `--json` exists to be piped into something."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "docs"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / "real.md").write_bytes(b"# real\n")
+    (folder / ".claude" / "settings.json").write_bytes(b"{}\n")
+
+    _mock_relay(monkeypatch, _dir_upload_handler({}))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder), "--json"]) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["id"] == "T1"
+    assert "skipped" in captured.err
+
+
+def test_task_create_dir_outside_a_git_work_tree_says_gitignore_was_not_applied(
+        monkeypatch, tmp_path, capsys):
+    """The fallback works, and it is not silent.
+
+    "Your ignore rules were not applied" is the fact that explains a surprising file count, and a
+    user who BELIEVED they were in a work tree has just learned that they are not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    folder.mkdir()
+    (folder / "a.txt").write_bytes(b"a\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["assets/a.txt"]
+    assert "not in a git work tree" in capsys.readouterr().err
+
+
+def _forbid_reads(monkeypatch):
+    """Make reading ANY file explode, so "refused before any content was read" is proven and not
+    merely asserted about a message."""
+    def boom(self, *a, **kw):
+        raise AssertionError(f"content was read before the bounds were checked: {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+
+
+def test_task_create_dir_over_the_file_count_refuses_before_reading_anything(
+        monkeypatch, tmp_path):
+    """Reading 1,847 files into memory and *then* refusing is the failure this ordering prevents.
+
+    The refusal has to carry three things to be actionable: the count, which entries are the
+    problem, and the way out — `grid project import`, which is what a whole codebase actually wants.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    folder.mkdir()
+    for index in range(remote_task.MAX_FILES + 1):
+        (folder / f"f{index:04d}.bin").write_bytes(b"x" * (index + 1))
+    _forbid_reads(monkeypatch)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert str(remote_task.MAX_FILES + 1) in message and str(remote_task.MAX_FILES) in message
+    assert "assets/f0200.bin" in message, message
+    assert "grid project import" in message, message
+    assert called == [], "the relay was contacted despite a local refusal"
+
+
+def test_task_create_dir_over_the_total_bytes_refuses_before_reading_anything(
+        monkeypatch, tmp_path):
+    """The byte budget is checked from `stat`, for the same reason: a 20 MiB refusal must not cost
+    20 MiB of reads first."""
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "media"
+    folder.mkdir()
+    # Sparse, so the test costs no real bytes — `stat().st_size` is what the bound reads, and it is
+    # also what the relay would charge for.
+    for name, size in (("big.mp4", 4_500_000), ("mid.png", 4_400_000), ("s.bin", 4_300_000)):
+        with open(folder / name, "wb") as handle:
+            handle.truncate(size)
+    monkeypatch.setattr(remote_task, "MAX_TOTAL_BYTES", 10_000_000)
+    _forbid_reads(monkeypatch)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert "media/big.mp4" in message, message
+    assert "grid project import" in message, message
+    assert called == []
+
+
+def test_file_and_dir_share_one_upload_budget(monkeypatch, tmp_path):
+    """One budget for the UPLOAD, not one per flag.
+
+    Two counters would let `--file`×150 through alongside `--dir`×60 for a 210-file POST the relay
+    then refuses — after the client has read and base64'd every one of them.
+    """
+    from cli import remote_task
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    singles = []
+    for index in range(150):
+        path = loose / f"s{index:03d}.txt"
+        path.write_bytes(b"s\n")
+        singles += ["--file", str(path)]
+    folder = tmp_path / "extra"
+    folder.mkdir()
+    for index in range(60):
+        (folder / f"d{index:03d}.txt").write_bytes(b"d\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", *singles, "--dir", str(folder)])
+
+    assert "210" in str(caught.value) and str(remote_task.MAX_FILES) in str(caught.value)
+    assert called == []
+
+
+def test_task_create_dir_refuses_an_empty_folder_by_name(monkeypatch, tmp_path):
+    """Consistent with `--delete` refusing a path that is not there rather than succeeding silently.
+
+    An upload that quietly sends nothing is the worst outcome: the task runs, the agent finds no
+    input, and the answer is wrong for a reason nothing anywhere states.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "hollow"
+    (folder / "nested").mkdir(parents=True)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    assert str(folder) in str(caught.value)
+    assert "empty" in str(caught.value).lower(), caught.value
+    assert called == []
+
+
+def test_task_create_dir_refuses_a_fully_gitignored_folder_naming_gitignore(monkeypatch, tmp_path):
+    """A folder every file of which is ignored selects nothing — and calling that "empty" would name
+    a visibly-full directory as empty, which reads as a bug in this CLI.
+
+    git hit the same problem and answered it: `git add ./build` on an ignored path refuses and names
+    `.gitignore`. This mirrors that rather than inventing a force flag.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work = tmp_path / "proj"
+    work.mkdir()
+    _git_work_tree(work)
+    (work / ".gitignore").write_text("dist/\n")
+    (work / "dist").mkdir()
+    (work / "dist" / "bundle.js").write_bytes(b"console.log(1)\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(work / "dist")])
+
+    message = str(caught.value)
+    assert ".gitignore" in message, message
+    assert "empty" not in message.lower(), "an ignored folder was reported as an empty one"
+    assert "--file" in message, message
+    assert called == []
+
+
+def test_task_create_dir_an_empty_folder_inside_a_repo_is_still_empty_not_ignored(
+        monkeypatch, tmp_path):
+    """The two empty-result causes must not be told apart by "is there anything in here".
+
+    git lists FILES, so a folder holding nothing but empty subdirectories makes it answer nothing —
+    while `iterdir()` still sees the subdirectory. Deciding on that would tell the user every file
+    is ignored by a `.gitignore` that does not mention it, and send them to edit the wrong thing.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work = tmp_path / "proj"
+    work.mkdir()
+    _git_work_tree(work)
+    (work / "hollow" / "nested").mkdir(parents=True)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(work / "hollow")])
+
+    message = str(caught.value)
+    assert "empty" in message.lower(), message
+    assert ".gitignore" not in message, "an empty folder was blamed on .gitignore"
+    assert called == []
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_reports_a_directory_it_could_not_read(monkeypatch, tmp_path, capsys):
+    """`os.walk`'s default `onerror=None` SWALLOWS the error and walks on.
+
+    So an unreadable subdirectory silently contributes nothing: the upload succeeds, the agent runs,
+    and the files under it were never sent — with nothing anywhere saying so. That is exactly the
+    failure this flag's skip report exists to prevent, arriving through the one door that reports
+    nothing by default.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "assets"
+    (folder / "locked").mkdir(parents=True)
+    (folder / "locked" / "hidden.txt").write_bytes(b"hidden\n")
+    (folder / "open.txt").write_bytes(b"open\n")
+    (folder / "locked").chmod(0o000)
+    seen = {}
+
+    try:
+        _mock_relay(monkeypatch, _dir_upload_handler(seen))
+        assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+        assert _paths_sent(seen) == ["assets/open.txt"]
+        err = capsys.readouterr().err
+        assert "assets/locked" in err, err
+    finally:
+        (folder / "locked").chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_reports_a_git_listing_git_itself_called_incomplete(
+        monkeypatch, tmp_path, capsys):
+    """git can report a partial listing as a SUCCESS, and the return code does not say so.
+
+    Measured on git 2.54.0: `ls-files --others` over a directory it cannot open prints
+    `warning: could not open directory 'blocked/': Permission denied` and **exits 0**. A caller that
+    branches on the return code alone therefore treats a listing with files missing from it as
+    complete — and this is the path MOST `--dir` calls take, since the flag is at its best inside a
+    work tree. `os.walk`'s `onerror` does not cover it: that fires only on the fallback.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "visible").mkdir()
+    (folder / "visible" / "a.txt").write_bytes(b"a\n")
+    (folder / "blocked").mkdir()
+    (folder / "blocked" / "b.txt").write_bytes(b"b\n")
+    (folder / "blocked").chmod(0o000)
+    seen = {}
+
+    try:
+        _mock_relay(monkeypatch, _dir_upload_handler(seen))
+        assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+        assert _paths_sent(seen) == ["proj/visible/a.txt"]
+        err = capsys.readouterr().err
+        assert "blocked" in err, err
+        # The user must be told the upload may be INCOMPLETE, not merely that git grumbled — the
+        # whole cost of this bug is believing a partial upload was a whole one.
+        assert "missing" in err.lower(), err
+    finally:
+        (folder / "blocked").chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_does_not_traceback_on_a_tracked_file_it_cannot_stat(
+        monkeypatch, tmp_path, capsys):
+    """`Path.is_file()` and `is_symlink()` do NOT swallow EACCES.
+
+    Measured on CPython 3.12: pathlib's `_ignore_error` covers ENOENT / ENOTDIR / ELOOP and **not**
+    EACCES, so both RAISE on a path whose parent directory cannot be read.
+
+    That is reachable, and specifically on the git path: `ls-files --cached` lists a TRACKED file
+    out of the index without touching the disk, so a file inside a chmod-000 directory is offered
+    as a candidate and then cannot be examined. Unguarded it escapes as a raw traceback rather than
+    this CLI's clean `SystemExit` idiom — and the fallback walk never reaches it, because `os.walk`
+    has already declined to enter that directory.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "sub").mkdir()
+    (folder / "sub" / "hidden.txt").write_bytes(b"hidden\n")
+    (folder / "kept.txt").write_bytes(b"kept\n")
+    subprocess.run(["git", "add", "-A"], cwd=folder, check=True, capture_output=True)
+    (folder / "sub").chmod(0o000)
+    seen = {}
+
+    try:
+        _mock_relay(monkeypatch, _dir_upload_handler(seen))
+        assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+        assert _paths_sent(seen) == ["proj/kept.txt"]
+        assert "sub/hidden.txt" in capsys.readouterr().err
+    finally:
+        (folder / "sub").chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_calls_an_unreadable_folder_unreadable_not_empty(monkeypatch, tmp_path):
+    """A folder nobody can read is not an empty one, and the two call for opposite actions.
+
+    "Empty" sends someone to look at the folder — delete it, re-create it, wonder where their files
+    went. The truth is a permission on their own machine, and the listing already knew: git warned
+    about it and the fallback walk recorded it. Both were being discarded on the way to this
+    refusal, which is the "wrong bucket" failure — the refusal is loud, and still misdescribes.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "blocked").mkdir()
+    (folder / "blocked" / "b.txt").write_bytes(b"b\n")
+    (folder / "blocked").chmod(0o000)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    try:
+        with pytest.raises(SystemExit) as caught:
+            cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+        message = str(caught.value)
+        assert "empty" not in message.lower(), f"an unreadable folder was called empty: {message}"
+        assert "blocked" in message, message
+        assert called == []
+    finally:
+        (folder / "blocked").chmod(0o700)
+
+
+def test_task_create_dir_folds_skipped_names_the_way_the_relay_does(monkeypatch, tmp_path):
+    """`.CLAUDE/` must be skipped like `.claude/`, or the whole upload dies on the relay's 422.
+
+    grid-src `task_files._folded()` strips Unicode format characters, applies NFKC and casefolds
+    before comparing these same names. A client filter that compares raw strings lets `.CLAUDE/`
+    through — plausible on a case-insensitive dev machine, where `mkdir .CLAUDE` once is enough —
+    and the relay then refuses the ENTIRE request, taking every legitimately selected file with it.
+
+    Not a security hole: the relay's fold is a strict superset, so nothing gets through both layers.
+    It defeats the thing this filter exists for, which is `--dir` working on its first try. The
+    duplication is safe in the direction that matters — a client fold narrower than the relay's ends
+    in that loud 422, and a wider one shows up as a file the user re-adds with `--file`.
+
+    This exercises the WALK's prune site; the git listing's is the next test.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "bundle"
+    (folder / ".CLAUDE").mkdir(parents=True)
+    (folder / ".CLAUDE" / "settings.json").write_bytes(b"{}\n")
+    (folder / "﹤ｇit").mkdir()  # not `.git`; a fullwidth spelling NFKC folds toward
+    (folder / "ok.txt").write_bytes(b"ok\n")
+    (folder / ".MCP.json").write_bytes(b"{}\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    sent = _paths_sent(seen)
+    assert "bundle/.CLAUDE/settings.json" not in sent, sent
+    assert "bundle/.MCP.json" not in sent, sent
+    assert "bundle/ok.txt" in sent
+
+
+def test_task_create_dir_folds_skipped_names_on_the_git_listing_too(monkeypatch, tmp_path):
+    """The same fold, at the other comparison site.
+
+    `_walk`'s prune and `_skip_reason` are two places the rule is applied, and they must not
+    disagree — a name folded in one and compared raw in the other is a filter that works only when
+    the folder happens not to be a git repository.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / ".CLAUDE").mkdir()
+    (folder / ".CLAUDE" / "settings.json").write_bytes(b"{}\n")
+    (folder / "app.py").write_bytes(b"x\n")
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["proj/app.py"]
+
+
+def test_task_create_dir_listing_ignores_an_inherited_git_dir(monkeypatch, tmp_path, capsys):
+    """`GIT_DIR`/`GIT_WORK_TREE` in the environment make git ignore `-C` entirely.
+
+    Measured: with both exported at another repository, `git -C <dir> ls-files` returns the OTHER
+    repo's tracked paths and none of `<dir>`'s. Those variables are a different class from
+    `GIT_CONFIG_GLOBAL`, which this code deliberately leaves alone because it carries
+    `core.excludesFile` — they do not affect ignore rules, they redirect which repository `-C` even
+    resolves to, and no listing of a named folder has any reason to honour them.
+
+    Plausible from a git hook or a CI wrapper that forgot to unset them. The failure is wrong
+    selection, not leakage — content is always read from `source / relative` — but a folder with
+    real content gets refused as fully skipped, which is a confusing way to lose an upload.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    other = tmp_path / "other"
+    other.mkdir()
+    _git_work_tree(other)
+    (other / "theirs.txt").write_bytes(b"theirs\n")
+    subprocess.run(["git", "add", "-A"], cwd=other, check=True, capture_output=True)
+    folder = tmp_path / "mine"
+    folder.mkdir()
+    (folder / "mine.txt").write_bytes(b"mine\n")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    seen = {}
+
+    _mock_relay(monkeypatch, _dir_upload_handler(seen))
+    assert cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)]) == 0
+
+    assert _paths_sent(seen) == ["mine/mine.txt"]
+    assert "theirs" not in json.dumps(seen["body"])
+
+
+def test_task_create_dir_refusal_keeps_every_note_the_listing_produced(monkeypatch, tmp_path):
+    """A refusal raised mid-selection is the one place a note can be DESTROYED rather than unused.
+
+    `_refuse_empty_selection` raises before `select()` ever collects that root's notes, so anything
+    the listing worked out and did not put in the message is simply gone. The rule has to be
+    unconditional — every note reaches the user — rather than "the important one does", because
+    which note is important is exactly the judgement that has been wrong twice here.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "bundle"
+    (folder / ".claude").mkdir(parents=True)
+    (folder / ".claude" / "settings.json").write_bytes(b"{}\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert "bundle/.claude/" in message, message
+    assert "not in a git work tree" in message, message
+    assert called == []
+
+
+def test_task_create_dir_does_not_blame_gitignore_for_its_own_reserved_rule(monkeypatch, tmp_path):
+    """A freshly `git init`-ed folder holds exactly one thing — `.git/` — and no `.gitignore` at all.
+
+    `ls-files` cannot see `.git/`, so it lists nothing; the explanatory re-walk then DOES find it,
+    because the prune records a reserved directory as a candidate on purpose. Judging that re-walk
+    without classifying it read "a plain walk finds files that git hid" and blamed a `.gitignore`
+    that does not exist, sending the user to look for a rule nobody wrote. The real cause is this
+    tool's own reserved-directory rule, which branch one already states correctly.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "fresh"
+    folder.mkdir()
+    _git_work_tree(folder)
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--dir", str(folder)])
+
+    message = str(caught.value)
+    assert ".gitignore" not in message, f"blamed a .gitignore that does not exist: {message}"
+    assert "fresh/.git/" in message, message
+    assert called == []
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions, so nothing would be unreadable")
+def test_task_create_dir_refusal_prefixes_re_walk_paths_like_every_other_skip(
+        monkeypatch, tmp_path):
+    """Every other line in a skip report is a destination path. The explanatory re-walk's own
+    findings were the one exception, which makes them read as a different kind of thing."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _git_work_tree(folder)
+    (folder / "blocked").mkdir()
+    (folder / "blocked" / "b.txt").write_bytes(b"b\n")
+    (folder / "blocked").chmod(0o000)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(201, json={}))
+    try:
+        with pytest.raises(SystemExit) as caught:
+            cli.main(["task", "create", "--prompt", "p", "--dir", f"{folder}:up"])
+        assert "up/blocked" in str(caught.value), caught.value
+    finally:
+        (folder / "blocked").chmod(0o700)
+
+
+def test_file_refusing_a_directory_now_names_dir(monkeypatch, tmp_path):
+    """The dead end this issue closes. The old message was honest and named no alternative, because
+    until now there was none."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "a.py").write_bytes(b"a\n")
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(201, json={}))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--prompt", "p", "--file", str(folder)])
+
+    assert "--dir" in str(caught.value), caught.value
+    assert called == []
+
+
+# --- ADR 0033 issue 16b: `grid project import` ---------------------------------------------------
+
+def _local_repo(tmp_path, name="src", commits=2):
+    """A real git repository for the CLI to import. Real git, because `push_import` runs real git."""
+    import subprocess
+
+    work = tmp_path / name
+    work.mkdir()
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=str(work), check=True, capture_output=True,
+                              text=True, env=env).stdout
+
+    git("init", "--quiet", "-b", "main", ".")
+    for index in range(commits):
+        (work / f"f{index}.txt").write_text(f"{index}\n")
+        git("add", "-A")
+        git("commit", "--quiet", "-m", f"c{index}")
+    return work, git("rev-parse", "HEAD").strip()
+
+
+def test_project_import_opens_pushes_and_finishes_in_that_order(monkeypatch, tmp_path, capsys):
+    """ADR 0033 D-f end to end through `cli.main`.
+
+    Three steps, and the middle one is a real `git push` — so this asserts the ORDER, that the push
+    went to the ref the relay named rather than one the client built, and that the pushed commit is
+    the repository's real tip.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={
+                "project_id": "P1", "member_key": "abc123",
+                "ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(200, json={
+            "project_id": "P1", "status": "imported", "commit": tip,
+            "trunk": "main", "warnings": [], "trees_read": 3})
+
+    _mock_relay(monkeypatch, handler)
+    # The push is real git against a real bare repo, so `git_remote_url` is pointed at one.
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    rc = cli.main(["project", "import", str(work), "P1"])
+
+    assert rc == 0
+    assert calls == [("POST", "/relay/v1/projects/P1/import"),
+                     ("POST", "/relay/v1/projects/P1/import/finish")]
+    landed = subprocess.run(
+        ["git", "--git-dir", str(relay_repo), "rev-parse", "refs/import/abc123"],
+        capture_output=True, text=True).stdout.strip()
+    assert landed == tip, "the push did not reach the ref the relay named"
+    out = capsys.readouterr().out
+    assert f"main is now at {tip}" in out
+
+
+def test_project_import_pushes_to_the_ref_the_relay_named_and_not_one_it_guessed(
+        monkeypatch, tmp_path):
+    """The staging ref's spelling is the relay's alone (the PRD's lockstep table says so).
+
+    Asserted with a ref this client could never have derived: if it ever starts building
+    `refs/import/<key>` itself, that is a second place that has to agree about how a member key is
+    shaped, and it would pass every other test in this file.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/not-a-member-key", "trunk": "main"})
+        return httpx.Response(200, json={"status": "imported", "commit": tip, "trunk": "main"})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    assert cli.main(["project", "import", str(work), "P1"]) == 0
+
+    landed = subprocess.run(
+        ["git", "--git-dir", str(relay_repo), "rev-parse", "refs/import/not-a-member-key"],
+        capture_output=True, text=True).stdout.strip()
+    assert landed == tip
+
+
+def test_project_import_shows_the_relays_refusal_and_the_path_it_names(monkeypatch, tmp_path):
+    """A 422 carrying `reason` and `path` beside its sentence (ADR 0033 D-l). The sentence is what
+    a person reads, and it has to arrive as words rather than a traceback."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(422, json={"detail": {
+            "code": "import_rejected", "reason": "submodule", "path": "vendor/lib",
+            "message": "This repository contains the submodule vendor/lib.", "warnings": []}})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "vendor/lib" in str(exit_info.value)
+
+
+def test_project_import_refuses_to_call_an_unreadable_reply_an_import(monkeypatch, tmp_path):
+    """The rule promote and integrate already follow. Reporting an import from a body that never
+    said so would tell somebody their team's history is on the relay on no evidence — and a proxy
+    that strips a body is all it takes."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(200, json={})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "did not say" in str(exit_info.value)
+
+
+def test_project_import_relays_the_lfs_warning_verbatim(monkeypatch, tmp_path, capsys):
+    """A warning is not a failure — the import landed. Printed verbatim, because these are the
+    relay's words about a repository this CLI never read."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, tip = _local_repo(tmp_path)
+    relay_repo = tmp_path / "relay.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(relay_repo)], check=True)
+
+    def handler(request):
+        if request.url.path.endswith("/import"):
+            return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+        return httpx.Response(200, json={
+            "status": "imported", "commit": tip, "trunk": "main",
+            "warnings": ["This repository uses Git LFS."]})
+
+    _mock_relay(monkeypatch, handler)
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(relay_repo))
+
+    assert cli.main(["project", "import", str(work), "P1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Git LFS" in out
+
+
+def test_project_import_against_an_old_relay_names_the_relay(monkeypatch, tmp_path):
+    """A bare framework 404 becomes the sentence naming the relay — the same gate every other
+    project route uses, keyed on the body FastAPI owns rather than on the status."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "does not have projects yet" in str(exit_info.value)
+
+
+def test_project_import_does_not_mask_a_real_404_from_a_relay_that_has_the_route(
+        monkeypatch, tmp_path):
+    """The other half of that gate. A relay that HAS import and answers 404 for its own reason —
+    the project is not yours — must show its own words, or the fix somebody is handed is wrong."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "No such project"}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    assert "No such project" in str(exit_info.value)
+
+
+def test_project_import_refuses_a_path_that_is_not_a_repository_before_touching_the_relay(
+        monkeypatch, tmp_path):
+    """Checked here rather than left to git, whose message arrives AFTER the relay has opened an
+    import and deleted whatever a previous attempt staged."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+
+    called = []
+    _mock_relay(monkeypatch, lambda r: called.append(1) or httpx.Response(200, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(plain), "P1"])
+
+    assert "not a git repository" in str(exit_info.value)
+    assert called == [], "the relay was asked to open an import for a directory with no git in it"
+
+
+def test_project_import_accepts_every_shape_of_repository_git_itself_accepts(
+        monkeypatch, tmp_path):
+    """"Has a `.git` DIRECTORY" is not "is a git repository", and the difference refused real work.
+
+    MEASURED on git 2.51, the four shapes this predicate meets:
+
+    | path            | `isdir(.git)` (the old check) | `git rev-parse --git-dir` |
+    |-----------------|-------------------------------|---------------------------|
+    | ordinary clone  | True                          | 0                         |
+    | **worktree**    | **False** — a `.git` FILE     | 0                         |
+    | **bare repo**   | **False** — no `.git` at all  | 0                         |
+    | plain directory | False                         | 128                       |
+
+    Both middle rows were refused with "there is nothing to import" while pointing at real history.
+    Worktrees are not exotic here — this product's own tri-repo development runs in them, so the
+    first import attempted from a feature checkout hit it.
+
+    The early check itself is kept: git's own message arrives only AFTER the relay has opened an
+    import and deleted whatever was staged. What changed is that git is now asked the question git
+    owns.
+    """
+    import subprocess
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def _git(cwd, *args):
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
+                              env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                                   "GIT_CONFIG_NOSYSTEM": "1"})
+
+    normal = tmp_path / "normal"
+    normal.mkdir()
+    _git(normal, "init", "-q", "-b", "main", ".")
+    _git(normal, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty",
+         "-m", "seed")
+    _git(normal, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    _git(tmp_path, "clone", "-q", "--bare", str(normal), str(tmp_path / "bare.git"))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    # The relay is asked to open an import for each accepted shape and for none of the refused one,
+    # which is what "before touching the relay" means in practice.
+    for shape in ("normal", "wt", "bare.git"):
+        opened = []
+        _mock_relay(monkeypatch,
+                    lambda r, seen=opened: seen.append(1) or httpx.Response(500, json={}))
+        with pytest.raises(SystemExit):
+            cli.main(["project", "import", str(tmp_path / shape), "P1"])
+        assert opened, f"{shape} was refused as 'not a git repository' before the relay was asked"
+
+    opened = []
+    _mock_relay(monkeypatch, lambda r: opened.append(1) or httpx.Response(200, json={}))
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(plain), "P1"])
+    assert "not a git repository" in str(exit_info.value)
+    assert opened == [], "the relay was asked to open an import for a directory with no git in it"
+
+
+def test_project_import_help_says_where_a_trunk_comes_from(monkeypatch, tmp_path):
+    """The help text of a consequential verb is asserted in this suite, as promote's and
+    integrate's are: a member cannot push `main` (issue 16b), so somebody reading `--help` has to
+    be told where a trunk comes from instead.
+
+    It used to say import was the ONLY way, which stopped being true at issue 25 — and the person
+    that mattered to is exactly the one reading this help with no repository to import."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    parser = cli.build_parser()
+    project = parser._subparsers._group_actions[0].choices["project"]
+    text = project._subparsers._group_actions[0].choices["import"].format_help()
+
+    assert "two ways a project gets a trunk" in text
+    assert "grid project init" in text, "the other way is not named"
+    assert "only way a project gets a trunk" not in text, "the superseded claim is still here"
+    assert "submodule" in text
+    assert "Git LFS" in text
+
+
+def test_project_init_help_says_the_trunk_is_empty_and_the_choice_is_not_undoable(
+        monkeypatch, tmp_path):
+    """Two facts a reader cannot recover afterwards. The trunk holds nothing they send — so a body
+    is refused rather than dropped — and initializing CLOSES the import path for that project,
+    permanently, because a second trunk would move `main` out from under every member's branch."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    parser = cli.build_parser()
+    project = parser._subparsers._group_actions[0].choices["project"]
+    text = project._subparsers._group_actions[0].choices["init"].format_help().lower()
+
+    assert "empty" in text, "the help does not say the trunk holds nothing"
+    assert "import" in text, "the help does not name the other way"
+    assert "undoable" in text or "refused" in text, (
+        "the help does not say this cannot be taken back")
+
+
+def test_project_import_reports_a_failed_push_as_a_sentence_not_a_traceback(monkeypatch, tmp_path):
+    """The push is the one step of this command that is not an HTTP call, and it was the one step
+    that ended in a traceback.
+
+    Steps 1 and 3 go through `relay._task_oneshot`, which turns every failure into a clean
+    `SystemExit`; `push_import` raises `CheckoutError`, a bare `RuntimeError`. `SystemExit` is this
+    repo's clean-error idiom, and a command that uses it for two of its three steps and not the
+    third is the shape somebody debugs at the wrong layer.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    work, _tip = _local_repo(tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, json={"ref": "refs/import/abc123", "trunk": "main"})
+
+    _mock_relay(monkeypatch, handler)
+    # A URL no git can push to, which is what a network failure or a wrong relay address looks like.
+    monkeypatch.setattr("remote.relay.git_remote_url",
+                        lambda *a, **k: str(tmp_path / "there-is-no-repo-here"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["project", "import", str(work), "P1"])
+
+    message = str(exit_info.value)
+    assert "Could not push" in message
+    # And it says what state the project is in, because "the push failed" leaves a person wondering
+    # whether half a repository is now on the relay.
+    assert "no main" in message
+
+
+# ---------------------------------------------------------------------------
+# ADR 0033 D-l / issue 19a — the read surface an application needs.
+#
+# Three commands, and each answers a question that previously required either a clone or a write:
+# `grid task list` (nothing listed tasks at all), `grid project status` (how far behind am I, and
+# what holds my slot — answerable only by attempting a promote), and `grid project check` (would
+# integrating conflict — answerable only by integrating, which spends the slot and may pay for an
+# agent run).
+# ---------------------------------------------------------------------------
+
+
+def test_task_list_gets_the_list_route_for_a_project(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"tasks": [
+            {"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "fix the parser",
+             "owner_id": "grid:n:alice", "member_key": "def456",
+             "created_at": "2026-08-08T10:00:00+00:00", "attempt": 1, "max_attempts": 3},
+        ], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/tasks")
+    assert seen["query"]["project_id"] == "P1"
+    out = capsys.readouterr().out
+    assert "t-1" in out and "completed" in out and "fix the parser" in out
+
+
+_A_MERGE_TURNS_PROMPT = (
+    "Resolve a git merge conflict in this repository.\n\n"
+    "You are on branch `task/m-1`. The commit to merge into it is the ref `refs/integrate/m-1`, "
+    "which is already present in this repository.\n1. Run `git merge refs/integrate/m-1`."
+)
+
+
+def test_task_get_on_a_failed_merge_turn_says_what_the_person_can_do(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g (issue 42). A merge turn that fails ends with the PROVIDER's words —
+    `_push_result` names the paths git still has unresolved, which is a correct diagnostic for an
+    operator and the one message the design says must not be a non-developer's last word.
+
+    Kept, not replaced: `error=` still prints verbatim, because whoever runs the grid needs it. What
+    is added is the sentence that turns a dead end into a next step.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "m-1", "conversation_id": "c-1", "kind": "merge", "state": "failed",
+        "error": "the agent reported success but left src/main.py unmerged in git's index",
+    }))
+
+    rc = cli.main(["task", "get", "m-1"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "unmerged in git's index" in captured.out, "the operator's diagnostic was thrown away"
+    assert "grid task send c-1" in captured.out + captured.err, (
+        "the person is left at a failure naming file paths with nothing they can do")
+
+
+def test_task_get_on_an_ordinary_failed_turn_says_no_such_thing(monkeypatch, tmp_path, capsys):
+    """The control. An ordinary turn that failed is the agent not managing what it was asked; there
+    is nothing about combining anybody's work, and offering that advice would send a person looking
+    for a collision that never happened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "conversation_id": "c-1", "kind": "message", "state": "failed",
+        "error": "the tests did not pass",
+    }))
+
+    cli.main(["task", "get", "t-1"])
+
+    captured = capsys.readouterr()
+    assert "combine" not in (captured.out + captured.err).lower()
+
+
+def test_task_list_shows_a_merge_turn_as_a_step_rather_than_as_something_somebody_typed(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g (issue 42). A merge turn's `prompt` is the RELAY's — `merge_tiers._MERGE_PROMPT`,
+    which names branches, refs and `git merge` — and this table puts it in a column headed PROMPT
+    beside the member's own messages, attributed to that member.
+
+    So a person reading their own conversation is shown git vocabulary they never wrote, as though
+    they wrote it. `kind` is the wire value that lets a client render it as machinery instead
+    (ADR 0034 D-m: no git vocabulary reaches the application's surface).
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        return httpx.Response(200, json={"tasks": [
+            {"id": "t-1", "project_id": "P1", "state": "completed", "kind": "message",
+             "prompt": "fix the parser", "member_key": "def456"},
+            {"id": "m-1", "project_id": "P1", "state": "queued", "kind": "merge",
+             "prompt": _A_MERGE_TURNS_PROMPT, "member_key": "def456"},
+        ], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fix the parser" in out, "a person's own message stopped being shown"
+    for word in ("git merge", "branch", "refs/integrate"):
+        assert word not in out, f"the relay's merge prompt reached the surface: {word!r}"
+    assert "m-1" in out
+
+
+def test_task_list_treats_a_relay_that_sends_no_kind_as_a_persons_message(
+        monkeypatch, tmp_path, capsys):
+    """The `serves_you` / `archived` / `visibility` rule, for the fourth time: *absent ⇒ a person's
+    message*, which is every relay before this slice. Keyed on an explicit `"merge"`, never on
+    truthiness — a falsy test here would relabel every row on an old relay as machinery and hide
+    every prompt anybody had ever typed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"tasks": [
+        {"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "fix the parser",
+         "member_key": "def456"},
+    ], "next_after": None}))
+
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    assert "fix the parser" in capsys.readouterr().out
+
+
+def test_task_list_all_asks_for_the_whole_project(monkeypatch, tmp_path, capsys):
+    """`mine=false` is what makes a shared project renderable. Without it a member sees only their
+    own runs, which is the `owner_id` default ADR 0033 calls wrong for a shared project."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"tasks": [], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1", "--all"])
+
+    assert rc == 0
+    assert seen["query"]["mine"] == "false"
+
+
+def test_task_list_says_so_rather_than_printing_an_empty_table(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"tasks": [], "next_after": None}))
+
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out.lower()
+    assert "no tasks" in out, out
+
+
+def test_task_list_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A relay predating issue 19a has no `/relay/v1/tasks` list, so it answers the framework's bare
+    404. Reported as "Not Found" it reads as "your project is gone"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--project", "P1"])
+
+    assert "relay" in str(caught.value).lower(), caught.value
+
+
+def test_project_status_reports_the_trunk_and_every_turn_in_flight(
+        monkeypatch, tmp_path, capsys):
+    """"What holds my slot" was answerable before only by attempting a create and reading the 409.
+
+    ⚠️ **Five fields left the reply with the promote they were about** (ADR 0034 D-d/D-e, issue 41):
+    `branch`, `wip_commit`, `ahead`, `behind` and `can_promote`, plus `branch`/`commit` on each
+    `members[]` entry. A member has one branch per CONVERSATION now, so there was no member-level ref
+    left to name, and "may I promote" is a question with no verb behind it.
+
+    What is left is a simpler change signal, and that is the point rather than a consolation: the
+    relay applies every finished turn itself, so `main_commit` moves whenever ANYBODY's work lands —
+    one oid to watch instead of one per member. The reply below carries exactly what a relay on this
+    slice sends, so a renderer that still reached for a distance would have nothing to read.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "def456", "trunk": "main",
+            "main_commit": "a" * 40,
+            # `active_turns` / `active_task_ids`, both LISTS since ADR 0034 D-b (issue 40): a
+            # member holds one turn per conversation, so the singular keys could only ever show one
+            # of them. Two here, because a payload with one is satisfied by a renderer that still
+            # reads a single object.
+            "active_turns": [
+                {"id": "t-9", "state": "running", "created_at": "2026-08-08T10:00:00Z",
+                 "deadline_at": None, "provider_id": "node-A", "attempt": 1, "max_attempts": 3},
+                {"id": "t-10", "state": "queued", "created_at": "2026-08-08T10:05:00Z",
+                 "deadline_at": None, "provider_id": None, "attempt": 0, "max_attempts": 3},
+            ],
+            "members": [{"member_key": "def456", "role": "owner",
+                         "active_task_ids": ["t-9", "t-10"]}],
+            "queue": {"queued": 2, "running": 1, "oldest_queued_at": "2026-08-08T09:00:00Z"}})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/status")
+    out = capsys.readouterr().out
+    # ⚠️ **The tip WITHOUT the trunk's name** (ADR 0034 D-m, issue 46). This line used to read
+    # `main=<oid>`, which put a git word and a git object id on the application's home screen. The
+    # value stays because it is the project's change signal — an application diffs it against the one
+    # it holds to notice that anybody's work landed — and `--json` still carries `trunk` for a
+    # program that wants the name.
+    assert "a" * 40 in out, out
+    assert "main" not in out, f"the trunk's name is back on a person's screen:\n{out}"
+    # EVERY turn in flight, by id — a person watching for a result needs to know what to wait for,
+    # and since ADR 0034 D-b there may be several. A renderer that still read the singular
+    # `active_task` shows neither; one that reads only the first shows `t-9` alone.
+    assert "t-9" in out and "t-10" in out, (
+        "the caller's turns in flight are missing or truncated to one")
+    # And one command to watch, naming the OLDEST rather than one line per turn.
+    assert "grid task follow t-9" in out
+    # ⚠️ Nothing may offer the deleted verbs. This is the assertion that would have caught a status
+    # renderer left half-migrated: `ahead`/`behind` are absent from the reply, so the old code path
+    # would print its "Nothing to compare yet" branch and advise a promote that no longer parses.
+    assert "promote" not in out and "integrate" not in out, out
+
+
+def _status_reply(**extra):
+    """A `GET /projects/{id}/status` body shaped like a relay on this slice sends it."""
+    body = {"project_id": "P1", "member_key": "def456", "trunk": "main",
+            "main_commit": "a" * 40, "active_turns": [], "members": [],
+            "queue": {"queued": 0, "running": 0, "oldest_queued_at": None}}
+    body.update(extra)
+    return body
+
+
+def test_project_status_says_where_you_stand_against_your_own_running_cap(
+        monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-i, issue 49. The two numbers exist so an application — and this CLI — can say
+    *"3 of your turns are running, this one is next"*, which is TRUE, instead of leaving the member
+    to read the queue and provider block below and conclude the fleet is too small.
+
+    A turn held by its owner's cap is invisible at the claim: the provider is answered 204, exactly
+    as for an empty queue. Nothing else on this payload distinguishes the two.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=3, member_running_cap=3)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "3 of 3" in out, out
+    # ⚠️ The sentence, not just the numbers. At the cap, "why is my next message not starting" has an
+    # answer that is NOT about the fleet, and the queue/provider block printed below says nothing
+    # about it. A member who reads only those adds a provider that will not be offered their work.
+    assert "provider" in out.lower(), (
+        "being at your own cap is reported as bare numbers, so the member is left to read the fleet "
+        "report below as the explanation")
+
+
+def test_project_status_says_nothing_about_a_cap_a_relay_never_mentioned(
+        monkeypatch, tmp_path, capsys):
+    """⚠️ *Absent ⇒ say nothing*, and never `0` — the `serves_you` / `archived` / `visibility` rule
+    for the fifth time.
+
+    A missing key read as a number renders as *"0 of 0 turns running"*, which is a sentence about
+    nothing, on every relay predating this slice. **Roll the relay out before the CLI.**
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 of 0" not in out, out
+    assert "cap" not in out.lower(), (
+        f"a relay that never mentioned a cap had one reported for it: {out}")
+
+
+def test_project_status_says_so_when_only_half_the_cap_pair_arrives(monkeypatch, tmp_path, capsys):
+    """⚠️ **A HALF-present pair cannot be an old relay, so silence is the wrong answer.** Found in
+    review.
+
+    Absent-means-say-nothing is right for both keys missing: that is every relay predating this
+    slice, and there is no cap to report. One key present and the other missing or unusable is a
+    different fact — no relay ever shipped that shape — so it is a mangled body or a half-finished
+    rename, and printing nothing makes it indistinguishable from the benign case on the one field
+    whose whole job is to explain why somebody's message is not running.
+
+    A note on stderr rather than a refusal: the rest of the status is readable and useful, and this
+    command is how a member follows up `queue_expired`'s advice. Losing the trunk and the queue over
+    one missing integer would be a worse answer than saying which part could not be read.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=2)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "version=" in captured.out, (
+        "the rest of the status was thrown away over one missing key")
+    assert "member_running_cap" in captured.err, (
+        f"a relay sent half the cap pair and the CLI said nothing, which is exactly what it says "
+        f"for a relay that is simply too old: {captured.err!r}")
+
+
+def test_project_status_will_not_report_a_cap_of_zero(monkeypatch, tmp_path, capsys):
+    """⚠️ **The same forbidden sentence, reached by a different door.** Found in review.
+
+    `test_project_status_says_nothing_about_a_cap_a_relay_never_mentioned` covers the ABSENT case.
+    A body carrying `member_running_cap: 0` is not absent — it is present, an `int`, and not a
+    `bool`, so it passes every guard and prints *"0 of 0"* followed by *"At your limit"*: a member
+    told their own limit is holding work back, when what they are actually looking at is a body no
+    healthy relay can produce. `config.validate_task_budgets` refuses to boot below 1, so this is a
+    mangled or hand-rolled reply rather than a real server — which is exactly the case where saying
+    nothing beats saying something confident and wrong.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=0, member_running_cap=0)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0 of 0" not in out, out
+    assert "at your limit" not in out.lower(), out
+
+
+def test_project_status_reports_a_member_under_their_cap_without_alarming_them(
+        monkeypatch, tmp_path, capsys):
+    """The positive control for the sentence above: under the cap there is nothing to explain, and
+    saying "your own limit is holding this" would be false."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(
+        member_running_turns=1, member_running_cap=3)))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 of 3" in out, out
+    assert "at your limit" not in out.lower(), out
+
+
+def test_project_status_will_not_report_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    """The same rule promote, integrate, commit and import all follow. A reply with no `branch` is
+    not a status — printing the template with blanks in it reads as "you have no work"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "status", "P1"])
+
+    assert "P1" in str(caught.value)
+
+
+def test_task_list_passes_the_filters_and_the_cursor_through(monkeypatch, tmp_path, capsys):
+    """`--state`, `--limit` and `--after` are the flags a paging client actually uses, and each of
+    them reaches the relay as a STRING — every query parameter on that route is declared as one
+    there so its refusals carry a `code` rather than falling to FastAPI's list-shaped validation
+    error."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = request.url.params
+        return httpx.Response(200, json={"tasks": [], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list", "--project", "P1", "--state", "queued", "--state", "running",
+                   "--limit", "5", "--after", "t-7"])
+
+    assert rc == 0
+    assert seen["query"].get_list("state") == ["queued", "running"]
+    assert seen["query"]["limit"] == "5"
+    assert seen["query"]["after"] == "t-7"
+
+
+def test_task_list_says_there_is_another_page(monkeypatch, tmp_path, capsys):
+    """A page that silently stops at the limit reads as the whole history. The relay hands back the
+    cursor rather than leaving the client to derive one, so this prints the command that continues."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "tasks": [{"id": "t-1", "state": "completed", "prompt": "p", "member_key": "def456"}],
+        "next_after": "t-1"}))
+
+    rc = cli.main(["task", "list", "--project", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--after t-1" in out, out
+
+
+def test_task_list_will_not_report_a_reply_it_cannot_read_as_an_empty_project(
+        monkeypatch, tmp_path):
+    """"Nobody has run anything" and "I could not read the answer" must not print the same line.
+
+    The sibling commands added in this same slice — `grid project status` and `grid project check` —
+    both refuse a reply missing the key their own report is about. This one collapsed them: a body a
+    proxy had stripped came back as `{}`, and a team member polling a shared project was told "No
+    tasks in project P1" and would reasonably conclude nobody was working.
+
+    The distinction is the PRESENCE of `tasks`, not its truthiness — an empty list is a real answer.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--project", "P1"])
+
+    assert "P1" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# ADR 0033 D-l / issue 19b — stopping a task, and seeing why nothing is moving.
+#
+# The two criteria 19a split off, and both overturn something already written down: cancellation was
+# deferred by ADR 0032, and task capacity was documented as deliberately unpublished. `grid task
+# cancel` is the first verb here that ENDS somebody's work, and `grid project status` gains the half
+# of "why is nothing moving" the relay could not answer before.
+# ---------------------------------------------------------------------------
+
+
+def test_task_cancel_posts_to_the_cancel_route_and_says_what_happened(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "id": "t-1", "project_id": "P1", "state": "failed", "error": "cancelled",
+            "prompt": "fix the parser", "member_key": "def456"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "cancel", "t-1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/t-1/cancel")
+    assert seen["auth"] == "Bearer AT"
+    # No body at all. The route is addressed by the task id and fenced on the caller's own identity,
+    # so anything here would be a second way to say who is cancelling what.
+    assert seen["body"] == b""
+    out = capsys.readouterr().out
+    assert "t-1" in out and "cancelled" in out.lower()
+
+
+def test_task_cancel_refuses_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    """The rule every sibling in this plane follows since 19a's review: an answer this command
+    cannot read is NOT a successful cancellation. Reporting one would tell somebody their colleague's
+    hour-long merge task had been stopped when nothing had happened."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "t-1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert "t-1" in str(caught.value)
+
+
+def test_task_cancel_against_a_relay_that_has_never_heard_of_it_says_so(monkeypatch, tmp_path):
+    """A bare framework 404 is an old relay, not a missing task, and the two need opposite actions.
+
+    Its own sentence rather than the project routes' `_OLD_RELAY`: that one says "this relay does
+    not have projects yet", which would be wrong here and would send somebody to check a feature
+    that is working.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert "relay" in str(caught.value).lower()
+    assert "cancel" in str(caught.value).lower()
+
+
+def test_task_cancel_shows_a_real_refusal_in_the_relays_own_words(monkeypatch, tmp_path):
+    """And the other side of that gate: a 404 ABOUT the task must not be reported as an old relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_task", "message": "Task not found"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert str(caught.value) == "Task not found"
+
+
+def test_task_cancel_on_an_already_ended_task_shows_the_relays_sentence(monkeypatch, tmp_path):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "task_already_ended", "state": "completed",
+        "message": "This task already ended (completed), so there is nothing to cancel."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "cancel", "t-1"])
+
+    assert "already ended" in str(caught.value)
+
+
+def test_task_cancel_help_says_it_stops_a_run_that_is_paid_for():
+    """Somebody reading `--help` should learn that this ends a run in flight, and that a project is
+    shared so it may not be their own. The same reasoning `grid project check`'s help carries: the
+    cost of the verb belongs in the sentence that offers it."""
+    parser = cli.build_parser()
+    cancel = parser._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["cancel"]
+    help_text = cancel.format_help().lower()
+
+    assert "slot" in help_text or "agent" in help_text, (
+        "the help does not say what cancelling frees or stops")
+    assert "member" in help_text or "project" in help_text, (
+        "the help does not say a project is shared, so this may not be your own task")
+
+
+def test_project_status_says_a_provider_has_withdrawn_and_when_it_returns(
+        monkeypatch, tmp_path, capsys):
+    """The criterion: a withdrawn provider is visible to every member, with the time it comes back.
+    Without it a member sees a queue and no reason, which is what six people on one subscription
+    were left with."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 2, "paused": 1, "resumes_at": "2026-08-09T11:30:00+00:00"}}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "2" in out and "1" in out
+    assert "2026-08-09T11:30:00+00:00" in out, "the time it comes back is the actionable half"
+    assert "paused" in out.lower() or "withdraw" in out.lower()
+
+
+def test_project_status_stays_quiet_about_a_fleet_that_is_all_serving(
+        monkeypatch, tmp_path, capsys):
+    """Nothing is wrong, so nothing is said. A line reading "0 paused" on every healthy poll is the
+    kind of noise that makes the one that matters invisible."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 3, "running": 1, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    # Asserted on the words the code actually prints, not on the word this feature is called by.
+    # An earlier version of this test looked for "paused", which never appears in the sentence —
+    # so it passed against a build that cheerfully announced "0 of 2 providers have withdrawn".
+    assert "withdrawn" not in out
+    assert "provider" not in out
+
+
+def test_project_status_says_when_this_grid_does_not_serve_you(monkeypatch, tmp_path, capsys):
+    """The one state `online` gets exactly backwards (ADR 0033 D-f, issue 24).
+
+    The fleet count is grid-wide, so a member whose own domain is not on the relay's allowlist is
+    shown the providers serving OTHER PEOPLE: a healthy `online: 2` beside a task no provider will
+    ever be offered. Worse than saying nothing — it is a wrong explanation, and it reads as "the
+    grid is busy" right up until `queue_expired` four hours later.
+
+    It has to print BEFORE the `paused` gate, because nothing is paused in this case: a fleet that
+    is entirely healthy and entirely unavailable to this member is the whole failure.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None, "serves_you": False}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "domain" in out
+    # And it must NOT read as a capacity problem, which is the opposite action.
+    assert "withdrawn" not in out
+
+
+def test_project_status_says_nothing_about_domains_when_the_relay_omits_the_key(
+        monkeypatch, tmp_path, capsys):
+    """*Absent ⇒ served*, which is the pre-24 behaviour exactly — a relay with no allowlist serves
+    everybody, and one predating this slice sends no key at all. Keyed on an explicit `False` and
+    never on falsiness, so a missing key cannot invent a refusal that is not happening."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    assert "domain" not in capsys.readouterr().out.lower()
+
+
+def test_project_status_says_you_are_unserved_even_when_the_queue_is_EMPTY(
+        monkeypatch, tmp_path, capsys):
+    """The moment a member most needs this sentence is the one it used to be withheld in (dev-VM
+    finding G-01).
+
+    `queue_expired`'s terminal message tells them, by name, to run `grid project status` — and
+    expiring is what EMPTIES the queue, so the advice landed on a status that said nothing about
+    providers at all. Measured on the dev VM both ways: the sentence appeared while the task was
+    still queued and vanished the moment it timed out. A member outside the allowlist therefore saw
+    a healthy-looking project and no cause, which is the whole failure D-f exists to name.
+
+    Being unserved is a fact about the CALLER, not about the queue. It does not become true when
+    work is waiting and it does not stop being true when the waiting ends.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 0, "resumes_at": None, "serves_you": False}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "domain" in out
+    assert "withdrawn" not in out  # still not a capacity problem — the opposite action
+
+
+def test_project_status_with_an_empty_queue_says_nothing_about_a_fleet_that_serves_you(
+        monkeypatch, tmp_path, capsys):
+    """The other half of G-01's fix, and the reason it is not "print the fleet block always".
+
+    `paused`, `online` and `resumes_at` answer "why is my work waiting", so with nothing waiting
+    they are a report nobody asked for — the noise rule the queue gate was written for, and which
+    still applies. Only the caller-fact moves out from behind it. Here a provider really has
+    withdrawn and it is still correct to say nothing.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": 2, "paused": 1, "resumes_at": "2026-08-09T11:30:00+00:00",
+                      "serves_you": True}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "withdrawn" not in out
+    assert "domain" not in out
+
+
+@pytest.mark.parametrize("queued", [0, 2], ids=["empty-queue", "queue-waiting"])
+def test_project_status_says_you_are_unserved_even_when_the_COUNTS_are_unreadable(
+        monkeypatch, tmp_path, capsys, queued):
+    """One rule on both paths, so the empty-queue branch cannot become a second dialect.
+
+    `serves_you` is its own readable fact — an explicit `False` — and does not depend on `online`
+    and `paused` being numbers this command can render. Leaving it behind the count guard would
+    make a relay with one unreadable counter withhold the only sentence the caller can act on, and
+    would do it differently depending on whether anything happened to be queued.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": queued, "running": 0, "oldest_queued_at": None},
+        "providers": {"online": None, "paused": "many", "serves_you": False}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out.lower()
+    assert "domain" in out
+    assert "many" not in out  # the unreadable counts are still never rendered
+
+
+def test_project_status_says_when_a_queue_has_nobody_to_serve_it(monkeypatch, tmp_path, capsys):
+    """The state a queue depth alone cannot express, and the one that needs a different action from
+    everybody else's: work waiting on a grid with no provider at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 0, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    assert "no provider" in capsys.readouterr().out.lower()
+
+
+def test_project_status_from_a_relay_too_old_to_report_providers_still_works(
+        monkeypatch, tmp_path, capsys):
+    """*Absent ⇒ nothing said.* The whole block is new in 19b, so a relay that predates it sends no
+    `providers` key at all and the rest of the status must render exactly as it did.
+
+    The positive control moved with issue 41: it used to be the member's WIP branch line, which is
+    one of the five fields ADR 0034 D-d took out of this reply. It is the TRUNK now — still a line
+    the renderer only reaches by having read the reply, which is all this control was ever for.
+    Without one, "says nothing about providers" would be satisfied by a status that printed nothing
+    at all.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 1, "running": 0, "oldest_queued_at": None}}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "version=" + "a" * 40 in out, out
+    assert "paused" not in out.lower() and "no provider" not in out.lower()
+
+
+def test_a_cancelled_event_is_rendered_as_a_sentence(capsys):
+    """`grid task follow` shows who stopped the run. On stderr with the other disclosures — it says
+    nothing about the result and everything about why there is not one."""
+    from cli import remote_task
+
+    remote_task._render(7, {"type": "task.cancelled", "by": "def456"}, as_json=False)
+
+    err = capsys.readouterr().err
+    assert "cancel" in err.lower()
+    assert "def456" in err
+
+
+def test_project_status_says_nothing_about_a_provider_block_it_cannot_read(
+        monkeypatch, tmp_path, capsys):
+    """A partial `providers` block is not a fleet report. Saying nothing is what an older relay
+    produces anyway, and it beats printing "2 of None providers have withdrawn" — the same rule
+    `grid task list` learned in 19a's review, applied before it can be learned the same way."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
+        "providers": {"paused": 2}}))          # no `online` at all
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "None" not in out
+    assert "withdrawn" not in out.lower()
+
+
+def test_task_cancel_says_the_reason_not_only_the_state(monkeypatch, tmp_path, capsys):
+    """`failed` on its own reads as "the agent broke", which is the one thing that did not happen.
+    The reason is also what tells a later `grid task get` the two apart."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "P1", "state": "failed", "error": "cancelled"}))
+
+    cli.main(["task", "cancel", "t-1"])
+
+    out = capsys.readouterr().out
+    assert "failed" in out and "cancelled" in out
+
+
+@pytest.mark.parametrize("providers,why", [
+    ({"online": True, "paused": True, "resumes_at": None}, "booleans, which subclass int"),
+    ({"online": "2", "paused": "1", "resumes_at": None}, "numbers sent as strings"),
+    ({"online": 2, "paused": -1, "resumes_at": None}, "a negative count"),
+], ids=["booleans", "strings", "negative"])
+def test_project_status_never_renders_a_provider_count_that_is_not_one(
+        monkeypatch, tmp_path, capsys, providers, why):
+    """`isinstance(x, int)` is True for `bool`, so the obvious guard lets `True` through and prints
+    "True of True providers have withdrawn". The same trap `remote/task_capacity._resets_at`
+    excludes by hand on the other side of this wire."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 2, "running": 0, "oldest_queued_at": None},
+        "providers": providers}))
+
+    rc = cli.main(["project", "status", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "withdrawn" not in out.lower(), why
+    assert "True" not in out and "no provider" not in out.lower(), why
+
+
+# --- ADR 0033 issue 17: the git credential helper -------------------------------------------------
+#
+# Every shape asserted here was measured against real git 2.54.0 driving a real `git http-backend`
+# behind a server that accepts ONLY `Authorization: Bearer` and answers a bare 401 otherwise — the
+# relay's git front exactly (grid-src `relay._bearer_or_api_key`). What git sends a `get` helper,
+# verbatim and in this order:
+#
+#     capability[]=authtype
+#     capability[]=state
+#     protocol=http
+#     host=127.0.0.1:56220
+#
+# `host` carries the port. `path` is absent, because `credential.useHttpPath` defaults to false.
+
+# A JWT-shaped stand-in: three dot-separated segments, so `credentials.claims_from_token` and
+# anything else that inspects it behaves as it would on a real grid token.
+_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtZW1iZXIifQ.signature"
+
+
+def _git_get(host="relay.example", protocol="https", *, authtype=True):
+    """What git writes to a helper's stdin for a `get`, in git's own order."""
+    lines = ["capability[]=authtype", "capability[]=state"] if authtype else []
+    lines += [f"protocol={protocol}", f"host={host}"]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _networks(url="https://relay.example", network_id="n1", token=_TOKEN):
+    return [{"network_id": network_id, "name": "team", "signaling_url": url,
+             "access_token": token, "refresh_token": "RT"}]
+
+
+def test_credential_get_answers_the_bearer_scheme_the_relay_accepts():
+    """The tracer bullet, and the whole reason this helper is not the textbook one.
+
+    A classic helper answers `username`/`password`, which git turns into **Basic** — measured, the
+    relay refuses it (`Basic eC1hY2Nlc3MtdG9rZW46…` → 401 → `fatal: Authentication failed`), because
+    `_bearer_or_api_key` reads `Bearer` and `x-api-key` and nothing else. git's `authtype`/
+    `credential` pair is what lets a helper name the scheme, and git concatenates the two with one
+    space to build the header verbatim.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond(
+        "get", _git_get(), networks=_networks(), network_id="n1")
+
+    assert reply.stdout.splitlines() == [
+        # The capability directive MUST come first: `git-credential(1)` says a directive has to
+        # precede any value depending on it.
+        "capability[]=authtype",
+        "authtype=Bearer",
+        f"credential={_TOKEN}",
+        "quit=1",
+    ]
+
+
+def test_credential_get_refuses_a_host_that_is_not_the_pinned_grids_relay():
+    """The grid is pinned in the clone's config, and the HOST is still checked against it.
+
+    `.git/config` is a file people copy. Trusting the pinned id alone would mean an attacker who can
+    get a member to `git remote set-url origin https://theirs.example/…` — or who ships a repository
+    with that config already in it — receives a year-long grid token, because git would happily run
+    our helper for their host and we would happily answer.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond(
+        "get", _git_get(host="attacker.example"),
+        networks=_networks(url="https://relay.example"), network_id="n1")
+
+    assert reply.stdout == ""
+    assert _TOKEN not in reply.stdout and _TOKEN not in reply.stderr
+    assert "attacker.example" in reply.stderr, "a silent refusal here is a debugging dead end"
+
+
+def test_credential_get_says_nothing_at_all_to_a_git_that_cannot_carry_a_scheme():
+    """A git too old for `authtype` gets NOTHING — deliberately, and not a username/password pair.
+
+    Falling back to Basic looks like graceful degradation and is the opposite. Measured against the
+    relay's shape: git sends `Basic eC1hY2Nlc3MtdG9rZW46…`, the relay answers 401, git calls the
+    helper's `erase` and reports `fatal: Authentication failed` — so the member sees an
+    authentication error rather than "your git is too old", every time, forever. Worse, the token
+    has by then been put on the wire in a header the relay never reads.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond(
+        "get", _git_get(authtype=False), networks=_networks(), network_id="n1")
+
+    assert reply.stdout == ""
+    assert _TOKEN not in reply.stderr
+    # The member has to be told what to do, and there is exactly one thing: upgrade git.
+    assert "git" in reply.stderr.lower() and "authtype" in reply.stderr
+
+
+@pytest.mark.parametrize("stored,protocol,host,gives,why", [
+    ("https://relay.example", "https", "relay.example", True, "the ordinary case"),
+    ("https://RELAY.Example", "https", "RELAY.Example", True,
+     "git does NOT lower-case the host it sends — measured"),
+    ("https://relay.example:443", "https", "relay.example:443", True,
+     "git does NOT strip a default port either, so an explicit one must match on both sides"),
+    ("https://[::1]:8443", "https", "[::1]:8443", True, "an IPv6 literal keeps its brackets"),
+    ("http://127.0.0.1:8123", "http", "127.0.0.1:8123", True, "the loopback relay the E2E uses"),
+    ("https://relay.example", "https", "relay.example.", False,
+     "a trailing dot is a different name and git passes it through verbatim"),
+    ("https://relay.example", "https", "relay.example:443", False,
+     "an explicit port against a stored URL without one — fails CLOSED, which is the safe way"),
+    ("https://relay.example", "http", "relay.example", False,
+     "a protocol DOWNGRADE: the same host over plaintext must not get a year-long token"),
+    ("https://relay.example", "https", "relay.example.evil.test", False,
+     "a suffix, in case the comparison were ever loosened to a prefix or `endswith`"),
+], ids=["plain", "mixed-case", "explicit-port", "ipv6", "loopback", "trailing-dot",
+        "port-asymmetry", "downgrade", "suffix"])
+def test_credential_get_matches_the_host_the_way_git_actually_sends_it(
+        stored, protocol, host, gives, why):
+    """The security check, against how git really shapes `host` — measured, not assumed.
+
+    Every one of these was read off git 2.54.0 by logging what it hands a helper for a given URL.
+    Two are worth stating out loud because the obvious implementation gets them wrong:
+
+      * git does **not** lower-case the host, so a comparison that did not would refuse a member
+        whose stored URL differs only in case;
+      * git does **not** strip a default port, so `https://relay.example:443` arrives with the
+        `:443` still on it.
+
+    The downgrade row is the one that matters most. Nothing else here would hand a year-long grid
+    token to a plaintext listener on the right hostname.
+    """
+    from remote import git_credential
+
+    networks = _networks(url=stored)
+    raw = f"capability[]=authtype\nprotocol={protocol}\nhost={host}\n".encode("utf-8")
+
+    reply = git_credential.respond("get", raw, networks=networks, network_id="n1")
+
+    assert (_TOKEN in reply.stdout) is gives, why
+
+
+@pytest.mark.parametrize("networks,why", [
+    (["oops"], "a list of strings — a hand-edited `networks = [\"…\"]`"),
+    ({"team": {}}, "a `[networks]` TABLE: tomllib parses it as a dict, and iterating yields KEYS"),
+    ([None], "a null entry"),
+    ([{"network_id": "n1"}, "junk"], "the target grid is present, but a later entry is malformed"),
+], ids=["list-of-strings", "table-not-array", "null-entry", "good-then-junk"])
+def test_credential_get_survives_a_credentials_file_whose_networks_are_not_records(networks, why):
+    """`credentials.toml` is PARSED, not validated, and the shape of the list is part of that.
+
+    Each FIELD was already guarded — the token is checked for type and shape, the URL for
+    parseability — but the guard stopped at the entries themselves. `n.get(...)` on a string raises
+    `AttributeError`, which nothing between here and the process boundary catches, so a member with
+    one hand-edited line in their store gets a raw Python traceback in the middle of a `git pull`.
+
+    The last row is the one that shows the blast radius: a malformed entry ANYWHERE in the list
+    takes out the lookup for every grid, because the scan raises on the first bad element it reaches
+    rather than skipping it.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond("get", _git_get(), networks=networks, network_id="n1")
+
+    assert reply.stdout == "", why
+    assert reply.stderr.startswith("grid:"), (
+        f"a refusal with no `grid:` line is indistinguishable from git's own noise ({why})")
+
+
+@pytest.mark.parametrize("operation", ["store", "erase", "some-future-verb"])
+def test_credential_says_nothing_for_every_operation_that_is_not_get(operation):
+    """`store` is handed the credential back, and must not repeat it anywhere.
+
+    Measured — after a successful fetch git runs the helper again with `store` and this on stdin:
+
+        capability[]=authtype
+        authtype=Bearer
+        credential=<the token>
+        protocol=http
+        host=127.0.0.1:56220
+
+    So `store` is the one operation that receives the secret rather than producing it. It succeeds
+    and writes nothing: git treats a failing `store` as an error, and a helper that persisted it
+    would be the thing this whole design exists to avoid.
+
+    `erase` matters for the same reason from the other side — measured, git calls it after any
+    authentication failure — and an unknown verb is answered identically because
+    `gitcredentials(7)` says a helper "should silently ignore" one, which is what leaves room for
+    git to add operations without breaking every installed helper.
+    """
+    from remote import git_credential
+
+    raw = (f"capability[]=authtype\nauthtype=Bearer\ncredential={_TOKEN}\n"
+           f"protocol=https\nhost=relay.example\n").encode("utf-8")
+
+    reply = git_credential.respond(operation, raw, networks=_networks(), network_id="n1")
+
+    assert reply == git_credential.Reply(), f"{operation!r} answered {reply!r}"
+    assert _TOKEN not in reply.stdout + reply.stderr
+
+
+@pytest.mark.parametrize("raw,why", [
+    (b"\xff\xfe not utf-8 at all\n", "invalid UTF-8 raises UnicodeDecodeError on decode"),
+    (b"", "an empty pipe — git died, or something else invoked us"),
+    (b"garbage with no equals sign\n", "a line that is not key=value"),
+    (b"capability[]=authtype\nprotocol=https\n", "a request naming no host at all"),
+], ids=["not-utf8", "empty", "no-equals", "no-host"])
+def test_credential_get_never_raises_on_input_it_cannot_read(raw, why):
+    """A helper that raises is a helper git cannot use, and the traceback goes to the member.
+
+    `bytes.decode("utf-8")` raises `UnicodeDecodeError` — a `ValueError`, so the obvious spelling
+    turns a mangled pipe into a Python traceback in the middle of someone's `git pull`. Nothing on
+    this stdin is trustworthy: it is whatever wrote to the pipe.
+
+    Note what the empty-host row protects. Without an explicit comparison against the grid's own
+    endpoint, "" == "" would make a request naming no host match a record recording no URL, and the
+    token would go out to whoever asked.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond("get", raw, networks=_networks(), network_id="n1")
+
+    assert reply.stdout == "", why
+    assert _TOKEN not in reply.stderr, why
+
+
+@pytest.mark.parametrize("raw,why", [
+    (b"capability[]=authtype\nprotocol=https\nhost=relay.example",
+     "git closes the pipe; there is no trailing newline to rely on"),
+    (b"capability[]=authtype\r\nprotocol=https\r\nhost=relay.example\r\n",
+     "CRLF: `splitlines()` handles it, a hand-rolled `split(chr(10))` leaves a trailing CR"),
+    (b"capability[]=authtype\nprotocol=HTTPS\nhost=Relay.Example\n",
+     "a host and scheme are case-insensitive; a stored URL need not match byte-for-byte"),
+    (b"capability[]=state\ncapability[]=authtype\nprotocol=https\nhost=relay.example\n",
+     "capability order is git's, not ours"),
+], ids=["no-trailing-newline", "crlf", "mixed-case", "capability-order"])
+def test_credential_get_still_answers_a_request_framed_a_little_differently(raw, why):
+    """The positive control for the row above, and the reason it is a separate test.
+
+    Every one of these IS a valid request and must produce the credential. Folded in with the
+    unreadable inputs they would have been asserted to produce nothing — which is how a parser that
+    quietly refuses everything passes a suite that only ever measures refusals.
+    """
+    from remote import git_credential
+
+    reply = git_credential.respond("get", raw, networks=_networks(), network_id="n1")
+
+    assert f"credential={_TOKEN}" in reply.stdout, why
+
+
+@pytest.mark.parametrize("token,why", [
+    ("", "a bundle stored without a token, or one a failed refresh emptied"),
+    (None, "the key absent entirely — `_record` drops None fields, so this shape is real"),
+    (17, "not a string at all; `credentials.toml` is parsed, not validated"),
+    ("good\nquit=0", "a newline ENDS the value and the rest becomes a protocol directive"),
+    ("good\rmore", "a bare CR — git refuses one in the protocol unless protectProtocol is off"),
+], ids=["empty", "absent", "not-a-string", "newline", "carriage-return"])
+def test_credential_get_refuses_a_stored_token_that_is_not_one_clean_line(token, why):
+    """The reply is line-oriented, so a value carrying a newline is not a value — it is more lines.
+
+    `credentials.toml` is a parsed file, not a validated one: a half-written bundle, a hand-edited
+    store, or a refresh that wrote something odd all arrive here. A token containing a newline would
+    let whatever follows it become a credential DIRECTIVE — `quit=0` re-enabling the helper chain,
+    or a second `credential=` line — from a file this process merely reads.
+
+    Refusing is the whole answer. There is no repair that is not a guess about what the member
+    meant, and a guess here is a guess about a credential.
+    """
+    from remote import git_credential
+
+    networks = _networks()
+    if token is None:
+        networks[0].pop("access_token")
+    else:
+        networks[0]["access_token"] = token
+
+    reply = git_credential.respond("get", _git_get(), networks=networks, network_id="n1")
+
+    assert reply.stdout == "", why
+    assert "credential=" not in reply.stdout, why
+    assert reply.stderr, "refusing without saying so leaves `git pull` with no explanation at all"
+
+
+# --- ADR 0033 issue 17: the `grid credential` command --------------------------------------------
+
+
+def _as_stdin(monkeypatch, raw: bytes):
+    """Stand in for the pipe git hands the helper — a real binary stream with a `.buffer`."""
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8"))
+
+
+def _seed_credential_grid(monkeypatch, tmp_path, url="https://relay.example"):
+    """A signed-in member with one grid — and NO control-plane mock, deliberately.
+
+    `_seed_running_remote_grid` installs `_mock_lifecycle`, which would let a control-plane call
+    through unnoticed. This helper exists so a call has nowhere to land.
+    """
+    _seed_remote(monkeypatch, tmp_path, networks=[{
+        "network_id": "n1", "name": "team", "signaling_url": url,
+        "access_token": _TOKEN, "refresh_token": "RT"}], active="team")
+
+
+@pytest.mark.parametrize("mode", ["remote", "local"])
+def test_grid_credential_get_answers_in_either_mode_without_touching_the_network(
+        monkeypatch, tmp_path, capsys, mode):
+    """git runs the helper in whatever mode `grid mode` happens to be, so it cannot be remote-only.
+
+    A member who ran `grid mode local` would otherwise find `git pull` broken inside a clone, by a
+    setting that has nothing to do with the clone.
+
+    And it makes NO network call at all — asserted by leaving the control plane with nowhere to
+    land, not by inspecting the code. The CLI's usual `_resolve()` path
+    (`remote_grid.resolve_relay_base` → `control_plane.get_managed_network_status`) would put a
+    control-plane round trip in front of every IDE fetch, break `git pull` against a healthy relay
+    whenever the control plane blips, and make every non-creator member take the 403 fallback each
+    time.
+    """
+    from remote import control_plane
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode(mode)
+    monkeypatch.setattr(control_plane, "get_managed_network_status",
+                        lambda *a, **k: pytest.fail("the credential helper called the control plane"))
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "get", "--grid", "n1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"credential={_TOKEN}" in out
+    assert "authtype=Bearer" in out
+
+
+@pytest.mark.parametrize("operation", ["store", "erase"])
+def test_grid_credential_store_and_erase_change_nothing_under_grid_home(
+        monkeypatch, tmp_path, capsys, operation):
+    """"Nothing writes a token to disk" is asserted against the disk, not against the code.
+
+    `store` is the operation that receives the credential BACK — measured, git hands it
+    `authtype=Bearer` and `credential=<the token>` on stdin after a successful fetch. So the file
+    tree under `GRID_HOME` before and after is the honest test: a helper that persisted anything,
+    anywhere, fails it. `erase` is here because git calls it after every authentication failure and
+    a helper that took it literally would sign the member out of their grid.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    before = {p: p.read_bytes() for p in sorted(tmp_path.rglob("*")) if p.is_file()}
+    _as_stdin(monkeypatch, (f"capability[]=authtype\nauthtype=Bearer\ncredential={_TOKEN}\n"
+                            f"protocol=https\nhost=relay.example\n").encode("utf-8"))
+
+    rc = cli.main(["credential", operation, "--grid", "n1"])
+
+    assert rc == 0, "git treats a failing store/erase as an error over whatever the member was doing"
+    assert capsys.readouterr().out == "", "git ignores this output; producing any is a mistake"
+    after = {p: p.read_bytes() for p in sorted(tmp_path.rglob("*")) if p.is_file()}
+    assert after == before, f"`credential {operation}` wrote under GRID_HOME"
+
+
+def test_grid_credential_accepts_an_operation_this_build_has_never_heard_of(
+        monkeypatch, tmp_path, capsys):
+    """The argparse surface must not be `choices=`, and this is the test that says why.
+
+    `gitcredentials(7)`: a helper receiving an operation it does not know "should silently ignore
+    the request. This leaves room for future operations to be added (older helpers will just ignore
+    the new requests)." A `choices=` list would turn a future git verb into an argparse usage error
+    with exit code 2 — which git reports as a broken helper, over whatever the member was doing,
+    on a version of git that is perfectly fine.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "some-verb-from-2030", "--grid", "n1"])
+
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_grid_credential_get_signed_out_explains_itself_instead_of_crashing(
+        monkeypatch, tmp_path, capsys):
+    """A member who ran `grid logout` still has clones, and their IDE still runs `git fetch`.
+
+    The store is simply gone then — `load_credentials()` answers `{}`. That must be a sentence
+    naming the fix, not a traceback and not silence: git prints the helper's stderr, and it is the
+    only place the real reason can appear. What the member sees otherwise is
+    `fatal: could not read Username`, which names neither grid nor sign-in.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    state.set_mode("remote")
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "get", "--grid", "n1"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "grid login" in captured.err
+
+
+def test_grid_credential_get_survives_a_corrupt_credential_store(monkeypatch, tmp_path, capsys):
+    """The store being unreadable is not the same as it being absent, and only one was covered.
+
+    `credentials.load_toml` raises `SystemExit` on a TOML parse error — the CLI's clean-error idiom
+    everywhere else, and exactly wrong here. Nothing between `cmd_credential` and the process
+    boundary catches it (`dispatch` is a bare `args.handler(args) or 0`), so the helper exits **1**,
+    contradicting the contract this module states in its own docstring: it always exits 0, because
+    git reports a failing helper as an error over whatever the member was actually doing.
+
+    The message still has to reach them — with the `grid:` prefix every other refusal carries, so it
+    reads as this tool's diagnosis rather than as more of git's output.
+    """
+    monkeypatch.setenv("GRID_HOME", str(tmp_path))
+    (tmp_path / "credentials.toml").write_text("this is not = = valid toml [[[\n")
+    state.set_mode("remote")
+    _as_stdin(monkeypatch, _git_get())
+
+    rc = cli.main(["credential", "get", "--grid", "n1"])
+
+    assert rc == 0, "a helper that exits non-zero is reported by git as a broken helper"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("grid:"), captured.err
+    assert "credentials.toml" in captured.err, "the member has to be told WHICH file to look at"
+
+
+def test_grid_credential_never_raises_when_git_closes_the_pipe(monkeypatch, tmp_path, capsys):
+    """git can go away mid-conversation, and the helper must not turn that into a traceback.
+
+    A `BrokenPipeError` on either side of the exchange — reading the request, or writing the reply —
+    is an ordinary consequence of the parent being killed, and it is an `OSError`, which nothing
+    here would otherwise catch.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    class _Severed:
+        def read(self, *_a):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    _as_stdin(monkeypatch, b"")
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(buffer=_Severed()))
+
+    assert cli.main(["credential", "get", "--grid", "n1"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+# --- ADR 0033 issue 17: `grid project clone` -----------------------------------------------------
+
+_MEMBER_KEY = "abc123abc123abc123abc123abc1231f"
+
+
+def _relay_bare_repo(tmp_path, *, member_key=_MEMBER_KEY, name="relay.git", with_wip=True):
+    """A bare repository shaped like the relay's: a `main`, and a member's `wip/<key>` past it.
+
+    The seeded WIP branch earns its keep as a NEGATIVE control since ADR 0034 D-d (issue 41): a
+    clone follows the trunk now, so `test_project_clone_checks_out_the_trunk` asserts the branch's
+    file is absent, which only means something while the branch is really there and really ahead.
+
+    ⚠️ `with_wip=False` no longer has a caller. It used to be the state of every project nobody had
+    run a task in — the relay created a member's WIP branch when one of their tasks settled, never
+    when a project was created — and the clone had to cut the branch from the trunk itself, which is
+    a path that failed against the real relay until `tests/e2e_cross_repo/` found it. Since the CLI
+    asks for the trunk by name that arm is unreachable from this side; the knob is kept because
+    `clone_project` still has the code and nothing here should quietly delete its only way in.
+
+    Real git, because `clone_project` runs real git. A local path is a perfectly good git "URL", so
+    the whole init/config/fetch/checkout path runs with no HTTP server in the way — what HTTP adds
+    (the credential) is proved separately, against the real relay, in `tests/e2e_cross_repo/`.
+    """
+    env = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"}
+    work = tmp_path / "relay-seed"
+    work.mkdir()
+
+    def git(*args, cwd=work):
+        return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True,
+                              text=True, env=env).stdout
+
+    git("init", "--quiet", "-b", "main", ".")
+    (work / "trunk.txt").write_text("on main\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "trunk")
+    trunk_tip = git("rev-parse", "HEAD").strip()
+    wip_tip = None
+    refs = ["main"]
+    if with_wip:
+        git("checkout", "--quiet", "-b", f"wip/{member_key}")
+        (work / "mine.txt").write_text("the member's own work\n")
+        git("add", "-A")
+        git("commit", "--quiet", "-m", "wip")
+        wip_tip = git("rev-parse", "HEAD").strip()
+        refs.append(f"wip/{member_key}")
+
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "--bare", "--quiet", "-b", "main", str(bare)], check=True)
+    git("push", "--quiet", str(bare), *refs)
+    return bare, trunk_tip, wip_tip
+
+
+def _status_reply(member_key=_MEMBER_KEY, **over):
+    """The reply a relay on ADR 0034 issue 41 sends.
+
+    ⚠️ `branch`, `wip_commit`, `ahead`, `behind` and `can_promote` are GONE (D-d/D-e). They are not
+    merely unread here — leaving them in would let a clone that still reached for `branch` pass
+    against a payload no relay produces, which is the whole failure mode `_status_reply` sits in
+    front of.
+    """
+    body = {"project_id": "P1", "member_key": member_key, "trunk": "main",
+            "main_commit": "a" * 40, "active_turns": [], "members": [],
+            "queue": {"queued": 0, "running": 0, "oldest_queued_at": None},
+            "providers": {"online": 1, "paused": 0, "resumes_at": None}}
+    body.update(over)
+    return body
+
+
+def test_project_clone_checks_out_the_trunk(monkeypatch, tmp_path, capsys):
+    """A clone lands on the TRUNK, which since ADR 0034 D-d is everybody's work.
+
+    ⚠️ **This inverts what it used to assert, and the reason is the whole of issue 41.** Under
+    ADR 0033 `main` moved only on a promote, so a project whose members had not released yet had a
+    trunk holding none of their task results — cloning to `main` would have shown an empty-looking
+    project to somebody who had just watched a task finish, so the clone followed the member's own
+    `wip/<key>`. The relay applies every finished turn to the trunk itself now, so that reasoning
+    is gone with the promote: a per-member branch would be a stale copy of PART of the project, and
+    there is no longer one branch per member to copy from anyway — there is one per conversation.
+
+    The status reply is where the branch name came from, so the CLI reads `trunk` and nothing else.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, trunk_tip, _wip_tip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    rc = cli.main(["project", "clone", "P1", str(dest)])
+
+    assert rc == 0, capsys.readouterr().out
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(dest), *args],
+                              capture_output=True, text=True).stdout.strip()
+
+    assert git("rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert git("rev-parse", "HEAD") == trunk_tip
+    assert (dest / "trunk.txt").read_text() == "on main\n"
+    # ⚠️ And NOT the member's branch, even though the fixture seeded one and it is further along.
+    # Without this the assertions above are satisfied by a clone that checked out `main` because the
+    # WIP branch happened to be missing, which is a different bug wearing the same output.
+    assert not (dest / "mine.txt").exists(), (
+        "the clone followed the member's WIP branch; since D-d it follows the trunk")
+    # `git pull` has an upstream without the member configuring one.
+    assert git("config", "--local", "--get", "branch.main.remote") == "origin"
+    assert git("config", "--local", "--get", "branch.main.merge") == "refs/heads/main"
+
+
+def test_project_clone_refuses_a_project_whose_trunk_the_relay_did_not_name(
+        monkeypatch, tmp_path):
+    """A reply this command cannot read is not a project — the rule `project status`, `commit` and
+    `import` all follow.
+
+    ⚠️ **Keyed on `trunk` since issue 41**, where it used to be keyed on `branch`. That is the right
+    replacement rather than the nearest one: the trunk is what the clone is now OF, and every relay
+    answering this route names it. Guessing `main` here instead would put the relay's ref-naming
+    rule in a second place, free to disagree with it — the reason the old code refused to guess
+    `wip/<key>` either.
+
+    It must not reach git at all: `git_remote_url` is left unpatched, so a clone that got that far
+    would fail on a URL rather than on the missing key, and the message would blame the network.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    reply = _status_reply()
+    del reply["trunk"]
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(tmp_path / "clone")])
+
+    message = str(caught.value)
+    assert "P1" in message and "trunk" in message.lower(), message
+    assert not (tmp_path / "clone").exists(), "a directory was made for a reply we could not read"
+
+
+def test_project_clone_refuses_a_project_that_has_no_trunk_either(monkeypatch, tmp_path):
+    """No `main` and no WIP branch is not an empty clone — it is a project nothing has imported.
+
+    Left to git this is `checkout: 'origin/main' is not a commit`, which reads as a broken clone.
+    It is not broken: ADR 0033 issue 16b made the relay the trunk's only writer, so the answer is
+    `grid project import`, and that is what the message has to say.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    empty = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", "-b", "main", str(empty)], check=True)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(main_commit=None)))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(empty))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(tmp_path / "clone")])
+
+    assert "grid project import" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_writes_no_credential_anywhere_and_leaves_global_git_config_alone(
+        monkeypatch, tmp_path, capsys):
+    """The acceptance criterion, asserted by SEARCHING for the token rather than by inspection.
+
+    Every byte under the clone — working tree and `.git/` alike — is read back and checked for the
+    token. Reading `.git/config` and being satisfied it looks clean is how the same property was
+    lost elsewhere: `git config` is not the only file in `.git`, and `FETCH_HEAD`, a packed-refs
+    file or a stray log would each hold it just as permanently.
+
+    The global config is a separate assertion because a credential helper is exactly the kind of
+    setting that is normally installed globally, and installing it there would follow the member
+    into every unrelated repository on the machine.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    global_config = tmp_path / "the-members-own-gitconfig"
+    global_config.write_text("[user]\n\tname = Someone\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    before = global_config.read_bytes()
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, capsys.readouterr().out
+
+    holding = [p for p in dest.rglob("*") if p.is_file() and _TOKEN.encode() in p.read_bytes()]
+    assert holding == [], f"the token was written to {[str(p) for p in holding]}"
+    assert global_config.read_bytes() == before, "the member's global git config was modified"
+
+
+def test_project_clone_configures_the_helper_for_this_grids_relay_and_nothing_wider(
+        monkeypatch, tmp_path, capsys):
+    """The helper is scoped to the relay, resets whatever the member had, and names its grid.
+
+    The empty-value reset is measured, not defensive: with a global `credential.helper` in place and
+    no reset, git consults that one FIRST, sends its username/password as Basic, is refused by the
+    relay, and never asks our helper for a credential at all — only for an `erase`. So the reset has
+    to come first in config order, and it has to be there.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, capsys.readouterr().out
+
+    def config(key):
+        return subprocess.run(["git", "-C", str(dest), "config", "--local", "--get-all", key],
+                              capture_output=True, text=True).stdout.splitlines()
+
+    helpers = config("credential.https://relay.example.helper")
+    assert helpers[0] == "", "the reset must come first, or an inherited helper answers instead"
+    assert len(helpers) == 2 and helpers[1].startswith("!"), helpers
+    # The `!` shell form, not a bare absolute path: a path containing a space is unrunnable
+    # unquoted, and a quoted one stops looking like a path so git tries `git credential-'/Users/…'`.
+    assert "credential --grid n1" in helpers[1], helpers[1]
+    assert config("http.https://relay.example.proactiveAuth") == ["auto"]
+    # Scoped: nothing was written that would apply to any other host.
+    unscoped = subprocess.run(["git", "-C", str(dest), "config", "--local", "--get-all",
+                               "credential.helper"], capture_output=True, text=True)
+    assert unscoped.stdout.strip() == "", "an unscoped helper would answer for every host"
+
+
+def test_project_clone_refuses_a_git_that_could_never_authenticate_before_writing_anything(
+        monkeypatch, tmp_path):
+    """Fail closed, and fail BEFORE the directory exists.
+
+    A git with no `authtype` can only send Basic, which the relay refuses (measured). Building the
+    clone anyway would leave a directory whose every `git pull` says
+    `fatal: Authentication failed` — a message that names the relay and blames it, for a fault that
+    is entirely local and has a one-line fix.
+    """
+    from remote import project_clone
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(project_clone, "credential_capabilities", lambda: frozenset({"state"}))
+    monkeypatch.setattr(
+        project_clone, "clone_project",
+        lambda *a, **k: pytest.fail("built a clone this machine's git cannot authenticate"))
+    dest = tmp_path / "clone"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(dest)])
+
+    assert "authtype" in str(caught.value), str(caught.value)
+    assert "upgrade git" in str(caught.value).lower(), "the member needs to be told the fix"
+    assert not dest.exists(), "a refused clone left a directory behind"
+
+
+@pytest.mark.parametrize("network_id", ["n1", "grid-0123456789abcdef", "a_b-c.9"])
+def test_the_helper_command_written_into_a_clone_parses_back_to_the_same_grid(network_id):
+    """The config is a command this CLI has to be able to read back — every time, forever.
+
+    A round trip rather than a string comparison: `.git/config` outlives the process that wrote it,
+    and the thing that matters is not how the line looks but that `shlex` and then argparse recover
+    exactly the grid that was pinned. Anything that survives quoting but not parsing produces a
+    clone that fails on every single credential lookup, with a message about argparse.
+    """
+    from remote import project_clone
+
+    written = project_clone.helper_command(network_id)
+
+    assert written.startswith("!"), "the `!` form is what makes quoting possible at all"
+    # git runs the value through a shell and APPENDS the operation, so this is the real argv.
+    argv = shlex.split(written[1:])[1:] + ["get"]
+    parsed = cli.build_parser().parse_args(argv)
+    assert parsed.command == "credential"
+    assert parsed.grid == network_id
+    assert parsed.operation == "get"
+
+
+def test_the_helper_command_refuses_a_grid_id_argparse_would_read_as_a_flag():
+    """`shlex.quote` does NOT quote a leading `-`, and that is the whole bug.
+
+    Its safe set is `[\\w@%+=:,./-]`, so `shlex.quote("-evil")` returns `-evil` **unquoted**
+    (measured). Baked into the config that becomes `--grid -evil`, which argparse reads as a flag
+    rather than as `--grid`'s value: `error: argument --grid: expected one argument`, exit 2, on
+    every credential lookup for that clone until somebody hand-edits `.git/config`.
+
+    `remote_grid._NETWORK_ID_RE` does not catch it either — `[A-Za-z0-9_-]+` allows a dash anywhere,
+    including first. Server-issued ids are `grid-<hex>` so this needs a hand-edited store to reach,
+    the same threat class the token-shape guards already take seriously; the difference is that this
+    one is written to disk ONCE and then fails forever, so it is refused at the moment it would be
+    written rather than at every use.
+    """
+    from remote import project_clone
+
+    with pytest.raises(project_clone.CloneError) as caught:
+        project_clone.helper_command("-evil")
+
+    assert "-evil" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_does_not_blame_the_git_version_when_git_is_missing_entirely(
+        monkeypatch, tmp_path):
+    """"Upgrade git" is a confident diagnosis, and it must not be given for a different illness.
+
+    `credential_capabilities()` answers an empty set for three different facts: git is too old, git
+    is not installed, and the probe timed out. Only the first is fixed by upgrading. Told to upgrade
+    a git that is not there, the member is also falsely reassured that `grid task fetch` still
+    works — it shells out to git too.
+
+    The `try/except` in `credential_capabilities` had no coverage at all: the one test touching it
+    monkeypatched the whole function away.
+    """
+    from remote import project_clone
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def no_git(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(project_clone.subprocess, "run", no_git)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(tmp_path / "clone")])
+
+    message = str(caught.value)
+    assert "git" in message.lower()
+    assert "upgrade" not in message.lower(), (
+        f"told to upgrade a git that is not installed: {message}")
+    assert "grid task fetch" not in message, "and reassured that a git-shelling command still works"
+
+
+def test_project_clone_says_push_is_refused_and_what_to_do_instead(monkeypatch, tmp_path, capsys):
+    """The obvious next action inside a real clone is `git push`, and it will not work.
+
+    Left unsaid, the relay's refusal reads as a permissions bug and gets filed as one. It is not:
+    the WIP branch is written by the grid alone so that a task in flight cannot have the ground
+    moved under it (ADR 0033 D-h). Saying only "refused" is half the message — the member has
+    somewhere to put their work, and it has to be named.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+
+    assert cli.main(["project", "clone", "P1", str(tmp_path / "clone")]) == 0
+
+    out = capsys.readouterr().out
+    assert "git push" in out and "refused" in out
+    # The two ways work leaves this clone since issue 41. `grid project integrate` was the third and
+    # is DELETED (ADR 0034 D-d) — there is no bringing the trunk into your branch when the grid puts
+    # every finished turn on the trunk itself — so naming it here would be advice for a command that
+    # no longer parses.
+    assert "grid task create --project P1" in out, out
+    assert "grid project commit <conversation-id>" in out, out
+    assert "integrate" not in out, out
+
+
+def test_project_clone_refuses_to_reset_a_branch_over_somebody_elses_directory(
+        monkeypatch, tmp_path, capsys):
+    """`git checkout -B` resets a branch to the fetched tip, which over a stranger's repository is
+    silent data loss — the same hazard `grid task fetch`'s guard exists for, where it was a real
+    defect once. A directory holding a `grid task fetch` result is called out by name, because a
+    member who has been using one is exactly who reaches for this command next.
+    """
+    from remote import project_clone
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    monkeypatch.setattr(
+        project_clone, "clone_project",
+        lambda *a, **k: pytest.fail("cloned over a directory this command did not make"))
+
+    mine = tmp_path / "my-real-project"
+    (mine / ".git").mkdir(parents=True)
+    (mine / "fix.py").write_text("the user's own uncommitted work\n")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(mine)])
+
+    assert "was not created by" in str(caught.value), str(caught.value)
+    assert (mine / "fix.py").read_text() == "the user's own uncommitted work\n"
+
+    # A `grid task fetch` directory gets the same refusal plus the sentence that resolves it.
+    from remote import task_repo
+
+    (mine / ".git" / task_repo.FETCH_MARKER).write_text("P1\n")
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(mine)])
+    assert "grid task fetch" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_updates_a_clone_it_already_made_but_not_another_projects(
+        monkeypatch, tmp_path, capsys):
+    """Re-cloning in place is how a member updates; re-cloning over ANOTHER project is a mistake.
+
+    The marker carries the project id for exactly this reason. Without it the second clone would
+    fetch a different repository's refs into the first one's directory and check out a branch that
+    happens to share a name — leaving a working tree belonging to neither project.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0, "re-cloning in place was refused"
+
+    # The SECOND half of idempotency, and the one a "did it exit 0" assertion sails past: every
+    # write here has to be re-runnable. `config --add` accumulates, so a second clone would leave
+    # two helper entries and two resets — and the reset works BY position, so a duplicated pair
+    # reads `"", helper, "", helper`, where the second reset discards the first helper. It would
+    # still work, until a third value was ever added, and then it would not.
+    helpers = subprocess.run(
+        ["git", "-C", str(dest), "config", "--local", "--get-all",
+         "credential.https://relay.example.helper"],
+        capture_output=True, text=True).stdout.splitlines()
+    assert len(helpers) == 2, f"the config accumulated across clones: {helpers}"
+    assert helpers[0] == "" and helpers[1].startswith("!"), helpers
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply(project_id="P2")))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P2", str(dest)])
+    assert "holds project P1" in str(caught.value), str(caught.value)
+
+
+def test_project_clone_refuses_to_re_clone_over_local_commits_it_would_discard(
+        monkeypatch, tmp_path, capsys):
+    """Re-cloning must never throw away work the grid has never seen.
+
+    `git checkout -B` resets a branch to the given commit, and its only safety net is a DIRTY
+    WORKING TREE — measured on git 2.54.0: an uncommitted edit makes it refuse with `error: Your
+    local changes… would be overwritten`, but a COMMITTED one is discarded in silence, exit 0.
+
+    That is not a misuse case, it is the documented one. `git push` is refused by design, so a local
+    commit is the only git-native way a member checkpoints between `grid project commit` calls, and
+    `docs/cli.md` invites resolving a conflict by hand in the clone. Re-cloning is meanwhile how a
+    member picks up everybody else's landed turns. The two together are a data-loss path through the
+    happy flow.
+
+    `_refuse_unusable_destination` cannot catch this: it asks whether the directory is ours, which
+    it is. The check has to compare the local branch against what is about to be fetched.
+
+    ⚠️ **The `with_wip` parametrization is GONE with issue 41, and that is a real narrowing worth
+    stating rather than a tidy-up.** It used to run twice — the member's branch present, and absent
+    so the checkout started from the trunk — because the CLI asked to check out `wip/<key>` and
+    `clone_project` had to cope with the ref not existing. The CLI passes `branch == trunk` now
+    (ADR 0034 D-d), so the trunk is the only ref either arm can be about and both cases collapsed
+    into this one. `clone_project`'s `not has_wip` arm is no longer reachable from the CLI.
+    """
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0
+    branch = "main"
+    git_target = "origin/main"
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(dest), *args], capture_output=True,
+                              text=True, env={**os.environ, "GIT_AUTHOR_NAME": "m",
+                                              "GIT_AUTHOR_EMAIL": "m@invalid",
+                                              "GIT_COMMITTER_NAME": "m",
+                                              "GIT_COMMITTER_EMAIL": "m@invalid"})
+
+    (dest / "precious.py").write_text("work the grid has never seen\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "my own local commit")
+    tip = git("rev-parse", "HEAD").stdout.strip()
+    assert git("status", "--porcelain").stdout == "", "the tree is CLEAN — that is the whole trap"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "clone", "P1", str(dest)])
+
+    message = str(caught.value)
+    assert "1 commit" in message, message
+    assert (dest / "precious.py").read_text() == "work the grid has never seen\n"
+    assert git("rev-parse", "HEAD").stdout.strip() == tip, "the local commit was discarded"
+    # And the member is told how to LOOK at what they have and how to LAND it — a refusal that only
+    # says no leaves them with work they cannot push and no named way forward.
+    assert f"log {git_target}..{branch}" in message, message
+    # ⚠️ The way to land it must name a CONVERSATION (ADR 0034 D-e, issue 41). `grid project commit`
+    # takes a conversation id since this slice, so the older `grid project commit <project-id>` form
+    # still PARSES and is the worse failure for it: the project id lands in the `conversation_id`
+    # slot and the member's files are posted to a conversation that does not exist. `project_refresh`
+    # already says `<conversation-id>` here; this hint comes from `remote/project_clone.py`, which
+    # was not re-keyed with it.
+    assert "grid project commit <conversation-id>" in message, message
+    assert "branch my-work" in message, message
+
+
+def test_task_fetch_into_a_project_clone_names_the_two_git_commands_instead(
+        monkeypatch, tmp_path, capsys):
+    """A clone already HAS the task branch, so "pass --into with a new directory" is the wrong fix.
+
+    The guard is not loosened to let the checkout through — `git checkout -- .` overwrites a
+    same-named file without complaining, and a clone is full of the member's own work in progress.
+    What changes is the sentence: somebody holding a real clone reaches a result with two git
+    commands and has no reason to call `grid task fetch` at all.
+
+    A third branch, not a rewording of the second: two existing tests assert the exact substring
+    "was not created by" for a directory that is nobody's, and that message is still right for one.
+    """
+    from remote import project_clone, task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    clone = tmp_path / "my-clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / project_clone.CLONE_MARKER).write_text("p1\n")
+    (clone / "in-progress.py").write_text("half-finished work\n")
+
+    monkeypatch.setattr(
+        task_repo, "checkout_result",
+        lambda *a, **k: pytest.fail("checked out over the member's own clone"))
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "T1", "state": "completed", "branch": "task/T1", "project_id": "p1",
+        "result_commit": "c" * 40}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "T1", "--into", str(clone)])
+
+    message = str(caught.value)
+    assert "git fetch" in message and "git checkout" in message, message
+    assert "task/T1" in message, "the member has to be told WHICH branch, not just the verbs"
+    assert "was not created by" not in message, "that is the message for a directory that is nobody's"
+    assert (clone / "in-progress.py").read_text() == "half-finished work\n"
+
+
+# --- `grid project refresh` ----------------------------------------------------------------------
+
+_GRID_SIDE_ENV = {"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+                  "GIT_CONFIG_GLOBAL": os.devnull, "HOME": "/nonexistent",
+                  "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@invalid",
+                  "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@invalid"}
+
+
+def _grid_side_git(tmp_path):
+    """Run git in the worktree `_relay_bare_repo` seeded, so a test can move the GRID's refs.
+
+    Refresh is the one command whose whole subject is "what changed on the grid since you cloned",
+    so every test here has to move a ref on the far side after the clone exists. Same env as the
+    fixture that built it.
+    """
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=str(tmp_path / "relay-seed"), check=True,
+                              capture_output=True, text=True, env=_GRID_SIDE_ENV).stdout
+    return git
+
+
+def _a_clone(monkeypatch, tmp_path, *, with_wip=True):
+    """A real `grid project clone` of P1 against a local bare repo. Returns (dest, bare)."""
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    bare, _trunk, _wip = _relay_bare_repo(tmp_path, with_wip=with_wip)
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_status_reply()))
+    monkeypatch.setattr("remote.relay.git_remote_url", lambda *a, **k: str(bare))
+    dest = tmp_path / "clone"
+    assert cli.main(["project", "clone", "P1", str(dest)]) == 0
+    return dest, bare
+
+
+def test_project_refresh_reports_the_commits_the_grid_has_and_the_clone_does_not(
+        monkeypatch, tmp_path, capsys):
+    """The whole point: a turn landed, and the clone is told — in oids it can act on.
+
+    `grid project status` and `grid task get` both print commit ids, so a member comparing "what the
+    grid said happened" with "what my clone holds" is comparing ids. A bare `behind 2` cannot be
+    checked against anything.
+
+    ⚠️ **The ref that moves is the TRUNK since ADR 0034 D-d (issue 41).** The grid applies every
+    finished turn to `main` itself, and a clone follows `main`, so "a turn landed" is a commit on the
+    trunk rather than on the member's own `wip/<key>` — which is what this used to push. Moving the
+    old ref here would leave the clone correctly reporting that nothing had changed, and the test
+    would be measuring the fixture rather than the command.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    before = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", "main")
+    (tmp_path / "relay-seed" / "landed.py").write_text("what the agent wrote\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "a turn landed")
+    after = git("rev-parse", "HEAD").strip()
+    git("push", "--quiet", str(bare), "main")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert before[:12] in out, f"the commit the clone is on is missing:\n{out}"
+    assert after[:12] in out, f"the commit the grid is on is missing:\n{out}"
+    assert "1 commit" in out, out
+    # The working tree was NOT touched — that is the difference from re-cloning.
+    assert not (dest / "landed.py").exists(), "refresh moved the working tree"
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip() == before
+    # And it names the one command that lands it, which `git status` alone does not.
+    assert "git merge --ff-only origin/main" in out, out
+    # The ORDINARY labelling, asserted here because the only other test of it is the rare
+    # second-remote case. Without this, inverting that comparison would put a false "tracks a remote
+    # this command does not fetch" caveat on every refresh anyone ever runs, and nothing would fail.
+    assert "on grid" in out, out
+    assert "does not\nfetch" not in out and "does not fetch" not in out, \
+        f"an ordinary clone was reported as tracking a remote refresh did not fetch:\n{out}"
+
+
+def test_project_refresh_on_a_current_clone_suggests_nothing(monkeypatch, tmp_path, capsys):
+    """Nothing changed is an ANSWER, and it must not come with a command to run.
+
+    A next-command line printed unconditionally trains people to run it unconditionally, and
+    `git merge --ff-only` against an upstream you already have is a no-op that still looks like
+    work. The states are told apart so the advice can be.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "git merge" not in out, f"advice was printed with nothing to advise:\n{out}"
+    assert "up to date" in out.lower(), out
+
+
+def _commit_locally(dest, name="mine.py", text="work the grid has never seen\n"):
+    """A local commit in the member's clone — the only git-native way they checkpoint."""
+    (dest / name).write_text(text)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "m", "GIT_AUTHOR_EMAIL": "m@invalid",
+           "GIT_COMMITTER_NAME": "m", "GIT_COMMITTER_EMAIL": "m@invalid"}
+    for args in (["add", "-A"], ["commit", "--quiet", "-m", "local checkpoint"]):
+        subprocess.run(["git", "-C", str(dest), *args], check=True, capture_output=True, env=env)
+    return subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+
+
+def test_project_refresh_with_local_commits_says_so_and_never_suggests_re_cloning(
+        monkeypatch, tmp_path, capsys):
+    """Having commits the grid has not seen is ORDINARY, not an error — and re-cloning destroys them.
+
+    A member cannot push, so a local commit is how they checkpoint between `grid project commit`
+    calls. `grid project clone` over the same directory is the documented way to update, and it
+    would reset this branch — so it is the one command that must never appear here. The way to land
+    the work is what appears instead.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    tip = _commit_locally(dest)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert tip[:12] in out, out
+    assert "up to date" not in out.lower(), f"a local commit was reported as being in step:\n{out}"
+    # The way to land it names a CONVERSATION since issue 41 (ADR 0034 D-e), not the project: the
+    # project id in that slot would parse and post the files to a conversation nobody has.
+    assert "grid project commit <conversation-id>" in out, out
+    assert "grid project clone" not in out, f"re-cloning would discard exactly this work:\n{out}"
+
+
+def test_project_refresh_on_a_diverged_branch_offers_no_fast_forward_and_names_the_cause(
+        monkeypatch, tmp_path, capsys):
+    """The one state where the wrong advice actively hurts.
+
+    `git merge --ff-only` FAILS here, and `git pull` "works" by making a merge commit the member can
+    never push — a member cannot push at all. So this state must not print the ff line.
+
+    It can name the cause, because there is only one on the grid's side: every other relay write
+    produces a descendant — a turn settling fast-forwards the branch it lands on, the grid's apply
+    advances the trunk, `grid project commit` adds to it. `grid project wip reset` is the only one
+    that can move a ref anywhere else, and ADR 0034 D-m keeps it for exactly that reason while
+    deleting promote and integrate around it.
+
+    ⚠️ The ref this rewinds is the TRUNK, because a clone follows the trunk since D-d (issue 41).
+    The cause named in the advice is still `wip reset` — a reset of a conversation's branch is what
+    the grid's own apply then carries onto `main`, so it remains the one relay write that can put
+    the grid's copy somewhere the member's history does not reach.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    # What that looks like from the clone's side: the commit it was sitting on is gone, and the grid
+    # has grown a different history in its place.
+    git("checkout", "--quiet", "main")
+    (tmp_path / "relay-seed" / "elsewhere.py").write_text("a different history\n")
+    git("add", "-A")
+    git("commit", "--quiet", "--amend", "-m", "after the reset")
+    git("push", "--quiet", "--force", str(bare), "main")
+    _commit_locally(dest)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, f"a diverged clone is a state to report, not a failure of the command:\n{out}"
+    assert "git merge --ff-only" not in out, f"that command fails in this state:\n{out}"
+    assert "git pull" not in out, f"a pull here makes a merge commit that can never be pushed:\n{out}"
+    assert "wip reset" in out, out
+    # Look at it, and keep it safe — the same two ways out `grid project clone`'s refusal offers.
+    assert "log --left-right --oneline main...origin/main" in out, out
+    assert "branch my-work" in out, out
+
+
+def test_project_refresh_on_a_collected_task_branch_does_not_claim_it_is_yet_to_appear(
+        monkeypatch, tmp_path, capsys):
+    """A branch whose upstream ref is not on the grid — reported as such, with no cause invented.
+
+    Reachable straight through advice this CLI gives: `grid task fetch` refuses inside a clone and
+    tells the member to check `task/<id>` out, and the relay's retention sweep later collects that
+    branch. The member is then standing on a branch whose upstream is configured and whose ref is
+    gone. Every count here is a comparison against nothing, and reporting `0/0` would say "in step
+    with the grid", which is the one thing that is not true.
+
+    Telling somebody their finished task's branch "appears when your first task lands" is not a
+    clumsy sentence, it is a false one. The fix is not to guess which cause it is from the ref's
+    NAME — that would put the relay's naming rule on this side of the wire — but to stop claiming
+    a cause the command cannot see.
+
+    ⚠️ **This absorbed `test_project_refresh_before_the_members_first_task_has_landed`, which issue
+    41 deleted.** That test reached the same state the other way round — a clone of a project whose
+    member had no WIP branch yet — and a clone follows the TRUNK now (ADR 0034 D-d), which exists
+    from the moment a project has one. There is no longer a first-task state for a clone to be in.
+    Its two assertions moved here rather than being dropped, so the coverage is unchanged: the
+    absence must not read as "up to date", and it must not offer a merge that would fail.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", "-b", "task/T1", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "an agent worked here")
+    git("push", "--quiet", str(bare), "task/T1")
+    assert cli.main(["project", "refresh", "P1", str(dest)]) == 0
+    # Exactly what `grid task fetch`'s own refusal tells the member to run.
+    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "task/T1"], check=True)
+    git("push", "--quiet", str(bare), "--delete", "task/T1")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "task/T1" in out, out
+    assert "first task" not in out.lower(), f"this branch is not one that has yet to appear:\n{out}"
+    assert "up to date" not in out.lower(), out
+    # Inherited from the deleted first-task test: the report has to SAY the grid does not have it,
+    # and must not offer a merge against a ref that is not there.
+    assert "does not have task/T1" in out, out
+    assert "git merge" not in out, out
+
+
+def test_project_refresh_says_so_when_the_branch_tracks_a_remote_it_did_not_fetch(
+        monkeypatch, tmp_path, capsys):
+    """Numbers measured against a ref this command did not update must not look freshly measured.
+
+    A clone is an ordinary git repository and members are invited to work in it, so a second remote
+    — a personal backup, a fork — is a thing that happens. Refresh only ever fetches `origin`, on
+    purpose: fetching whatever else a repository points at would reach a host nobody here chose,
+    which is the very thing the directory guard exists to prevent.
+
+    So the comparison is still made and still true of what is on disk; what would be false is
+    presenting it as news from the grid. It is fetching that is refused here, not reporting.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    branch = "main"  # what a clone stands on since ADR 0034 D-d (issue 41)
+    for args in (["remote", "add", "backup", str(tmp_path / "relay.git")],
+                 ["fetch", "--quiet", "backup"],
+                 ["config", "branch." + branch + ".remote", "backup"]):
+        subprocess.run(["git", "-C", str(dest), *args], check=True, capture_output=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "backup" in out, f"the report never says which remote it measured against:\n{out}"
+    assert "origin" in out, out
+
+
+def test_project_refresh_on_a_detached_head_reports_instead_of_crashing(
+        monkeypatch, tmp_path, capsys):
+    """A detached HEAD is reachable from advice this CLI gives, so it cannot be an unhandled case.
+
+    `grid task fetch` inside a clone refuses and tells the member to check a task branch out; one
+    slip of that (checking out the remote-tracking ref, or an oid from `grid task get`) leaves HEAD
+    detached. There is no branch, so there is no upstream and nothing to compare — which is an
+    answer, not a crash and not a zero.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", "HEAD"], check=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "detached" in out.lower(), out
+    assert "up to date" not in out.lower(), out
+    assert "git merge" not in out, out
+
+
+def test_project_refresh_on_a_branch_that_tracks_nothing_says_which_branch(
+        monkeypatch, tmp_path, capsys):
+    """A local branch of one's own is ordinary in a clone, and it has no counterpart on the grid.
+
+    Distinct from `no_remote_branch`, which is an upstream that is configured and not yet created.
+    Here nothing is configured, so there is nothing the grid could be asked about — and the member
+    has to be told WHICH branch that is, because the reason they see no news is that they are
+    standing somewhere the grid was never going to answer for.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    subprocess.run(["git", "-C", str(dest), "checkout", "--quiet", "-b", "my-experiment"],
+                   check=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "my-experiment" in out, out
+    assert "up to date" not in out.lower(), out
+    assert "git merge" not in out, out
+
+
+def test_project_refresh_refuses_a_directory_holding_another_project(monkeypatch, tmp_path, capsys):
+    """The project id is not decoration: it is what makes standing in the wrong clone detectable.
+
+    Nothing here would be destroyed by getting it wrong — refresh writes no working tree — but the
+    member would read a report about a project they did not name and believe it was the one they
+    did. The marker already records which project a directory holds, so the mistake is answerable
+    rather than merely survivable.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "refresh", "P2", str(dest)])
+
+    message = str(caught.value)
+    assert "P1" in message, f"the refusal has to name the project the directory really holds: {message}"
+    assert "P2" in message, message
+
+
+def test_project_refresh_refuses_a_task_fetch_directory_and_a_directory_that_is_nobodys(
+        monkeypatch, tmp_path, capsys):
+    """Two different mistakes, two different sentences — the split `grid task fetch` already makes.
+
+    A `grid task fetch` result looks like a repository and is not a clone: it has no origin to
+    refresh from and no branch of the member's. Saying only "not a clone" there leaves somebody
+    holding a real directory of real work with no idea what to do; naming what it IS points at
+    `grid project clone`, which is the thing they actually want.
+    """
+    from remote import project_clone, task_repo
+
+    _seed_credential_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    fetched = tmp_path / "a-result"
+    (fetched / ".git").mkdir(parents=True)
+    (fetched / ".git" / task_repo.FETCH_MARKER).write_text("P1\n")
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "refresh", "P1", str(fetched)])
+    message = str(caught.value)
+    assert "grid task fetch" in message, message
+    assert "grid project clone" in message, f"name the command that gives them a clone: {message}"
+
+    stranger = tmp_path / "somebody-elses-repo"
+    (stranger / ".git").mkdir(parents=True)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "refresh", "P1", str(stranger)])
+    message = str(caught.value)
+    assert "grid task fetch" not in message, f"that is the OTHER directory's sentence: {message}"
+    assert project_clone.CLONE_MARKER not in message, "a marker filename is not an explanation"
+    assert "clone" in message.lower(), message
+
+
+@pytest.mark.parametrize("cause", ["unreadable", "empty"])
+def test_project_refresh_does_not_report_an_unusable_marker_as_not_a_clone(
+        monkeypatch, tmp_path, capsys, cause):
+    """"I cannot make sense of this" and "this is not ours" are different facts with different fixes.
+
+    `cloned_project` answers `None` for both, which is right for what it is — a reporter. What is
+    wrong is the refusal built on top of it telling somebody to run `grid project clone`, because
+    re-cloning lands on the same file and fails the same way. The advice has to be about the file.
+
+    ⚠️ And the refusal must not name a CAUSE it cannot verify — the same rule as
+    `no_remote_branch`'s message, broken once already by the first version of this very fix. A
+    marker can be unusable because it cannot be read OR because it is readable and says nothing,
+    and "check its permissions" is a dead end for the second: `os.access(R_OK)` is True there.
+    """
+    if cause == "unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file, so there is no refusal to make")
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    marker = dest / ".git" / "grid-project-clone"
+    if cause == "unreadable":
+        marker.chmod(0o000)
+    else:
+        marker.write_bytes(b"")
+        assert os.access(marker, os.R_OK), "the point of this case is that nothing is wrong with it"
+    try:
+        with pytest.raises(SystemExit) as caught:
+            cli.main(["project", "refresh", "P1", str(dest)])
+    finally:
+        marker.chmod(0o644)
+
+    message = str(caught.value)
+    assert "grid project clone" not in message, f"re-cloning cannot fix this:\n{message}"
+    assert str(marker) in message, f"the member is not told which file to look at:\n{message}"
+    # Both causes, neither asserted as THE cause.
+    assert "contents" in message, f"the refusal blames one cause it cannot verify:\n{message}"
+
+
+def test_project_refresh_counts_the_other_refs_that_moved_and_the_ones_collected(
+        monkeypatch, tmp_path, capsys):
+    """The grid's refs churn under a clone, and silence about it is the wrong report.
+
+    Task branches accumulate in a clone with every turn, and the relay's retention sweep collects
+    them on its side — so without `--prune` a clone keeps `origin/task/<id>` refs for turns that no
+    longer exist, and every later listing is wrong. They are COUNTED and never interpreted: reading
+    `task/…` as "a finished task" would put the relay's ref-naming rule on this side of the wire,
+    where it would be free to disagree with it.
+
+    ⚠️ **The ref that stands in for "another one moved" had to change with issue 41.** It used to be
+    the TRUNK — the clone sat on `wip/<key>`, so a promote moving `main` was news about a ref the
+    member was not on. A clone follows the trunk since ADR 0034 D-d, so `main` moving is now the
+    branch's OWN report and counts as no other ref at all: the assertion below read `1 other ref
+    updated` and got `0`. A second task branch is used instead, which is what actually churns here.
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", "-b", "task/T1", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "an agent worked here")
+    git("push", "--quiet", str(bare), "task/T1")
+    assert cli.main(["project", "refresh", "P1", str(dest)]) == 0
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "--verify", "--quiet",
+                           "refs/remotes/origin/task/T1"], capture_output=True).returncode == 0
+
+    # The relay collected the first turn's branch, and a second turn moved its own.
+    git("push", "--quiet", str(bare), "--delete", "task/T1")
+    git("checkout", "--quiet", "-b", "task/T2", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "a second turn")
+    git("push", "--quiet", str(bare), "task/T2")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "1 other ref updated, 1 pruned" in out, out
+    assert "task" not in out.lower(), f"the refs were interpreted, not counted:\n{out}"
+    assert subprocess.run(["git", "-C", str(dest), "rev-parse", "--verify", "--quiet",
+                           "refs/remotes/origin/task/T1"], capture_output=True).returncode != 0, \
+        "the collected branch is still in the clone"
+
+
+def test_project_refresh_json_names_the_state_and_carries_full_oids(monkeypatch, tmp_path, capsys):
+    """`state` is a field, not something a reader recomputes from the counts.
+
+    Three of the seven states cannot be expressed as a pair of counts at all, so a caller deriving
+    "am I in step" from `ahead == behind == 0` would read `no_upstream` and `detached` as up to
+    date.
+
+    The oids are FULL here even though the printed ones are shortened: this is the half something
+    compares against `grid task get`'s `base_commit` or `grid project status`'s `main_commit`, and
+    those are full. (The integrate this used to name went with issue 41; the trunk oid on `status`
+    is the comparison that replaces it, and it is the SAME ref this clone follows since D-d.)
+    """
+    dest, bare = _a_clone(monkeypatch, tmp_path)
+    git = _grid_side_git(tmp_path)
+    git("checkout", "--quiet", "main")
+    git("commit", "--quiet", "--allow-empty", "-m", "a turn landed")
+    landed = git("rev-parse", "HEAD").strip()
+    git("push", "--quiet", str(bare), "main")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest), "--json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "behind", payload
+    assert payload["remote_commit"] == landed, "the oid is abbreviated, so it cannot be compared"
+    assert len(payload["local_commit"]) == 40, payload["local_commit"]
+    assert payload["behind"] == 1 and payload["ahead"] == 0, payload
+    assert payload["branch"] == "main", payload
+    assert payload["upstream"] == "origin/main", payload
+    assert payload["project_id"] == "P1", payload
+    # Everything the printed report can say has to be here too, or `--json` is a lossy version of
+    # the same command and an application has to scrape stdout for the rest.
+    assert payload["refs_updated"] == 0 and payload["refs_pruned"] == 0, payload
+    assert payload["upstream_remote"] == "origin", payload
+
+
+@pytest.mark.parametrize("state,arrange", [
+    # ⚠️ `no_remote_branch` is ARRANGED since issue 41, where it used to fall out of cloning a
+    # project whose member had no WIP branch yet. A clone follows the TRUNK now (ADR 0034 D-d) and
+    # the trunk always exists, so the state has to be built: a local branch with an upstream
+    # configured by hand at a ref the grid does not have — which is exactly the shape a member
+    # reaches by standing on a `task/<id>` the relay has since collected.
+    ("no_remote_branch", [["checkout", "--quiet", "-b", "gone"],
+                          ["config", "branch.gone.remote", "origin"],
+                          ["config", "branch.gone.merge", "refs/heads/gone"]]),
+    ("no_upstream", [["checkout", "--quiet", "-b", "an-experiment"]]),
+    ("detached", [["checkout", "--quiet", "--detach", "HEAD"]]),
+])
+def test_project_refresh_json_reports_no_comparison_as_absent_never_as_zero(
+        monkeypatch, tmp_path, capsys, state, arrange):
+    """`ahead: 0, behind: 0` means "in step with the grid" and must never be invented.
+
+    The three states here made no comparison at all — there is no second tip to compare against —
+    and a consumer reading the two fields whose entire purpose is "how far apart am I" would take a
+    fabricated pair of zeroes as "nothing outstanding".
+
+    `grid project status` already gets this right against the relay's own numbers, and this is the
+    same fact measured locally, so it answers the same way.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    for args in arrange:
+        subprocess.run(["git", "-C", str(dest), *args], check=True, capture_output=True)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest), "--json"])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == state, payload
+    assert payload["ahead"] is None, f"invented a count for a comparison never made: {payload}"
+    assert payload["behind"] is None, payload
+
+
+def test_project_refresh_asks_the_relay_nothing_and_needs_no_stored_credential(
+        monkeypatch, tmp_path, capsys):
+    """The reason this command has no `--grid`, stated as a test rather than as a comment.
+
+    Refresh answers from the clone and the git plane alone. Two consequences worth pinning: an
+    outage of the control plane cannot stop a member reading where their work is, and a `--grid`
+    flag would be a lie — the grid is already pinned inside the clone's own credential helper, so
+    naming a different one could not change what happens.
+
+    Proven twice over: the relay transport fails the test if it is touched at all, and GRID_HOME is
+    swapped for an empty one, so there is no stored credential and no grid record left to read.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    calls = []
+    # Recorded rather than `pytest.fail`-ed inside the handler: an exception raised in there travels
+    # back through httpx and could be caught by something on the way, which would turn a real
+    # regression into a passing test.
+    _mock_relay(monkeypatch, lambda r: calls.append(str(r.url)) or httpx.Response(200, json={}))
+    monkeypatch.setenv("GRID_HOME", str(tmp_path / "a-machine-with-no-grid-state"))
+    state.set_mode("remote")
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1", str(dest)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert calls == [], f"refresh called the relay: {calls}"
+
+
+def test_project_refresh_defaults_to_the_directory_you_are_standing_in(
+        monkeypatch, tmp_path, capsys):
+    """The commonest call of all is from inside the clone, with no directory given.
+
+    `grid project clone` defaults its directory to a NEW one named after the project id. Copying
+    that default here would break exactly this call: standing in the clone, `grid project refresh
+    <id>` would look for `./<id>` and refuse, having been given everything it needed.
+    """
+    dest, _bare = _a_clone(monkeypatch, tmp_path)
+    monkeypatch.chdir(dest)
+    capsys.readouterr()
+
+    rc = cli.main(["project", "refresh", "P1"])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    # The branch a clone stands on since ADR 0034 D-d (issue 41) — asserted so "it exited 0" cannot
+    # pass for "it found the clone it was standing in".
+    assert "main" in out and str(dest) in out, out
+
+
+# --- ADR 0033 D-p / issue 33: `grid project archive | unarchive | delete` ---
+#
+# Three commands and one flag, and the pair they form is the point: archive is reversible and can
+# destroy nothing, delete is irreversible and is refused for anything that holds work. Every test
+# below that touches `archived` keys on an EXPLICIT `True`/`False` and never on truthiness — *absent
+# ⇒ not archived* is what a relay predating this slice says, and it must stay readable as that.
+
+
+def test_project_archive_posts_to_the_archive_route_and_sends_no_body(monkeypatch, tmp_path,
+                                                                      capsys):
+    """The soft half, end to end through `cli.main`.
+
+    **No body**, like init and integrate: the project is named in the path and there is nothing
+    else to say.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "project_id": "P1", "archived": True,
+            "archived_at": "2026-08-12T10:00:00+00:00", "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "archive", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/archive")
+    assert seen["body"] == b"", seen["body"]
+    out = capsys.readouterr().out
+    assert "P1" in out
+    assert "unarchive" in out, f"the way back is not named: {out!r}"
+
+
+def test_project_archive_says_when_it_was_already_archived(monkeypatch, tmp_path, capsys):
+    """`changed: false` is a 200, not a failure — the state the caller asked for is the state that
+    holds. Saying so is what stops somebody re-running it wondering whether it worked."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "archived": True, "archived_at": "2026-08-01T10:00:00+00:00",
+        "changed": False}))
+    rc = cli.main(["project", "archive", "P1"])
+
+    assert rc == 0
+    assert "already" in capsys.readouterr().out.lower()
+
+
+def test_project_archive_refuses_to_call_an_unreadable_reply_an_archive(monkeypatch, tmp_path):
+    """The house guard. A reply this command cannot read is not an archive it may report — the next
+    thing the member does is walk away believing their project takes no new work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "archive", "P1"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+def test_project_unarchive_posts_to_its_own_route(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "archived": False, "archived_at": None, "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "unarchive", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/unarchive")
+    assert "P1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("verb", ["archive", "unarchive", "delete"])
+def test_the_new_project_routes_on_an_old_relay_say_the_relay_is_old(monkeypatch, tmp_path, verb):
+    """Brand-new routes, so a relay that predates them answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1", *(["--yes"] if verb == "delete" else [])])
+
+    message = str(caught.value).lower()
+    assert "relay" in message, caught.value
+    # ⚠️ NOT `_OLD_RELAY`'s sentence. This relay HAS projects — it is missing these three routes —
+    # and telling somebody their relay "does not have projects yet" sends them to check a feature
+    # that is working perfectly. The same reason `_OLD_RELAY_NO_CANCEL` exists.
+    assert "does not have projects yet" not in message, caught.value
+
+
+@pytest.mark.parametrize("verb", ["archive", "unarchive", "delete"])
+def test_a_real_404_from_the_new_project_routes_is_not_masked(monkeypatch, tmp_path, verb):
+    """The paired negative every route here carries: a relay that HAS the route and answers 404
+    about the project must show its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1", *(["--yes"] if verb == "delete" else [])])
+
+    assert str(caught.value) == "No such project"
+
+
+def test_project_list_hides_archived_projects_until_all_is_passed(monkeypatch, tmp_path, capsys):
+    """The flag rides on a query parameter, and it is OMITTED when not asked for.
+
+    Omitted rather than sent as `include_archived=false`, the `list_tasks(mine=…)` precedent: a
+    relay that has never heard of the key is never handed one it would have to ignore.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"projects": [
+            {"id": "P1", "name": "acme", "role": "owner", "archived": False},
+        ]})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "list"]) == 0
+    assert cli.main(["project", "list", "--all"]) == 0
+
+    assert seen[0] == {}, f"the bare listing sent a parameter an old relay does not know: {seen[0]}"
+    assert seen[1] == {"include_archived": "true"}, seen[1]
+
+
+def test_project_list_marks_an_archived_row_and_never_guesses(monkeypatch, tmp_path, capsys):
+    """`archived` is read as an EXPLICIT `True`, never as truthiness (ADR 0033 D-p).
+
+    *Absent ⇒ not archived* is what a relay predating this slice says, and that reading has to stay
+    available — so a row with no key must render exactly like a live one. A truthiness test would
+    also fire on `"false"`, which is what a proxy that stringifies booleans produces.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"projects": [
+        {"id": "P1", "name": "live", "role": "owner", "archived": False},
+        {"id": "P2", "name": "old", "role": "owner", "archived": True},
+        {"id": "P3", "name": "ancient", "role": "member"},          # a relay predating the slice
+    ]}))
+    assert cli.main(["project", "list", "--all"]) == 0
+
+    lines = {line.split()[0]: line for line in capsys.readouterr().out.splitlines()
+             if line.startswith("P")}
+    assert "archived" not in lines["P1"].lower(), lines["P1"]
+    assert "archived" in lines["P2"].lower(), lines["P2"]
+    assert "archived" not in lines["P3"].lower(), (
+        "a project from a relay that does not send the key was rendered as archived: "
+        f"{lines['P3']!r}")
+
+
+def test_project_delete_asks_before_it_acts_and_calls_nothing_when_declined(monkeypatch, tmp_path,
+                                                                            capsys):
+    """The whole point of the prompt: a declined delete must not reach the relay at all.
+
+    Asserted on the CALLS rather than on the exit code, because a command that asks, is refused, and
+    deletes anyway would still exit 0.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    calls = []
+
+    _mock_relay(monkeypatch, lambda r: calls.append(r.url.path) or httpx.Response(200, json={}))
+    monkeypatch.setattr("shared.launch.system.confirm", lambda question: False)
+
+    rc = cli.main(["project", "delete", "P1"])
+
+    assert rc == 0
+    assert calls == [], f"a declined delete still called the relay: {calls}"
+    assert "Nothing was deleted" in capsys.readouterr().out
+
+
+def test_project_delete_with_yes_never_prompts(monkeypatch, tmp_path, capsys):
+    """`--yes` is what makes this usable from a script — and a script's stdin is not a terminal, so
+    `system.confirm` would read EOF and decline every time."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "deleted": True, "repository_removed": True})
+
+    _mock_relay(monkeypatch, handler)
+
+    def refuse(question):
+        raise AssertionError("--yes still prompted")
+    monkeypatch.setattr("shared.launch.system.confirm", refuse)
+
+    rc = cli.main(["project", "delete", "P1", "--yes"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("DELETE", "/relay/v1/projects/P1")
+    assert "deleted" in capsys.readouterr().out
+
+
+def test_project_delete_reports_a_repository_that_was_left_behind(monkeypatch, tmp_path, capsys):
+    """`repository_removed: false` means the rows went and the directory did not.
+
+    Not a failure for the caller — what they asked for happened, and they could not retry anyway
+    because the id no longer resolves — but staying silent would leave an orphaned repository on a
+    disk nobody is watching. Read as an EXPLICIT `False`: *absent ⇒ nothing to report*, which is a
+    relay that does not send the key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "deleted": True, "repository_removed": False}))
+
+    rc = cli.main(["project", "delete", "P1", "--yes"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "repository" in out.lower(), out
+    assert "still on the relay" in out.lower(), out
+
+
+def test_project_delete_says_nothing_extra_when_the_relay_omits_the_key(monkeypatch, tmp_path,
+                                                                        capsys):
+    """The paired negative for the rule above: a relay that does not send `repository_removed` must
+    not be reported as having left a repository behind."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "deleted": True}))
+
+    assert cli.main(["project", "delete", "P1", "--yes"]) == 0
+    assert "still on the relay" not in capsys.readouterr().out.lower()
+
+
+def test_project_delete_help_says_it_cannot_be_undone_and_names_archive():
+    """A consequential verb discloses its cost in `--help`, the rule `project init` follows.
+
+    Somebody reaching for `delete` when they wanted `archive` is the mistake this slice exists to
+    make hard, and the help is where they find out before running it.
+    """
+    parser = cli.build_parser()
+    remover = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["delete"]
+    text = remover.format_help().lower()
+
+    assert "cannot be undone" in text or "irreversible" in text, text
+    assert "archive" in text, "the help does not name the reversible alternative"
+
+
+def test_project_archive_help_says_a_running_task_is_not_cancelled():
+    """The one thing about archiving that would otherwise be discovered by surprise (ADR 0033 D-p).
+
+    Somebody archiving a project while a colleague's agent is running needs to know that the agent
+    keeps going — and somebody who WANTED it stopped needs to be sent to `grid task cancel`.
+    """
+    parser = cli.build_parser()
+    archiver = parser._subparsers._group_actions[0].choices["project"] \
+        ._subparsers._group_actions[0].choices["archive"]
+    text = archiver.format_help().lower()
+
+    assert "cancel" in text, text
+    assert "repository is kept" in text or "nothing is destroyed" in text, text
+
+
+def test_project_status_says_when_the_project_is_archived(monkeypatch, tmp_path, capsys):
+    """A member reading a healthy-looking status has no other way to learn why their next `task
+    create` will be refused, so it is said first and in the member's own words."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40,
+        "archived": True}))
+    assert cli.main(["project", "status", "P1"]) == 0
+
+    out = capsys.readouterr().out
+    assert "archived" in out.lower(), out
+    assert "unarchive" in out, out
+
+
+def test_project_status_says_nothing_about_archiving_when_the_relay_omits_the_key(
+        monkeypatch, tmp_path, capsys):
+    """The paired negative: *absent ⇒ not archived*, which is every relay predating this slice."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40}))
+    assert cli.main(["project", "status", "P1"]) == 0
+
+    assert "archived" not in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue 28 (ADR 0033 D-a) — one spelling for a project id. `--project <id>` is
+# accepted everywhere the positional is, and the positional everywhere the flag
+# is. Client-only: no wire change, so no rollout order.
+# ---------------------------------------------------------------------------
+
+
+def _settled(argv: list[str]) -> argparse.Namespace:
+    """Parse `argv` the way the CLI does — argparse, then the two-spelling merge."""
+    from cli import project_arg
+
+    return project_arg.resolve(cli.build_parser().parse_args(argv))
+
+
+def test_a_project_command_takes_the_id_as_a_flag():
+    assert _settled(["project", "status", "--project", "abc123"]).project_id == "abc123"
+
+
+def test_a_project_command_still_takes_the_id_positionally():
+    assert _settled(["project", "status", "abc123"]).project_id == "abc123"
+
+
+def test_two_different_project_ids_are_refused_naming_both():
+    """Never a silent preference: the two spellings are one value, so a disagreement is the
+    caller's to settle, and they can only settle it if they are told what they said."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "status", "abc123", "--project", "def456"])
+    message = str(caught.value)
+    assert "abc123" in message and "def456" in message, message
+
+
+def test_the_same_project_id_twice_is_accepted():
+    assert _settled(["project", "status", "abc", "--project", "abc"]).project_id == "abc"
+
+
+def test_a_missing_project_id_is_refused_in_our_words_not_argparses():
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "status"])
+    message = str(caught.value)
+    assert "--project" in message, message
+    assert "grid project list" in message, message
+    assert "the following arguments are required" not in message, message
+
+
+def test_one_positional_beside_the_project_flag_is_never_read_as_the_project():
+    """The hazard this pins: measured, argparse hands a lone positional to `project_id` whatever the
+    caller meant, so `member remove --project P1 abc` would act on a project called `abc` and
+    silently ignore `P1`.
+
+    It used to be pinned as a REFUSAL. Review pointed out that a named `--project` settles the
+    question rather than leaving it open — `abc` can only be the member key — so the positional is
+    now placed there. The hazard is closed either way; what changed is that the reading is taken
+    instead of thrown away. A bogus value still fails loudly downstream, where a member key is
+    checked for shape.
+
+    Written against `member remove` since issue 41, which deleted the `promote` these two-value
+    tests were written against. It is the only two-positional command left, and the shape is the
+    machinery's rather than any one command's — `_place_a_lone_positional` keys on the SHAPE.
+    """
+    settled = _settled(["project", "member", "remove", "--project", "P1", "abc"])
+    assert settled.project_id == "P1", "the named project must survive a stray positional"
+    assert settled.member_key == "abc"
+
+
+# (the lone-positional-with-no-flag refusal is pinned by
+# `test_a_lone_positional_with_NO_flag_is_still_ambiguous_and_still_refused` below, which asserts
+# both spellings are named and that the message only claims ambiguity when there is some)
+
+
+def test_clone_reads_a_lone_positional_beside_the_project_flag_as_the_DIRECTORY():
+    """`clone` and `refresh` are `<project-id> [<directory>]`, so with the id named there is exactly
+    one thing a remaining positional can be. Measured: argparse would otherwise put it in the
+    project slot and leave the directory unset."""
+    settled = _settled(["project", "clone", "--project", "abc123", "mydir"])
+    assert (settled.project_id, settled.directory) == ("abc123", "mydir")
+
+
+def test_clone_keeps_both_of_its_positional_forms():
+    bare = _settled(["project", "clone", "abc123"])
+    assert (bare.project_id, bare.directory) == ("abc123", None)
+    with_dir = _settled(["project", "clone", "abc123", "mydir"])
+    assert (with_dir.project_id, with_dir.directory) == ("abc123", "mydir")
+
+
+def test_clone_refuses_two_positionals_beside_the_project_flag():
+    """There is only one slot to shift into, so the second has no reading to give it."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "clone", "--project", "abc123", "one", "two"])
+    message = str(caught.value)
+    assert "one" in message and "two" in message, message
+
+
+def test_refresh_takes_the_project_flag_too():
+    settled = _settled(["project", "refresh", "--project", "abc123", "mydir"])
+    assert (settled.project_id, settled.directory) == ("abc123", "mydir")
+
+
+def test_task_list_takes_a_positional_project_id():
+    assert _settled(["task", "list", "abc123"]).project == "abc123"
+
+
+def test_task_list_takes_no_project_at_all_and_still_refuses_a_blank_one():
+    """⚠️ **OVERTURNS issue 28's rule for this one command** (ADR 0034 D-m, issue 46).
+
+    It used to refuse a missing project, because there was "nothing to default it to". There is now:
+    omitting it lists the caller's own tasks across every project they can reach, which is the
+    application's home screen. Both spellings still work when one IS given.
+
+    Issue 28's other half survives untouched, and that is what the second half of this test is for:
+    a project given as an EMPTY string is still refused. `--project ""` is somebody's shell handing
+    over an unset variable, and reading it as "every project" would answer a much wider question
+    than the one that was asked.
+    """
+    assert _settled(["task", "list", "--project", "abc123"]).project == "abc123"
+    assert _settled(["task", "list"]).project is None
+    with pytest.raises(SystemExit) as caught:
+        _settled(["task", "list", "--project", ""])
+    assert "--project" in str(caught.value)
+
+
+def test_task_create_takes_the_project_either_way_and_neither_is_still_fine():
+    """The one command where omitting the project is not a refusal — it resolves the caller's own
+    `default` project (issue 26), and this slice must not turn that into an error."""
+    assert _settled(["task", "create", "abc123", "--prompt", "hi"]).project == "abc123"
+    assert _settled(["task", "create", "--project", "abc123", "--prompt", "hi"]).project == "abc123"
+    assert _settled(["task", "create", "--prompt", "hi"]).project is None
+
+
+# Every command that takes a project id, in both spellings. This is acceptance criterion 1 as a
+# table: the left column is what worked before this slice, the right is what it gains. A command
+# added later that takes a project belongs here — and the structural test below catches it if
+# whoever adds it forgets.
+_BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
+    (["project", "init", "P1"], ["project", "init", "--project", "P1"]),
+    (["project", "archive", "P1"], ["project", "archive", "--project", "P1"]),
+    (["project", "unarchive", "P1"], ["project", "unarchive", "--project", "P1"]),
+    (["project", "delete", "P1"], ["project", "delete", "--project", "P1"]),
+    # ADR 0034 D-k / issue 36. The walk found these two before this table did, which is what the
+    # count assertion below is for.
+    (["project", "share", "P1"], ["project", "share", "--project", "P1"]),
+    (["project", "private", "P1"], ["project", "private", "--project", "P1"]),
+    (["project", "member", "list", "P1"], ["project", "member", "list", "--project", "P1"]),
+    (["project", "member", "add", "P1", "--email", "a@b.c"],
+     ["project", "member", "add", "--project", "P1", "--email", "a@b.c"]),
+    (["project", "member", "remove", "P1", "KEY"],
+     ["project", "member", "remove", "--project", "P1", "--member", "KEY"]),
+    # ⚠️ `wip reset`'s second value is a CONVERSATION id since ADR 0034 D-e (issue 41), and it is a
+    # bare positional with no flag of its own — so the flag form names only the project. `promote`,
+    # `integrate` and `check` left this table with the commands themselves (D-d/D-m), and `commit`
+    # left it because it no longer takes a project id at all: it is addressed by conversation.
+    (["project", "wip", "reset", "P1", "C1", "--commit", "c" * 40],
+     ["project", "wip", "reset", "--project", "P1", "C1", "--commit", "c" * 40]),
+    (["project", "status", "P1"], ["project", "status", "--project", "P1"]),
+    # ADR 0034 D-m / issue 45. ⚠️ `files` is the `clone`/`refresh` shape — an OPTIONAL positional
+    # behind the optional project id — so `--project P src` needed `project_arg.add_path` to shift
+    # the slots; before it, `src` landed in `project_id` and the command listed a project called
+    # `src`. `file`'s path is REQUIRED, so argparse gives a lone positional to it and no rule is
+    # needed, exactly as `wip reset`'s conversation id needs none.
+    (["project", "files", "P1"], ["project", "files", "--project", "P1"]),
+    (["project", "file", "P1", "a.txt"], ["project", "file", "--project", "P1", "a.txt"]),
+    (["project", "download", "P1"], ["project", "download", "--project", "P1"]),
+    (["project", "import", "./repo", "P1"], ["project", "import", "./repo", "--project", "P1"]),
+    (["project", "clone", "P1"], ["project", "clone", "--project", "P1"]),
+    (["project", "refresh", "P1"], ["project", "refresh", "--project", "P1"]),
+    (["task", "create", "P1", "--prompt", "hi"],
+     ["task", "create", "--project", "P1", "--prompt", "hi"]),
+    (["task", "list", "P1"], ["task", "list", "--project", "P1"]),
+]
+
+
+@pytest.mark.parametrize("positional, flag", _BOTH_SPELLINGS,
+                         ids=[" ".join(p[:3]) for p, _ in _BOTH_SPELLINGS])
+def test_every_command_taking_a_project_accepts_both_spellings(positional, flag):
+    assert _settled(positional).project_id == "P1"
+    assert _settled(flag).project_id == "P1"
+
+
+def test_the_flag_form_reaches_the_relay_end_to_end(monkeypatch, tmp_path, capsys):
+    """The parse is only half of it: the settled id has to be what the handler asks the relay for."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen: dict[str, str] = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={
+            "project_id": "P1", "member_key": "abc", "trunk": "main", "main_commit": "a" * 40})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "status", "--project", "P1"]) == 0
+    assert seen["path"].endswith("/projects/P1/status"), seen
+
+
+def _every_parser(parser, prefix: str = ""):
+    """Walk the whole command tree, yielding (path, parser) for every node."""
+    yield prefix or parser.prog, parser
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, child in action.choices.items():
+                yield from _every_parser(child, f"{prefix} {name}".strip())
+
+
+def test_no_command_can_ship_with_only_one_spelling_of_the_project_id():
+    """The net under acceptance criterion 1: a command added later that takes a project id gets
+    both spellings or fails here.
+
+    A scan that stops recognising what it is looking for finds nothing and passes, so the count is
+    checked against the table above too — the reason grid-src's `test_task_errors` carries a
+    per-module floor. Mutation-checked three ways: dropping either spelling from one command, and
+    dropping the whole argument (which only the count can see).
+    """
+    positional_only, flag_only, both = [], [], []
+    for path, parser in _every_parser(cli.build_parser()):
+        actions = parser._actions
+        has_positional = any(a.dest == "project_id" and not a.option_strings for a in actions)
+        has_flag = any("--project" in a.option_strings for a in actions)
+        if has_positional and has_flag:
+            both.append(path)
+        elif has_positional:
+            positional_only.append(path)
+        elif has_flag:
+            flag_only.append(path)
+
+    assert positional_only == [], f"take a project id positionally but not as --project: {positional_only}"
+    assert flag_only == [], f"take --project but not a positional project id: {flag_only}"
+    assert len(both) == len(_BOTH_SPELLINGS), (
+        f"the walk found {len(both)} commands taking a project id, the table lists "
+        f"{len(_BOTH_SPELLINGS)}: {sorted(both)}")
+
+
+def test_import_keeps_its_path_when_the_project_is_named():
+    """`import <path> <project-id>` is the one shape with a REQUIRED positional in front. Measured:
+    argparse fills the required one first, so naming the project cannot steal the path."""
+    settled = _settled(["project", "import", "./repo", "--project", "P1"])
+    assert (settled.path, settled.project_id) == ("./repo", "P1")
+    positional = _settled(["project", "import", "./repo", "P1"])
+    assert (positional.path, positional.project_id) == ("./repo", "P1")
+
+
+def test_a_command_that_takes_no_project_is_untouched_by_the_merge():
+    """`project create` and `project list` name no project, so `resolve` must pass them through
+    rather than refuse them for a missing id."""
+    created = _settled(["project", "create", "--name", "thing"])
+    assert created.name == "thing"
+    assert not hasattr(created, "project_id")
+    assert _settled(["project", "list", "--all"]).all is True
+
+
+def test_a_missing_member_key_offers_a_form_that_exists_and_the_command_that_prints_keys():
+    """The project id and the member key are both two-spelling values, but they are not
+    interchangeable in a message: `grid project member remove <member-key>` is not a form, and it is
+    `grid project member list` — not `grid project list` — that prints a key.
+
+    Written against `member remove` since issue 41 deleted `promote`; it is the last command of this
+    shape, and the rule is the shape's rather than the command's.
+    """
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "member", "remove", "--project", "P1"])
+    message = str(caught.value)
+    assert "grid project member remove <member-key>" not in message, message
+    assert ("grid project member remove --project <project-id> --member <member-key>"
+            in message), message
+    assert "grid project member list" in message, message
+
+
+def test_naming_one_of_the_two_values_places_the_other_positionally():
+    """The two flags have to COMPOSE with the positionals, or the slice has just moved the
+    hands-changing one command along. A lone positional is only ambiguous when NEITHER flag is
+    given — name either one and the remaining slot is the only place the positional can go.
+
+    Found in review. The refusal that used to fire here said `'P1' on its own could be either the
+    project id or the member key`, which was not true once `--member` had been given.
+
+    ⚠️ `wip reset` LEFT this test with issue 41 and is not merely re-spelled. Its second value is a
+    conversation id now (ADR 0034 D-e) and has no flag, so it is never one of two things a lone
+    positional could be — there is nothing to place. It is covered as a plain-shaped command by
+    `_BOTH_SPELLINGS` instead. `member remove` is the only two-value command left.
+    """
+    from_member = _settled(["project", "member", "remove", "P1", "--member", "KEY"])
+    assert (from_member.project_id, from_member.member_key) == ("P1", "KEY")
+    from_project = _settled(["project", "member", "remove", "--project", "P1", "KEY"])
+    assert (from_project.project_id, from_project.member_key) == ("P1", "KEY")
+
+
+def test_a_lone_positional_with_NO_flag_is_still_ambiguous_and_still_refused():
+    """The half of the shape limitation that is real: with nothing named, argparse cannot tell
+    `member remove <member-key>` from `member remove <project-id>` and neither can we.
+
+    Written against `member remove` since issue 41 deleted `promote`.
+    """
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "member", "remove", "P1"])
+    message = str(caught.value)
+    assert "could be either" in message, message
+    assert "--project" in message and "--member" in message, message
+
+
+def test_refresh_with_the_project_id_said_twice_leaves_the_directory_alone():
+    """`--project P1 P1` is one project id given both ways, which the docs promise is fine — not a
+    request to refresh `./P1`. Found in review: `clone` hid it, because a directory named after the
+    project id is also `clone`'s default, and `refresh`'s default is the current directory."""
+    settled = _settled(["project", "refresh", "--project", "P1", "P1"])
+    assert (settled.project_id, settled.directory) == ("P1", None)
+    still_explicit = _settled(["project", "refresh", "P1", "P1"])
+    assert (still_explicit.project_id, still_explicit.directory) == ("P1", "P1")
+
+
+def test_a_stray_positional_with_both_values_already_named_is_refused():
+    """The third arm of the two-positional shape, and the one no test reached before: with both
+    values named there is no free slot, so a positional is a stray. It goes to `project_id` (that is
+    what argparse does), and the conflict refusal names both values rather than acting on `STRAY`.
+
+    Written against `member remove` since issue 41 deleted `promote`.
+    """
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "member", "remove", "--project", "P1", "--member", "KEY", "STRAY"])
+    message = str(caught.value)
+    assert "STRAY" in message and "P1" in message, message
+    # Restating a value that agrees is still fine, here as everywhere else.
+    settled = _settled(["project", "member", "remove", "--project", "P1", "--member", "KEY", "P1"])
+    assert (settled.project_id, settled.member_key) == ("P1", "KEY")
+
+
+def test_clone_takes_a_directory_beside_a_project_id_said_twice():
+    """Falls out of the same-value carve-out, and is worth pinning because it used to be refused:
+    the id agreeing with itself leaves the second positional free to be the directory."""
+    settled = _settled(["project", "clone", "--project", "P1", "P1", "mydir"])
+    assert (settled.project_id, settled.directory) == ("P1", "mydir")
+
+
+def _suggested_forms(argv: list[str]) -> list[list[str]]:
+    """Run `argv`, expect our refusal, and turn each command form it offers back into argv."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(argv)
+    forms = [line.strip() for line in str(caught.value).splitlines() if line.startswith("    ")]
+    assert forms, f"no command forms offered:\n{caught.value}"
+    filled = []
+    for form in forms:
+        words = form.split()
+        assert words[0] == "grid", form
+        argv_form = []
+        for word in words[1:]:
+            argv_form.append({"<project-id>": "P1", "<member-key>": "KEY",
+                              "<path>": "./repo"}.get(word, word))
+        filled.append(argv_form)
+    return filled
+
+
+# `(argv, trigger, extra)` per command:
+#   * `argv`    — the command, up to but not including whatever makes it refuse;
+#   * `trigger` — what makes the refusal OURS rather than argparse's;
+#   * `extra`   — the other required flags a suggested form needs before it can parse at all.
+#
+# The two are separate because for one command the trigger is itself the thing being refused, and
+# carrying it into the completed form would refuse that too. They are the same list everywhere else,
+# which is what the shape looked like before issue 46.
+_FORM_CASES = [
+    (["project", "status"], [], []),
+    (["project", "clone"], [], []),
+    (["project", "import", "./repo"], [], []),
+    (["project", "member", "remove", "--member", "KEY"], [], []),
+    # ⚠️ `wip reset` gained a REQUIRED second positional in issue 41 (the conversation id, ADR 0034
+    # D-e) and it was registered with a bare `add_argument`, so `project_arg` never learned about
+    # it. Supplying it here is what makes the refusal ours rather than argparse's — and the forms
+    # that refusal then offers are the thing under test.
+    (["project", "wip", "reset", "C1"], ["--commit", "c" * 40], ["--commit", "c" * 40]),
+    # ⚠️ `--project ""` is the TRIGGER and not an extra: since ADR 0034 D-m (issue 46) omitting the
+    # project is a REQUEST — the caller's own tasks across every project — so the bare form no
+    # longer refuses and had nothing for this check to read. A blank value is still refused, by the
+    # same `project_arg` code offering the same forms. Carried into the completed form it would
+    # refuse `grid task list P1 --project ""` as well, which is the refusal working, not a broken
+    # suggestion.
+    (["task", "list"], ["--project", ""], []),
+]
+
+
+# Commands this CLI used to have and no longer does (ADR 0034 D-d/D-m, issue 41). Prose that still
+# tells somebody to run one of these is not a stale comment — it is an instruction that ends in
+# argparse's `invalid choice`, in the one place a person looks when they are already stuck.
+_DELETED_COMMANDS = ("grid project promote", "grid project integrate", "grid project check")
+
+
+def test_no_help_text_tells_anybody_to_run_a_command_that_was_deleted():
+    """Every subparser's `--help`, swept for the commands this slice removed.
+
+    ⚠️ **Written because this class bit three times in one slice.** `grid project clone`'s
+    description told the reader to run `grid project integrate`; `grid project import`'s said the
+    trunk moves when somebody promotes; `grid task cancel`'s named an integrate as the usual reason
+    to cancel. The long-form `docs/cli.md` was updated for all three and the argparse text was not,
+    because nothing reads it — `--help` is the only user-facing prose in this repository with no
+    test over it at all, which is exactly why it rots first.
+
+    Swept rather than listed, so a command added later is covered without anybody remembering to
+    add it here. `_DELETED_COMMANDS` is the thing to extend when the next verb goes.
+    """
+    import argparse as _argparse
+
+    from cli.parser import build_parser
+
+    def descriptions(parser, prog="grid"):
+        yield prog, (parser.description or ""), (parser.format_help() or "")
+        for action in parser._actions:
+            if isinstance(action, _argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    yield from descriptions(sub, f"{prog} {name}")
+
+    offences = []
+    for prog, description, rendered in descriptions(build_parser()):
+        for gone in _DELETED_COMMANDS:
+            if gone in description or gone in rendered:
+                offences.append(f"{prog} --help names `{gone}`")
+    assert not offences, (
+        "help text tells a reader to run a command that no longer exists, so following it ends in "
+        "argparse's `invalid choice`: " + "; ".join(sorted(set(offences))))
+
+
+@pytest.mark.parametrize("argv, trigger, extra", _FORM_CASES,
+                         ids=[" ".join(a[:3]) for a, _t, _e in _FORM_CASES])
+def test_a_refusal_only_ever_offers_a_command_that_really_works(argv, trigger, extra):
+    """A refusal that names a form which does not parse — or parses into the wrong slot — sends the
+    reader round the loop again. Found in review for the member shape; `import` is worse, because
+    `grid project import <project-id>` DOES parse and puts the id in the `<path>` slot.
+
+    So the forms are checked by running them, not by reading them.
+    """
+    # The TRIGGER is what makes the refusal ours: argparse rejects its own missing required flags
+    # before `resolve` runs, so without it there would be nothing of ours to read. The EXTRA is what
+    # the suggested form then needs to parse, and the two are not always the same list.
+    for form in _suggested_forms([*argv, *trigger]):
+        settled = _settled([*form, *extra])
+        assert settled.project_id == "P1", f"{form} did not put the project id in the project slot"
+        if "path" in vars(settled):
+            assert settled.path == "./repo", f"{form} lost the path"
+
+
+@pytest.mark.parametrize("register", ["add_member", "add_directory"])
+def test_registering_a_second_positional_before_the_project_says_so(register):
+    """The order is load-bearing — argparse fills consecutive optional positionals left to right, so
+    registering the project id second would silently swap what a caller's first word means. Getting
+    it wrong is a developer error at parser-build time, so it must be loud AND legible."""
+    from cli import project_arg
+
+    bare = argparse.ArgumentParser(prog="grid thing")
+    with pytest.raises(ValueError) as caught:
+        getattr(project_arg, register)(bare, help="x")
+    assert "add_project" in str(caught.value), caught.value
+
+
+def test_an_empty_project_id_is_refused_here_not_misreported_as_an_old_relay():
+    """`grid project status ""` used to build `/relay/v1/projects//status`, which matches no route,
+    so the relay answered a bare framework 404 and `missing_route_hint` turned it into "this grid's
+    relay does not have projects yet — ask its operator to update it". The relay is fine; the id was
+    empty. Sending somebody to chase a working feature is the failure `_OLD_RELAY_NO_CANCEL` exists
+    to avoid, and an empty id never reaches the wire now.
+
+    Pre-existing — the old required positional accepted "" too, and argparse's `required=True` only
+    ever checked presence, never emptiness.
+    """
+    for blank in ("", "   "):
+        with pytest.raises(SystemExit) as caught:
+            _settled(["project", "status", blank])
+        message = str(caught.value)
+        assert "empty" in message, message
+        assert "--project" in message and "grid project list" in message, message
+        assert "relay" not in message.lower(), message
+
+        with pytest.raises(SystemExit) as by_flag:
+            _settled(["project", "status", "--project", blank])
+        assert "empty" in str(by_flag.value), by_flag.value
+
+
+def test_an_empty_project_on_task_create_still_says_it_may_be_left_off():
+    """The one command with a fallback, so the refusal has to name it — otherwise the advice is
+    "pass a real id" to somebody whose next move is to pass none at all."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["task", "create", "--project", "", "--prompt", "x"])
+    message = str(caught.value)
+    assert "empty" in message, message
+    assert "default" in message, message
+
+
+def test_an_empty_member_key_is_refused_as_a_member_key():
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "member", "remove", "--project", "P1", "--member", "  "])
+    message = str(caught.value)
+    assert "member key" in message and "empty" in message, message
+    assert "grid project member list" in message, message
+
+
+def test_an_empty_project_flag_on_clone_is_refused_before_the_directory_shift():
+    """Otherwise the shift runs on a blank id and the refusal talks about directories."""
+    with pytest.raises(SystemExit) as caught:
+        _settled(["project", "clone", "--project", "", "mydir"])
+    assert "empty" in str(caught.value), caught.value
+
+
+# --- ADR 0034 D-k / issue 36: `grid project share | private` ---
+#
+# Two verbs for one enum, and every test below that touches `visibility` compares against an
+# EXPLICIT value and never on truthiness — *absent ⇒ grid-visible* is what a relay predating this
+# slice says, and that reading has to stay available. The dangerous direction is the quiet one: a
+# CLI that reported "private" for a project the relay never restricted.
+
+
+def test_project_private_posts_the_value_to_the_visibility_route(monkeypatch, tmp_path, capsys):
+    """The tracer bullet. One route, and the VALUE travels in the body — the relay's column is an
+    enum ADR 0034 D-k leaves open, so a boolean here would be a second vocabulary to map onto it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "private", "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "private", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/visibility")
+    assert seen["body"] == {"visibility": "private"}, seen["body"]
+    out = capsys.readouterr().out
+    assert "P1" in out
+    assert "share" in out, f"the way back is not named: {out!r}"
+
+
+def test_project_share_posts_the_other_value(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "grid", "changed": True})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "share", "P1"])
+
+    assert rc == 0
+    assert seen["body"] == {"visibility": "grid"}, seen["body"]
+    out = capsys.readouterr().out
+    assert "private" in out, f"the way back is not named: {out!r}"
+
+
+def test_project_private_says_when_it_was_already_private(monkeypatch, tmp_path, capsys):
+    """`changed: false` is a 200, not a failure — the state the caller asked for is the state that
+    holds, the reading archive and init both apply to a double-submit."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+        "archived": False, "visibility": "private", "changed": False}))
+    rc = cli.main(["project", "private", "P1"])
+
+    assert rc == 0
+    assert "already" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.parametrize("reply", [
+    {"id": "P1"},                                       # the key is missing entirely
+    {"id": "P1", "visibility": "grid"},                 # the relay did the OPPOSITE
+    {"id": "P1", "visibility": True},                   # a boolean where an enum belongs
+    {"id": "P1", "visibility": "Private"},              # a spelling this build does not know
+])
+def test_project_private_refuses_to_call_an_unreadable_reply_a_restriction(
+        monkeypatch, tmp_path, reply):
+    """The house guard, and the one that matters most in this slice. A member told their project is
+    private walks away and stops thinking about it; if the relay never restricted it, colleagues
+    keep reading their work and nothing ever says so."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "private", "P1"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("verb", ["share", "private"])
+def test_the_visibility_route_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path, verb):
+    """A brand-new route, so a relay that predates it answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1"])
+
+    message = str(caught.value).lower()
+    assert "relay" in message, caught.value
+    # ⚠️ NOT `_OLD_RELAY`'s sentence: this relay HAS projects and is missing one route.
+    assert "does not have projects yet" not in message, caught.value
+    # And it says what the silence MEANS — on a relay this old a project is members-only already,
+    # so somebody who reached for `private` has what they asked for and must not be left thinking
+    # their work is exposed with no way to fix it.
+    assert "members" in message, caught.value
+
+
+@pytest.mark.parametrize("verb", ["share", "private"])
+def test_a_real_404_from_the_visibility_route_is_not_masked(monkeypatch, tmp_path, verb):
+    """The paired negative: a relay that HAS the route and answers 404 about the project must show
+    its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", verb, "P1"])
+
+    assert "no such project" in str(caught.value).lower(), caught.value
+    assert "predates" not in str(caught.value).lower(), caught.value
+
+
+def test_project_list_marks_a_private_project_and_leaves_the_rest_alone(monkeypatch, tmp_path,
+                                                                       capsys):
+    """*Absent ⇒ grid-visible.* The middle row is what a relay predating this slice sends for every
+    project, and marking it private would tell a whole grid their work was restricted when it is
+    not."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"projects": [
+        {"id": "P1", "name": "shared", "role": "owner", "visibility": "grid"},
+        {"id": "P2", "name": "from-an-old-relay", "role": "owner"},
+        {"id": "P3", "name": "secret", "role": "owner", "visibility": "private"},
+    ]}))
+    rc = cli.main(["project", "list"])
+
+    assert rc == 0
+    # `ID  ROLE  NAME` — key on the NAME, which is the third column.
+    lines = {line.split()[2]: line for line in capsys.readouterr().out.splitlines()
+             if line.startswith("P")}
+    assert "(private)" not in lines["shared"], lines["shared"]
+    assert "(private)" not in lines["from-an-old-relay"], lines["from-an-old-relay"]
+    assert "(private)" in lines["secret"], lines["secret"]
+
+
+def test_project_list_shows_the_grid_role_a_colleagues_project_carries(monkeypatch, tmp_path,
+                                                                       capsys):
+    """`role` is `grid` for a project reached without a membership row (ADR 0034 D-k). Printed as
+    it is, so a person can tell "I am not in this one" from a field the relay did not send."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"projects": [
+        {"id": "P1", "name": "theirs", "role": "grid", "visibility": "grid"},
+    ]}))
+    rc = cli.main(["project", "list"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "grid" in out and "theirs" in out, out
+    assert "?" not in out, f"a defined role was rendered as a missing field: {out!r}"
+
+
+def test_project_status_announces_private_and_stays_quiet_about_grid(monkeypatch, tmp_path,
+                                                                     capsys):
+    """Only the RESTRICTED state is announced. Grid-visible is the default on a relay that serves
+    D-k, so saying it on every status is noise; private is a deliberate act somebody needs
+    reminding of before they wonder why a colleague cannot see their work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = {
+        "project_id": "P1", "member_key": "a" * 32, "trunk": "main",
+        "main_commit": "c" * 40, "archived": False,
+    }
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={**body, "visibility": "private"}))
+    assert cli.main(["project", "status", "P1"]) == 0
+    private_out = capsys.readouterr().out
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={**body, "visibility": "grid"}))
+    assert cli.main(["project", "status", "P1"]) == 0
+    grid_out = capsys.readouterr().out
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    assert cli.main(["project", "status", "P1"]) == 0
+    old_relay_out = capsys.readouterr().out
+
+    assert "PRIVATE" in private_out, private_out
+    assert "grid project share P1" in private_out, private_out
+    assert "PRIVATE" not in grid_out, grid_out
+    assert "PRIVATE" not in old_relay_out, (
+        "a relay that sends no visibility was reported as having restricted the project")
+
+
+def test_project_share_does_not_claim_a_widening_the_relay_cannot_perform(monkeypatch, tmp_path,
+                                                                          capsys):
+    """`grid_access: false` — the relay saying it does not share projects grid-wide at all.
+
+    Found in review of ADR 0034 D-k. The setting and its EFFECT are two facts: on any grid but a
+    per-email-domain one the `visibility` column is written and honoured by nothing, so a CLI that
+    read `visibility: "grid"` alone printed "Anyone signed in to this grid can now work in it"
+    about a project only its members can reach. `private` was accurate on such a relay; `share` was
+    not, which is the direction that matters.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+        "archived": False, "visibility": "grid", "grid_access": False, "changed": True}))
+    rc = cli.main(["project", "share", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Anyone signed in to this grid can now work in it" not in out, out
+    assert "does not share projects grid-wide" in out, out
+
+
+@pytest.mark.parametrize("grid_access", [True, None])
+def test_project_share_claims_the_widening_when_the_relay_does_serve_it(
+        monkeypatch, tmp_path, capsys, grid_access):
+    """`True`, and — the paired negative — a reply with the key ABSENT.
+
+    ⚠️ `is False`, never falsiness. *Absent ⇒ served* is the only available reading: a relay that
+    answers this route at all has this slice, and one that does not answers a 404 that became
+    `_OLD_RELAY_NO_VISIBILITY`. Keying on truthiness would make every reply a proxy had stripped
+    read as "this grid shares nothing", which is the opposite of the truth.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = {"id": "P1", "name": "acme", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "grid", "changed": True}
+    if grid_access is not None:
+        body["grid_access"] = grid_access
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    rc = cli.main(["project", "share", "P1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Anyone signed in to this grid can now work in it" in out, out
+    assert "does not share projects grid-wide" not in out, out
+
+
+# ---------------------------------------------------------------------------
+# ADR 0034 D-l / issue 44 — undoing the last change.
+#
+# The counterweight to issue 41: auto-apply removed the moment a person could decline, so the only
+# way back has to be something they can press afterwards. `grid task undo <turn-id>` names the TURN,
+# never a commit, and no git vocabulary reaches its surface.
+# ---------------------------------------------------------------------------
+
+
+def test_task_undo_posts_to_the_undo_route_and_says_what_happened(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = request.content
+        return httpx.Response(200, json={
+            "task_id": "t-1", "project_id": "P1", "undone": True,
+            "undone_at": "2026-08-17T10:00:00+00:00", "trunk_commit": "a" * 40})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "undo", "t-1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/tasks/t-1/undo")
+    assert seen["auth"] == "Bearer AT"
+    # No body. The route is addressed by the turn id and fenced on the caller's own identity, so
+    # anything sent here would be a second way of saying who is undoing what — `cancel_task`'s rule.
+    assert seen["body"] == b""
+    out = capsys.readouterr().out
+    assert "t-1" in out
+
+
+def test_task_undo_says_nothing_about_git_on_its_own_surface(monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-m. The person this exists for does not know what a branch is, and undo is the one
+    command in the plane whose whole subject is a git operation."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "task_id": "t-1", "project_id": "P1", "undone": True,
+        "undone_at": "2026-08-17T10:00:00+00:00", "trunk_commit": "a" * 40}))
+
+    cli.main(["task", "undo", "t-1"])
+
+    out = capsys.readouterr().out.lower()
+    for word in ("branch", "merge", "commit", "revert", "conflict", "rebase", "head", "trunk",
+                 "wip", "sha", "oid", "fast-forward"):
+        assert word not in out, f"{word!r} reached a person's screen"
+
+
+def test_task_undo_emits_the_relays_document_verbatim_under_json(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    answer = {"task_id": "t-1", "project_id": "P1", "undone": True,
+              "undone_at": "2026-08-17T10:00:00+00:00", "trunk_commit": "a" * 40}
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=answer))
+
+    rc = cli.main(["task", "undo", "t-1", "--json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == answer
+
+
+def test_task_undo_refuses_a_reply_it_cannot_read(monkeypatch, tmp_path):
+    """The rule every sibling in this plane follows since issue 19a's review: an answer this command
+    cannot read is NOT a successful undo. Reporting one would tell somebody the change they regret
+    had been taken out of the project when nothing had happened.
+
+    ⚠️ Keyed on an explicit `undone is True`, never on truthiness — the `serves_you` / `archived` /
+    `visibility` rule. A relay that stopped sending the key must not be read as having done it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"task_id": "t-1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    assert "t-1" in str(caught.value)
+
+
+def test_task_undo_against_a_relay_that_has_never_heard_of_it_says_so(monkeypatch, tmp_path):
+    """A bare framework 404 is an old relay, not a missing turn, and the two need opposite actions.
+
+    Its own sentence rather than the project routes' `_OLD_RELAY`, which says the relay has no
+    projects — plainly false of one that has been serving `grid task create`.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    message = str(caught.value).lower()
+    assert "relay" in message
+    assert "undo" in message
+    # It must say what the silence MEANS — nothing was changed — or somebody goes looking in the
+    # project for a change that is still exactly where it was.
+    assert "nothing" in message
+
+
+def test_task_undo_shows_a_real_refusal_in_the_relays_own_words(monkeypatch, tmp_path):
+    """The other side of that gate: a 404 ABOUT the turn must not be reported as an old relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    assert str(caught.value) == "No such project"
+
+
+@pytest.mark.parametrize("code,message", [
+    ("not_yours_to_undo", "That change was asked for by another project member."),
+    ("already_undone", "That change has already been undone."),
+    ("cannot_undo_a_merge_step", "That step combined your work with a colleague's."),
+    ("undo_conflicts", "That change cannot be undone on its own."),
+    ("nothing_to_undo", "That step did not change anything in the project."),
+    # The relay's seventh route-owned refusal, and the one this table first left out — it had been
+    # swapped for `project_archived` below, which comes from the SHARED guard rather than from the
+    # undo route. Every code the route can send is exercised here now.
+    ("trunk_moved_during_undo", "Other work landed in this project while the change was being "
+                                "undone. Nothing was changed — try again."),
+    ("project_archived", "This project is archived. Run `grid project unarchive` first."),
+])
+def test_task_undo_passes_every_refusal_through_in_the_relays_own_words(
+        monkeypatch, tmp_path, code, message):
+    """Six coded refusals and this CLI branches on NONE of them.
+
+    Each relay message already names what to do, so a branch here would be a second copy of wording
+    the relay owns — the `project_archived` / `project_not_empty` rule from issue 33, which is why
+    this CLI parses exactly two codes and issue 33 deliberately did not make it three.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={
+        "detail": {"code": code, "message": message}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "undo", "t-1"])
+
+    assert str(caught.value) == message
+
+
+# --------------------------------------------------------------------------------------------
+# `grid project files | file | download` and `grid task diff` — seeing a project with no git
+# (ADR 0034 D-m, issue 45).
+# --------------------------------------------------------------------------------------------
+
+
+def test_project_files_asks_the_files_route_and_lists_what_came_back(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["query"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={
+            "project_id": "P1", "commit": "a" * 40, "path": "",
+            "entries": [{"name": "README.md", "type": "file", "size": 12,
+                         "executable": False, "symlink": False},
+                        {"name": "src", "type": "directory", "size": None,
+                         "executable": False, "symlink": False}],
+            "total": 2, "truncated": False})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "files", "P1"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/files")
+    assert seen["query"] == {"path": ""}
+    assert seen["auth"] == "Bearer AT"
+    out = capsys.readouterr().out
+    assert "README.md" in out
+    # A folder is marked as one, so the eye separates the two without reading a `type` column.
+    assert "src/" in out
+
+
+def test_project_files_sends_the_folder_it_was_asked_for(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"project_id": "P1", "commit": "a" * 40, "path": "src",
+                                         "entries": [], "total": 0, "truncated": False})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "files", "P1", "src/"]) == 0
+
+    # Trimmed of its slashes before it goes on the wire, so `src/` and `src` are one request and the
+    # relay never has to decide what a trailing separator means.
+    assert seen["query"] == {"path": "src"}
+
+
+def test_an_empty_folder_is_not_the_same_as_a_project_with_nothing_in_it(
+        monkeypatch, tmp_path, capsys):
+    """The criterion: "empty directory" has to be distinguishable from "could not ask", and both
+    from a project that has not been started."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": None, "path": "", "entries": [], "total": 0,
+        "truncated": False}))
+    assert cli.main(["project", "files", "P1"]) == 0
+    nothing_yet = capsys.readouterr().out
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": "a" * 40, "path": "src", "entries": [], "total": 0,
+        "truncated": False}))
+    assert cli.main(["project", "files", "P1", "src"]) == 0
+    empty_folder = capsys.readouterr().out
+
+    assert nothing_yet != empty_folder
+    assert "nothing in it yet" in nothing_yet
+    assert "nothing here" in empty_folder
+
+
+def test_a_listing_the_cli_cannot_read_is_not_reported_as_an_empty_one(monkeypatch, tmp_path):
+    """The house guard. A reply this command cannot read is not a listing it may report — otherwise
+    a relay that changed shape would tell somebody their project is empty."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"project_id": "P1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "files", "P1"])
+
+    assert "--json" in str(caught.value)
+
+
+def test_project_file_prints_text_and_writes_bytes_with_output(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["path"], seen["query"] = request.url.path, dict(request.url.params)
+        return httpx.Response(200, json={
+            "project_id": "P1", "commit": "a" * 40, "path": "a.txt", "size": 6,
+            "executable": False, "symlink": False, "too_large": False, "limit": 5 * 1024 * 1024,
+            "binary": False, "encoding": "utf-8", "content": "hello\n"})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "file", "P1", "a.txt"]) == 0
+
+    assert seen["path"] == "/relay/v1/projects/P1/file"
+    # The path rides a QUERY parameter, never a path segment: a file's path has slashes in it.
+    assert seen["query"] == {"path": "a.txt"}
+    assert capsys.readouterr().out == "hello\n"
+
+    destination = tmp_path / "out.txt"
+    assert cli.main(["project", "file", "P1", "a.txt", "--output", str(destination)]) == 0
+    assert destination.read_bytes() == b"hello\n"
+
+
+def test_a_binary_file_is_saved_and_never_written_to_the_terminal(monkeypatch, tmp_path, capsys):
+    """A terminal handed a PNG stops rendering text, and the person's next command is invisible to
+    them — a worse outcome than being told which flag to use."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    blob = b"\x89PNG\r\n\x1a\n\x00\x01\x02"
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": "a" * 40, "path": "logo.png", "size": len(blob),
+        "executable": False, "symlink": False, "too_large": False, "limit": 5 * 1024 * 1024,
+        "binary": True, "encoding": "base64", "content": base64.b64encode(blob).decode()}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "file", "P1", "logo.png"])
+    assert "--output" in str(caught.value)
+
+    destination = tmp_path / "logo.png"
+    assert cli.main(["project", "file", "P1", "logo.png", "--output", str(destination)]) == 0
+    assert destination.read_bytes() == blob
+
+
+def test_a_file_over_the_relays_bound_is_refused_with_the_way_forward(monkeypatch, tmp_path):
+    """The relay answers 200 with `too_large` — the file is real and the ask was reasonable — but
+    THIS command promised contents and did not get them, so it exits non-zero."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "commit": "a" * 40, "path": "big.bin", "size": 99_000_000,
+        "executable": False, "symlink": False, "too_large": True, "limit": 5 * 1024 * 1024,
+        "binary": None, "encoding": None, "content": None}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "file", "P1", "big.bin"])
+
+    assert "grid project download P1" in str(caught.value)
+
+
+def test_project_download_streams_the_zip_to_disk_and_says_where(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    payload = b"PK\x03\x04" + b"z" * 500
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, content=payload,
+                              headers={"content-type": "application/zip"})
+
+    _mock_relay(monkeypatch, handler)
+    destination = tmp_path / "p.zip"
+    assert cli.main(["project", "download", "P1", "--output", str(destination)]) == 0
+
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/projects/P1/download")
+    assert destination.read_bytes() == payload
+    assert str(destination) in capsys.readouterr().out
+
+
+def test_a_refused_download_leaves_no_part_file_behind(monkeypatch, tmp_path):
+    """The part file is this command's own litter. A refusal that left one behind would look like a
+    half-finished download in the folder the person was watching."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(413, json={
+        "detail": {"code": "project_too_large_to_download",
+                   "message": "This project holds 5000000000 bytes", "bytes": 5_000_000_000,
+                   "limit": 1_073_741_824}}))
+    destination = tmp_path / "p.zip"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(destination)])
+
+    assert "5000000000" in str(caught.value)
+    assert not destination.exists()
+    assert list(tmp_path.glob(".p.zip.*")) == [], "a .part file survived a refusal"
+
+
+def test_task_diff_asks_the_diff_route_and_names_who_asked(monkeypatch, tmp_path, capsys):
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={
+            "task_id": "t-1", "project_id": "P1", "kind": "message", "state": "completed",
+            "author": {"name": "Alice Example", "email": "alice@example.com"},
+            "created_at": None, "completed_at": None, "available": True,
+            "files": [{"path": "a.txt", "status": "added", "added": 2, "deleted": 0,
+                       "binary": False}],
+            "patch": "--- /dev/null\n+++ b/a.txt\n", "patch_truncated": False})
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["task", "diff", "t-1"]) == 0
+
+    assert (seen["method"], seen["path"]) == ("GET", "/relay/v1/tasks/t-1/diff")
+    out = capsys.readouterr().out
+    assert "Alice Example" in out
+    assert "a.txt" in out
+    assert "+2 -0" in out
+
+
+def test_a_merge_step_is_not_attributed_to_the_person(monkeypatch, tmp_path, capsys):
+    """ADR 0034 D-g: a merge turn is machinery, not a message. `kind` is compared for EQUALITY —
+    absent means a person's message, which is the right degrade for an older relay."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "task_id": "t-2", "project_id": "P1", "kind": "merge", "state": "completed",
+        "author": {"name": "Alice Example", "email": "a@example.com"},
+        "created_at": None, "completed_at": None, "available": True,
+        "files": [], "patch": None, "patch_truncated": False}))
+
+    assert cli.main(["task", "diff", "t-2"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Alice Example" not in out
+    assert "combine" in out
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("no_result", "did not change anything"),
+    ("expired", "no longer keeps"),
+    ("something_new", "no change to show"),
+])
+def test_a_task_with_no_change_to_show_is_an_answer_and_not_a_failure(
+        monkeypatch, tmp_path, capsys, reason, expected):
+    """Both documented reasons are answers, so the exit code stays 0 — and a reason this CLI has
+    never heard of is DISPLAYED rather than guessed at (the `task.retry` rule)."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "task_id": "t-3", "project_id": "P1", "kind": "message", "state": "failed",
+        "author": None, "created_at": None, "completed_at": None,
+        "available": False, "reason": reason, "files": [], "patch": None,
+        "patch_truncated": False}))
+
+    assert cli.main(["task", "diff", "t-3"]) == 0
+
+    assert expected in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", [
+    ["project", "files", "P1"],
+    ["project", "file", "P1", "a.txt"],
+    ["project", "download", "P1"],
+    ["task", "diff", "t-1"],
+])
+def test_an_old_relay_gets_a_sentence_naming_the_relay_not_a_bare_not_found(
+        monkeypatch, tmp_path, command):
+    """All four arrived in one release, so one hint covers them — `_OLD_RELAY_NO_ARCHIVE`'s
+    precedent. It must NOT be `_OLD_RELAY`, which claims the relay has no projects at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(command)
+
+    message = str(caught.value)
+    assert "predates" in message
+    assert "operator to update it" in message
+    assert "does not have projects" not in message
+
+
+@pytest.mark.parametrize("command", [
+    ["project", "files", "P1"],
+    ["project", "file", "P1", "a.txt"],
+    ["project", "download", "P1"],
+    ["task", "diff", "t-1"],
+])
+def test_a_real_refusal_is_shown_in_the_relays_own_words(monkeypatch, tmp_path, command):
+    """The other side of that gate: a 404 the relay MEANT must keep its own sentence."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(command)
+
+    assert str(caught.value) == "No such project"
+
+
+@pytest.mark.parametrize("command,route", [
+    (["project", "files", "P1", "--json"], "files"),
+    (["project", "file", "P1", "a.txt", "--json"], "file"),
+    (["task", "diff", "t-1", "--json"], "diff"),
+])
+def test_json_puts_the_relays_own_document_on_stdout(monkeypatch, tmp_path, capsys, command, route):
+    """The application contract: stdout is one parseable document and nothing else."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = {"project_id": "P1", "commit": "a" * 40, "path": "a.txt", "entries": [], "total": 0,
+            "truncated": False, "size": 6, "executable": False, "symlink": False,
+            "too_large": False, "limit": 10, "binary": False, "encoding": "utf-8",
+            "content": "hello\n", "available": False, "reason": "no_result", "files": [],
+            "patch": None, "patch_truncated": False, "task_id": "t-1", "kind": "message",
+            "state": "failed", "author": None, "created_at": None, "completed_at": None}
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    assert cli.main(command) == 0
+
+    assert json.loads(capsys.readouterr().out) == body
+
+
+def test_a_diff_reply_the_cli_cannot_read_is_refused_not_reported_as_no_change(
+        monkeypatch, tmp_path):
+    """⚠️ Found by review. This is the surface that audits what landed, so "I do not understand what
+    the relay sent" printed as "this task changed nothing" is the one wrong answer that stops
+    somebody looking. `grid project files` refuses in the same situation; this now matches it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"task_id": "t-1"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "diff", "t-1"])
+
+    assert "--json" in str(caught.value)
+
+
+def test_a_download_that_wrote_nothing_is_refused_rather_than_called_empty(monkeypatch, tmp_path):
+    """⚠️ Found by review. An empty project is a 22-byte zip, not a 0-byte one, and a project with
+    no trunk is refused by the relay before anything streams — so there is no legitimate way to get
+    here, and the first draft's reassuring note described a real fault as normal."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, content=b"",
+                                                      headers={"content-type": "application/zip"}))
+    destination = tmp_path / "p.zip"
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(destination)])
+
+    assert "no data" in str(caught.value)
+    assert "empty project" not in str(caught.value).split("This is not")[0]
+
+
+@pytest.mark.parametrize("bad", ["missing-folder", "a-file"])
+def test_a_download_to_an_unwritable_place_is_a_clean_refusal_not_a_traceback(
+        monkeypatch, tmp_path, bad):
+    """⚠️ The `.part` file is created BEFORE the request, so its failure is outside the transport's
+    own handler. Measured: `--output /nonexistent-dir/p.zip` printed a raw `FileNotFoundError` at
+    the user, where this plane's contract is that any failure is a clean `SystemExit`.
+
+    Refused before the relay is asked for anything, which is also the cheap direction: there is no
+    point packing a project into a path that cannot be written.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    if bad == "missing-folder":
+        output = tmp_path / "no-such-folder" / "p.zip"
+    else:
+        # A parent that exists and is not a directory — `--output existing-file/p.zip`.
+        (tmp_path / "plain.txt").write_text("i am a file\n")
+        output = tmp_path / "plain.txt" / "p.zip"
+
+    asked = []
+    _mock_relay(monkeypatch, lambda r: asked.append(r) or httpx.Response(200, content=b"PK"))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(output)])
+
+    assert "Cannot write to" in str(caught.value)
+    assert "--output" in str(caught.value)
+    assert asked == [], "the relay was asked to pack a project into a path that cannot be written"
+
+
+@pytest.mark.parametrize("command,body", [
+    (["project", "files", "P1"], {"project_id": "P1"}),
+    (["task", "diff", "t-1"], {"task_id": "t-1"}),
+    # ADR 0034 D-m (issue 46) — the rest of the surface an application drives. Every one of these
+    # already refused an unreadable reply in a terminal and reported success under `--json`; the
+    # two that matter most are the state changes, where the client walks away believing a project
+    # was archived, made private, or had a change taken back out of it.
+    (["task", "list", "--project", "P1"], {"project_id": "P1"}),
+    (["task", "list"], {"whatever": True}),
+    (["task", "cancel", "t-1"], {"id": "t-1"}),
+    (["task", "undo", "t-1"], {"task_id": "t-1"}),
+    (["project", "status", "P1"], {"project_id": "P1"}),
+    (["project", "init", "P1"], {"project_id": "P1"}),
+    (["project", "archive", "P1"], {"project_id": "P1"}),
+    (["project", "unarchive", "P1"], {"project_id": "P1"}),
+    (["project", "delete", "P1", "--yes"], {"project_id": "P1"}),
+    (["project", "share", "P1"], {"project_id": "P1"}),
+    (["project", "private", "P1"], {"project_id": "P1"}),
+    # `--delete` and not `--file`: this command refuses locally when there is nothing to commit,
+    # before the relay is asked for anything, and a deletion needs no file on disk to name.
+    (["project", "commit", "C1", "-m", "a message", "--delete", "gone.txt"],
+     {"conversation_id": "C1"}),
+])
+def test_an_unreadable_reply_exits_non_zero_in_BOTH_modes(monkeypatch, tmp_path, capsys,
+                                                          command, body):
+    """⚠️ Found by review. `_emit` returns True whatever the payload's shape, so an early
+    `if _emit(...): return 0` puts the shape guard out of reach of `--json` — the one mode an
+    application actually drives. An unreadable listing exited 0 there and 1 in a terminal.
+
+    `_project_create`'s guard states the rule this restores: stdout stays one parseable document,
+    the explanation goes to stderr, and **the exit code carries the verdict**.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    with pytest.raises(SystemExit):
+        cli.main(command)
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as as_json:
+        cli.main(command + ["--json"])
+
+    # The document still went to stdout — the refusal is AFTER a successful print, not instead of it.
+    assert json.loads(capsys.readouterr().out) == body
+    assert "--json" in str(as_json.value)
+
+
+def test_a_download_that_cannot_be_moved_into_place_leaves_nothing_behind(monkeypatch, tmp_path):
+    """The one exit path whose cleanup did not run: `partial.replace(destination)` sits outside both
+    handlers, so an `OSError` there escaped raw AND stranded the part-file. Reachable by a race the
+    length of a download makes real — the destination becoming a non-empty directory while the bytes
+    were arriving."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    destination = tmp_path / "p.zip"
+
+    def in_the_way(request):
+        # The RACE, not the steady state: `cli/project_download.py`'s `is_dir()` pre-check already
+        # refuses a directory that is there when the command starts — cleanly, and before the relay
+        # is asked for anything. What it cannot see is the destination appearing WHILE the bytes
+        # arrive, which over a long download is a real interval.
+        destination.mkdir()
+        (destination / "occupied.txt").write_text("in the way\n")
+        return httpx.Response(200, content=b"PK\x03\x04zip",
+                              headers={"content-type": "application/zip"})
+
+    _mock_relay(monkeypatch, in_the_way)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "download", "P1", "--output", str(destination)])
+
+    assert "could not put them at" in str(caught.value)
+    assert list(tmp_path.glob(".p.zip.*")) == [], "a .part file survived a failed move"
+
+
+# ---------------------------------------------------------------------------
+# ADR 0034 D-m / issue 46 — the surface an application drives.
+#
+# The client is Flutter on desktop spawning this binary. Everything here is about what a PROGRAM can
+# read: one list across projects, a refusal it can branch on, and a `--json` mode whose guards are
+# the same guards a terminal gets.
+# ---------------------------------------------------------------------------
+
+
+def test_task_list_without_a_project_lists_across_projects(monkeypatch, tmp_path, capsys):
+    """The application's home screen is *your conversations*, which names no project (issue 46).
+
+    `--project` was required, so a client wanting a person's own history had to fan out over
+    `grid project list` — N requests, and no way to page the result, because one cursor per project
+    cannot be merged into one list.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = dict(request.url.params)
+        return httpx.Response(200, json={"tasks": [
+            {"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "fix the parser",
+             "member_key": "def456"},
+            {"id": "t-2", "project_id": "P2", "state": "running", "prompt": "change the logo",
+             "member_key": "def456"},
+        ], "next_after": None})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "list"])
+
+    assert rc == 0
+    # Omitted, never sent empty: a blank `project_id` is a different request from no `project_id`
+    # against any relay that validates it.
+    assert "project_id" not in seen["query"], seen["query"]
+    out = capsys.readouterr().out
+    assert "P1" in out and "P2" in out, (
+        f"a list spanning projects does not say which project each row is in:\n{out}")
+    assert "t-1" in out and "t-2" in out
+
+
+def test_task_list_across_projects_offers_a_next_page_command_that_parses(
+        monkeypatch, tmp_path, capsys):
+    """The hint used to name `--project {args.project}` unconditionally, which across projects is
+    `--project None` — a command that parses into a project called "None" and lists nothing.
+
+    Pinned by running the offered command through the parser, the rule
+    `test_every_command_this_cli_tells_you_to_run_actually_parses` already applies to this module.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "tasks": [{"id": "t-1", "project_id": "P1", "state": "completed", "prompt": "p"}],
+        "next_after": "t-1"}))
+
+    rc = cli.main(["task", "list"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    more = next(line for line in out.splitlines() if line.startswith("More:"))
+    assert "--project" not in more, f"the next-page command names a project nobody gave: {more!r}"
+    assert "--after t-1" in more, more
+    # And it really runs: the words after `More: ` are argv, through the same `project_arg.resolve`
+    # every handler sees rather than the raw parse.
+    parsed = _settled(more[len("More: "):].split()[1:])
+    assert (parsed.project, parsed.after) == (None, "t-1")
+
+
+def test_task_list_all_without_a_project_shows_the_relays_own_refusal(monkeypatch, tmp_path):
+    """"Every member's tasks in every project" is refused by the RELAY, and its sentence is shown
+    verbatim (issue 46).
+
+    Not re-implemented here as a local check. `remote/relay.py` records the standing rule: exactly
+    three refusal codes are parsed anywhere in this CLI, and keeping the count that low is the
+    contract — every other refusal is displayed, because the relay's message already names the way
+    forward and a fourth reader is a fourth thing a reworded relay could break.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(422, json={"detail": {
+        "field": "mine", "code": "invalid_request",
+        "message": "mine=false needs a project_id — every member's tasks are listed one project "
+                   "at a time."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--all"])
+
+    assert "one project at a time" in str(caught.value), (
+        f"the relay's own sentence did not reach the user:\n{caught.value}")
+    assert caught.value.refusal_code == "invalid_request"
+
+
+def test_a_refusal_under_json_is_a_document_on_stderr_carrying_the_relays_code(
+        monkeypatch, tmp_path, capsys):
+    """The application has no other way to know what happened (ADR 0034 D-m, issue 46).
+
+    Every refusal in this plane is a sentence, and a sentence is the one thing a program must not
+    parse — reword it and the client breaks silently. `TaskRefusal` has carried the relay's code
+    since ADR 0033 D-l and exactly two branches read it; nothing put it where a caller could see it.
+
+    **stderr, not stdout**, so `--json`'s stdout stays exactly the documents the relay sent — the
+    rule `_note_an_unreadable_state` already follows for its own disclosure.
+
+    ⚠️ Driven through the ONE refusal this CLI replaces with a sentence of its own, because that is
+    where the code was being dropped: `_task_create` caught the relay's `TaskRefusal` and raised a
+    bare `SystemExit` carrying better prose and nothing machine-readable. An application branching on
+    `project_has_no_trunk` would have seen this single refusal, alone in the whole plane, arrive
+    indistinguishable from a local failure.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "project_has_no_trunk", "message": "project P1 has no trunk yet"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "go", "--json"])
+
+    captured = capsys.readouterr()
+    envelope = json.loads(captured.err.strip().splitlines()[-1])
+    assert envelope["error"]["code"] == "project_has_no_trunk"
+    assert envelope["error"]["status"] == 409
+    # The MESSAGE is this CLI's replacement, not the relay's, and that is the point: the sentence is
+    # ours to improve and the code is the relay's to be branched on. They travel together.
+    assert envelope["error"]["message"] == str(caught.value)
+    assert "grid project import" in envelope["error"]["message"], (
+        "the substituted sentence lost the way forward it exists to give")
+    # stdout carries no part of it.
+    assert captured.out.strip() == "", captured.out
+
+
+def test_without_json_a_refusal_is_exactly_what_it_always_was(monkeypatch, tmp_path, capsys):
+    """The control. Everything about the terminal path is unchanged — same type, same message, and
+    **nothing extra on stderr**, which is what somebody watching a `grid` command actually reads."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={"detail": {
+        "code": "project_has_no_trunk", "message": "project P1 has no trunk yet"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "go"])
+
+    err = capsys.readouterr().err
+    assert "{" not in err, f"a JSON envelope reached a command that never asked for one:\n{err!r}"
+    assert "grid project import" in str(caught.value)
+
+
+@pytest.mark.parametrize("code", [None, 0])
+def test_a_clean_early_exit_is_not_reported_to_an_application_as_a_failure(code, capsys):
+    """`SystemExit(None)` and `SystemExit(0)` are how a command stops early having SUCCEEDED.
+
+    Reported as an error they would tell a client its call failed while the interpreter exited 0 —
+    the two halves of one answer disagreeing, which is the exact shape `TaskRefusal`'s own warning is
+    about at the other end (`SystemExit.code` overwritten with a refusal code made a failed create
+    exit 0 with nothing printed).
+    """
+    from cli import json_error
+
+    json_error.refuse_as_json(argparse.Namespace(json=True), SystemExit(code))
+
+    assert capsys.readouterr().err == "", "a clean exit was written out as a refusal"
+
+
+@pytest.mark.parametrize("command,body", [
+    (["task", "list", "--project", "P1"], {"tasks": [], "next_after": None}),
+    (["task", "list"], {"tasks": [], "next_after": None}),
+    (["task", "cancel", "t-1"], {"id": "t-1", "state": "failed", "error": "cancelled"}),
+    (["task", "undo", "t-1"], {"task_id": "t-1", "undone": True}),
+    (["project", "status", "P1"], {"trunk": "main", "main_commit": "a" * 40}),
+    (["project", "init", "P1"], {"status": "initialized", "trunk": "main", "commit": "b" * 40}),
+    (["project", "archive", "P1"], {"archived": True}),
+    (["project", "unarchive", "P1"], {"archived": False}),
+    (["project", "delete", "P1", "--yes"], {"deleted": True}),
+    (["project", "share", "P1"], {"visibility": "grid"}),
+    (["project", "private", "P1"], {"visibility": "private"}),
+    (["project", "commit", "C1", "-m", "m", "--delete", "gone.txt"],
+     {"conversation_id": "C1", "commit": "c" * 40, "branch": "wip/C1"}),
+])
+def test_json_prints_one_document_and_no_prose_when_the_reply_is_good(
+        monkeypatch, tmp_path, capsys, command, body):
+    """The positive control for the emit-then-validate ordering (ADR 0034 D-m, issue 46).
+
+    ⚠️ **Written because the fix is exactly where the next bug of this class lands.** Moving the
+    `--json` return from BEFORE the guard to after it means every one of these functions now has a
+    `return 0` somebody has to place correctly, and placing it one line too late prints the human
+    report underneath the document — which no test in the previous phase can see, because they all
+    drive replies the guard rejects. `ruff` caught one of these (an `emitted` nobody read) and can
+    only ever catch that one shape.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    rc = cli.main(command + ["--json"])
+
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    # ONE document and nothing else: `json.loads` over the whole of stdout fails the moment a line
+    # of prose, or a second document, is printed after it.
+    assert json.loads(captured.out) == body, captured.out
+
+
+@pytest.mark.parametrize("raw,expected,offered", [
+    ("git fetch failed (128): fatal: couldn't find remote ref refs/heads/task/t-1",
+     "no longer kept", "grid task get t-1"),
+    ("git clone failed (128): fatal: Authentication failed for 'https://relay.example/'",
+     "sign-in", "grid login"),
+    ("git fetch timed out after 900s", "could not be reached", "grid task fetch t-1"),
+    ("git checkout failed (1): error: Your local changes would be overwritten",
+     "could not be put on disk", "--into"),
+])
+def test_a_raw_git_failure_is_turned_into_a_sentence(monkeypatch, tmp_path, raw, expected,
+                                                     offered):
+    """ADR 0034 D-m: *"no raw git error reaches the application's surface."*
+
+    `grid task fetch` is the one command in this CLI that runs git itself, and it re-raised whatever
+    git had said — `fatal: couldn't find remote ref refs/heads/task/t-1` — at somebody who has never
+    seen a ref. Worse, the four causes below call for four different actions and git's wording says
+    which for none of them.
+
+    ⚠️ **git's own text is KEPT, on its own line.** The rule issue 42 set for a failed merge turn:
+    the provider's diagnostic is right for whoever runs the grid and is the one message a
+    non-developer must not be left staring at, so it is followed rather than replaced. What is added
+    is the sentence that turns a dead end into a next step.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "state": "completed", "project_id": "P1", "branch": "task/t-1",
+        "result_commit": "a" * 40}))
+
+    def explode(*args, **kwargs):
+        raise task_repo.CheckoutError(raw)
+
+    monkeypatch.setattr(task_repo, "checkout_result", explode)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "t-1"])
+
+    said = str(caught.value)
+    assert expected in said, f"the cause was not named:\n{said}"
+    assert offered in said, f"nothing to do next:\n{said}"
+    assert raw in said, f"git's own words were thrown away, so nobody can diagnose it:\n{said}"
+
+
+def test_a_fetch_without_git_names_the_read_that_needs_none(monkeypatch, tmp_path):
+    """The one cause whose way forward is a different command, not a retry (issue 46).
+
+    `grid project files` / `file` / `download` were added by issue 45 precisely so that a person
+    with no git can still see their project, and this is the moment they need to be told so — being
+    handed `could not run git ([Errno 2] No such file or directory: 'git')` instead is the dead end
+    that whole slice exists to remove. The project id it offers is the PROJECT's, never the
+    directory the fetch was aimed at.
+    """
+    from remote import task_repo
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "state": "completed", "project_id": "P-real", "branch": "task/t-1",
+        "result_commit": "a" * 40}))
+
+    def no_git(*args, **kwargs):
+        raise task_repo.CheckoutError(
+            "could not run git ([Errno 2] No such file or directory: 'git'); "
+            "is git installed on this provider?")
+
+    monkeypatch.setattr(task_repo, "checkout_result", no_git)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "fetch", "t-1", "--into", str(tmp_path / "somewhere-else")])
+
+    said = str(caught.value)
+    assert "grid project files P-real" in said, (
+        f"the read that needs no git is not offered, or names the wrong thing:\n{said}")
+
+
+def test_a_refusal_envelope_always_carries_a_message(capsys):
+    """An envelope with an empty `message` tells an application an error was described when nothing
+    was — worse than a clumsy sentence, because there is nothing to show a person.
+
+    ⚠️ The `int` case is UNREACHABLE today: every refusal in this CLI carries words, and the one
+    numeric exit (`grid task get`'s 2) is a `return` rather than a raise. Pinned anyway, because the
+    day somebody writes `raise SystemExit(2)` the hole opens in the mode nobody watches.
+    """
+    from cli import json_error
+
+    # `""` is what `raise SystemExit(some_variable)` produces when the variable is empty; `2` is a
+    # numeric exit carrying no sentence at all. Neither is raised in this CLI today.
+    for code in ("a refusal sentence", 2, ""):
+        json_error.refuse_as_json(argparse.Namespace(json=True), SystemExit(code))
+        envelope = json.loads(capsys.readouterr().err.strip())
+        assert envelope["error"]["message"], f"an empty message for SystemExit({code!r})"
+
+
+def test_project_delete_with_json_refuses_rather_than_declining_at_a_prompt(monkeypatch, tmp_path,
+                                                                            capsys):
+    """⚠️ **Found in review.** `grid project delete P1 --json` printed an interactive prompt to
+    stdout, read EOF from a closed stdin, said "Nothing was deleted." and exited **0**.
+
+    An application spawning this binary has no terminal to answer at, so it hit that path every
+    time — and read exit 0 as *the project was deleted*. `system.confirm` answering False on EOF is
+    right for a person who pressed Ctrl-D; it is the wrong shape entirely for a caller that cannot
+    press anything, because "declined" and "done" become the same status.
+
+    Refused with a sentence naming `--yes`, not silently confirmed: this is the one irreversible
+    verb in the plane, and the flag is how an application says it meant it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    asked = []
+    _mock_relay(monkeypatch, lambda r: asked.append(r) or httpx.Response(200, json={"deleted": True}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "delete", "P1", "--json"])
+
+    captured = capsys.readouterr()
+    assert "--yes" in str(caught.value), f"the flag that does this is not named:\n{caught.value}"
+    assert asked == [], "the relay was asked to delete a project nobody confirmed"
+    assert captured.out == "", f"prose reached an application's stdout:\n{captured.out!r}"
+    # And the envelope an application actually reads.
+    assert json.loads(captured.err.strip().splitlines()[-1])["error"]["message"] == str(caught.value)
+
+
+def test_project_delete_with_json_and_yes_still_works(monkeypatch, tmp_path, capsys):
+    """The control: `--yes` is the whole of what `--json` needs, and nothing else changed."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"deleted": True}))
+
+    assert cli.main(["project", "delete", "P1", "--yes", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"deleted": True}
+
+
+def test_a_usage_error_under_json_is_still_a_document_an_application_can_read(monkeypatch, tmp_path,
+                                                                             capsys):
+    """⚠️ **Found in review.** argparse raises before `dispatch` is ever called, so the envelope
+    never fired for an argv that does not parse.
+
+    Worse than missing prose: argparse exits **2**, and `2` in this CLI means *not finished yet, ask
+    again* (issue 32). A client polling `grid task get "$id" --json` that had sent one flag this
+    build does not know would loop for ever on a usage error, seeing the code that means "keep
+    waiting". The way it gets there is version skew — the application and the binary shipped apart —
+    which is exactly the case a spawned-subprocess client cannot rule out.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "list", "--json", "--no-such-flag"])
+
+    assert caught.value.code == 2, "argparse's own status is preserved"
+    envelope = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert envelope["error"]["message"], "an application is left with argparse's prose and nothing else"
+    assert envelope["error"]["code"] is None, "a usage error is this CLI's, not the relay's"
+
+
+def test_a_usage_error_without_json_prints_no_envelope(monkeypatch, tmp_path, capsys):
+    """The control. `--json` has to be read out of the RAW argv here — the namespace does not exist
+    when argparse fails — so the risk is reading it as set for every caller."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    with pytest.raises(SystemExit):
+        cli.main(["task", "list", "--no-such-flag"])
+
+    assert "{" not in capsys.readouterr().err

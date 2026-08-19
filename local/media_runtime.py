@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -118,16 +116,12 @@ def _tcp_port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+# Re-exported, not re-implemented. `local/runtime.py` owns the one copy: this used to be a second,
+# byte-identical body, and a fix landing in only one of them is how the media bridge and the CLI
+# seats would start disagreeing about how to re-invoke this CLI — the same duplication this module's
+# `stop_media_server`/`wait_for_child_server` are shared to avoid.
 def _cli_subprocess_command() -> list[str]:
-    argv0 = sys.argv[0] if sys.argv else ""
-    candidates: list[Path] = []
-    if argv0:
-        candidates.append(Path(argv0).expanduser())
-        resolved = shutil.which(argv0)
-        if resolved:
-            candidates.append(Path(resolved))
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return [str(candidate.resolve())]
-    return [sys.executable, "-m", "cli"]
+    from local.runtime import _cli_subprocess_command as resolve  # lazy: keeps the import one-way
+
+    return resolve()
 

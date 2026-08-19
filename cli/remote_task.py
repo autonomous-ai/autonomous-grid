@@ -1,0 +1,1777 @@
+"""Remote-mode `grid task create|get|follow|fetch` — hand the grid a coding task, read it back.
+
+A task (ADR 0032) is work that outlives the request that created it: the client posts a prompt, a
+provider claims it and runs an agent against it, and the client comes back later for the result.
+That is why this is two commands and not one streaming call — there is nothing to hold open.
+
+Each call resolves the grid + relay base + per-grid access token exactly as `price`/`router` do, and
+talks to the relay's `/relay/v1/tasks`. Remote-only — `cli.dispatch` gates it (in `REMOTE_ONLY`);
+local mode exits with guidance. Import rule mirrors the other remote handlers: stdlib only at module
+top; `remote.*` / sibling cli modules imported lazily.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+# Bounded reattach: a relay that is genuinely gone must end the command rather than spin. The budget
+# is per OUTAGE, not per task — any event received resets it, so a long task that blips repeatedly
+# is not slowly starved of retries.
+_RECONNECT_ATTEMPTS = 5
+_RECONNECT_BACKOFF_SECONDS = 2.0
+
+# Local upload bounds, refused HERE rather than after a multi-megabyte POST the relay then rejects.
+# LOCKSTEP with grid-src `task_files.MAX_FILE_BYTES` / `MAX_TOTAL_BYTES` / `MAX_FILES`: the relay is
+# the authority and refuses anything over its own limits regardless, so a client that drifts LOW
+# merely refuses early with a clear message, and one that drifts HIGH pays for the upload before
+# being told no. Neither corrupts anything, which is why these are duplicated rather than negotiated.
+MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_TOTAL_BYTES = 20 * 1024 * 1024
+MAX_FILES = 200
+
+# The states in which a task has stopped and its branch is final. LOCKSTEP with grid-src's
+# `tasks.TERMINAL_STATES`, and this half is deliberately CONSERVATIVE: a state this build has never
+# heard of is treated as not-yet-finished, so a newer relay's extra state refuses a fetch rather
+# than handing back the input files as though they were the result.
+_TERMINAL_STATES = frozenset({"completed", "failed", "timed_out"})
+
+# The terminal reason meaning "no provider ever claimed this task" (ADR 0033 D-k, issue 18).
+# LOCKSTEP with grid-src's `task_reaper.QUEUE_EXPIRED`, kept in step by editing both repos;
+# `tests/test_task_lease.py` parses that module rather than restating the string.
+#
+# ⚠️ The ONE terminal `error` this client branches on rather than printing verbatim, and the reason
+# is that `queue_expired` and `deadline_exceeded` are one word apart and call for OPPOSITE actions —
+# add providers, or fix the task. The slug is still printed either way; what the branch adds is the
+# sentence saying which of the two a reader is looking at.
+#
+# *Absent ⇒ an old relay sends `deadline_exceeded` as it always did*, so nothing here changes; a
+# newer relay against an older CLI prints the new slug with no sentence. No rollout order.
+QUEUE_EXPIRED = "queue_expired"
+
+# The block that ENDS a conversation's stream (ADR 0034 D-m, issue 51). LOCKSTEP with grid-src's
+# `task_events.CONVERSATION_IDLE_EVENT`, kept in step by editing both repos;
+# `tests/test_task_lease.py` parses that module rather than restating the string.
+#
+# ⚠️ **It is to a conversation what `task.terminal` is to a turn, and it has to be, because a
+# conversation has no terminal state** (ADR 0034 D-a). Drifted, this follower would never recognise
+# the end: it would fall into its empty-reattach budget and report a healthy conversation as a lost
+# stream, exiting non-zero. Loud enough to be found, unlike `_MERGE_KIND`'s silent degrade.
+_CONVERSATION_IDLE = "conversation.idle"
+# Phrased about the BUDGET, not about the attempt count, because `queue_expired` does not mean
+# `attempt == 0`. A task whose provider died is put back on the queue clock, so one that nobody
+# picks up again ends this way having already run once — and "no provider ever claimed it" would be
+# flatly false for exactly the row a team stares at when a fleet is flapping.
+_QUEUE_EXPIRED_NOTE = ("it ran out of time WAITING for a provider rather than while running — the "
+                       "grid is short of task capacity, not the task at fault. "
+                       "`grid project status` says who is online and paused.")
+
+# A turn the GRID added to a conversation rather than one a person sent (ADR 0034 D-g, issue 42).
+# LOCKSTEP with grid-src's `db.MERGE_KIND`, kept in step by editing both repos;
+# `tests/test_task_lease.py` parses that module rather than restating the string.
+#
+# ⚠️ *Absent ⇒ a person's message* — every relay before this slice, and the reading `task_view` gives
+# a NULL column — so this is compared for EQUALITY and never tested for truthiness. The
+# `serves_you` / `archived` / `visibility` rule for the fourth time: a falsy test would relabel every
+# row an old relay sends as machinery and hide every prompt anybody had typed.
+_MERGE_KIND = "merge"
+# What a merge turn shows where a person's message would be. The relay's own prompt goes in its
+# place: it names a branch, a `refs/integrate/…` ref and `git merge`, and ADR 0034 D-m is that no git
+# vocabulary and no raw git error reaches this surface. The relay is free to reword its prompt
+# without this line moving, which is why the substitution is here rather than a shorter prompt there.
+_MERGE_TURN_LABEL = "(the grid is combining this work with a colleague's)"
+
+
+def _is_merge_turn(task: object) -> bool:
+    """Did the grid add this turn, or did a person send it? (ADR 0034 D-g, issue 42.)
+
+    One reader, so the *absent means a message* rule is applied in one place. `.get` on a non-dict is
+    the shape guard every reader of a relay document here carries — `list_tasks` hands back whatever
+    the relay sent, and a row that is not an object must not raise in the middle of a table.
+    """
+    return isinstance(task, dict) and task.get("kind") == _MERGE_KIND
+
+
+def _resolve(args: argparse.Namespace) -> tuple[str, str, str]:
+    """(relay_base, access_token, label) for the selected grid. Clean SystemExit if signed-out."""
+    from remote import credentials
+
+    from . import remote_grid
+
+    session = credentials.require_session()
+    rec = remote_grid._select(getattr(args, "grid", None))
+    network_id = remote_grid._network_id(rec)
+    label = rec.get("name") or network_id
+    token = rec.get("access_token")
+    if not token:
+        raise SystemExit(
+            f"Grid {label} has no access token locally. Run `grid login` to refresh your grids.")
+    base, _status = remote_grid.resolve_relay_base(session, rec, network_id, label)
+    return base, token, label
+
+
+def _emit(args: argparse.Namespace, payload) -> bool:
+    """Print `payload` as JSON when `--json` was asked for. True if it did.
+
+    Delegated to `remote_project._emit` rather than re-implemented, so this command group's JSON is
+    byte-identical in shape to every other one an application drives — the reason `task_diff` gives
+    for doing the same.
+
+    ⚠️ **Its result is a flag to be checked LATER, never a `return`.** Every caller here emits, runs
+    its postcondition guard, and only then returns on it: a guard skipped under `--json` is a wrong
+    answer delivered to the one caller that cannot see the sentence a terminal would have got
+    (ADR 0034 D-m, issue 46).
+    """
+    from . import remote_project
+
+    return remote_project._emit(args, payload)
+
+
+def cmd_remote_task(args: argparse.Namespace) -> int:
+    # See `cmd_remote_project` — the same merge, and the reason `args.project` still reads the way
+    # `_task_create` and `_task_list` always read it (ADR 0033 D-a, issue 28).
+    from . import project_arg
+
+    args = project_arg.resolve(args)
+    if args.subcommand == "create":
+        return _task_create(args)
+    if args.subcommand == "send":
+        return _task_send(args)
+    if args.subcommand == "follow":
+        return _task_follow(args)
+    if args.subcommand == "fetch":
+        return _task_fetch(args)
+    if args.subcommand == "list":
+        return _task_list(args)
+    if args.subcommand == "cancel":
+        return _task_cancel(args)
+    if args.subcommand == "diff":
+        # ADR 0034 D-m (issue 45). Its handler lives in its own module for `task_undo`'s reason, and
+        # dispatch stays here so `cli/parser.py` needs no new import.
+        from .task_diff import task_diff
+
+        return task_diff(args)
+    if args.subcommand == "undo":
+        # ADR 0034 D-l (issue 44). Its handler lives in its own module — this one is past the
+        # repository's size ceiling — and dispatch stays here so `cli/parser.py` needs no new import.
+        from .task_undo import task_undo
+
+        return task_undo(args)
+    # argparse (required=True + choices) guarantees the rest is `get`; guard explicitly anyway, so
+    # direct misuse of the handler fails loudly rather than falling through to the wrong verb.
+    if args.subcommand != "get":
+        raise SystemExit(f"Unknown task subcommand: {args.subcommand!r}")
+    return _task_get(args)
+
+
+def _collect_files(specs: list[str] | None, *, dirs: list[str] | None = None,
+                   mark_executable: bool = False) -> list[dict]:
+    """Read each `--file LOCAL[:DEST]` into the wire shape, or exit with a sentence naming the file.
+
+    Every refusal here is local and happens BEFORE the relay is contacted. Two of them cannot be
+    delegated to it at all:
+
+      * **A symlink.** The wire carries `{path, content}`, so a symlink is not representable and the
+        relay has nothing to detect. Following it and uploading the TARGET would be worse than
+        refusing — it silently uploads a file the user never named, and the classic target of a
+        planted link is a private key. (The relay's half of this rule is structural: it writes mode
+        `100644` and nothing else, so a caller that is not this CLI still cannot create one.)
+      * **A directory or an unreadable file.** The relay never sees these; they are facts about this
+        machine.
+
+    Path RULES — `..`, `.git/`, absolute — are deliberately NOT re-implemented here. The relay is
+    the sole authority on them, and a second copy in another repo drifts silently: each side keeps
+    working, just not identically, and the gap is a path one accepts and the other does not.
+
+    `mark_executable` sends the `executable` boolean (ADR 0033 D-j), and it is **set-only**: `True`
+    for a local file with an exec bit, and the key OMITTED otherwise. Never `False`, because absent
+    means "inherit the mode already in the project" and `False` means "make this a regular file" —
+    so a local copy that lost its bit (a zip, a Windows share, a `curl -O`) would silently strip the
+    bit on the server, which is the exact defect this field exists to fix. Clearing one is therefore
+    not expressible from this CLI; the relay's API takes `false` if it is ever wanted.
+
+    **Off by default, and that is a rollout constraint rather than a taste.** `grid task create`
+    calls this with no flag, so its wire shape is byte-identical to before — and it has to be:
+    `task_files.parse_files` refuses unknown keys, so a relay predating this release answers 422
+    rather than dropping the field, and sending it from task create would break a command that works
+    today. Task uploads still stop stripping executable bits, because that half is the relay reading
+    the base tree and needs nothing from here.
+    """
+    from . import upload_dir
+
+    if not specs and not dirs:
+        # No key at all rather than an empty list: a relay predating the git plane must not receive
+        # a field it does not understand for a task that has no files.
+        return []
+
+    # `--file` first, then whatever `--dir` walked. ONE list from here on, which is the reason this
+    # stayed a single function rather than gaining a second collector beside it: the bounds are a
+    # budget for the UPLOAD, not for a flag, and two counters would let `--file`×150 through
+    # alongside `--dir`×150 for a 300-file POST that the relay then refuses.
+    pairs = [_split_spec(spec) for spec in specs or ()]
+    selected = upload_dir.select([_split_spec(spec) for spec in dirs or ()])
+    _report_selection(selected)
+    pairs += [(str(entry.local), entry.dest) for entry in selected.entries]
+
+    # Both bounds are checked from `stat` HERE, before the read loop below opens anything. Reading
+    # 1,847 files into memory and only THEN refusing is the failure this ordering exists to prevent,
+    # and it is reachable only through `--dir` — nobody types 1,847 `--file` flags.
+    if len(pairs) > MAX_FILES:
+        raise SystemExit(_budget_refusal(
+            selected, f"That is {len(pairs)} files to upload; the limit is {MAX_FILES}."))
+    walked_bytes = sum(entry.size for entry in selected.entries)
+    if walked_bytes > MAX_TOTAL_BYTES:
+        # Only the WALKED bytes: `--file` entries are sized by the read loop, which stays the
+        # authority on the true total. This check exists to stop a folder being read, not to
+        # duplicate that one.
+        raise SystemExit(_budget_refusal(
+            selected, f"--dir selected {walked_bytes} bytes; the upload limit is "
+                      f"{MAX_TOTAL_BYTES} bytes."))
+
+    files: list[dict] = []
+    total = 0
+    for local, dest in pairs:
+        source = Path(local)
+
+        # `is_symlink` BEFORE any other probe: `exists()` and `is_file()` both follow the link, so
+        # checking them first would report a planted symlink as a perfectly ordinary file.
+        if source.is_symlink():
+            raise SystemExit(
+                f"Refusing to upload {local}: it is a symlink, and uploading what it points at "
+                f"would send a file you did not name. Pass the target directly if you meant it.")
+        if not source.exists():
+            raise SystemExit(f"Cannot upload {local}: no such file.")
+        if source.is_dir():
+            # Names `--dir` (issue 27). Until that flag existed this message was a dead end: honest,
+            # and naming no alternative because there was none.
+            raise SystemExit(
+                f"Cannot upload {local}: it is a directory, and --file takes one file at a time. "
+                f"Use --dir {local} to upload the folder.")
+        if not source.is_file():
+            raise SystemExit(f"Cannot upload {local}: it is not a regular file.")
+
+        try:
+            content = source.read_bytes()
+        except OSError as exc:
+            raise SystemExit(f"Cannot read {local}: {exc}")
+
+        if len(content) > MAX_FILE_BYTES:
+            raise SystemExit(
+                f"Cannot upload {local}: it is {len(content)} bytes, over the "
+                f"{MAX_FILE_BYTES}-byte per-file limit.")
+        total += len(content)
+        if total > MAX_TOTAL_BYTES:
+            raise SystemExit(
+                f"The upload exceeds the {MAX_TOTAL_BYTES}-byte total limit.")
+
+        entry = {"path": dest, "content_b64": base64.b64encode(content).decode()}
+        if mark_executable and _is_executable(source):
+            entry["executable"] = True
+        files.append(entry)
+    return files
+
+
+# How many skipped paths the report names before it summarizes the rest. Enough to read at a glance;
+# the COUNT is always exact, so a truncated list never understates what was left out.
+_SKIP_REPORT_LIMIT = 8
+
+# How many of the biggest entries an over-budget refusal names. The point is to identify the
+# offender — a video, a checkpoint, a tarball — not to enumerate the folder.
+_LARGEST_NAMED = 3
+
+
+def _budget_refusal(selected, headline: str) -> str:
+    """An over-budget upload, refused with the three things that make it actionable.
+
+    The count alone is not: a user told "1,847 files (the limit is 200)" has no idea whether they
+    pointed at the wrong folder or hit one stray `node_modules`. Naming the biggest entries answers
+    that in one line, and naming `grid project import` answers the case where the folder really is a
+    whole codebase — which is what this flag is deliberately not for.
+    """
+    largest = sorted(selected.entries, key=lambda entry: entry.size, reverse=True)[:_LARGEST_NAMED]
+    lines = [headline]
+    if largest:
+        lines.append("Largest: " + ", ".join(
+            f"{entry.dest} ({_human_bytes(entry.size)})" for entry in largest))
+    lines += ["", "For a whole codebase, use:  grid project import <path> <project-id>"]
+    return "\n".join(lines)
+
+
+def _human_bytes(size: int) -> str:
+    """A size a person can compare against a limit at a glance. `34 MB`, not `35651584`."""
+    for unit, scale in (("MB", 1024 * 1024), ("KB", 1024)):
+        if size >= scale:
+            return f"{size / scale:.1f} {unit}"
+    return f"{size} B"
+
+
+def _report_selection(selected) -> None:
+    """Say what `--dir` passed over, and how it looked.
+
+    **Never silent.** A silent skip is how somebody discovers at runtime that the file they needed
+    was never sent — and, unlike a refusal, nothing else in the system will ever mention it.
+
+    **stderr, always.** `--json` prints the payload on stdout for a program to read, and a skip line
+    there would corrupt it. That also means the report survives `| jq` rather than being swallowed
+    by it, which is the case where a human most needs to see it.
+    """
+    for note in selected.notes:
+        print(note, file=sys.stderr)
+    if not selected.skipped:
+        return
+    shown = list(selected.skipped[:_SKIP_REPORT_LIMIT])
+    if len(selected.skipped) > _SKIP_REPORT_LIMIT:
+        shown.append(f"…and {len(selected.skipped) - _SKIP_REPORT_LIMIT} more")
+    print(f"skipped {len(selected.skipped)} paths ({', '.join(shown)})", file=sys.stderr)
+
+
+def _is_executable(source: Path) -> bool:
+    """Whether this local file carries an execute bit.
+
+    `os.access(X_OK)` is deliberately NOT used: it answers "could *this process* execute it", which
+    folds in ownership, ACLs and the mount's `noexec` — none of which say anything about the mode
+    that belongs in the project's history. The question here is what git would record, which is the
+    stat mode.
+
+    ANY of the three bits, matching git's own rule: git stores one executable mode, so a file that is
+    executable for its owner and nobody else is still `100755` once committed.
+    """
+    import stat
+
+    try:
+        return bool(source.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+    except OSError:
+        # Unreadable metadata on a file whose CONTENT was just read successfully. Not worth failing
+        # the command over: the mode is then whatever the project already has, which is the same
+        # answer a caller who says nothing gets.
+        return False
+
+
+def _split_spec(spec: str) -> tuple[str, str]:
+    """`LOCAL[:DEST]` → `(local, dest)`, defaulting the destination to the file's basename.
+
+    Split on the LAST colon, not the first: a colon is a legal character in a filename on every
+    platform this runs on, so `--file ./od:2026-08-04.csv:notes/od.csv` must keep the colon in the
+    LOCAL name and take only the final field as the destination. Splitting on the first would look
+    for a file called `./od` and report it missing.
+
+    Only when what follows is non-empty — `--file ./a.txt:` is a typo, not a request to upload to
+    "". A colon-bearing filename with NO destination is still ambiguous by construction and resolves
+    to "no such file", which names the path it looked for.
+    """
+    if ":" in spec:
+        local, _, dest = spec.rpartition(":")
+        if local and dest:
+            return local, dest
+    return spec, Path(spec).name
+
+
+# The project a task lands in when `--project` is not given. A NAME, resolved here against the
+# caller's own projects and never sent to the relay as one — `POST /tasks` takes an id (ADR 0033
+# D-a). LOCKSTEP in spirit with grid-src's `DEFAULT_PROJECT_NAME`, but not in effect: the relay no
+# longer resolves it for anybody, so the two drifting apart would give this CLI a differently-named
+# personal project, not a broken one.
+DEFAULT_PROJECT_NAME = "default"
+
+# The `role` a project listing gives the person who owns it, mirroring grid-src's
+# `project_members.OWNER_ROLE`. Required rather than cosmetic: `GET /relay/v1/projects` lists every
+# project the caller is a MEMBER of, so without this filter a `default` belonging to a COLLEAGUE
+# would be substituted for the one the caller meant — which is precisely the ADR 0033 D-a bug this
+# feature exists to remove, reintroduced on the path that has no `--project` to check against.
+#
+# *A role this build does not recognise simply does not match*, so the fail direction is the
+# "which project?" refusal, which creates nothing and names the two commands that fix it.
+# `tests/test_task_lease.py` parses grid-src for the spelling rather than restating it.
+_OWNER_ROLE = "owner"
+
+# Case A (ADR 0033 D-o, issue 26). Framed on the actionable fact — a task needs a project and none
+# was named — rather than on `default`, which is an internal convention the user never chose and
+# cannot act on.
+_NO_PROJECT = (
+    "No project given. A task runs on a project's code, so it needs to know which one.\n"
+    "\n"
+    "  grid project list                                  # projects you can work in\n"
+    "  grid task create --project <id> --prompt '...'\n"
+    "\n"
+    "No projects yet?  grid project create --name my-app")
+
+
+def _resolve_project(base: str, token: str, project: str | None) -> str:
+    """The project id to post a task to.
+
+    `--project` is an **id**, used verbatim: a name is unique per owner (`idx_projects_owner_name`),
+    so it was never an address a second project member could use, and resolving one here would put
+    back the bug ADR 0033 D-a closes — posting a name someone else owns used to hand you a new,
+    empty project of your own, silently.
+
+    With no `--project`, the caller's own project called `default` is looked UP and used if it is
+    there. It is never created: minting one as a side effect of a forgotten flag left people owning
+    projects they had not asked for, named after a convention, discoverable only through the error
+    line that followed (ADR 0033 D-o, issue 26).
+    """
+    if project is not None:
+        # `is not None`, then reject blank — NOT a bare truthiness test. `--project ""` naming the
+        # default project is the same substitution this whole slice removes: the caller named
+        # something and something else was used. The relay would refuse an empty `project_id`, but
+        # it never sees one, because an empty string never reaches the wire.
+        #
+        # `project_arg._refuse_a_blank_value` now catches this first, for every command rather than
+        # this one, and with a message that names both spellings. This stays as the boundary guard
+        # on a helper that takes `str | None` from its caller — do not delete it as "unreachable"
+        # without moving the rule, or `--project ""` silently means `default` again.
+        if not project.strip():
+            raise SystemExit(
+                "--project needs a project id. Find yours with `grid project list`, "
+                "or leave --project off to use your own 'default' project.")
+        return project
+    return _own_default_project(base, token)
+
+
+def _own_default_project(base: str, token: str) -> str:
+    """The id of the caller's OWN project called `default`, or the "which project?" refusal.
+
+    One round trip, exactly as the create-or-get it replaces — the convention is kept so that
+    anybody who already has a `default` project keeps their one-liner working, and only the minting
+    goes away.
+    """
+    from remote import relay
+
+    answer = relay.list_projects(base, token)
+    # `isinstance` before `.get`: `_task_oneshot` returns `resp.json()` verbatim, so a 200 carrying a
+    # JSON array, string or number — a proxy, a captive portal — reaches this line and an
+    # `AttributeError` escapes `main()` as a traceback, breaking this plane's "any failure is a clean
+    # SystemExit" contract. The hole is `_task_oneshot`'s and is older than this command; it is
+    # guarded HERE because a projectless `grid task create` is the most-run path in the CLI.
+    projects = answer.get("projects") if isinstance(answer, dict) else None
+    if not isinstance(projects, list):
+        # A reply this command cannot read is NOT an empty account — the rule `grid task list`,
+        # `project status`, `promote`, `integrate` and `init` all follow. Reporting one as "you have
+        # no projects" sends somebody who has used their `default` for months to create a second
+        # one, leaving their work in the project the message did not mention.
+        raise SystemExit(
+            "The relay's answer did not contain a project list, so this cannot tell whether you "
+            "have a project called 'default'. `grid project list --json` shows what it sent; "
+            "`grid task create --project <id>` names one explicitly.")
+    mine = [project for project in projects
+            if isinstance(project, dict)
+            and project.get("role") == _OWNER_ROLE
+            and project.get("name") == DEFAULT_PROJECT_NAME]
+    if not mine:
+        raise SystemExit(_NO_PROJECT)
+    project_id = mine[0].get("id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        # Listed, but with nothing to address it by. Nothing downstream can recover — `create_task`
+        # would post `project_id: None` and be refused with a message about a key the user never
+        # typed — so say what actually happened.
+        raise SystemExit(
+            f"The relay listed your {DEFAULT_PROJECT_NAME!r} project but gave it no id. "
+            "Pass --project <id> explicitly, or list your projects with `grid project list`.")
+    return project_id
+
+
+def _ensure_trunk(base: str, token: str, project_id: str, *, quiet: bool) -> None:
+    """`--init-project`: give the project a trunk if it has none, then let the task go ahead.
+
+    Init-then-create rather than a pre-check, for `create_task`'s reason: issue 25's route already
+    decides this, and asking first would add a round trip to learn something the call itself
+    reports.
+
+    **A project that ALREADY has a trunk is not an error here.** The relay's 409 says the state the
+    caller asked for is the state that holds, and refusing on it would make the very command Case B
+    suggests single-use — a task create that then failed for any other reason (a busy slot, a
+    rejected path) would leave the user re-running a line that now complains about a trunk instead of
+    running their task. It is the same reading `project_init` itself applies to the swap it loses to
+    an identical commit: *an error for a state that is already correct sends somebody to fix a thing
+    that is not broken*.
+
+    Every OTHER refusal stops the command, including a relay too old to have the route — that one
+    arrives as `_OLD_RELAY`'s sentence from `init_project`, so no task is created against a relay
+    that could not have initialized anything.
+
+    `quiet` moves the line to **stderr** rather than suppressing it, and the distinction matters
+    because this is the one IRREVERSIBLE thing `task create` can do: a project given an empty trunk
+    can never `grid project import`, and nothing undoes it. `--json`'s contract is that stdout is a
+    single parseable document — that is satisfied by writing elsewhere, not by saying nothing. It
+    used to say nothing, which left the caller most likely to run this unattended with no record
+    that the door had been opened at all: `create_task` can still fail AFTER the init lands (a busy
+    slot, a path the relay rejects), and the JSON consumer would see only that error.
+    """
+    from remote import relay
+
+    # `--json` sends it to stderr; a human sees it on stdout with the rest of the command's progress.
+    where = sys.stderr if quiet else sys.stdout
+
+    try:
+        answer = relay.init_project(base, token, project_id)
+    except relay.TaskRefusal as exc:
+        if exc.refusal_code != _TRUNK_EXISTS:
+            raise
+        print(f"{project_id} already has something to start from — nothing to set up.",
+              file=where)
+        return
+    # `.get()` and a fallback: the reply is the relay's, and the task is going ahead either way.
+    # `grid project init` is the command that REPORTS an initialization and it guards its reply
+    # properly; here the trunk is a precondition being met, not the thing being reported — and if it
+    # was not really met, `create_task` refuses `project_has_no_trunk` one round trip later.
+    # The trunk's NAME is not printed (ADR 0034 D-m, issue 46) — it comes off the wire as `main`.
+    print(f"{project_id} is ready to work in, at version "
+          f"{answer.get('commit') or '(nothing reported)'}", file=where)
+
+
+def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
+    """Case B: the two ways forward, as commands, carrying what the user already typed.
+
+    The suggestion reproduces the prompt and every `--file` spec **verbatim**, because the
+    alternative — "fix it and run the task again" — is a retype of a command that may hold a long
+    prompt and several uploads. `--grid` rides along when it was given: without it the suggested
+    line would target a different grid from the one that just refused, which is a worse failure than
+    the one being explained.
+
+    `shlex.quote` on every value, so a prompt carrying a space or an apostrophe pastes back as ONE
+    argument. `--project` always names the resolved id even when the caller did not type one — the
+    id is the thing they need and the only unambiguous way to say it.
+
+    Deliberately NOT the relay's own sentence with a line appended: the relay's ends by naming
+    import as the only fix, and since ADR 0033 D-o there are two.
+    """
+    import shlex
+
+    head = (f"Project {project_id} has no main yet, so there is nothing to cut a task from.")
+    if getattr(args, "init_project", False):
+        # The caller ALREADY asked for a trunk and the relay still says there is none, so offering
+        # `--init-project` would hand back the command that just failed — the "advice that is
+        # guaranteed not to work" this whole issue exists to remove, reintroduced at the one place
+        # left that could still print it.
+        #
+        # Reachable through the conflation named in `_task_create`: grid-src's `resolve_branch`
+        # answers `None` both for "no trunk" and for "this repository could not be read", so a
+        # transient relay-side read failure looks exactly like a missing trunk. That points at the
+        # relay, not at the user, and re-running would change nothing.
+        return (
+            f"{head} The --init-project you passed reported success, so either the relay could not "
+            f"read this project's files or what it had set up went missing between the two calls — "
+            f"neither is something re-running fixes.\n"
+            f"\n"
+            f"  Check what the relay thinks it has:\n"
+            f"    grid project status {project_id}")
+
+    grid = getattr(args, "grid", None)
+    argv = ["grid", "task", "create", "--project", project_id, "--init-project"]
+    if grid:
+        argv += ["--grid", grid]
+    argv += ["--prompt", args.prompt]
+    for spec in getattr(args, "file", None) or []:
+        argv += ["--file", spec]
+    # `--dir` rides along for `--file`'s reason: this line is meant to be PASTED, and one that
+    # silently drops the folder the user gathered runs the retried task against none of it — and
+    # succeeds, so nothing ever says so.
+    for spec in getattr(args, "dir", None) or []:
+        argv += ["--dir", spec]
+    suggestion = " ".join(shlex.quote(part) for part in argv)
+    return (
+        f"{head} Two ways forward:\n"
+        f"\n"
+        f"  Start empty (no existing code):\n"
+        f"    {suggestion}\n"
+        f"\n"
+        f"  Or bring an existing repository in:\n"
+        f"    grid project import . {project_id}")
+
+
+# The relay's refusal code for "this project has no `main`" — grid-src `tasks.wip_base_ref`, a 422.
+# One of the TWO parsed `detail` codes this CLI reads (the other is `_TRUNK_EXISTS` below); the
+# provider still reads exactly one, `remote/task_lease.CANCELLED_CODE`.
+#
+# *Absent ⇒ the branch does not fire and the relay's own sentence is shown*, which is the behaviour
+# every release before this one had. `tests/test_task_lease.py` parses grid-src for the spelling.
+_NO_TRUNK = "project_has_no_trunk"
+
+# The relay's refusal code for "this project already has a `main`" — grid-src
+# `project_trunk.refuse_if_trunk_exists`, a 409 shared by both bootstraps.
+_TRUNK_EXISTS = "project_already_has_trunk"
+
+
+def _task_create(args: argparse.Namespace) -> int:
+    from remote import relay
+
+    # Read the files BEFORE resolving the grid: a typo in a filename should not first cost a
+    # credential lookup and a control-plane round trip to discover.
+    files = _collect_files(getattr(args, "file", None), dirs=getattr(args, "dir", None))
+
+    base, token, label = _resolve(args)
+    project_id = _resolve_project(base, token, getattr(args, "project", None))
+    if getattr(args, "init_project", False):
+        _ensure_trunk(base, token, project_id, quiet=bool(getattr(args, "json", False)))
+    # `files` and not `files or None`: `create_task` already decides whether the key goes on the
+    # wire, and a second guard here reads as though it mattered while doing nothing.
+    try:
+        task = relay.create_task(
+            base, token, prompt=args.prompt, project_id=project_id, files=files)
+    except relay.TaskRefusal as exc:
+        # Deliberately NOT pre-checked with a `project_status` call. That would add a round trip to
+        # every task creation to serve the first one, and it cannot even answer the question
+        # reliably: `main_commit` is `None` both for "no trunk" and for "the relay cannot read this
+        # repository", so a pre-flight would tell a user to initialize a project when the fault is
+        # the relay's disk. Nothing is wasted by letting the post happen — grid-src refuses before
+        # the task row exists and before `commit_input`, so no state is written and no slot spent.
+        if exc.refusal_code != _NO_TRUNK:
+            raise
+        # ⚠️ **The relay's CODE is carried onto the replacement** (ADR 0034 D-m, issue 46). Only the
+        # sentence is ours — the refusal is still the relay's, and an application branching on
+        # `project_has_no_trunk` would otherwise see this one refusal, alone in the whole plane,
+        # arrive with `code: null` and be indistinguishable from a local failure. A bare
+        # `SystemExit` is what this was, and it was invisible for exactly as long as nothing looked.
+        raise relay.TaskRefusal(_no_trunk_message(args, project_id),
+                                code=exc.refusal_code, status=exc.status) from None
+
+    as_json = bool(getattr(args, "json", False))
+    following = bool(getattr(args, "follow", False))
+    task_id = task.get("id")
+    _report_created(task, label, following=following, as_json=as_json)
+
+    if not following:
+        return 0
+
+    if not task_id:
+        # Created, but with nothing to address it by, so there is nothing to attach to. Not a silent
+        # 0: the caller asked to watch this task, and reporting success for a create-and-watch that
+        # only created would be the same class of lie the exit codes above exist to remove.
+        raise SystemExit(
+            f"The relay created a task but did not say what its id is, so --follow has nothing to "
+            f"attach to. See what landed with `grid task list --project {project_id}`")
+
+    return _follow_created(base, token, task_id, as_json=as_json)
+
+
+def _task_send(args: argparse.Namespace) -> int:
+    """Send another message into a conversation that already exists (ADR 0034 D-n, issue 47).
+
+    `_task_create` minus the project half, and the subtraction IS the command: a conversation
+    already names its project, so there is no `--project` to resolve, no `default` to look up and
+    no `--init-project` — a conversation cannot exist in a project with no trunk.
+
+    That also means **no `GET /relay/v1/projects` round trip**, which `create` needs only to answer
+    "which project did you mean". One request, and its refusals are the relay's own.
+    """
+    from remote import relay
+
+    # Before the grid is resolved, for `_task_create`'s reason: a typo in a filename should not
+    # first cost a credential lookup and a control-plane round trip to discover.
+    files = _collect_files(getattr(args, "file", None), dirs=getattr(args, "dir", None))
+
+    base, token, label = _resolve(args)
+    task = relay.send_turn(
+        base, token, args.conversation_id, prompt=args.prompt, files=files)
+
+    as_json = bool(getattr(args, "json", False))
+    following = bool(getattr(args, "follow", False))
+    task_id = task.get("id")
+    _report_created(task, label, following=following, as_json=as_json, verb="sent to")
+
+    if not following:
+        return 0
+
+    if not task_id:
+        # `_task_create`'s guard verbatim, and for its reason: the turn exists, so reporting 0 for a
+        # send-and-watch that only sent would be the lie the exit codes exist to remove.
+        raise SystemExit(
+            f"The relay accepted the message but did not say what its turn id is, so --follow has "
+            f"nothing to attach to. See what landed with `grid task list "
+            f"{task.get('project_id') or '<project-id>'}`")
+
+    return _follow_created(base, token, task_id, as_json=as_json)
+
+
+def _report_created(task: dict, label: str, *, following: bool, as_json: bool,
+                    verb: str = "created on") -> None:
+    """What `task create` and `task send` say about the turn they just made, in the chosen shape.
+
+    ONE function with a `verb` rather than two that drift — the reasoning
+    `project_writable.refuse_if_archived` records for taking one: the two commands report the same
+    row and the only honest difference is which of them the person ran.
+
+    `.get()` throughout: the reply shape is the relay's, and an older one may not send every key.
+
+    The `--json` document is **compact when following**, so the whole of stdout is one JSON document
+    per line and a consumer reads the create payload and the events with the same `while read`.
+    `indent=2` is kept byte-for-byte when not following, because that output has consumers today.
+
+    The watch advice lives strictly inside the human branch, never beside the JSON: `--json`'s stdout
+    is one document for a program to parse, and this is prose. Pinned by
+    `test_task_create_dir_keeps_json_stdout_parseable_while_it_reports_skips`, which caught exactly
+    that while this was being written.
+    """
+    task_id = task.get("id")
+    if as_json:
+        print(json.dumps(task, indent=None if following else 2))
+        return
+
+    print(f"task {task_id or '(no id)'} {verb} {label}")
+    print(f"state={task.get('state') or 'unknown'}")
+    print(f"project={task.get('project_id') or 'unknown'}")
+    # The id the NEXT message is addressed by (ADR 0034 D-n, issue 47), and the only place a person
+    # is ever told it: `conversation_id` reaches no other surface a member can call. Printed for
+    # `create` as well as `send`, because create is where a conversation begins and therefore where
+    # somebody needs its id.
+    #
+    # ⚠️ Skipped rather than printed as `unknown` when the relay does not send it — that is an older
+    # relay with no follow-up route, so a line naming an id it does not have would advertise a
+    # command that answers 404.
+    # `isinstance`, never a bare truthiness test — the rule `relay.refusal_code` states, and it
+    # matters here because this id is interpolated into a command the person is told to RUN. A
+    # truthy non-string from a mangling proxy would print `grid task send {'a': 1} --prompt …`,
+    # advice that cannot work and reads as this CLI being broken. Falling silent is the honest
+    # answer and is the reading an older relay already gets; the turn id is still reported.
+    conversation_id = task.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id.strip():
+        conversation_id = None
+    if conversation_id:
+        print(f"conversation={conversation_id}")
+    if following:
+        return
+    # `follow` and not `get` (issue 32). The verb said "watch" and the command named the one-shot —
+    # `get` answers once and returns, so somebody following that advice saw `state=queued` and nothing
+    # else. Both are offered, each labelled with what it does.
+    print(f"\nWatch it with:   grid task follow {task_id or '<id>'}"
+          f"\nOr ask once:     grid task get {task_id or '<id>'}"
+          f"\n(or pass --follow to create and watch in one command)")
+    if conversation_id:
+        # Last on its line, because `test_every_command_this_cli_tells_you_to_run_actually_parses`
+        # retypes the first `grid …` match on a line as argv — and the argument is spelled
+        # `<your message>` rather than `'...'` for the same reason: that scanner strips quotes, so
+        # a quoted ellipsis leaves `--prompt` with nothing after it and the retyped line is a usage
+        # error. `<…>` becomes a placeholder token instead. Caught by that test while writing this.
+        print(f"Reply in this conversation with:  "
+              f"grid task send {conversation_id} --prompt <your message>")
+
+
+def _follow_created(base: str, token: str, task_id: str, *, as_json: bool) -> int:
+    """Hand `create --follow` to the same watcher `grid task follow` uses.
+
+    Called with the base and token `_task_create` ALREADY holds rather than re-resolving them: a
+    second `_resolve` is a second credential lookup and control-plane round trip in the window
+    between the task becoming claimable and anybody watching it, and one that failed would leave a
+    running task reported as an error.
+
+    `after_seq=-1` — from the very first event, so the gap between the POST returning and the stream
+    opening holds nothing. That is what the sequenced log is for.
+    """
+    if not as_json:
+        # Said before the stream starts, because the answer to "can I stop this?" is needed while it
+        # is running, not afterwards. Ctrl-C ends the watching only; the task is the grid's now.
+        print(f"\nfollowing task {task_id} — Ctrl-C stops watching, not the task.\n"
+              f"To stop the task itself:  grid task cancel {task_id}\n")
+    # ⚠️ **The flush is the guarantee, not the print.** CPython block-buffers stdout whenever it is
+    # not a tty, and the next call blocks for as long as the task waits for a provider — so
+    # `grid task create … --follow > out.log &` with a `tail -f` showed ZERO bytes until the task
+    # ended, id included. Measured, and the reason `test_task_create_follow_flushes_the_id_before_it
+    # _blocks_on_the_stream` is a real subprocess: `capsys` replaces `sys.stdout` with a memory
+    # buffer, so it can only ever see the ORDER of the prints and never whether the fd was flushed.
+    # One flush here covers all three shapes of preamble — the human report, this banner, and
+    # `--json`'s compact create line.
+    sys.stdout.flush()
+    terminal = _follow_stream(base, token, task_id, after_seq=-1, as_json=as_json)
+    if terminal is None:
+        # `_follow_stream` has already said what went wrong with the STREAM. What it cannot say is
+        # that the task is still out there running — it does not know one was just created — and
+        # without this the non-zero exit reads as "the task failed" with no way forward.
+        # One command per line, each at the END of its line — `test_every_command_this_cli_tells_you
+        # _to_run_actually_parses` retypes the first `grid …` match on a line as argv, so a second
+        # clause after it becomes unrecognised arguments.
+        print(f"The task is still running; nothing here cancelled it.\n"
+              f"Reattach with:    grid task follow {task_id}\n"
+              f"Or read it once:  grid task get {task_id}", file=sys.stderr)
+    return _follow_exit_code(terminal)
+
+
+def _task_follow(args: argparse.Namespace) -> int:
+    """Watch a task's event log live, reattaching at the cursor if the connection drops.
+
+    The cursor is the whole point. Every event carries its `seq`, so a stream that dies is resumed
+    with `after_seq=<last seq seen>` and the relay replays exactly what follows — no gap, no repeat.
+    Without that, a reconnect would either re-render everything or silently skip whatever arrived
+    while the socket was down.
+
+    Reconnects are BOUNDED. A relay that is genuinely gone must end the command, not spin forever;
+    and an answered refusal (403 not yours, 404 no such task, 410 expired) is never retried at all,
+    because reconnecting cannot change a verdict.
+
+    Exit code is the task's own outcome: 0 for `completed`, 1 for `failed`/`timed_out`, so a script
+    can branch on it. A stream that ends without a terminal event exits non-zero too — the task's
+    fate is unknown, and reporting unknown as success is the failure this guards.
+
+    Unchanged by issue 32: `get` gained a third code (2, not finished) and this did NOT. A follower
+    has watched a stream to its end, so "not started yet" is not one of the answers available to it.
+    """
+    base, token, _label = _resolve(args)
+    conversation_id = getattr(args, "conversation", None)
+    if not conversation_id and not getattr(args, "task_id", None):
+        # argparse cannot express "one of these two" for an optional positional and a flag, so the
+        # refusal is here — and it names both, because somebody who typed neither does not yet know
+        # a conversation is a thing they can follow.
+        raise SystemExit(
+            "Say what to follow: a turn id, or a whole conversation.\n"
+            "  grid task follow <turn-id>\n"
+            "  grid task follow --conversation <conversation-id>")
+
+    stop = _follow_stream(
+        base, token, conversation_id or args.task_id,
+        after_seq=int(getattr(args, "after_seq", -1) or -1),
+        as_json=bool(getattr(args, "json", False)),
+        conversation=bool(conversation_id))
+    if conversation_id:
+        return _conversation_exit_code(stop)
+    return _follow_exit_code(stop)
+
+
+def _follow_exit_code(terminal: dict | None) -> int:
+    """`follow`'s two-way rule, in one place because `create --follow` reports it too.
+
+    Deliberately NOT `_outcome_exit_code`: that one answers 2 for a state it cannot place as
+    finished, which is right for a one-shot read and wrong here — a stream that ended is not a task
+    that has not started. `None` (no terminal event ever arrived) is non-zero for the reason in
+    `_task_follow`'s docstring: the fate is unknown, and unknown must never read as success.
+    """
+    return 0 if terminal is not None and terminal.get("state") == "completed" else 1
+
+
+def _conversation_exit_code(idle: dict | None) -> int:
+    """A conversation's two-way rule — and it says something different from a turn's.
+
+    ⚠️ **It deliberately does NOT borrow the last turn's outcome.** A conversation has no terminal
+    state (ADR 0034 D-a): "is this conversation finished" is not a fact the grid owns, so an exit
+    code claiming one would be this CLI inventing it. What 0 means here is exactly what was
+    observed — the stream was watched to its end — and 1 means it was not, which covers a lost
+    connection, a refusal and a credential that stopped working. Someone who wants a turn's outcome
+    has `grid task get` and `grid task follow <turn-id>`, both of which answer it honestly.
+    """
+    return 0 if idle is not None else 1
+
+
+def _blocks(base: str, token: str, target_id: str, *, after_seq: int, conversation: bool):
+    """`(seq, turn_id, event)` off whichever stream is being followed.
+
+    The one place the two wire functions differ is flattened here rather than in `_follow_stream`'s
+    loop, so the cursor, the reconnect budget and the renderer see one shape. `turn_id` is `None`
+    for a turn's own stream, where the question does not arise.
+    """
+    from remote import relay
+
+    if conversation:
+        yield from relay.stream_conversation_events(
+            base, token, target_id, after_seq=after_seq)
+        return
+    for seq, event in relay.stream_task_events(base, token, target_id, after_seq=after_seq):
+        yield seq, None, event
+
+
+def _follow_stream(base: str, token: str, task_id: str, *,
+                   after_seq: int, as_json: bool, conversation: bool = False) -> dict | None:
+    """Render a task's events until it ends, reattaching at the cursor. The terminal event, or None.
+
+    The ONE implementation of the cursor and the reconnect budget — `grid task follow`,
+    `grid task create --follow` and (since ADR 0034 D-m, issue 51) `grid task follow --conversation`
+    are the same watching, differing only in who resolved the grid, what is printed before it
+    starts, and which stream it reads.
+
+    `conversation=True` follows a whole conversation rather than one turn. Everything that makes
+    this function worth having is unchanged by that: the cursor is still one integer, still advanced
+    to every yielded `seq`, still what a reattach resumes from. What differs is the route, the
+    ending event, and that each block says which turn it came from — none of which the loop below
+    has to know twice.
+
+    `None` means no terminal event was ever seen, and it covers FOUR different endings, each of which
+    has already said which on stderr: a refused credential, an answered refusal, an outage that
+    outlasted the budget, and a stream that kept ending empty. The caller cannot tell them apart and
+    does not need to — all four mean "the task's fate is unknown from here".
+
+    ⚠️ The first of the four is caught **separately and by name**: `RelayUnauthorized` is a plain
+    `Exception`, not a `RelayError` (`remote/relay.py`), so `except relay.RelayError` never saw a 401
+    and a token revoked mid-task came out of this loop as a raw traceback. Every one-shot call in this
+    plane folds a 401 into a worded `SystemExit`; this is the follower's version of that. It is
+    reported rather than retried for the same reason a 4xx is: a refused credential does not become
+    valid on reconnect, and the wait would spend the budget confirming it.
+    """
+    import time
+
+    from remote import relay
+
+    cursor = after_seq
+    terminal: dict | None = None
+    attempts_left = _RECONNECT_ATTEMPTS
+    # Outlives the reconnect loop deliberately: a reattach resumes at the cursor, so the tree the
+    # follower already showed is still the tree the user is looking at.
+    tree = _TreeView()
+    # Which stream, and what ends it. `task.terminal` ends a TURN; a conversation has no terminal
+    # state (ADR 0034 D-a), so what ends its stream is the relay saying nothing more will arrive.
+    #
+    # ⚠️ On a conversation the block must ALSO belong to no turn, and that is defence in depth rather
+    # than belt-and-braces. `conversation.idle` is the first event type a client ACTS ON: this loop
+    # stops at it and `_conversation_exit_code` reports 0. The relay refuses a provider that tries to
+    # publish one (`task_events.RESERVED_EVENT_PREFIX`), but a provider is authenticated and not
+    # trusted, so two independent things now have to fail before a watcher is told a conversation
+    # finished while its turn is still running. The relay's own block is the only one with no
+    # `task_id`; a forged one wears the forger's.
+    ends_on = _CONVERSATION_IDLE if conversation else "task.terminal"
+    noun = "conversation" if conversation else "task"
+
+    while terminal is None:
+        made_progress = False
+        try:
+            for seq, turn_id, event in _blocks(
+                    base, token, task_id, after_seq=cursor, conversation=conversation):
+                cursor = seq
+                made_progress = True
+                _render(seq, event, as_json=as_json, tree=tree,
+                        turn_id=turn_id, conversation=conversation)
+                if event.get("type") == ends_on and (turn_id is None or not conversation):
+                    terminal = event
+                    break
+        except SystemExit:
+            raise
+        except relay.RelayUnauthorized:
+            # Named explicitly because it is NOT a `RelayError` — see the docstring. Nothing here can
+            # refresh a grid access token, so this says which credential and which command renews it
+            # rather than reconnecting into the same 401 five times.
+            print(f"Cannot follow {noun} {task_id}: the relay refused this grid's access token. "
+                  f"Refresh it with `grid login`", file=sys.stderr)
+            return None
+        except relay.RelayError as exc:
+            if _is_answer_not_blip(getattr(exc, "status", None)):
+                print(f"Cannot follow {noun} {task_id}: {exc}", file=sys.stderr)
+                return None
+            if made_progress:
+                attempts_left = _RECONNECT_ATTEMPTS
+            elif attempts_left <= 0:
+                print(f"Lost the connection following {noun} {task_id} and could not "
+                      f"reattach: {exc}", file=sys.stderr)
+                return None
+            else:
+                attempts_left -= 1
+            print(f"connection lost ({exc}); reattaching at seq {cursor}", file=sys.stderr)
+            time.sleep(_RECONNECT_BACKOFF_SECONDS)
+            continue
+
+        if terminal is not None:
+            break
+
+        # The stream ended CLEANLY without a terminal event, and the client cannot tell why: the
+        # relay may have finished (its row GC'd), or something between us — a proxy's SSE read
+        # timeout — may have closed a perfectly live stream. Those are byte-identical at this end,
+        # so reattach rather than guess. Progress refills the budget, so a proxy that severs a busy
+        # stream every few minutes is followed indefinitely; a task that is genuinely over yields
+        # nothing new and costs a few empty reattaches before this gives up.
+        if made_progress:
+            attempts_left = _RECONNECT_ATTEMPTS
+        elif attempts_left <= 0:
+            print(f"The stream for {noun} {task_id} ended without saying it had finished.",
+                  file=sys.stderr)
+            return None
+        else:
+            attempts_left -= 1
+        time.sleep(_RECONNECT_BACKOFF_SECONDS)
+
+    return terminal
+
+
+def _is_answer_not_blip(status: int | None) -> bool:
+    """Whether the relay ANSWERED, so reattaching cannot change the outcome.
+
+    The same rule the provider's report path uses, applied to the read side: a 4xx is a verdict
+    (403 not yours, 404 no such task, 410 expired); a 5xx or a bare transport failure means nobody
+    decided anything yet and the connection is worth remaking.
+    """
+    return status is not None and 400 <= status < 500
+
+
+# How many path lines one tree snapshot may print. The provider's own cap protects the WIRE; this
+# one protects the terminal, where the tree shares a screen with the tool-call lines a user is
+# actually reading. A capped snapshot is still five hundred paths.
+_TREE_LINES = 40
+# What every path line is indented by, so a tree is visibly subordinate to the `[seq]` line above it.
+_TREE_INDENT = "      "
+
+
+class _TreeView:
+    """The last workspace snapshot this follower saw, so later ones can be shown as changes.
+
+    The provider re-sends the WHOLE tree every time — it has to, because a client can attach at any
+    `after_seq` and a requeue can move the task to a provider that never saw the earlier events
+    (ADR 0032 D-d). Snapshots are the right thing on the wire and the wrong thing on a screen:
+    reprinting two hundred unchanged paths every thirty seconds buries everything else. So the
+    difference is computed here, at the only end that has somewhere to keep it.
+
+    **A delta is only computed between two COMPLETE snapshots**, and "complete" is judged rather than
+    assumed. A truncated snapshot shows a prefix; so does one whose `paths` was not a list, or held
+    an entry that was not a string, or whose `total` disagrees with what arrived. In every one of
+    those cases a path missing from this snapshot may simply be a path we were not given — and
+    reporting it as `- src/main.py` would be a confident, wrong statement that the agent deleted the
+    user's file. Listing the snapshot again is noisier and true, which is the correct way round.
+    """
+
+    def __init__(self) -> None:
+        # The last COMPLETE snapshot, or `None` for "no baseline worth diffing against" — which is
+        # both the initial state and what a partial snapshot leaves behind.
+        self._paths: frozenset[str] | None = None
+
+    def lines(self, seq: int, event: dict) -> list[str]:
+        """The lines one `task.tree` event prints. Never raises — the event came off the wire."""
+        paths, well_formed = _tree_paths(event)
+        total = event.get("total")
+        # `bool` is an `int` in Python, and `True` is not a file count.
+        counted = isinstance(total, int) and not isinstance(total, bool) and total >= len(paths)
+        truncated = bool(event.get("truncated"))
+        # Complete means: everything the tree holds is in this event, and we can prove it. A `total`
+        # that disagrees with the paths delivered is as partial as a flag saying so.
+        complete = well_formed and counted and not truncated and total == len(paths)
+
+        if counted:
+            head = f"[{seq}] workspace: {total} files"
+            if truncated:
+                head += f" (truncated, showing {len(paths)} of {total})"
+        else:
+            # No usable count arrived, so none is claimed: "showing 2 of 2" under a `truncated` flag
+            # is a line that contradicts itself, and it is built entirely out of a recovered number.
+            head = f"[{seq}] workspace: {len(paths)} files listed"
+            if truncated:
+                head += " (truncated; the total was not reported)"
+
+        previous = self._paths
+        self._paths = frozenset(paths) if complete else None
+        if previous is None or not complete:
+            # Nothing honest to compare against: either the user attached mid-run and has no idea
+            # what is in there, or one of the two snapshots is part of a tree we never saw whole.
+            return [head, *_bounded([f"{_TREE_INDENT}{path}" for path in paths])]
+
+        added = sorted(frozenset(paths) - previous)
+        removed = sorted(previous - frozenset(paths))
+        if not added and not removed:
+            return [head]
+        counts = ([f"+{len(added)}"] if added else []) + ([f"-{len(removed)}"] if removed else [])
+        head += f" ({', '.join(counts)})"
+        return [head, *_bounded(
+            [f"{_TREE_INDENT}+ {path}" for path in added]
+            + [f"{_TREE_INDENT}- {path}" for path in removed])]
+
+
+def _tree_paths(event: dict) -> tuple[list[str], bool]:
+    """The event's `paths`, and whether they arrived intact.
+
+    Defended at the boundary — a relay that is newer, older, or simply wrong must not be able to turn
+    `grid task follow` into a traceback. The second half of the answer is what stops the defence from
+    becoming its own bug: silently dropping an entry we could not read leaves a SHORTER list that
+    looks complete, and `_TreeView` would then report the missing entry as a deleted file.
+    """
+    raw = event.get("paths")
+    if not isinstance(raw, list):
+        return [], False
+    usable = [path for path in raw if isinstance(path, str)]
+    return usable, len(usable) == len(raw)
+
+
+def _bounded(lines: list[str]) -> list[str]:
+    """At most `_TREE_LINES` of them, and a line saying so when there were more.
+
+    Saying so is the part that matters: a listing silently cut at forty reads as a workspace that
+    holds forty files, which is exactly the wrong thing to believe about a dependency install.
+    """
+    if len(lines) <= _TREE_LINES:
+        return lines
+    return [*lines[:_TREE_LINES], f"{_TREE_INDENT}… and {len(lines) - _TREE_LINES} more"]
+
+
+def _resets_note(resets_at: Any) -> str:
+    """" — resets <local time>", or nothing at all when the stamp is not one.
+
+    A raw epoch is not a time anyone can read, and this line exists to tell a user when they can
+    submit their next task. Every field on the event is optional — it is built from a subprocess's
+    stdout — so an unusable stamp is simply left out rather than shown as `None` or raised on.
+    """
+    if isinstance(resets_at, bool) or not isinstance(resets_at, (int, float)):
+        return ""
+    try:
+        return f" — resets {datetime.datetime.fromtimestamp(resets_at):%b %-d at %H:%M}"
+    except (OverflowError, OSError, ValueError):
+        # A stamp far enough out of range that the platform cannot render it. The rest of the line
+        # is still worth printing; a follower may never die on a diagnostic.
+        return ""
+
+
+def _result_note(event: dict) -> str:
+    """": success (12 turns, 34.5s)" — with each part dropped unless it is usable.
+
+    Same contract as `_resets_note`: the fields come off a subprocess's stdout, nothing bounds them,
+    and a follower may never die on a diagnostic. `num_turns` excludes `bool` because `True` is an
+    `int` in Python and "1 turns" from a boolean is a confident lie about the run.
+    """
+    parts = []
+    turns = event.get("num_turns")
+    if isinstance(turns, int) and not isinstance(turns, bool):
+        parts.append(f"{turns} turns")
+    duration = event.get("duration_ms")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+        try:
+            parts.append(f"{duration / 1000:.1f}s")
+        except (OverflowError, ValueError):
+            # A JSON number is an unbounded int; dividing one long enough overflows the float.
+            pass
+    subtype = event.get("subtype")
+    head = f": {subtype}" if isinstance(subtype, str) and subtype else ""
+    if event.get("is_error"):
+        head += " (the agent reports it went wrong)"
+    return head + (f" ({', '.join(parts)})" if parts else "")
+
+
+def _render(seq: int, event: dict, *, as_json: bool, tree: "_TreeView | None" = None,
+            turn_id: str | None = None, conversation: bool = False) -> None:
+    """One event, printed. Unknown types are shown rather than dropped.
+
+    Event types grow, and a follower that rendered only the types it knew would show a user nothing
+    while the relay faithfully streamed them what they asked for.
+
+    `conversation` says which stream this event came off, and it is a separate flag from `turn_id`
+    being set rather than derived from it: the conversation stream's own ending block belongs to no
+    turn, so "no turn id" and "not a conversation" are different facts. The per-turn stream's
+    `--json` line is byte-identical to what it has always been — issue 32's contract is built on it.
+    """
+    if as_json:
+        line = {"seq": seq, "event": event}
+        if conversation:
+            line = {"seq": seq, "task_id": turn_id, "event": event}
+        print(json.dumps(line))
+        return
+
+    kind = event.get("type") or "event"
+    if kind == _CONVERSATION_IDLE:
+        print("\n(nothing more is running in this conversation)")
+        return
+    if kind == "task.tree":
+        # The only live view of a running task's working directory: the provider commits at terminal
+        # boundaries only (ADR 0032 D-e), so between claim and terminal the repository holds nothing
+        # new and there is nothing else to look at.
+        for line in (tree or _TreeView()).lines(seq, event):
+            print(line)
+    elif kind == "task.output":
+        print(event.get("text", ""))
+    elif kind == "task.tool_use":
+        # The line a user reads most of — a task is minutes of tool calls and a sentence of prose.
+        # The path is optional: `Bash` and `WebSearch` target nothing, and a stream that went silent
+        # during a ten-minute test run would read as a hang.
+        path = event.get("path")
+        print(f"[{seq}] {event.get('tool') or 'tool'}" + (f" {path}" if path else ""))
+    elif kind == "task.tool_result":
+        # One of these arrives for EVERY tool call, and a real task makes hundreds. The call's
+        # identity was already printed by its `task.tool_use` line, so the only news here is a
+        # failure — narrating the successes would double the length of a follow with a line whose
+        # sole content is an id the user cannot act on. Silence is the right render for "it worked".
+        if event.get("is_error"):
+            print(f"[{seq}] tool call failed ({event.get('id') or 'unknown call'})", file=sys.stderr)
+    elif kind == "task.stderr":
+        # The agent's own diagnostics, on OUR stderr — so `grid task follow > out.txt` keeps the
+        # task's output separable from the noise around it.
+        print(f"[{seq}] {event.get('text', '')}", file=sys.stderr)
+    elif kind == "task.session":
+        print(f"[{seq}] session {event.get('session_id')}")
+    elif kind == "task.session_resumed":
+        print(f"[{seq}] resuming session {event.get('session_id')}")
+    elif kind == "task.session_reset":
+        # On stderr with the other diagnostics: the agent is about to answer without any of the
+        # project's history, and a user who does not know that reads the result as the agent
+        # ignoring everything they established in earlier tasks.
+        reason = event.get("reason") or "the transcript could not be used"
+        print(f"[{seq}] starting a fresh session ({reason})", file=sys.stderr)
+    elif kind == "task.rate_limit":
+        # The provider's own Claude subscription, reporting itself (ADR 0032 issue 09). On stderr
+        # with the other diagnostics: it says nothing about this task's result, and it is the only
+        # copy of the reason that reaches the person who submitted the task — the provider's own
+        # warning goes to the provider's log, which they cannot read. So when their NEXT task sits
+        # queued, this is what explains it.
+        #
+        # "provider capacity", not "rate limit", and `status=` rather than a verb. The provider now
+        # drops the boring reading (`task_capacity.QUIET_STATUS`), so anything arriving here is worth
+        # a line — but the OLD phrasing made even a healthy one read as a fault: "the provider's
+        # five_hour window is allowed" opens with the words `rate limit`, puts `allowed` where a
+        # reader expects a verdict, and prints on stderr beside real diagnostics. The status stays
+        # VERBATIM (the `task.retry` rule): the decision about what a status means belongs to
+        # `task_capacity`, on the provider, and a second reading here is a second thing to disagree.
+        print(f"[{seq}] provider capacity: "
+              f"{event.get('limit_type') or 'subscription'} window, "
+              f"status={event.get('status') or 'unknown'}"
+              + _resets_note(event.get("resets_at")), file=sys.stderr)
+    elif kind == "task.attempt_started":
+        provider = event.get("provider_id")
+        where = f" on {provider}" if provider else ""
+        print(f"[{seq}] attempt {event.get('attempt')} started{where}")
+    elif kind == "task.retry":
+        # On stderr with the other disclosures, and worded so the asymmetry is unmissable: the relay
+        # resets the TASK's branch to its input commit before the next attempt, and a user who is
+        # not told that reads a repeated run as the agent looping (ADR 0032 D-d).
+        #
+        # It used to say "Changes the lost attempt made in git are undone", and ADR 0033 D-c made
+        # that FALSE. The reset covers `task/<id>` and nothing else — the reaper never touches a
+        # conversation's branch, the relay's apply writes only the trunk, and there is no revert. So
+        # an interrupted settle (the git write landed, the terminal transaction did not) leaves the
+        # lost attempt's work on `wip/<conversation_id>`, which is exactly where this conversation's
+        # NEXT turn is cut from.
+        #
+        # Naming the recovery is the other half. "Something may be left behind" with no way to act
+        # on it is a worse message than the wrong one it replaces.
+        #
+        # ⚠️ **The recovery it names is re-keyed, not deleted** (ADR 0034 D-e/D-m, issue 41): `wip
+        # reset` survives the clean break that takes promote and integrate, and it now takes the
+        # CONVERSATION whose branch is to move. Naming the old member-keyed form here would send
+        # somebody to a command that refuses them.
+        attempt = event.get("attempt")
+        of = event.get("max_attempts")
+        reason = event.get("reason") or "its lease lapsed"
+        print(f"[{seq}] attempt {attempt}"
+              + (f" of {of}" if of else "")
+              + f" was lost ({reason}); retrying from the turn's input. The turn's own branch is "
+                f"reset; anything it did outside git is not, and work an interrupted settle "
+                f"already merged into the conversation's branch stays there "
+                f"(`grid project wip reset <project-id> <conversation-id> --commit <base>` "
+                f"moves it back).", file=sys.stderr)
+    elif kind == "task.apply_blocked":
+        # The turn this lands on was reported COMPLETED (ADR 0034 D-g, issue 42), so nothing else in
+        # the stream reads as a problem — and the fallback arm below would print the raw payload,
+        # conflicting file paths and all, at somebody who does not know what a conflict is.
+        #
+        # On stdout rather than stderr, unlike the disclosures around it: this is progress, not a
+        # diagnostic. A step is running and there is nothing for the reader to do.
+        step = event.get("merge_turn_id")
+        print(f"[{seq}] your work is finished; the grid is combining it with a colleague's change"
+              + (f" (step {step})" if step else ""))
+    elif kind == "task.apply_unresolved":
+        # ⚠️ **A DIFFERENT instruction from the event above, which is why the relay gives it a
+        # different type.** That one means a step is running; this one means nothing more will happen
+        # unless the person says something. Rendered alike, a dead end reads as progress.
+        #
+        # No file paths and no git vocabulary (ADR 0034 D-m). The relay's `conflicts` list is DATA
+        # for an application; the sentence is this repo's, which is where that rule is testable.
+        where = event.get("conversation_id")
+        print(f"[{seq}] this change has not appeared in the project yet — somebody changed the same "
+              f"thing at the same time and the grid could not combine the two. Your work is safe in "
+              f"this conversation.", file=sys.stderr)
+        print(f"     Ask for it again with:  grid task send "
+              f"{where or '<conversation-id>'} --prompt '<what to do>'", file=sys.stderr)
+    elif kind == "task.apply_failed":
+        # The relay has tried and failed to put this result into the project enough times that
+        # "transient" has stopped being the likeliest explanation (ADR 0034 D-d, issue 41). Its
+        # `reason` is the relay's own words — displayed VERBATIM and never compared, the `task.retry`
+        # rule — so it goes to stderr with the other diagnostics rather than into the sentence.
+        print(f"[{seq}] the grid has not been able to put this change into the project"
+              + (f" after {event['attempts']} attempts" if event.get("attempts") else "")
+              + ". It keeps trying; tell whoever runs this grid if it does not clear.",
+              file=sys.stderr)
+        if event.get("reason"):
+            print(f"     {event['reason']}", file=sys.stderr)
+    elif kind == "task.cancelled":
+        # Somebody stopped this run (ADR 0033 D-l, issue 19b). On stderr with the other
+        # disclosures: it says nothing about the result and everything about why there is not one,
+        # and on a shared project the person reading this is often not the person who did it.
+        #
+        # `by` is a member key, which is what `grid project member list` and `grid project promote`
+        # both speak. Absent is ordinary — an older relay, or a canceller who has since left the
+        # project — and is worth saying rather than printing `None`.
+        by = event.get("by")
+        print(f"[{seq}] cancelled by " + (f"project member {by}" if by else "a project member")
+              + ". The task's branch is left where the agent got to.", file=sys.stderr)
+    elif kind == "task.result":
+        # The agent's own account of the run, one event at the end. `is_error` here is the AGENT's
+        # claim about itself; the task's real outcome is `task.terminal`'s, which prints after it.
+        # Every field is optional and none is bounded (it is built from a subprocess's JSON), so
+        # each part is dropped unless it is usable rather than printed as `None`.
+        print(f"[{seq}] agent finished{_result_note(event)}")
+    elif kind == "task.terminal":
+        error = event.get("error")
+        print(f"[{seq}] {event.get('state')}" + (f": {error}" if error else ""))
+        if error == QUEUE_EXPIRED:
+            # The relay's word stays on the line above, verbatim like every other reason. This says
+            # what it means, because `timed_out` reads as "the task hung" and this one did not run
+            # at all (ADR 0033 D-k).
+            #
+            # On stdout with the line it explains, unlike the `task.retry` and `task.rate_limit`
+            # diagnostics: this is part of the terminal report, and a reader piping stdout to a log
+            # must not end up with the outcome and not the reason for it.
+            print(f"[{seq}] {_QUEUE_EXPIRED_NOTE}")
+    else:
+        # Verbatim, minus the type we already printed — enough to be useful without pretending to
+        # understand a shape this build has never seen.
+        rest = {k: v for k, v in event.items() if k != "type"}
+        print(f"[{seq}] {kind} {json.dumps(rest, sort_keys=True)}" if rest else f"[{seq}] {kind}")
+
+
+def _task_fetch(args: argparse.Namespace) -> int:
+    """Put a finished task's result on disk, over the relay's git front (ADR 0032 issue 05).
+
+    No SSH key is provisioned for anyone: the same grid token this CLI already holds authenticates
+    the fetch, handed to git through the environment so it never reaches argv and is never written
+    into the clone's `.git/config`. A result directory is a thing people zip up and pass around, and
+    a grid access token lives a year.
+    """
+    from remote import project_clone, relay, task_repo
+
+    base, token, _label = _resolve(args)
+    task = relay.get_task(base, token, args.task_id)
+
+    state = task.get("state")
+    if state not in _TERMINAL_STATES:
+        # Refused rather than served: until the provider pushes, the branch still holds only the
+        # INPUT, so a fetch would hand back the uploaded files as though they were the result.
+        raise SystemExit(
+            f"Task {args.task_id} is {state or 'unknown'}, so it has no result yet. "
+            f"Watch it with `grid task follow {args.task_id}`.")
+    commit, branch, project_id = (
+        task.get("result_commit"), task.get("branch"), task.get("project_id"))
+    if not (branch and project_id):
+        # Nothing ADDRESSABLE — no branch to fetch from, so there is genuinely nowhere to look.
+        raise SystemExit(
+            f"Task {args.task_id} finished as {state} but recorded no result to fetch. "
+            f"`grid task get {args.task_id}` shows what it did report.")
+    # A missing `result_commit` used to be refused here too, and that made `grid task cancel` a
+    # liar: it prints "Its branch is left where the agent got to: grid task fetch <id>", and this
+    # command then answered "recorded no result to fetch" — while the branch was on the relay all
+    # along, holding at least the task's input.
+    #
+    # The promise cannot be made conditional at its own end: cancel returns immediately and the
+    # agent does not die until the next lease beat, so at the moment the sentence is printed nobody
+    # knows whether a result will land. So the fix belongs here — serve what exists, and SAY which
+    # of the two it is. Refusing was one way to keep "input" from reading as "result"; saying so is
+    # the other, and it is the one that keeps the promise.
+    if not commit:
+        print(f"Task {args.task_id} recorded no result, so this is the branch as the grid last "
+              f"saw it — it may hold only the task's input.")
+    if task.get("branch_pruned"):
+        # Refused HERE rather than letting git answer, because everything else about an old task
+        # still looks fetchable — the commit and the branch name are both on the row. git's own
+        # `couldn't find remote ref` reads as corruption or as a permissions problem, and sends the
+        # user hunting for a break that is a retention policy working exactly as intended.
+        #
+        # `.get` with a falsy default is the degrade: a relay predating ADR 0033 issue 16a sends no
+        # such key AND collects no branches, so absent must mean "still there". Reading absence the
+        # other way would refuse every fetch against every relay that has not redeployed.
+        raise SystemExit(
+            f"Task {args.task_id}'s branch is no longer kept on the relay — its files were "
+            f"collected after the project's retention window. "
+            f"`grid task get {args.task_id}` still shows what it did and why.")
+
+    dest = Path(args.into) if getattr(args, "into", None) else Path(args.task_id)
+    if dest.exists() and not dest.is_dir():
+        raise SystemExit(f"Cannot fetch into {dest}: it exists and is not a directory.")
+    if dest.is_dir() and any(dest.iterdir()):
+        # A directory of somebody's own work is not a place to check a branch out into: `git
+        # checkout -- .` overwrites a file of the same name without complaining. Only a directory
+        # THIS command created is safe, and only for the project it was created for — updating one
+        # in place is how a project's successive tasks are followed.
+        #
+        # The presence of `.git` is NOT that proof, and using it as such was a real defect: the
+        # user's own repository has one too, so `--into ~/my-project` (or running the command inside
+        # it) sailed past the guard and destroyed uncommitted work.
+        # A `grid project clone` is checked FIRST and refused with its own sentence (ADR 0033 D-h,
+        # issue 17). The guard is not loosened for it — a clone is full of work in progress, and
+        # `git checkout -- .` overwrites a same-named file without complaining — but "pass --into
+        # with a new directory" is the wrong fix there: the clone already has the task branch, and
+        # two git commands reach it without this command being involved at all.
+        cloned = project_clone.cloned_project(dest)
+        if cloned is not None:
+            raise SystemExit(
+                f"Cannot fetch into {dest}: it is a `grid project clone`, which already has "
+                f"task {args.task_id}'s branch. Get the result there with "
+                f"`git fetch origin task/{args.task_id}` then `git checkout task/{args.task_id}`.")
+        held = task_repo.fetched_project(dest)
+        if held is None:
+            raise SystemExit(
+                f"Cannot fetch into {dest}: it already has files in it and was not created by "
+                f"`grid task fetch`. Pass --into with a new directory.")
+        if held != project_id:
+            raise SystemExit(
+                f"Cannot fetch into {dest}: it holds project {held}, and task {args.task_id} "
+                f"belongs to project {project_id}. Pass --into with a different directory.")
+    dest.mkdir(parents=True, exist_ok=True)
+
+    try:
+        task_repo.checkout_result(
+            dest, url=relay.git_remote_url(base, project_id), token=token,
+            branch=branch, commit=commit, project_id=project_id)
+    except Exception as exc:
+        # Translated, never re-raised verbatim (ADR 0034 D-m, issue 46). `task_repo._git` builds its
+        # errors as `git <cmd> failed (N): <the last 500 bytes of git's stderr>`, and that string
+        # went straight to the screen — at somebody who has never seen a ref, naming one.
+        raise SystemExit(_fetch_failure_message(args.task_id, dest, project_id, exc))
+
+    if getattr(args, "json", False):
+        print(json.dumps(
+            {"task_id": args.task_id, "state": state, "result_commit": commit,
+             "branch": branch, "path": str(dest)}, indent=2))
+        return 0
+
+    print(f"task {args.task_id} ({state}) at {commit or branch}")
+    print(f"fetched into {dest}")
+    # Named so the user can see WHAT arrived rather than being told that something did — on a
+    # `failed` task especially, the file list is the point of fetching at all.
+    for path in sorted(p for p in dest.rglob("*") if p.is_file() and ".git" not in p.parts):
+        print(f"  {path.relative_to(dest)}")
+    return 0
+
+
+# What a git failure during `grid task fetch` MEANS, and what to do about it (ADR 0034 D-m,
+# issue 46). Matched against git's own text, lowercased, first hit wins.
+#
+# ⚠️ **Matched on git's wording, which git is free to change — so every miss lands on the fallback,
+# never on a wrong answer.** That is the direction this table has to fail in: a cause named wrongly
+# sends somebody to fix a thing that is not broken, while the fallback still names git's own words
+# and the two commands that are right whatever happened. The alternative — parsing git's exit codes
+# — is worse: `128` covers every one of these.
+#
+# Ordered, and `couldn't find remote ref` comes FIRST deliberately: an expired branch on an
+# authenticated fetch also prints host and URL, so a substring test for the auth case alone would
+# claim a sign-in problem for a retention window doing its job.
+_FETCH_FAILURES = (
+    (("couldn't find remote ref", "not our ref", "reference is not a tree",
+      "did not send all necessary objects"),
+     "its files are no longer kept on the grid — they were collected after this project's "
+     "retention window.",
+     "What it did and why is still in: grid task get {task_id}"),
+    (("authentication failed", "403 forbidden", "401 unauthorized", "could not read username",
+      "terminal prompts disabled"),
+     "this grid did not accept your sign-in.",
+     "Refresh it with: grid login"),
+    (("timed out", "could not resolve host", "failed to connect", "connection reset",
+      "operation timed out", "early eof", "rpc failed"),
+     "the grid could not be reached while its files were arriving.",
+     "It is safe to run again: grid task fetch {task_id}"),
+    (("is git installed",),
+     "git is not installed on this machine, and this command needs it.",
+     "Everything else works without it — read the project with: grid project files {project}"),
+)
+
+_FETCH_FALLBACK = "its files could not be put on disk."
+_FETCH_FALLBACK_NEXT = ("Try somewhere else with --into, or see what it did with: "
+                        "grid task get {task_id}")
+
+
+def _fetch_failure_message(task_id: str, dest: Path, project_id: str, exc: Exception) -> str:
+    """One sentence saying what went wrong and what to do, with git's own words kept beneath it.
+
+    The rule issue 42 set for a failed merge turn, applied to the one command in this CLI that runs
+    git itself: the raw diagnostic is right for whoever runs the grid, and is the one message a
+    non-developer must not be left staring at — so it is FOLLOWED rather than replaced.
+
+    ⚠️ The command goes LAST on its line, because
+    `tests/test_task_lease.py::test_every_command_this_cli_tells_you_to_run_actually_parses` retypes
+    every `grid …` hint in this module through the real parser and reads to end of line.
+    """
+    raw = str(exc)
+    lowered = raw.lower()
+    for needles, because, next_step in _FETCH_FAILURES:
+        if any(needle in lowered for needle in needles):
+            break
+    else:
+        because, next_step = _FETCH_FALLBACK, _FETCH_FALLBACK_NEXT
+    return (f"Task {task_id} could not be fetched into {dest}: {because}\n"
+            f"{next_step.format(task_id=task_id, project=project_id)}\n"
+            # Kept verbatim, and last: an operator scrolls to it, a person stops before it.
+            f"Details: {raw}")
+
+
+# How much of a prompt a listed row shows. The prompt is up to 100 KB, and a table is unreadable
+# the moment one row wraps — `grid task get <id>` is where the whole thing lives.
+_PROMPT_COLUMN = 48
+
+
+def _task_list(args: argparse.Namespace) -> int:
+    """Tasks — one project's, or the caller's own everywhere (ADR 0033 D-l 19a; D-m issue 46).
+
+    Nothing listed tasks before this. `grid task get` answers one id at a time and the id came from
+    `grid task create`, so somebody who closed their terminal had to clone the project and read
+    `task/*` refs by hand.
+
+    `--all` widens it from the caller's own runs to every member's, which is the point on a shared
+    project: a team wants to see what the team ran, and the relay fences the answer on membership.
+
+    **Without a project it lists the caller's own turns across every project they can reach**, which
+    is the application's home screen. The relay refuses `--all` there — see `relay.list_tasks` — so
+    every row on that page is the caller's own, which is why the MEMBER column becomes PROJECT
+    rather than being added beside it: a column whose every cell is the same value costs 36
+    characters to say nothing, and which project a conversation is in is the one thing a
+    cross-project list has to answer.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    project = args.project
+    answer = relay.list_tasks(base, token, project, mine=not args.all,
+                              states=list(args.state or ()), limit=args.limit,
+                              after=args.after)
+    # ⚠️ **Emitted, then validated — never returned on**, the ordering `task_diff` and
+    # `project_files` already carry (ADR 0034 D-m, issue 46). Returning here put the guard below out
+    # of reach of `--json`, which is the one mode an application drives: a body a proxy had stripped
+    # exited 0 with `{}` on stdout, and a client rendering "no conversations" from it is the exact
+    # wrong answer the guard exists to prevent — while a terminal running the same command refused.
+    emitted = _emit(args, answer)
+
+    tasks = answer.get("tasks") if isinstance(answer, dict) else None
+    if not isinstance(tasks, list):
+        # A reply this command cannot read is NOT an empty project — the same rule
+        # `grid project status`, `commit` and `import` all follow. The two collapsed here until
+        # issue 19a's review: a body a proxy had stripped came back as `{}`, and somebody polling a
+        # shared project was told nobody was working. The check is on the PRESENCE of `tasks`, not
+        # its truthiness — an empty list is a real answer.
+        raise SystemExit(
+            f"The relay's answer {_for_project(project)} did not contain a task list, "
+            f"so this cannot be reported as one. "
+            f"`{_list_command(project)} --json` shows what it sent.")
+    if emitted:
+        return 0
+
+    if not tasks:
+        # Said rather than printed as an empty table, which reads as a display bug.
+        if project is None:
+            print("You have no tasks in any project.")
+            print("\nCreate one with: grid task create --prompt '<what to do>'")
+        else:
+            print(f"No tasks in project {project}.")
+            print(f"\nCreate one with: grid task create --project {project} "
+                  f"--prompt '<what to do>'")
+        return 0
+
+    # PROJECT where MEMBER would be, when there is no project to name — see the docstring.
+    second = "MEMBER" if project is not None else "PROJECT"
+    print(f"{'TASK':38}  {'STATE':10}  {second:34}  PROMPT")
+    for task in tasks:
+        # A merge turn's prompt is the RELAY's, not this member's (ADR 0034 D-g, issue 42). Printed
+        # verbatim it puts `git merge`, a branch name and a `refs/integrate/…` ref in a column headed
+        # PROMPT, attributed to the person whose conversation it is — the exact thing ADR 0034 D-m
+        # says must never reach this surface, and words they did not write.
+        prompt = (_MERGE_TURN_LABEL if _is_merge_turn(task)
+                  else " ".join(str(task.get("prompt") or "").split()))
+        if len(prompt) > _PROMPT_COLUMN:
+            prompt = prompt[:_PROMPT_COLUMN - 1] + "…"
+        if project is not None:
+            # `member_key` and not `owner_id`: the key is what `grid project member list` speaks,
+            # and `grid:<network>:<sub>` is unreadable in a column. Absent when the author has since
+            # left the project.
+            column = str(task.get("member_key") or "(not a member)")
+        else:
+            column = str(task.get("project_id") or "?")
+        print(f"{str(task.get('id') or '?'):38}  "
+              f"{str(task.get('state') or '?'):10}  "
+              f"{column:34}  {prompt}")
+    if answer.get("next_after"):
+        # There is more. Said out loud, because a page that silently stops at the limit reads as the
+        # whole history — and this is the flag that continues it.
+        print(f"\nMore: {_list_command(project)} --after {answer['next_after']}")
+    return 0
+
+
+def _list_command(project: str | None) -> str:
+    """`grid task list` with the project it was given, or without one.
+
+    ⚠️ The command LAST on its line wherever this is printed:
+    `tests/test_task_lease.py::test_every_command_this_cli_tells_you_to_run_actually_parses` walks
+    every `grid …` hint in this module through `build_parser()`, and a hint naming `--project None`
+    would fail there — which is what a bare f-string produced before this helper existed.
+    """
+    return "grid task list" + (f" --project {project}" if project is not None else "")
+
+
+def _for_project(project: str | None) -> str:
+    """How a refusal names what was asked about, when there may be no project to name."""
+    return f"for project {project}" if project is not None else "for your tasks"
+
+
+def _task_cancel(args: argparse.Namespace) -> int:
+    """Stop a queued or running TURN, leaving its conversation usable (ADR 0033 D-l, issue 19b).
+
+    It ends this run and nothing else. Since ADR 0034 D-b (issue 40) the cancelled turn stops
+    matching the relay's one-running-turn-per-conversation index, so that conversation's next
+    message runs — cancelling is not a way to end a conversation, and the grid has no such verb.
+
+    **No confirmation, on purpose.** Every other consequential verb here — promote, integrate,
+    commit — does the thing it is asked to do, and an application driving this CLI would have to
+    pass a `--yes` on every call. Knowing whose task it is would also cost a `GET` first. The
+    accountability is the relay's event log, which records the member who cancelled.
+
+    A cancelled task's branch is left where the agent got to, so `grid task fetch` still works on it.
+    """
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    answer = relay.cancel_task(base, token, args.task_id)
+
+    # ⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46). The guard below
+    # was unreachable under `--json`, which is the one mode an application drives: a body that never
+    # said what state the task is in exited 0 there and 1 in a terminal, so a client was told a
+    # colleague's hour-long turn had been stopped when nothing had happened.
+    emitted = _emit(args, answer)
+
+    state = answer.get("state") if isinstance(answer, dict) else None
+    if not state:
+        # A reply this command cannot read is NOT a cancellation — the rule every sibling in this
+        # plane follows. Reporting one would tell somebody their colleague's hour-long merge task
+        # had been stopped when nothing had happened, and the slot is what they would act on next.
+        raise SystemExit(
+            f"The relay's answer for task {args.task_id} did not say what state the task is now in, "
+            f"so this cannot be reported as a cancellation. "
+            f"`grid task cancel {args.task_id} --json` shows what it sent.")
+    if emitted:
+        return 0
+
+    # The state AND the reason. `failed` alone reads as "the agent broke", which is the one thing
+    # that did not happen — and `error` is what tells a later `grid task get` the two apart.
+    reason = answer.get("error")
+    print(f"task {args.task_id} cancelled — it is now {state}"
+          + (f" ({reason})" if reason else ""))
+    # Nothing is rewound, so whatever the agent had done is still fetchable. Said out loud,
+    # because "cancelled" reads as "undone" and here it is not. No git word (ADR 0034 D-m,
+    # issue 46) — the parser's own description was reworded with it.
+    print(f"Whatever it had already done is kept: grid task fetch {args.task_id}")
+    return 0
+
+
+# The three exit codes `grid task get` reports a task's outcome with (issue 32). Named because the
+# third one is a contract a shell script branches on, and `2` reads as an argparse usage error
+# everywhere else in this CLI.
+_EXIT_COMPLETED = 0
+_EXIT_ENDED_BADLY = 1
+_EXIT_UNFINISHED = 2
+
+
+def _outcome_exit_code(state: Any) -> int:
+    """The exit status a task's own state earns — 0 completed, 1 ended badly, 2 not finished.
+
+    Keyed on `_TERMINAL_STATES`, so `get` and `fetch` cannot come to disagree about what "finished"
+    means: a state this build has never heard of is NOT FINISHED here for the same reason it refuses
+    a fetch there. That direction is the repo's standing rule — an unknown thing degrades to the old
+    behaviour, never to a new failure — and the alternative is worse in a way that is easy to miss:
+    if a newer relay adds an *active* state, reading it as 1 would report a perfectly healthy
+    running task as failed.
+
+    ⚠️ **The `isinstance` is load-bearing, not defensive habit.** `state in _TERMINAL_STATES` HASHES
+    its left operand, so a `state` the relay sent as a JSON object or array raised
+    `TypeError: unhashable type: 'dict'` — uncaught, out through `_task_get`, `dispatch` and `main()`.
+    Python exits **1** on an unhandled exception, which is numerically "the task ended badly": a
+    client-side parsing crash delivered to a script as a verdict about the task, indistinguishable
+    from a real failure. That is the exact class of wrong answer this whole function exists to remove,
+    arriving through a traceback instead of a bad return value. A state is a string or it is not a
+    state.
+    """
+    if not isinstance(state, str):
+        return _EXIT_UNFINISHED
+    if state == "completed":
+        return _EXIT_COMPLETED
+    if state in _TERMINAL_STATES:
+        return _EXIT_ENDED_BADLY
+    return _EXIT_UNFINISHED
+
+
+# The states in which a task is on its way and its outcome is genuinely not decided yet. LOCKSTEP in
+# spirit with grid-src's `TASK_ACTIVE_STATES`, and deliberately **display-only**: it decides whether
+# the note below is printed, never the exit code, which `_outcome_exit_code` derives from
+# `_TERMINAL_STATES` alone. So drift costs an extra line on stderr, never a wrong verdict, and this
+# is not a lockstep value.
+_ACTIVE_STATES = frozenset({"preparing", "queued", "running"})
+
+
+def _note_an_unreadable_state(task_id: str, state: Any) -> None:
+    """Say on stderr that `2` here means "this build cannot place that state", not "still working".
+
+    `2` is the right code either way — it never claims success and never invents a failure — but the
+    two readings call for different actions, and the difference is invisible from the status alone. A
+    poller waiting on a state a newer relay considers TERMINAL would otherwise wait forever with
+    nothing ever mentioning it: the one failure mode this conservative direction buys, so it is
+    disclosed rather than left to be discovered.
+
+    stderr, so `--json`'s stdout stays exactly the document the relay sent.
+    """
+    # `isinstance` FIRST for `_outcome_exit_code`'s reason, and this is the same trap one line later:
+    # this is reached for every code-2 state, dicts and lists included, and `state in _ACTIVE_STATES`
+    # hashes its left operand exactly as the terminal test does. Guarding one and not the other would
+    # have moved the crash into the code that exists to report it.
+    if isinstance(state, str) and state in _ACTIVE_STATES:
+        return
+    # `is None` and not falsiness: `""`, `0` and `False` are all states the relay DID send, and
+    # reporting them as "no state at all" hides which of the two shapes of wrong this is — a body
+    # with the key missing, or a body carrying something that is not a state name.
+    described = "no state at all" if state is None else f"state {state!r}"
+    # The command LAST on its line, and that is a constraint rather than a preference:
+    # `tests/test_task_lease.py::test_every_command_this_cli_tells_you_to_run_actually_parses` walks
+    # every printed hint in this module through `build_parser()`, taking each `grid …` match to the
+    # end of its line. Prose after the closing backtick becomes argv and the hint fails to parse —
+    # which is what happened while this was being written.
+    print(f"Task {task_id}: the relay reported {described}, which this build cannot place as "
+          f"finished or unfinished — reporting it as unfinished (exit 2).\n"
+          f"See what it sent with `grid task get {task_id} --json`", file=sys.stderr)
+
+
+def _task_get(args: argparse.Namespace) -> int:
+    from remote import relay
+
+    base, token, _label = _resolve(args)
+    task = relay.get_task(base, token, args.task_id)
+    as_json = bool(getattr(args, "json", False))
+
+    # A body that is not even an object, checked BEFORE the first `.get`. `relay.get_task` hands back
+    # `resp.json()` verbatim, so a 200 carrying an array, a string or a number — a proxy, a captive
+    # portal — reaches this line; until this slice the `--json` path never touched the body at all, so
+    # it printed and returned 0, and reading `state` unguarded turned that into an `AttributeError`
+    # with NOTHING printed. An unhandled exception exits 1, which now means "the task ended badly", so
+    # a client-side parse failure was being delivered to a script as a verdict about the task.
+    #
+    # The two shapes diverge because their contracts do: `--json` owes the caller the document the
+    # relay sent, disclosure on stderr, exit 2 (nothing here can say whether the task finished); the
+    # human path has no document to hand over and every line below assumes an object, so it refuses
+    # with a sentence — the rule `task list`, `project status`, `cancel` and `_own_default_project`
+    # all already follow. Each message is therefore true about the code it exits with, which one
+    # shared path could not manage.
+    if not isinstance(task, dict):
+        if as_json:
+            _note_an_unreadable_state(args.task_id, None)
+            print(json.dumps(task, indent=2))
+            return _EXIT_UNFINISHED
+        raise SystemExit(
+            f"The relay's answer for task {args.task_id} was not a task, so there is nothing to "
+            f"report about it. See what it sent with `grid task get {args.task_id} --json`")
+
+    state = task.get("state")
+    code = _outcome_exit_code(state)
+    if code == _EXIT_UNFINISHED:
+        _note_an_unreadable_state(args.task_id, state)
+
+    if as_json:
+        print(json.dumps(task, indent=2))
+        return code
+
+    print(f"task {task.get('id') or args.task_id}")
+    print(f"state={task.get('state') or 'unknown'}")
+    if task.get("provider_id"):
+        print(f"provider={task['provider_id']}")
+    if task.get("claude_session_id"):
+        print(f"session={task['claude_session_id']}")
+    if task.get("error"):
+        print(f"error={task['error']}")
+        if task["error"] == QUEUE_EXPIRED:
+            print(_QUEUE_EXPIRED_NOTE)
+    if _is_merge_turn(task) and code == _EXIT_ENDED_BADLY:
+        # ADR 0034 D-g (issue 42): a merge turn that fails must not be a person's last word. The
+        # relay's `error` above is the PROVIDER's diagnostic — it names the paths git still has
+        # unresolved, which is exactly right for whoever runs the grid and is the one message the
+        # design says a non-developer must not be left staring at.
+        #
+        # Kept AND followed, rather than replaced: the two readers need different things, and
+        # deleting the operator's half to spare the member would make the fault undiagnosable.
+        # Retrying this turn is deliberately not offered — every attempt is reset to the same input
+        # and meets the same collision, which is why the relay does not retry it either.
+        conversation = task.get("conversation_id")
+        print(f"\nThe grid could not combine this work with a colleague's change. Your work is "
+              f"safe in this conversation — ask for it again with:\n"
+              f"  grid task send {conversation or '<conversation-id>'} --prompt '<what to do>'")
+    result = task.get("result_text")
+    if result:
+        print("\n--- result ---")
+        print(result.rstrip("\n"))
+    return code

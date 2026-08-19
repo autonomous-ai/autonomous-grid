@@ -34,12 +34,16 @@ from .grid import (
     cmd_up,
     cmd_version,
 )
+from .credential import cmd_credential
 from .launch import cmd_launch
 from .mode import cmd_mode, cmd_use
 from .models import cmd_catalog, cmd_ctx, cmd_pull, cmd_rm
+from . import project_arg
 from .provider import cmd_engines, cmd_join, cmd_leave, cmd_models
 from .remote_grid import cmd_remote_members
 from .remote_price import cmd_remote_price
+from .remote_project import cmd_remote_project
+from .remote_task import cmd_remote_task
 from .remote_router import (
     MAX_ADVISORS,
     AdvisorsAction,
@@ -84,13 +88,44 @@ def build_parser() -> argparse.ArgumentParser:
     _add_auth(sub)
     _add_members(sub)
     _add_price(sub)
+    _add_project(sub)
+    _add_task(sub)
     _add_router(sub)
     _add_engine_setup(sub)
     _add_launch(sub)
     _add_train(sub)
+    _add_credential(sub)
     _add_stt(sub)
 
     return parser
+
+
+def _add_credential(sub) -> None:
+    """`grid credential <operation>` — git's credential-helper protocol (ADR 0033 D-h, issue 17).
+
+    Not a command anybody types: `grid project clone` writes it into the clone's `.git/config` and
+    git runs it on every operation against that relay.
+
+    The operation is a free-form positional rather than a `choices=` list, and that is the protocol
+    speaking, not laxity — `gitcredentials(7)` says a helper receiving an operation it does not
+    know "should silently ignore the request. This leaves room for future operations to be added
+    (older helpers will just ignore the new requests)." `choices=` would make a future git verb an
+    argparse usage error with exit code 2, which git reports as a broken helper.
+    """
+    credential = sub.add_parser(
+        "credential",
+        help="git credential helper (used by `grid project clone`; not typed by hand)",
+        description=(
+            "Answer git's credential-helper protocol on stdin/stdout.\n\n"
+            "`grid project clone` configures this in the clone's own `.git/config`, scoped to that\n"
+            "grid's relay, so no token is ever written to disk and a refreshed one is picked up\n"
+            "automatically. Reads only the local credential store — never the network."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    credential.add_argument("operation", help="get, store or erase — git supplies this.")
+    credential.add_argument(
+        "--grid", default=None,
+        help="Grid whose credential this clone uses. Written by `grid project clone`.")
+    credential.set_defaults(handler=cmd_credential)
 
 
 def _add_grid_lifecycle(sub) -> None:
@@ -441,6 +476,713 @@ def _add_members(sub) -> None:
     listing.add_argument("grid", nargs="?", default=None)
     listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     listing.set_defaults(handler=cmd_remote_members)
+
+
+def _add_project(sub) -> None:
+    """Remote-only `grid project create|list` and `grid project member …` (ADR 0033 D-a).
+
+    Gated in local mode by dispatch (`project` is in `REMOTE_ONLY`). A project is addressed by
+    **id** everywhere downstream, so `create` printing one and `list` showing them is not a
+    convenience — without it, `grid task create --project <id>` has no id to be given."""
+    project = sub.add_parser("project", help="Create projects and manage who is in them (remote)")
+    project_sub = project.add_subparsers(dest="subcommand", required=True)
+
+    create = project_sub.add_parser("create", help="Create (or get) one of your projects by name")
+    create.add_argument("--name", required=True, help="What to call it. Unique among your own.")
+    # ADR 0034 D-o (issue 48). Without it a project is created with no trunk and the very next
+    # thing anybody does is refused, which is the first wall a new user hits.
+    create.add_argument(
+        "--empty", action="store_true",
+        # ⚠️ No git word here (ADR 0034 D-m, issue 46): this flag is among the first things a new
+        # person meets, and "trunk" sends them to git's documentation for a product that has
+        # deliberately hidden git from them. `tests/test_application_surface.py` keeps it that way.
+        help=("Start it ready to work in, so a task can run in it immediately. IRREVERSIBLE: a "
+              "project that already holds something can never take in an existing repository with "
+              "`grid project import`."))
+    create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    create.set_defaults(handler=cmd_remote_project)
+
+    # `init` — the OTHER way a project gets a trunk (ADR 0033 D-o, issue 25), and the one a new
+    # piece of work needs. Registered next to `create` rather than beside `import`, because
+    # `create`'s own next step names it and somebody who reads `grid project --help` on that advice
+    # should find it where they were just sent.
+    starter = project_sub.add_parser(
+        "init",
+        help="Give an empty project a trunk, so tasks can run in it",
+        description=(
+            "Create the project's `main` at a single empty root commit.\n\n"
+            "A project has no trunk when it is created, and a task cannot be cut from nothing. "
+            "This is one of the two ways to give it one — `grid project import` is the other, for "
+            "a repository that already exists. Every member's branch is then cut from this same "
+            "commit, which is what lets their work be integrated and promoted later.\n\n"
+            "The trunk it makes is EMPTY and holds nothing you send: files reach `main` by "
+            "promoting a branch, never by a bootstrap. Put them on yours with `grid project "
+            "commit` (or a task) and promote.\n\n"
+            "Refused if the project already has a trunk, and it is not undoable — a project that "
+            "has been initialized can no longer import a repository, because a second trunk would "
+            "move `main` out from under every member's branch."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(starter)
+    starter.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    starter.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    starter.set_defaults(handler=cmd_remote_project)
+
+    listing = project_sub.add_parser(
+        "list", help="List the projects you can work in")
+    listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    # ADR 0033 D-p / issue 33. Archived projects are hidden by default because this listing is what
+    # a member reads to find an id, and one they archived is one they have said they are not working
+    # in. Nothing becomes unreachable — the id still resolves on every other route.
+    listing.add_argument(
+        "--all", action="store_true",
+        help="Include archived projects, marked as archived. They are hidden by default.")
+    listing.set_defaults(handler=cmd_remote_project)
+
+    # ADR 0033 D-p / issue 33 — the two ways to stop looking at a project, and they are deliberately
+    # not symmetrical. Registered next to `list`, because that is the command whose output somebody
+    # is looking at when they decide they want one of these.
+    archiver = project_sub.add_parser(
+        "archive",
+        help="Stop a project accepting new work and hide it from `grid project list`",
+        description=(
+            "Archive a project. It accepts no new work — no tasks, commits, integrates, promotes, "
+            "imports or inits — and leaves `grid project list` unless you pass --all.\n\n"
+            "NOTHING IS DESTROYED. The repository is kept exactly as it is, and every read still "
+            "works: `grid project status`, `grid project clone`, `grid task list`, `grid task "
+            "fetch`. Reverse it at any time with `grid project unarchive`.\n\n"
+            "A task that is already queued or running is NOT cancelled — it is claimed, runs and "
+            "settles normally. Archiving stops new work starting; use `grid task cancel` to stop "
+            "work that has already started."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(archiver)
+    archiver.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    archiver.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    archiver.set_defaults(handler=cmd_remote_project)
+
+    restorer = project_sub.add_parser(
+        "unarchive", help="Put an archived project back, so it accepts work again")
+    project_arg.add_project(restorer, help="Project id from `grid project list --all`.")
+    restorer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    restorer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    restorer.set_defaults(handler=cmd_remote_project)
+
+    remover = project_sub.add_parser(
+        "delete",
+        help="Permanently remove a project that has nothing in it",
+        description=(
+            "Delete a project, its members and its repository. THIS CANNOT BE UNDONE.\n\n"
+            "Refused unless the project has never held anything and has never had a task — in that "
+            "state there is provably nothing in it to lose. Anything else is refused, naming "
+            "`grid project archive`, which takes a project out of the way and keeps every byte.\n\n"
+            "For the project created by a typo, and for one you inited or imported into by "
+            "mistake and want the id back for. Asks before it acts unless you pass --yes."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(remover, help="Project id from `grid project list --all`.")
+    remover.add_argument(
+        "--yes", action="store_true",
+        help="Do not ask for confirmation. Required when stdin is not a terminal.")
+    remover.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    remover.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    remover.set_defaults(handler=cmd_remote_project)
+
+    # ADR 0034 D-k / issue 36 — who on the grid may reach a project. Registered next to the
+    # lifecycle verbs above because they answer neighbouring questions about the same row, and a
+    # person deciding to archive a project is often deciding who should see it.
+    sharer = project_sub.add_parser(
+        "share",
+        help="Let anyone on this grid work in the project, without being added to it",
+        description=(
+            "Share a project with everyone on this grid. Anyone signed in can then work in it "
+            "without being added as a member, and they become one the first time they do.\n\n"
+            "This is the DEFAULT for a new project. Use `grid project private` to restrict one.\n\n"
+            "Owner only. Nothing is destroyed and nothing is moved — this changes who may reach "
+            "the project, not what is in it."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(sharer)
+    sharer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    sharer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    sharer.set_defaults(handler=cmd_remote_project)
+
+    privater = project_sub.add_parser(
+        "private",
+        help="Restrict the project to its members",
+        description=(
+            "Make a project private: only its members can reach it — read it, clone it, list its "
+            "tasks or work in it.\n\n"
+            "Everyone who has already worked in the project is a member and KEEPS access. This "
+            "stops anyone else joining, it does not remove anybody.\n\n"
+            "Owner only. Reverse it at any time with `grid project share`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(privater)
+    privater.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    privater.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    privater.set_defaults(handler=cmd_remote_project)
+
+    member = project_sub.add_parser("member", help="List, add and remove project members")
+    member_sub = member.add_subparsers(dest="member_action", required=True)
+
+    member_list = member_sub.add_parser("list", help="Show a project's members and their keys")
+    project_arg.add_project(member_list)
+    member_list.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    member_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    member_list.set_defaults(handler=cmd_remote_project)
+
+    member_add = member_sub.add_parser("add", help="Admit a grid member to this project")
+    project_arg.add_project(member_add)
+    member_add.add_argument(
+        "--email", required=True,
+        help="Their address on this grid. They must have signed in to it at least once.")
+    member_add.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    member_add.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    member_add.set_defaults(handler=cmd_remote_project)
+
+    # By member key and not by email: the key is a path segment by construction, and a member's
+    # `user_id` (`grid:<network>:<sub>`) is not. `grid project member list` prints it.
+    member_remove = member_sub.add_parser("remove", help="Remove someone from this project")
+    project_arg.add_project(member_remove)
+    project_arg.add_member(member_remove)
+    member_remove.add_argument("--grid", default=None,
+                               help="Grid to act on (default: active grid).")
+    member_remove.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    member_remove.set_defaults(handler=cmd_remote_project)
+
+    # `wip reset` — the one way out of a conversation's branch left ahead of the turn that settled
+    # onto it (ADR 0033 D-c, re-keyed by ADR 0034 D-e). It SURVIVES the clean break that deletes
+    # promote and integrate (ADR 0034 D-m), because the relay's own apply can still leave a branch
+    # ahead and this is the documented recovery. Nothing else moves one backwards: members never
+    # push, the apply writes only `main`, and there is no revert — so without this the
+    # conversation's NEXT turn is silently cut from a lost attempt's work.
+    wip = project_sub.add_parser(
+        "wip", help="Work on a conversation's branch — the ref its turns are cut from")
+    wip_sub = wip.add_subparsers(dest="wip_action", required=True)
+
+    wip_reset = wip_sub.add_parser(
+        "reset", help="Move a conversation's branch back to a commit (recovers a lost attempt)")
+    project_arg.add_project(wip_reset)
+    # Through `project_arg`, never a bare `add_argument`: every refusal in that module offers forms
+    # DERIVED from what was registered, so a second positional added behind its back makes each of
+    # them name a command that no longer parses. Caught by
+    # `test_a_refusal_only_ever_offers_a_command_that_really_works`, which is what that test is for.
+    project_arg.add_conversation(
+        wip_reset,
+        help="Which conversation's branch to move. `grid task get <turn-id>` prints the "
+             "conversation a turn belongs to.")
+    wip_reset.add_argument(
+        "--commit", required=True,
+        help="Where to put the branch. `grid task get <id>` prints the `base_commit` a turn was "
+             "cut from, which is usually the commit you want.")
+    wip_reset.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    wip_reset.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    wip_reset.set_defaults(handler=cmd_remote_project)
+
+    # `status` — the question that used to need a WRITE to answer (ADR 0033 D-l, issue 19a). A pure
+    # read: it moves no ref and takes nobody's slot. Its `check` sibling went with the integrate it
+    # previewed (ADR 0034 D-d, issue 41).
+    status = project_sub.add_parser(
+        "status",
+        help="Where the project is: what it holds, what is running, and who can serve it",
+        description=(
+            "Where the project is.\n\n"
+            "What is holding your turns was answerable before only by attempting a create and "
+            "reading the refusal. It is a read now, and it costs nothing.\n\n"
+            "It is also how an application notices the project changed without running `git fetch`: "
+            "the grid applies every finished turn to the project itself, so what the project "
+            "holds changes whenever anybody's work lands."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(status)
+    status.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    status.set_defaults(handler=cmd_remote_project)
+
+    # `files` / `file` / `download` — seeing the project with no git on the machine (ADR 0034 D-m,
+    # issue 45). Until these, the only read path was `clone`, which needs git AND a credential
+    # helper git is new enough to describe — a dead end at the first step for the person this
+    # product is for.
+    files = project_sub.add_parser(
+        "files",
+        help="List what is in the project, one folder at a time",
+        description=(
+            "See what is in your project.\n\n"
+            "No git needed on this machine. With no path you get the top of the project; give a "
+            "folder's name to look inside it.\n\n"
+            "What you see is the project as it stands now — everybody's finished work, applied by "
+            "the grid as each task completes."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(files)
+    # Through `project_arg` rather than a bare `add_argument`: an optional positional BEHIND the
+    # optional project id is the `clone`/`refresh` shape, and argparse fills the two left to right —
+    # so `grid project files --project P src` parks `src` in the project id and lists the top of a
+    # project called `src`. Measured, before `add_path` existed.
+    project_arg.add_path(files, help="Folder to look inside (default: the top of the project).")
+    files.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    files.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    files.set_defaults(handler=cmd_remote_project)
+
+    one_file = project_sub.add_parser(
+        "file",
+        help="Read one file out of the project",
+        description=(
+            "Read one file, without git and without downloading the whole project.\n\n"
+            "Text is printed. Anything that is not text needs `--output`, because writing it to a "
+            "terminal stops that terminal rendering text at all.\n\n"
+            "A very large file is refused with its size — `grid project download` gets it as part "
+            "of the whole project."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(one_file)
+    one_file.add_argument("path", help="File to read, e.g. `src/app.py`.")
+    one_file.add_argument("--output", default=None,
+                          help="Write the file here instead of printing it.")
+    one_file.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    one_file.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    one_file.set_defaults(handler=cmd_remote_project)
+
+    download = project_sub.add_parser(
+        "download",
+        help="Download the whole project as a zip",
+        description=(
+            "Take the whole project away as one zip file.\n\n"
+            "No git needed. This is the copy to hand to somebody else, or to open in an editor on "
+            "a machine that has no developer tools.\n\n"
+            "It is a snapshot of the project as it stands, not a repository: to keep working in it "
+            "through the grid, send a task instead."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(download)
+    download.add_argument("--output", default=None,
+                          help="Where to write the zip (default: <project-id>.zip here).")
+    download.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    download.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    download.set_defaults(handler=cmd_remote_project)
+
+    # `commit` — a change goes in without an agent (ADR 0033 D-j, issue 20), onto the branch of a
+    # CONVERSATION named on the command line (ADR 0034 D-e, issue 41).
+    committer = project_sub.add_parser(
+        "commit",
+        help="Put files into the project without running an agent",
+        description=(
+            "Commit files into a conversation, with no agent and no provider.\n\n"
+            "This is the answer to 'the agent got it 90% right, let me fix the last line'. The "
+            "alternative is `grid task create --file`, which spends a slot and then runs an agent "
+            "that may change the very line you are fixing.\n\n"
+            "It goes into a conversation you already started, so the next message you send there "
+            "starts from it. You still cannot push to the project — the write goes through the "
+            "grid, lands on exactly one ref, and holds that conversation's slot while it does. So "
+            "it is refused while that conversation has a turn running, and the refusal names it.\n\n"
+            "Executable bits look after themselves. Editing a file the project already has as "
+            "executable keeps it executable, and a local file that is executable is committed that "
+            "way. (Removing an executable bit is not expressible here.)\n\n"
+            "--delete takes a path already in your branch. A path that is not there is REFUSED "
+            "rather than quietly ignored, because git's own answer to deleting a file that does "
+            "not exist is to report success and do nothing.\n\n"
+            "It appears in the project by itself, exactly as a finished turn does — the grid "
+            "applies it. There is nothing else to run afterwards."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    committer.add_argument(
+        "conversation_id",
+        help="Which conversation to commit into. `grid task create` prints one, and "
+             "`grid task get <turn-id>` prints the conversation a turn belongs to.")
+    committer.add_argument(
+        "-m", "--message", required=True, metavar="MSG",
+        help="What this commit did. Required, like git's own.")
+    committer.add_argument(
+        "--file", action="append", metavar="LOCAL[:DEST]", default=None,
+        help="A file to write, repeatable. DEST defaults to the file's name. Same form as "
+             "`grid task create --file`.")
+    committer.add_argument(
+        "--dir", action="append", metavar="LOCAL[:DEST]", default=None,
+        help="A folder to write, repeatable. DEST defaults to the folder's name. Inside a git work "
+             "tree your .gitignore is honoured; `.git/`, `.grid/`, `.claude/`, `.mcp.json` and "
+             "symlinks are skipped and reported. Executable bits are kept, like --file.")
+    committer.add_argument(
+        "--delete", action="append", metavar="PATH", default=None,
+        help="A path in the conversation's branch to remove, repeatable. Refused if it is not "
+             "there.")
+    committer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    committer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    committer.set_defaults(handler=cmd_remote_project)
+
+    # `import` — how a project that has no commits gets a trunk from a repository that already
+    # exists (ADR 0033 D-f, issue 16b). Since issue 16b a member cannot push `main` themselves, and
+    # since issue 25 (D-o) `init` is the other way in — for work that starts from nothing.
+    importer = project_sub.add_parser(
+        "import",
+        help="Import an existing repository into an empty project",
+        description=(
+            "Import an existing repository, with its history, into a project that has no `main` "
+            "yet.\n\n"
+            "One of the two ways a project gets a trunk — `grid project init` is the other, and "
+            "makes an empty one for work that starts from nothing. The relay is `main`'s sole "
+            "writer — those two create it and the grid moves it afterwards, applying every turn "
+            "that succeeds, and nothing else does — so a first `git push` of `main` is refused."
+            "\n\n"
+            "What happens: the repository is pushed to a staging ref only you can see, the relay "
+            "reads EVERY tree its history reaches, and only then does it become `main`. The "
+            "reading is the slow part and it is why this command waits — on a 29,000-commit "
+            "repository it is about twenty seconds.\n\n"
+            "It is refused if the repository contains a submodule (a task's provider has no "
+            "credential to fetch one), a path under `.grid/`, or a symlink pointing outside the "
+            "repository. Symlinks that stay inside are fine, and so is `.claude/`. A repository "
+            "using Git LFS imports with a warning: an agent will see pointer files, not content.\n\n"
+            "A refused import leaves the project with NO trunk, on purpose — half a trunk would be "
+            "worse. Fix what it names and import again, or import into a fresh project.\n\n"
+            "Import brings a repository into an EMPTY project. A project that already has a `main` "
+            "is refused, because a second import would move the trunk out from under every "
+            "member's branch and nothing could integrate back."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    importer.add_argument("path", help="Path to the local git repository to import.")
+    project_arg.add_project(importer)
+    importer.add_argument(
+        "--branch", default="HEAD",
+        help="Which local ref to import (default: HEAD, i.e. whatever is checked out).")
+    importer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    importer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    importer.set_defaults(handler=cmd_remote_project)
+
+    # `clone` — a member's own working copy, with a credential helper instead of a stored token
+    # (ADR 0033 D-h, issue 17). `grid task fetch` still exists and is still the right thing for one
+    # task's result; this is for working in the project.
+    cloner = project_sub.add_parser(
+        "clone",
+        help="Clone a project's repository, configured to ask grid for a credential each time",
+        description=(
+            "Clone a project into a directory you name.\n\n"
+            "No token is written anywhere. The clone is configured to run `grid credential` when\n"
+            "git needs one, scoped to this grid's relay and to this clone alone — your global git\n"
+            "config is untouched. Because git asks each time, a refreshed token is picked up\n"
+            "automatically, where a token written into `.git/config` would expire in place.\n\n"
+            "You are put on the project's trunk, which holds everybody's finished work: the grid\n"
+            "applies every turn that succeeds, so there is no separate branch of yours to be on.\n\n"
+            "`git push` is REFUSED, and that is the design rather than a permission to request.\n"
+            "The project is written by the grid alone, so a push could move the ground under work\n"
+            "that is running right now.\n"
+            "Land work with `grid task create`, or `grid project commit <conversation-id>` for\n"
+            "files with no agent.\n\n"
+            "Needs a git that reports `authtype` from `git credential capability`; the relay\n"
+            "accepts no credential scheme an older git can send."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(cloner)
+    project_arg.add_directory(
+        cloner, help="Where to put it (default: a directory named after the project id).")
+    cloner.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    cloner.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    cloner.set_defaults(handler=cmd_remote_project)
+
+    # `refresh` — what a clone does after somebody else's work lands. The counterpart to `clone`,
+    # and deliberately the READ-ONLY half of it: re-cloning updates by resetting the branch, which
+    # is refused outright the moment you have a local commit, and that is the ordinary state of
+    # anyone checkpointing work.
+    #
+    # NO `--grid`. Every other project subcommand has one because it calls the relay; this one calls
+    # nothing — the grid is already pinned inside the clone's own credential helper, so a flag
+    # naming a different one could not change anything and would only look as though it did.
+    refresher = project_sub.add_parser(
+        "refresh",
+        help="Fetch what the grid has for a clone, and report how far behind it is",
+        description=(
+            "Bring a clone's view of the grid up to date, and say what changed.\n\n"
+            "This NEVER touches your working tree or your branch — it updates what your clone knows\n"
+            "about the grid and reports the difference. So it works with local commits, with a\n"
+            "dirty tree, and while a task of yours is running. Re-running `grid project clone` over\n"
+            "the same directory also updates it, but by RESETTING your branch to the fetched tip,\n"
+            "which it refuses to do when you have commits the grid has not seen.\n\n"
+            "It reports on the branch you are standing on, whichever that is. Inside a clone that\n"
+            "is usually your own WIP branch, but `grid task fetch`'s own advice puts you on\n"
+            "`task/<id>`, and those move and are collected too.\n\n"
+            "Nothing here reaches `main`, and nothing here is compared against it: how far your\n"
+            "branch is from the trunk is `grid project status`, which asks the relay. This asks\n"
+            "only your clone and the git plane.\n\n"
+            "It needs the relay reachable. It does not need the control plane — the credential\n"
+            "helper reads your local store, never the network."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(refresher)
+    project_arg.add_directory(
+        refresher, help="The clone to refresh (default: the current directory).")
+    refresher.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    refresher.set_defaults(handler=cmd_remote_project)
+
+
+def _add_task(sub) -> None:
+    """Remote-only `grid task` — hand the grid a coding task, watch it, read the result back, stop it.
+
+    `create | get | list | follow | fetch | cancel` (ADR 0032; `list` and `cancel` are ADR 0033 D-l).
+
+    Gated in local mode by dispatch (`task` is in `REMOTE_ONLY`). `--grid` is a FLAG, not a leading
+    positional — the same call `router set-advisors` made. The reason used to be given as "the
+    prompt that follows is free-form": it is not, `--prompt` is a flag, and since issue 28 there IS
+    a leading optional positional here, the project id. The reason that survives is that a SECOND
+    optional positional beside it could not be told from the first (measured — `cli/project_arg.py`
+    documents the same limitation for `promote`)."""
+    task = sub.add_parser("task", help="Create and read distributed tasks (remote)")
+    task_sub = task.add_subparsers(dest="subcommand", required=True)
+
+    create = task_sub.add_parser("create", help="Hand the grid a task and queue it for a provider")
+    create.add_argument("--prompt", required=True, help="What the agent should do.")
+    # The ONE project-taking command where omitting it is not a refusal: it resolves the caller's
+    # own `default` project (ADR 0033 D-o, issue 26), so `required=False`.
+    project_arg.add_project(
+        create, required=False,
+        help="Project id to run in, from `grid project list` (default: your own project named "
+             "'default', created on first use). You may run as many conversations in a project as "
+             "you like and they run alongside each other; the messages inside one conversation run "
+             "in the order you sent them. A colleague's work never blocks yours.")
+    create.add_argument(
+        "--file", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="File to upload with the task; repeatable. Committed with the task before any "
+             "provider can claim it, so the agent always finds it. Placed at the file's own name "
+             "unless you give a destination (e.g. ./conf.toml:config/conf.toml).")
+    # ADR 0033 D-j / issue 27. Client-only: it expands into the same `files` list `--file` produces,
+    # so the relay sees the payload it saw before and there is no rollout order.
+    create.add_argument(
+        "--dir", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="Folder to upload with the task; repeatable. Placed under the folder's own name "
+             "unless you give a destination. Inside a git work tree your .gitignore is honoured; "
+             "`.git/`, `.grid/`, `.claude/`, `.mcp.json` and symlinks are skipped and reported. "
+             "For a whole codebase use `grid project import` instead.")
+    # ADR 0033 D-o / issue 26 — the opt-in convenience form D-o promised. Opt-IN because it is a
+    # one-way door: `grid project import` refuses a project that already has a trunk, so a project
+    # given an empty one can never bring an existing repository in, and nothing undoes it.
+    create.add_argument(
+        "--init-project", dest="init_project", action="store_true",
+        # No git word (ADR 0034 D-m, issue 46) — see `grid project create --empty`, which this is
+        # the convenience form of.
+        help="Start the project empty first, if it holds nothing yet, then run the task. For work "
+             "that starts from nothing. ONE-WAY: a project that already holds something can never "
+             "take in an existing repository, so use `grid project import` instead if you have "
+             "one. Your uploaded files start inside your own conversation, and reach the project "
+             "when the task succeeds.")
+    # ADR 0032 / issue 32. `create` printed an id and stopped, so every use was create → copy the id
+    # → `grid task follow <id>`. This is that, with the id it already has and no window in between:
+    # the stream is attached from `after_seq=-1`, so nothing is missed.
+    create.add_argument(
+        "--follow", action="store_true",
+        help="Watch the task after creating it, and exit with its outcome — 0 completed, non-zero "
+             "otherwise, exactly as `grid task follow` does. Ctrl-C stops the watching, not the "
+             "task. With --json the create payload is one compact line and each event follows on "
+             "its own line, so both are readable by a program.")
+    create.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    create.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    create.set_defaults(handler=cmd_remote_task)
+
+    # ADR 0034 D-n / issue 47 — the door the queue was built for. `create` opens a conversation and
+    # sends its FIRST message; this sends the next one. Until it existed every `create` minted a
+    # fresh conversation, so there was no way to continue one at all.
+    #
+    # A separate verb rather than `create --conversation <id>`, for the reason `follow` is separate
+    # from `get --follow`: they differ in what they ADDRESS. `create` names a project and may resolve
+    # one; this names a conversation, which already answers that — so `--project` and
+    # `--init-project` are absent rather than ignored, and the relay refuses a `project_id` on the
+    # wire for the same reason.
+    send = task_sub.add_parser(
+        "send", help="Send another message into a conversation you already started",
+        description=(
+            "Send a follow-up message into a conversation. It runs after whatever that "
+            "conversation is already doing — your messages inside one conversation run in the "
+            "order you sent them, and you can type ahead without waiting.\n\n"
+            "The conversation id is printed by `grid task create`, and is on every turn that "
+            "`grid task get` and `grid task list` report.\n\n"
+            "Only the person who started a conversation can send into it. A colleague can read "
+            "its turns; to work alongside them, start your own with `grid task create`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    send.add_argument(
+        "conversation_id",
+        help="Conversation to send into, from `grid task create` or `grid task get`.")
+    send.add_argument("--prompt", required=True, help="What the agent should do next.")
+    send.add_argument(
+        "--file", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="File to upload with the message; repeatable. Committed before any provider can claim "
+             "the turn, so the agent always finds it. Placed at the file's own name unless you give "
+             "a destination (e.g. ./conf.toml:config/conf.toml).")
+    send.add_argument(
+        "--dir", action="append", default=None, metavar="LOCAL[:DEST]",
+        help="Folder to upload with the message; repeatable. Placed under the folder's own name "
+             "unless you give a destination. Inside a git work tree your .gitignore is honoured; "
+             "`.git/`, `.grid/`, `.claude/`, `.mcp.json` and symlinks are skipped and reported.")
+    send.add_argument(
+        "--follow", action="store_true",
+        help="Watch the turn after sending it, and exit with its outcome — 0 completed, non-zero "
+             "otherwise, exactly as `grid task follow` does. Ctrl-C stops the watching, not the "
+             "turn. A message waiting for an earlier one in the same conversation simply shows "
+             "nothing until its turn comes.")
+    send.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    send.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    send.set_defaults(handler=cmd_remote_task)
+
+    # `get` exits with the task's OUTCOME (ADR 0032, issue 32) — the same contract `follow` has
+    # always had, on the command a script is far more likely to reach for, because it is the
+    # non-blocking one. It returned 0 whatever the state until this slice, so `grid task get $id &&
+    # deploy.sh` deployed a failed task and nothing anywhere said so.
+    get = task_sub.add_parser(
+        "get",
+        help="Show a task's state and result; exit with its outcome",
+        description=(
+            "Show where a task got to, once. Exits with the task's own outcome, so a script can "
+            "branch on it:\n\n"
+            "  0   completed\n"
+            "  1   failed or timed_out — and, as everywhere in this CLI, any refusal\n"
+            "  2   not finished yet (preparing, queued, running)\n\n"
+            "`2` is the code that makes waiting expressible: 0 would say \"fine\" about an outcome "
+            "nobody has reached, and 1 would say it went wrong. It is also the ONLY code a poller "
+            "may read as \"ask again\" — 1 covers both a failed task and a relay that could not be "
+            "reached.\n\n"
+            # `rc`, never `status`: in zsh — the default macOS shell — `status` is a READ-ONLY
+            # special parameter aliased to `$?`, so the assignment fails, the comparison then reads
+            # the assignment's own 1, and the loop exits reporting a FAILURE on the first poll of a
+            # perfectly healthy running task. Measured in zsh, bash and sh; bash and sh accept
+            # `status` happily, which is what makes the trap invisible to whoever writes it.
+            "  until grid task get \"$id\"; do\n"
+            "    rc=$?\n"
+            "    [ \"$rc\" -eq 2 ] || exit \"$rc\"   # it finished, and not well\n"
+            "    sleep 30\n"
+            "  done\n\n"
+            "Read the status: `until grid task get \"$id\"; do sleep 30; done` on its own ends only "
+            "on success, so it waits forever on a task that failed.\n\n"
+            "A state this build cannot place — one a newer relay invented — is reported as "
+            "unfinished with a line on stderr saying so, never as a success or a failure.\n\n"
+            "`--json` prints exactly what it always did; only the exit status is new. To watch a "
+            "task instead of asking once, use `grid task follow`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    get.add_argument("task_id", help="Task id returned by `grid task create`.")
+    get.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    get.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    get.set_defaults(handler=cmd_remote_task)
+
+    # A separate verb rather than `get --follow`: `get` answers "where did it get to" in one shot,
+    # `follow` holds a stream open and owns a cursor. One flag flipping between those two would
+    # change the output shape wholesale.
+    #
+    # ONE verb for a turn and for a whole conversation (ADR 0034 D-m, issue 51), because the two are
+    # the same watching: one cursor, one reconnect budget, one renderer. A second command would be a
+    # synonym of this one, which `CONTEXT-MAP.md` bans, and two copies of the cursor to keep in step.
+    follow = task_sub.add_parser("follow", help="Watch a task's output as it runs")
+    what = follow.add_mutually_exclusive_group()
+    what.add_argument("task_id", nargs="?", default=None,
+                      help="Turn id, as reported by `grid task get` and `grid task list`.")
+    what.add_argument(
+        "--conversation", default=None, metavar="<conversation-id>",
+        help="Watch a whole conversation instead of one turn — every turn's output in order, "
+             "including steps the grid added itself. Ends when the conversation goes quiet.")
+    follow.add_argument(
+        "--after-seq", type=int, default=-1, dest="after_seq",
+        help="Resume after this event sequence number (default: -1, from the start). "
+             "A conversation's sequence is its own and is not a turn's.")
+    follow.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    follow.add_argument("--json", action="store_true", help="Emit one JSON event per line.")
+    follow.set_defaults(handler=cmd_remote_task)
+
+    fetch = task_sub.add_parser("fetch", help="Fetch a finished task's result into a directory")
+    fetch.add_argument("task_id", help="Task id returned by `grid task create`.")
+    fetch.add_argument(
+        "--into", default=None, metavar="DIR",
+        help="Where to put the result (default: ./<task-id>). Created if missing; an existing "
+             "directory is added to, never reset.")
+    fetch.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    fetch.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    fetch.set_defaults(handler=cmd_remote_task)
+
+    # `list` — nothing listed tasks at all before ADR 0033 issue 19a. `grid task get` answers one id
+    # at a time, and the id came from `grid task create`, so somebody who closed their terminal had
+    # to clone the project and read `task/*` refs by hand.
+    listing = task_sub.add_parser("list", help="List your conversations, or one project's")
+    # OPTIONAL since ADR 0034 D-m (issue 46), and omitting it means something DIFFERENT from what it
+    # means on `create`. There it resolves the caller's own `default` project; here it widens to
+    # every project — an application's home screen is *your conversations*, which names none. Issue
+    # 28's refusal still fires for a blank value, and both spellings still work when one is given.
+    project_arg.add_project(
+        listing, required=False,
+        help="Project id to list, from `grid project list` (default: your conversations in every "
+             "project you can reach, newest page last).")
+    listing.add_argument(
+        "--all", action="store_true",
+        help="Every member's tasks, not only your own. A project is shared, so this is how a team "
+             "sees what the team ran. Needs a project: the whole grid's work is listed one project "
+             "at a time.")
+    listing.add_argument(
+        "--state", action="append", default=None, metavar="STATE",
+        help="Only tasks in this state (queued, running, completed, failed, timed_out). "
+             "Repeatable.")
+    listing.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="How many to show (default 50, maximum 200).")
+    listing.add_argument(
+        "--after", default=None, metavar="TASK_ID",
+        help="Continue from a previous page — the task id the last page printed.")
+    listing.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    listing.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    listing.set_defaults(handler=cmd_remote_task)
+
+    # `cancel` — the first verb here that ENDS somebody's work (ADR 0033 D-l, issue 19b). It gets a
+    # long description for the reason `project check` does: what the verb costs, or in this case
+    # frees and stops, belongs in the sentence that offers it.
+    cancel = task_sub.add_parser(
+        "cancel",
+        help="Stop a queued or running task without ending its conversation",
+        description=(
+            "Stop a task that has not finished.\n\n"
+            "Until this existed the only way out of a task nobody wanted any more was to wait for "
+            "its deadline — an hour if it was running, and up to four if it was still waiting for "
+            "a provider. A turn the grid queued to resolve a collision — one nobody typed — is the "
+            "usual reason to reach for it.\n\n"
+            "The CONVERSATION survives. Cancelling stops this run and nothing else, so the next "
+            "message you send continues where it left off — there is no way to end a conversation, "
+            "because the grid holds no such state.\n\n"
+            "A project is shared, so any member may cancel any task in it: the colleague whose "
+            "combining step has been stuck all afternoon is often the person who needs to stop it. "
+            "The event log records who did.\n\n"
+            "The conversation is free to take its next message immediately. The agent itself stops "
+            "within about half a minute, on the provider's next lease renewal — and on a provider "
+            "that has not been updated yet it runs to completion, harmlessly, with nothing waiting "
+            "on it.\n\n"
+            "Nothing is rewound: whatever the agent had already done is kept, so "
+            "`grid task fetch` still works on it."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    cancel.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    cancel.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    cancel.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    cancel.set_defaults(handler=cmd_remote_task)
+
+    # `diff` — what one task changed (ADR 0034 D-m, issue 45). The audit surface auto-apply created:
+    # every finished task is now a release, and the promotion ledger that used to answer "what
+    # landed" went with `grid project promote`.
+    diff = task_sub.add_parser(
+        "diff",
+        help="See what one finished task changed",
+        description=(
+            "See exactly what one task changed in the project.\n\n"
+            "Finished work reaches the project by itself, so this is how you check that what "
+            "arrived is what you meant — including any files you sent with the message.\n\n"
+            "A task that changed nothing says so. A task that ran long ago may no longer have its "
+            "details kept, which is also an answer rather than a problem.\n\n"
+            "To take a change back out, `grid task undo <task-id>`."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    diff.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    diff.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    diff.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    diff.set_defaults(handler=cmd_remote_task)
+
+    undo = task_sub.add_parser(
+        "undo",
+        help="Take one finished task's change back out of the project",
+        description=(
+            "Undo a change you did not want.\n\n"
+            "Finished work reaches the project by itself, with nobody asked to approve it — so this "
+            "is how you decline afterwards. It takes out exactly what that one task changed, "
+            "including any files you sent with it.\n\n"
+            "Everything done since then stays. Your colleagues' work, and your own later tasks, are "
+            "untouched — the project is not rewound to how it looked before, it simply no longer "
+            "contains this one change.\n\n"
+            "If somebody has since built on the same files, the grid cannot take the change out "
+            "cleanly and will say so, naming them. Ask for what you want in a new message instead.\n\n"
+            "Only the person who asked for the task, and whoever owns the project, can undo it. A "
+            "task that failed, or one whose result has not appeared in the project yet, has nothing "
+            "to undo.\n\n"
+            "This is not the same as `grid task cancel`, which stops a task that is still running "
+            "and changes nothing."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    undo.add_argument("task_id", help="Task id, from `grid task list` or `grid task create`.")
+    undo.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    undo.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    undo.set_defaults(handler=cmd_remote_task)
 
 
 def _add_price(sub) -> None:

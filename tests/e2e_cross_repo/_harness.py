@@ -1,0 +1,335 @@
+"""Constants and helpers shared by the two cross-repo E2E modules.
+
+Separate from `conftest.py` so the test modules can import them without importing the conftest —
+pytest owns that file's module identity, and reaching into it from a test is a way to end up with
+two copies of one module.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+import pytest
+
+# This repository, derived rather than written down: `tests/e2e_cross_repo/_harness.py`.
+GRID_REPO = Path(__file__).resolve().parents[2]
+
+# grid-src's matching worktree. Hardcoded with an env override and a skip, exactly as
+# `tests/test_task_lease.py` does for the lockstep constants it parses: the two repositories share no
+# code and are not installed together, so there is no import path to discover this by.
+RELAY_REPO = Path(os.environ.get(
+    "GRID_SRC_REPO", "/Users/macbookpro/Projects/grid-src-feats/distributed-tasks"))
+RELAY_SERVER_DIR = RELAY_REPO / "grid_cli" / "private_server"
+RELAY_PYTHON = RELAY_REPO / ".venv" / "bin" / "python"
+
+SECRET = "cross-repo-e2e-secret-padded-past-32-bytes"
+BOOT_TIMEOUT_SECONDS = 90.0
+# Seconds rather than the production 120s/30s, and the RATIO is what is kept (ADR 0032 D-c: a TTL
+# several beats wider than the renewal interval). 6s/0.5s is the same 4x with the same slack, so what
+# is under test is the mechanism and not the operator's patience.
+LEASE_SECONDS = 6
+REAPER_SECONDS = 1
+RENEW_SECONDS = 0.5
+# The two budgets ADR 0033 D-k splits, scaled the same way and keeping the same INEQUALITY (the run
+# budget inside the queue budget). Used only by the relay that tests the queue clock: the ordinary
+# `relay` fixture keeps the production defaults, because a short run budget there would reap the
+# long-running agents the other modules deliberately spawn.
+QUEUE_BUDGET_SECONDS = 12
+RUN_BUDGET_SECONDS = 3
+SCOPES = [
+    "inference:create", "inference:models", "inference:resume",
+    "provider:heartbeat", "provider:update", "provider:poll", "provider:submit", "provider:error",
+]
+
+
+def require_relay_repo() -> None:
+    """Skip rather than fail when grid-src is not beside this worktree — same rule as the lockstep
+    tests, because a machine without the other repository cannot check a cross-repo property."""
+    if not RELAY_SERVER_DIR.is_dir():
+        pytest.skip(f"grid-src worktree not found at {RELAY_REPO}; set GRID_SRC_REPO")
+    if not RELAY_PYTHON.exists():
+        pytest.skip(f"grid-src has no virtualenv at {RELAY_PYTHON}; the relay needs its own install")
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def token(user_id: str, node_id: str = "node-1") -> str:
+    """A real HS256 token, minted by hand.
+
+    PyJWT is not a dependency of this repository and adding one for a test would be the wrong trade:
+    a provider never mints a token, it is handed one. Twenty lines of `hmac` keep the two repos'
+    dependency lists as different here as they are in the field — and a real token is the honest
+    test anyway, since nothing in this process can reach into the relay's to patch a verifier.
+    """
+    now = int(time.time())
+    header = _b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    payload = _b64(json.dumps({
+        "user_id": user_id, "node_id": node_id, "email": f"{user_id}@invalid", "role": "both",
+        "scopes": SCOPES, "iat": now, "exp": now + 3600}, separators=(",", ":")).encode())
+    signing_input = f"{header}.{payload}".encode()
+    return f"{header}.{payload}.{_b64(hmac.new(SECRET.encode(), signing_input, hashlib.sha256).digest())}"
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def start_relay(root, *, extra_env=None):
+    """Boot grid-src's `server:app` under a real uvicorn and wait for it. Returns `(proc, base)`.
+
+    Here rather than in `conftest.py` for that file's own reason — pytest owns a conftest's module
+    identity, so importing from it yields two copies of one module. Factored out when a second relay
+    was needed (ADR 0033 issue 18): the budgets it splits are read from the environment at import
+    time, so a relay with a different clock is a different PROCESS, and two copies of forty lines of
+    boot-and-poll would be two places for the health check to drift.
+    """
+    import httpx
+
+    require_relay_repo()
+    port = free_port()
+    env = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite+aiosqlite:///{root / 'e2e.db'}",
+        "KEYS_PATH": str(root / "keys"),
+        "JWT_SECRET": SECRET,
+        "PLATFORM_FEE_PERCENT": "10.0",
+        "TASK_REPO_ROOT": str(root / "projects"),
+        "TASK_LEASE_SECONDS": str(LEASE_SECONDS),
+        "TASK_REAPER_INTERVAL_SECONDS": str(REAPER_SECONDS),
+        "TASK_CLAIM_TIMEOUT_SECONDS": "3",
+        "GRID_MODE": "false",
+        "PYTHONPATH": str(RELAY_SERVER_DIR),
+        **(extra_env or {}),
+    }
+    proc = subprocess.Popen(
+        [str(RELAY_PYTHON), "-m", "uvicorn", "server:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        cwd=str(RELAY_SERVER_DIR), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS
+    while True:
+        if proc.poll() is not None:
+            pytest.fail(f"the relay exited before serving:\n{proc.communicate()[0]}")
+        try:
+            if httpx.get(f"{base}/relay/v1/health", timeout=2.0).status_code < 500:
+                return proc, base
+        except httpx.HTTPError:
+            pass
+        if time.monotonic() > deadline:
+            proc.kill()
+            pytest.fail(f"the relay did not come up within {BOOT_TIMEOUT_SECONDS:.0f}s")
+        time.sleep(0.2)
+
+
+def stop_relay(proc) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def wait_for(predicate, timeout=25.0, interval=0.2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(interval)
+    return None
+
+
+def git_ls_remote(url: str, ref: str, *, bearer: str) -> str:
+    """`git ls-remote` against the relay's git front, authenticated the way the CLI does it."""
+    listed = subprocess.run(
+        ["git", "ls-remote", url, ref], capture_output=True, text=True, timeout=60,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
+             "GIT_CONFIG_KEY_0": "http.extraHeader",
+             "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {bearer}"})
+    assert listed.returncode == 0, listed.stderr
+    return listed.stdout
+
+
+class Provider:
+    """One provider process, and the two different ways it can stop."""
+
+    def __init__(self, proc, node_id, log_path=None):
+        self.proc = proc
+        self.node_id = node_id
+        #: Where this process's merged stdout+stderr is being written. A FILE, never an undrained
+        #: `subprocess.PIPE` — see `conftest.spawn_provider` for what that cost.
+        self.log_path = log_path
+
+    def output(self) -> str:
+        """Everything this provider has said so far. `""` before it has said anything.
+
+        Read from disk rather than from a pipe, so a test may look at it WHILE the provider is still
+        running — which is the only useful moment for most of what it says.
+        """
+        if self.log_path is None or not Path(self.log_path).exists():
+            return ""
+        return Path(self.log_path).read_text(errors="replace")
+
+    def die(self):
+        """`SIGKILL` — no cleanup, no final report, no goodbye to the relay.
+
+        A provider whose host went away, which is the only thing that is supposed to make a lease
+        lapse. `stop()` is a provider tidying up, which is the opposite case.
+        """
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGKILL)
+        self.proc.wait(timeout=15)
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+
+# ------------------------------------------------------------------------- the client, for real
+
+def create(relay_base, bearer, prompt, *, project, files=None):
+    """One task in the project called `project`, creating and seeding that project if it is new.
+
+    Three calls, and none of them is setup noise — each is a step `grid task create` or
+    `grid project import` really runs:
+
+      * a task is posted to a project **id** since ADR 0033 issue 10, and a name is resolved only by
+        `POST /relay/v1/projects`, under the caller's own ownership;
+      * since issue 16b a project has no `main` until something imports one, and a member may no
+        longer push one themselves — the relay is the trunk's sole writer. `create_task` refuses a
+        project with no trunk outright, so seeding is now part of standing a project up rather than
+        an optional convenience.
+    """
+    from remote import relay as relay_client
+
+    project_id = relay_client.create_project(relay_base, bearer, name=project)["id"]
+    seed_trunk(relay_base, bearer, project_id)
+    return relay_client.create_task(
+        relay_base, bearer, prompt=prompt, project_id=project_id, files=files)
+
+
+def seed_trunk(relay_base, bearer, project_id):
+    """Give a project the `main` a task has to be cut from, through the real import route.
+
+    ⚠️ **This is what issue 16b took away and nothing here replaced.** Before it, a member could
+    push `main` themselves while the project was idle, and `create` relied on that without ever
+    saying so. 16b made the relay the trunk's only writer — promote and import, nothing else — and
+    from that commit every module in this directory failed at its first `H.create` with "has no main
+    yet". Both unit suites stayed green, because neither of them creates a project the way a person
+    does. That is the same blind spot this whole directory exists for, so the fix goes through the
+    real three-step import rather than reaching into the relay's bare repository on disk.
+
+    Idempotent by ASKING, not by remembering: `/status` already reports `main_commit`, so a project
+    that has a trunk is skipped without this helper keeping a set of ids it hopes is accurate. It
+    also means the check cannot drift from what `create_task` will refuse on, since both read the
+    same ref.
+    """
+    from remote import relay as relay_client, task_repo
+
+    if relay_client.project_status(relay_base, bearer, project_id).get("main_commit"):
+        return
+
+    opened = relay_client.open_project_import(relay_base, bearer, project_id)
+    ref = opened["ref"]
+    source = Path(tempfile.mkdtemp(prefix="e2e-seed-"))
+    try:
+        _git(source, "init", "-q", "-b", "main")
+        (source / "README.md").write_text("seeded by the cross-repo E2E\n")
+        _git(source, "add", "README.md")
+        _git(source, "commit", "-q", "-m", "seed")
+        task_repo.push_import(
+            source, url=relay_client.git_remote_url(relay_base, project_id), token=bearer,
+            local_ref="main", remote_ref=ref)
+    finally:
+        shutil.rmtree(source, ignore_errors=True)
+    answer = relay_client.finish_project_import(relay_base, bearer, project_id)
+    assert answer.get("status") == "imported", answer
+
+
+# Hermetic git for the seed repository: no system or global config, no ambient identity. Otherwise a
+# developer's own `~/.gitconfig` — a `commit.gpgsign`, an `init.defaultBranch` — decides what this
+# harness pushes, and the failure lands on somebody else's machine.
+_SEED_GIT_ENV = {
+    "PATH": os.environ.get("PATH", ""),
+    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "HOME": "/nonexistent",
+    "GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e2e@invalid",
+    "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e2e@invalid",
+}
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True,
+                          text=True, env=_SEED_GIT_ENV).stdout
+
+
+def get(relay_base, bearer, task_id):
+    from remote import relay as relay_client
+
+    return relay_client.get_task(relay_base, bearer, task_id)
+
+
+def await_state(relay_base, bearer, task_id, states, timeout=60.0):
+    got = wait_for(
+        lambda: (lambda t: t if t.get("state") in states else None)(get(relay_base, bearer, task_id)),
+        timeout=timeout, interval=0.3)
+    if got is None:
+        raise AssertionError(
+            f"task {task_id} never reached {states}; last seen {get(relay_base, bearer, task_id)!r}")
+    return got
+
+
+def b64_file(content: str) -> str:
+    return base64.b64encode(content.encode()).decode()
+
+
+# --------------------------------------------------------- the operator's own config directory
+
+def sweep_transcript_links(workspace_root) -> None:
+    """Remove the transcript symlinks a live run planted in the operator's real `~/.claude`.
+
+    Every module that drives the REAL binary has to write there — issue 01's spike measured a custom
+    `CLAUDE_CONFIG_DIR` yielding `Not logged in` even on macOS, where the token is in the Keychain —
+    so every one of them has to clean up, and they must clean up the same way.
+
+    By TARGET, never by deriving the expected link names. Deriving them quietly half-works: a test
+    that deletes its workspace on purpose leaves nothing to derive a name from, so that run's link
+    survives. Reading targets also needs no opinion about how the vendor encodes a path into a
+    directory name — and being wrong about that encoding is the bug this whole E2E layer exists to
+    catch, so a cleanup that depended on it would fail in exactly the case worth knowing about.
+
+    Safe because of the target test: everything under a `tmp_path_factory` root belongs to the run
+    that asked, so nothing of the operator's own can match.
+    """
+    from remote import task_agent
+
+    projects = task_agent.claude_config_dir() / "projects"
+    if not projects.is_dir():
+        return
+    ours = {str(workspace_root), os.path.realpath(workspace_root)}
+    for entry in projects.iterdir():
+        # Only ever a symlink; a real directory there is somebody's data.
+        if not entry.is_symlink():
+            continue
+        target = os.path.realpath(os.readlink(entry))
+        if any(target.startswith(root + os.sep) for root in ours):
+            entry.unlink()

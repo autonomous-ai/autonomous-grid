@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from remote import (
     api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
-    codex_auth, codex_oauth, throughput,
+    codex_auth, codex_oauth, task_capacity, throughput,
 )
 from shared.handlers import HANDLERS
 from shared import run_records
@@ -1416,6 +1416,11 @@ class _ServeState:
         # different engine. Empty = nothing withheld, which is also what every failure path leaves.
         self._sweep = engine_health.SweepResult(health=engine_health.EngineHealth())
         self.stop = threading.Event()
+        # Retires the distributed-tasks loop ALONE (ADR 0032). A second event, not a flag on
+        # `stop`, because the two planes must be independently stoppable: a relay with no tasks
+        # plane, or a task credential gone bad, retires task serving while inference keeps running,
+        # and nothing on the task side may ever set `stop`. Teardown sets both.
+        self.tasks_stop = threading.Event()
         self._lock = threading.Lock()  # guards the snapshot swap + token + inflight (short sections)
         self._register_lock = threading.Lock()  # serializes reload-register vs heartbeat-404 re-register
         self.reload_requested = threading.Event()  # SIGHUP sets this; the reload loop waits on it
@@ -1576,6 +1581,32 @@ class _ServeState:
         with self._lock:
             return self._tok_s
 
+    @staticmethod
+    def _task_pause_stamp() -> str | None:
+        """When this provider claims tasks again, as an ISO-8601 UTC string — or `None` while it is
+        claiming now (ADR 0033 D-l, issue 19b).
+
+        ISO 8601 and not a float, because the relay's half is a fail-open reader and a bare number
+        would make it guess at units; every other timestamp on this wire is already a string.
+
+        **Best-effort, exactly like the codex quota and the seat allowance beside it.** `load()` is
+        what the heartbeat is built from, and a heartbeat that raises is a provider that TTLs out of
+        the grid entirely — it would stop serving inference over a telemetry value about tasks. So
+        the failure of a reading is the absence of a key, which is already the wire's "nothing to
+        report".
+        """
+        try:
+            paused_until = task_capacity.shared().paused_until()
+            if paused_until is None:
+                return None
+            from datetime import datetime, timezone
+
+            return datetime.fromtimestamp(paused_until, tz=timezone.utc).isoformat()
+        except Exception as exc:  # noqa: BLE001 — telemetry must never fail a heartbeat
+            _warn(f"could not read this provider's task-capacity pause ({exc}); the heartbeat is "
+                  f"being sent without it")
+            return None
+
     def load(self) -> dict[str, Any]:
         with self._lock:
             load = {"active_tasks": self._inflight}
@@ -1611,6 +1642,17 @@ class _ServeState:
         seat_quota = self._seat_quota()
         if seat_quota:
             load["quota"] = seat_quota
+        # When this provider's own Claude subscription lets it claim TASKS again (ADR 0033 D-l,
+        # issue 19b). OUTSIDE `_lock`, with the other cross-module reads: `task_capacity.shared()`
+        # carries its own lock, and taking ours around it would order two locks for no reason.
+        #
+        # Nothing the relay ROUTES on: a provider out of task headroom serves inference perfectly
+        # well, which is the property `test_a_task_capacity_block_changes_nothing_the_relay_ROUTES_ON`
+        # still pins. This is published so the members waiting on a queue can see why it is not
+        # moving, and for nothing else.
+        paused_until = self._task_pause_stamp()
+        if paused_until:
+            load[task_capacity.PAUSED_LOAD_KEY] = paused_until
         return load
 
     def _seat_quota(self) -> dict[str, Any] | None:
@@ -2783,6 +2825,124 @@ def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
         state.stop.set()
 
 
+def _task_serving_enabled() -> bool:
+    """Whether this provider claims distributed tasks (ADR 0032). Opt-in, and off by default.
+
+    Read from the environment at serve time rather than baked into the run record: the detached
+    serve child inherits the parent's environment (`_spawn_remote_engine` passes ``{**os.environ}``),
+    so ``GRID_TASKS=1 grid join …`` reaches here. Opt-in is not a convenience — a task loop spends
+    the operator's own agent subscription, so it may never turn itself on.
+    """
+    return os.getenv("GRID_TASKS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+TASK_WORKERS_ENV = "GRID_MAX_TASKS"
+# The count that changes nothing. Turning task serving on may not also change how much of the
+# operator's subscription it spends, so the pool starts where it has always been and only the
+# operator moves it. Deliberately NOT a benchmarked ceiling — the ceiling that matters is the
+# subscription's own, read at runtime by `remote/task_capacity.py` (ADR 0032 issue 09).
+_DEFAULT_TASK_WORKERS = 1
+
+
+def _task_worker_count() -> int:
+    """How many tasks this provider runs at once (ADR 0032 issue 09).
+
+    Misconfiguration falls back rather than failing, the same rule `tasks.task_timeout()` states: a
+    provider that refused to serve tasks because an operator typed `three` would take task serving
+    down for the life of the process, which is a far worse answer than running with the default and
+    saying so.
+
+    There is **no upper clamp**, and that is deliberate. A number picked here would be exactly the
+    guessed constant this issue exists to remove, and it would be guessed about the wrong thing —
+    what binds is the operator's own subscription, not this process's opinion of their machine. The
+    machine's real limit is discovered instead: a thread that cannot start is reported, and the
+    workers that did start keep serving.
+    """
+    raw = (os.getenv(TASK_WORKERS_ENV) or "").strip()
+    if not raw:
+        return _DEFAULT_TASK_WORKERS
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 0
+    if count < 1:
+        print(f"\n[tasks] {TASK_WORKERS_ENV}={raw!r} is not a positive whole number of tasks; "
+              f"using {_DEFAULT_TASK_WORKERS}", file=sys.stderr)
+        return _DEFAULT_TASK_WORKERS
+    return count
+
+
+def _start_task_worker(state: _ServeState) -> list[threading.Thread]:
+    """Start the distributed-tasks claim loops, if enabled. Returns the threads that started.
+
+    Deliberately NOT wrapped in ``_supervise`` — the same exemption ``_reload_loop`` has, for the
+    same reason. ``_supervise`` sets ``state.stop`` on any fault, which is right for a poll worker
+    (a dead one strands advertised inference capacity) and wrong here: a fault in task serving must
+    leave inference running. ``task_loop`` self-guards and owns its own retirement signal.
+
+    Not joined on drain either. A task runs for minutes; the drain budget is 5s and belongs to
+    in-flight inference jobs. The thread is a daemon, so it cannot outlive the process.
+
+    Guarded end to end, because this call runs on the MAIN thread and BEFORE `_serve_loop`'s own
+    try/finally: an unguarded fault here — an import error in `remote/tasks.py`, `RuntimeError:
+    can't start new thread` under exhaustion — would escape to the top-level handler, unregister the
+    node and kill the process. Every other fault in this plane is isolated; a startup fault must be
+    too, or the isolation is only true once the thread already exists.
+
+    Each worker is guarded on its OWN, so a machine that runs out of threads part way through keeps
+    the ones it managed to start. Task serving is retired only when NONE started, because that is the
+    only case where nothing is claiming and saying so is the honest record.
+
+    Nothing is passed to `task_loop`: it finds the process-wide capacity gate itself, which is what
+    makes every worker throttle on ONE reading of the one subscription they all spend.
+    """
+    try:
+        if not _task_serving_enabled():
+            return []
+        from . import tasks
+
+        count = _task_worker_count()
+    except (Exception, SystemExit) as exc:
+        print(f"\nCould not start task serving ({exc!r}); inference is unaffected.", file=sys.stderr)
+        state.tasks_stop.set()
+        return []
+
+    threads: list[threading.Thread] = []
+    for index in range(count):
+        try:
+            thread = threading.Thread(
+                target=_supervise_tasks, args=(tasks.task_loop, state), daemon=True,
+                name=f"task-worker-{index + 1}")
+            thread.start()
+            threads.append(thread)
+        except (Exception, SystemExit) as exc:
+            print(f"\nCould not start task worker {index + 1} of {count} ({exc!r}); "
+                  f"inference is unaffected.", file=sys.stderr)
+    if not threads:
+        state.tasks_stop.set()
+    return threads
+
+
+def _supervise_tasks(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
+    """`_supervise` for the task loop: just as loud, but it retires task serving instead of the engine.
+
+    ``task_loop`` guards its own body, so arriving here means a fault outside that guard. Letting it
+    escape would drop the thread into the default excepthook and leave task serving silently dead
+    for the life of the process — the failure ``_supervise`` was written to prevent. The difference
+    is only which stop event is set: ``tasks_stop``, never ``state.stop``, so a task-plane fault
+    cannot take inference down with it.
+    """
+    try:
+        loop(state)
+    except BaseException as exc:  # noqa: BLE001 — a loop-level fault must fail loud, not vanish
+        from . import tasks  # imported here for the same reason the caller does: keep it off startup
+
+        print(f"\n{threading.current_thread().name} stopped unexpectedly: {exc!r}. "
+              f"{tasks.RESUME_HINT}", file=sys.stderr)
+        traceback.print_exc()
+        state.tasks_stop.set()
+
+
 def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = None) -> None:
     """Heartbeat + one poll worker per concurrency slot, until stop / SIGTERM.
 
@@ -2816,6 +2976,7 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
     ]
     for worker in workers:
         worker.start()
+    _start_task_worker(state)
     # Unblock SIGHUP on THIS (main) thread last: the reload daemon + heartbeat + N workers all inherited
     # the block, so a join/leave SIGHUP now lands here and EINTRs the park below — never on a poll worker
     # mid-forward (ADR 0010 C4).
@@ -2826,6 +2987,7 @@ def _serve_loop(state: _ServeState, reload_thread: threading.Thread | None = Non
             state.stop.wait(60)  # park; a worker/heartbeat may set stop, or SIGTERM unwinds here
     finally:
         state.stop.set()
+        state.tasks_stop.set()  # retire task serving with the engine, not only on its own signal
         deadline = time.monotonic() + _DRAIN_TIMEOUT
         # Wait on in-flight JOBS, never on the worker threads. A worker parked in a long-poll cannot
         # be woken by `state.stop` and does not return for up to `relay.POLL_TIMEOUT` (35s) — far past

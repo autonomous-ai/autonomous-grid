@@ -422,15 +422,48 @@ def cli_command() -> list[str]:
     return _cli_subprocess_command()
 
 
+# What `CreateProcess` can actually launch on Windows. NOT `PATHEXT`, which routinely carries
+# `.PY`/`.VBS`/`.JS` — those run through a shell association, so CreateProcess refuses them with
+# WinError 193 and only the four below are safe to hand to `subprocess`.
+_WINDOWS_EXEC_SUFFIXES = (".bat", ".cmd", ".com", ".exe")
+
+
+def _is_executable(path: Path) -> bool:
+    """Whether `path` is something a subprocess can be spawned from.
+
+    Windows has no execute bit, so `os.access(path, os.X_OK)` there is only an existence check and
+    answers True for **any** file — including the `cli/__main__.py` that `[sys.executable, "-m",
+    "cli"]` leaves in a child's `sys.argv[0]`. A child re-deriving this command handed that `.py`
+    straight to `CreateProcess` and died with `[WinError 193] %1 is not a valid Win32 application`,
+    which is what took every `grid join --api claude` seat down on Windows: the seat server never
+    started, `remote/serve.py` reported the OSError, and the run record was reaped — so the join
+    printed "starting", exited 0, and the engine was gone a second later.
+
+    POSIX keeps the execute-bit test unchanged; the suffix rule is Windows-only.
+    """
+    if not path.is_file():
+        return False
+    if os.name == "nt":
+        return path.suffix.lower() in _WINDOWS_EXEC_SUFFIXES
+    return os.access(path, os.X_OK)
+
+
 def _cli_subprocess_command() -> list[str]:
     argv0 = sys.argv[0] if sys.argv else ""
     candidates: list[Path] = []
     if argv0:
-        candidates.append(Path(argv0).expanduser())
+        base = Path(argv0).expanduser()
+        candidates.append(base)
+        if os.name == "nt":
+            # A console script's argv[0] reaches us WITHOUT its extension (`…\bin\grid`, measured on
+            # the uv-installed launcher), and `shutil.which` adds no PATHEXT to a name that already
+            # carries a directory component before 3.12 — so both lookups miss the real `grid.exe`
+            # and the interpreter fallback below was taken even where a launcher exists.
+            candidates += [base.with_name(base.name + ext) for ext in _WINDOWS_EXEC_SUFFIXES]
         resolved = shutil.which(argv0)
         if resolved:
             candidates.append(Path(resolved))
     for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
+        if _is_executable(candidate):
             return [str(candidate.resolve())]
     return [sys.executable, "-m", "cli"]

@@ -42,6 +42,12 @@ AGNOSTIC = frozenset({
     # `train` talks to whatever rollout endpoint its config names (a local proxy or a hosted
     # relay URL work identically), so it is deliberately mode-blind like `engine`/`agent`.
     "train",
+    # git's credential helper (ADR 0033 D-h). AGNOSTIC rather than REMOTE_ONLY even though only a
+    # remote grid has a relay to clone from: git runs this on every operation inside a clone, in
+    # whatever mode `grid mode` happens to be, so a local-mode refusal would break `git pull` in a
+    # directory that has nothing to do with the member's current mode. It reads `credentials.toml`
+    # and nothing else, which is not a mode-specific file.
+    "credential",
     # `stt` hits the account-level control plane — there's no "this grid" for it to route
     # through, so it is mode-blind too.
     "stt",
@@ -117,6 +123,13 @@ REMOTE_ONLY: dict[str, str | None] = {
     "sync": None,
     "price": None,
     "router": None,
+    # Tasks live in the relay's durable queue and are claimed by whichever provider is free
+    # (ADR 0032). A local grid has neither, so this is sign-in-gated like the rest.
+    "task": None,
+    # A project and its members are rows in the RELAY's own database (ADR 0033 D-a) — deliberately
+    # not the control plane's — and the repository they name is served by the relay's git plane. A
+    # local grid has none of it.
+    "project": None,
     # The one command whose reason is not sign-in (ADR 0028): a local grid serves chat/completions,
     # completions, models and media — never Anthropic Messages, which is the only dialect Claude Code
     # speaks. Naming the dialect is what stops this being filed as a bug.

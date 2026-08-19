@@ -9,6 +9,7 @@ from datetime import datetime
 from local import config
 from local import runtime
 from shared import logging_setup, paths
+from . import json_error
 from .dispatch import dispatch, resolve_override, split_forwarded
 from .parser import build_parser
 
@@ -125,13 +126,35 @@ def main(argv: list[str] | None = None) -> int:
     # reach argparse, which would bind the app's own flags to this CLI's positionals.
     cleaned, forwarded = split_forwarded(cleaned)
     parser = build_parser()
-    args = parser.parse_args(cleaned)
-    if forwarded:
-        # Only when there is something to forward, so every other command's namespace is untouched.
-        # The parser declares `forward=()` on `launch`, so its handler always finds the attribute —
-        # `grid launch claude --` with nothing after it is therefore identical to no `--` at all.
-        args.forward = forwarded
-    return dispatch(args, override)
+    # ADR 0034 D-m (issue 46): a refusal an application can branch on. Written here rather than in
+    # each handler because every command an application drives has to carry it, and a new one would
+    # otherwise have to remember — the failure being one nobody sees until a client is already
+    # parsing prose.
+    #
+    # ⚠️ **`parse_args` is INSIDE the guard, and that was found in review.** argparse raises its own
+    # `SystemExit(2)` for an argv that does not parse, before `dispatch` is ever reached — so a
+    # usage error was the one failure that reached an application as prose. Worse than prose: `2` is
+    # this CLI's code for *not finished yet, ask again* (issue 32), so a client polling with one
+    # flag this build does not know would loop for ever on it. Version skew between the app and the
+    # binary is exactly the case a spawned-subprocess client cannot rule out.
+    #
+    # ⚠️ **Re-raised, never returned.** `SystemExit` out of `main()` is this plane's error contract;
+    # see `cli/json_error.py` for the callers and tests that depend on it.
+    args = None
+    try:
+        args = parser.parse_args(cleaned)
+        if forwarded:
+            # Only when there is something to forward, so every other command's namespace is
+            # untouched. The parser declares `forward=()` on `launch`, so its handler always finds
+            # the attribute — `grid launch claude --` with nothing after it is therefore identical
+            # to no `--` at all.
+            args.forward = forwarded
+        return dispatch(args, override)
+    except SystemExit as exc:
+        # `args` is `None` when argparse itself refused, so the flag is read out of the raw argv —
+        # see `json_error.asked_for_json`.
+        json_error.refuse_as_json(args, exc, argv=cleaned)
+        raise
 
 
 def _maybe_internal(argv: list[str]) -> int | None:
