@@ -791,3 +791,41 @@ initially claimed entries run in family order — they run numerically #1–#7),
 caught before commit.
 
 **Commit/push.** (R40 — this commit).
+
+## Round 41
+
+**Change.** Model layer closed the GoF-signature gap the agent layer already
+had: added **"One request, walked through the catalog"** — a worked case study
+that drives one correctness-gating request (a lock-ordering deadlock-free
+verdict) through the actual shapes it invokes (spend #5 → fan #2/#11/#12 with
+forced divergence + correlation weighting → certify #8/#22 with a
+pre-registered N → state #17/#24 → risk #19/#20 CVaR + breaker), and closes on
+why local flips the economics. Mirrors the agent layer's "one box, one defect".
+Verified all `#N` refs are in the model layer's 1–27 and every pattern header
+survived. Purely additive.
+
+## Round 42
+
+**Change.** 4-lens judge pass over R38–R41 content, run directly (the sub-agent
+runtime still fails to persist judges — logged as-is). Findings:
+
+- **GoF lens** — both worked case studies are strong; the one consistent
+  scannability gap is that the agent catalog's "catalog, as one figure"
+  (`index.svg`) caption carried no organizing framing, while the model layer's
+  identical figure names its taxonomy ("arrayed primitive → composition →
+  stateful → epistemic → machinery"). **Applied:** reworded the agent caption
+  to "seven patterns arrayed by the three binds — seat, act, fact — and the
+  end-to-end system," tying the figure to the R40 thesis instead of an orphan.
+- **Architecture lens** — re-verified the agent #5 `admit()` Sample Code three
+  stages are internally consistent (shadow → bounded → full, each a ledger
+  event) and match the On-the-Grid prose; no drift found.
+- **AI-ML / local-AI lenses** — confirmed all model names in both catalogs'
+  pattern examples are current SoTA (`qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`,
+  `qwen3-coder`, `glm-5.2`, `deepseek-v4-flash`) and the model-layer #6
+  attribution agent #1 relies on ("only one worker may act") is a real
+  refinement of model Brute-Force, not a fabrication.
+
+**Verification.** Agent `index.svg` confirmed to contain all seven pattern
+titles; Markdown rebalanced; single targeted edit, no structural change.
+
+**Commit/push.** (R42 — this commit).

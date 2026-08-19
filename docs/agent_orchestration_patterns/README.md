@@ -445,7 +445,7 @@ binds is the one that decides:
 
 ## The catalog, as one figure
 
-![Local AI orchestration patterns — the agent layer: seven patterns and the end-to-end system on one token set](images/index.svg)
+![Local AI orchestration patterns — the agent layer: seven patterns arrayed by the three binds — seat, act, fact — and the end-to-end system, on one token set](images/index.svg)
 
 ---
 
