@@ -2401,9 +2401,24 @@ def _merge_in_progress(tmp_path, workspace, remote, input_commit, merge_ref):
 
     task_repo.materialize(workspace, url=remote.url, token=remote.token, branch="task/T1",
                           input_commit=input_commit, merge_ref=merge_ref)
-    # Exits 1 — that is the case. `_git` would raise on it, so this one is run directly.
-    subprocess.run(["git", "-C", str(workspace), "merge", "--no-edit", merge_ref],
-                   capture_output=True)
+    # Exits 1 on a conflict — that IS the case under test, hence `check=False`.
+    #
+    # ⚠️ **Through `_git`, never a bare `subprocess.run`.** A bare one inherits the developer's
+    # ambient git configuration and `HOME`, so this helper depended on the machine it ran on: it
+    # conflicted on a Mac and left the workspace still at `input_commit` on Linux CI. Because the
+    # output was captured and dropped, four tests then failed on assertions about the workspace
+    # rather than on the merge that never ran — "the fixture never conflicted" was the only clue,
+    # and it named the symptom rather than the cause.
+    done = _git(workspace, "merge", "--no-edit", merge_ref, check=False)
+    # ⚠️ **The INDEX is the postcondition, not the markers.** A modify/delete conflict leaves no
+    # markers at all — `_modify_delete_remote` is exactly that case, and one test asserts their
+    # absence — so `ls-files --unmerged` is the one thing both fixtures share. Raised rather than
+    # returned so a merge that did not happen can never again reach a test as a merge that did.
+    if not _git(workspace, "ls-files", "--unmerged").stdout.strip():
+        raise AssertionError(
+            "the merge left nothing unmerged, so this fixture never reached the state under test. "
+            f"`git merge {merge_ref}` exit={done.returncode}\n"
+            f"stdout={done.stdout!r}\nstderr={done.stderr!r}")
 
 
 def test_a_resolved_merge_is_committed_with_both_parents(tmp_path):
