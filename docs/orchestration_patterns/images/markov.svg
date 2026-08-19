@@ -1,58 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 574" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1638 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1100" height="574" fill="#fff"/>
-  <rect x="70" y="307" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="110" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <circle cx="166" cy="340" r="9" fill="#2b2b29"/>
-  <rect x="355" y="177" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="410" y="219" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
-  <rect x="355" y="307" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="410" y="349" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
-  <rect x="355" y="437" width="110" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="410" y="479" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
-  <path d="M166 340 C186 340, 320 210, 340 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M166 340 C186 340, 320 340, 340 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M166 340 C186 340, 320 470, 340 470" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="280" y="158" text-anchor="middle" fill="#2b2b29" font-size="24">same prompt</text>
-  <rect x="428" y="307" width="264" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="560" y="349" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">weighted mean</text>
-  <path d="M480 210 C600 210, 308 340, 428 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M480 340 C600 340, 308 340, 428 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M480 470 C600 470, 308 340, 428 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="560" y="514" text-anchor="middle" fill="#2b2b29" font-size="24">correlation-weighted</text>
-  <rect x="640" y="307" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="710" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
-  <path d="M702 340 C722 340, 610 340, 630 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="643" y="288" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <rect width="1638" height="450" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Markowitz Ensemble — correlation-weighted, not just averaged</text>
+  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
+  <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 328, 594 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 92 C 808 92, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 210 C 808 210, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 328 C 808 328, 808 210, 878 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1140 210 C 1268 210, 1268 210, 1397 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
+  <rect x="594" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="594" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="594" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">worker</text>
+  <rect x="878" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">weighted mean</text>
+  <text x="1009" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">correlation-weighted</text>
+  <rect x="1397" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1469" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 </svg>

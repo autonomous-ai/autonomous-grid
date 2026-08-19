@@ -10,7 +10,7 @@ money and starts being the point.
 This is the **model-layer** half of the catalog — the shape of routing and
 combining *local inference*: how many samples a request deserves and how the
 samples are pooled into an answer. It pairs with
-[`agents.md`](agents.md), the **agent-layer** half — orchestrating *harness
+`agents.md`, the **agent-layer** half — orchestrating *harness
 frameworks as workers* (act-gates, session lifecycles, harness routing, and a
 single fsync'd ledger): sessions that hold context and credentials, tool calls
 that touch the world, and the rule that only one worker may act. The two
@@ -20,6 +20,13 @@ the agent doc the scarce thing is the *seat* — one resident, VRAM-backed model
 + harness runtime that a request or agent occupies — and compute is cheap by
 comparison. Read the model layer first; it is the foundation every agent doc
 decision runs on top of.
+
+The companion documents (`ROUTER.md`, `router-execution.md`) live in the
+sibling research doc at
+`autonomous-org/projects/grid-orchestration/` and are cited here for
+provenance; `agents.md` is the agent-layer half, not yet published — where it
+ships it will open the layer above this one. Treat the bare names in the text
+as pointers to that role, not to files in this catalog.
 
 This is the "redesign the router" document. `ROUTER.md` analyzes the current
 naive router; this file is the design space it should grow into — the original
@@ -42,10 +49,39 @@ is defined above. *WAL* is the write-ahead log that backs the state ledger.
 These recur throughout; where a term is loaded before it is defined here, the
 definition lives in this block.
 
-Read the register before you draw or write: `knowledge/diagram-style.md`,
-`knowledge/technical-writing-style.md`.
+Read the register before you draw or write. The figure style that the
+diagrams in this catalog follow is written up in `docs/STYLE.md` and
+`docs/DIAGRAMS.md`; the canonical standard that vendors them is
+`autonomous-org/knowledge/diagram-style.md` (and its companion
+`technical-writing-style.md`), which you may not have locally.
 
 ---
+
+**How to read a pattern.** Every pattern below is documented under the same
+skeleton, so the catalog can be scanned and then read deep. The headings are
+fixed and mean the same thing in every pattern:
+
+- **Intent** — the shape in one sentence, and what it buys.
+- **Also Known As** — the other names the idea travels under, so you can find
+  it by what you already call it.
+- **Motivation** — the concrete pressure that makes the pattern worth having;
+  the failure it answers.
+- **Structure** — the diagram and the parts it names.
+- **Mechanics** — how the parts collaborate: who decides, who waits, what
+  crosses which edge.
+- **Refinements** — how to build it: the concrete rules that keep the promise
+  honest (present where the pattern has implementation guidance to separate).
+- **Consequences** — what the pattern costs and what it forgives.
+- **Failure mode** — the specific way this pattern goes wrong, and the honest
+  version of its promise.
+- **On the Grid stack** — one concrete local build, to keep the economics
+  honest. **Related Patterns** ends each entry and points at the same family.
+
+Read the **one-sentence table** first to choose a shape, then a pattern's
+**Intent** to confirm, then its **Failure mode** before you build it — the
+liability is where a pattern is actually decided. The patterns are numbered
+and cross-reference each other by `#number`; read the primitives (#1–#5)
+before their compositions, and treat the framing below as the map.
 
 ## The one sentence per pattern
 
@@ -82,6 +118,44 @@ Read the register before you draw or write: `knowledge/diagram-style.md`,
 The first is the baseline we already ship — naive remote-style routing. The
 rest are what local gives you permission to do.
 
+
+**Choosing a pattern — the decision order.** The table above lists the *what*
+for each shape; this is the *which* — the order in which to ask the questions,
+because the first question that binds is the one that decides. Read the request
+as a small set of properties and let the first that holds pick the leaf:
+
+1. **Do you already know the one right model?** → #1. When the request is cheap
+   to answer and its class is well-mapped, *not running the other nineteen* is
+   the whole move. Everything that follows is what you trade this for when that
+   confidence is missing.
+2. **Is the answer worth checking, and are tokens free?** → #2, then #7/#12 for
+   a numeric answer (#12 when the pool's errors are *known* correlated). The
+   vote is the cheapest insurance; distrust its agreement when you can't field
+   genuinely different reads (#11).
+3. **Is the request several requests with a named order?** → #10 pipeline; an
+  *unfixed* order that needs a planner → #3.
+4. **Is a wrong answer costly, and do two independent voices disagree?** → #4
+   (one round) or #9 (loop until they close).
+5. **Does the *same* expensive answer keep coming back?** → #17 (memorize it),
+   or #14 when you don't yet know which *shape* wins the class.
+6. **Is one request-class quietly failing?** → #13 (set spend from measured
+   confidence error); one worker on the tail is blocking the group → #16.
+7. **Is a node or class toxic?** → #20 (trip fast, quarantine); a rare request
+   is hard *and* costly → #19; the proof bar turns on which error is worse
+   → #23.
+8. **Are you admitting a model you don't yet trust?** → #18 (shadow it on live
+   traffic) or #24 (probe its type in idle); promoting a luck-streak winner
+   → #22, and keep exploring losers → #27.
+9. **Does the plan assume idle time that isn't there?** → #26.
+
+Three shapes aren't leaves and don't answer a request — they *select* or
+*cover*. **Strategy (#5)** is the switchboard: the frozen classifier that picks
+a leaf per request-class until #14/#27 learn to pick for it. **Brute-Force
+(#6)** is the leaf when the pool rule is "best of many tries" — you can't name
+a better pooling, so coverage beats cleverness. **Verifier Gate (#8)** is the
+leaf when checking is far cheaper than getting it wrong — one draft, a check,
+retry on fail; it composes with #1 and #6 rather than replacing them.
+**Two levers
 **Two levers, twenty-seven shapes.** *(If you read one thing, read this — it is
 the shape of the whole catalog.)* Every pattern is a point in a small grid:
 *how many samples* (1, N, or many) × *how they're pooled* (a single pick, a
@@ -119,7 +193,9 @@ is the current Grid router verbatim: a deterministic hard filter, an advisor
 that ranks, and one winning worker. It is the baseline every other pattern is
 measured against.
 
-**Motive.** Routing is an assignment problem in the remote world because
+**Also Known As.** best-fit routing; single-model dispatch
+
+**Motivation.** Routing is an assignment problem in the remote world because
 every candidate costs money and seconds. When one model can do the job, the
 optimal move is to *not* run the other nineteen. That logic stays true
 locally — it is just no longer the *only* true answer.
@@ -134,7 +210,7 @@ most capable one. It sees model facts and price, never queue depth or live
 throughput, which a later pattern (#5) exploits: the ranker picks by
 *capacity to do the job*, not by *who is free right now*.
 
-**Tradeoffs.** Cheapest answer in latency and tokens. But it is a single
+**Consequences.** Cheapest answer in latency and tokens. But it is a single
 point of failure on the ranker's judgment — one wrong `SIMPLE` call and the
 whole answer is wrong, silently. There is no second read.
 
@@ -146,6 +222,8 @@ classification that looks right in training data and fails on the tail.
 
 ---
 
+**Related Patterns.** Fan-Out (#2), Verifier Gate (#8), Strategy (#5) — the baseline every other shape is measured against.
+
 ## 2. Fan-Out — same prompt, N answers, a vote
 
 ![Fan-Out — one prompt fanned to three workers, a vote, expand on a tie](images/fanout.svg)
@@ -154,7 +232,9 @@ classification that looks right in training data and fails on the tail.
 one the majority agree on. This is best-of-N / self-consistency, made viable
 by free tokens.
 
-**Motive.** Independent samples of a stochastic function disagree more where
+**Also Known As.** self-consistency voting; best-of-N vote
+
+**Motivation.** Independent samples of a stochastic function disagree more where
 the answer is genuinely hard, and agree on what is actually true. This is the
 self-consistency result (Wang et al. 2022): majority over independent samples
 beats greedy decoding, and the vote is more than a quorum — it is a confidence
@@ -175,12 +255,12 @@ have. They run in parallel and return to a vote node that is strictly the
 *decision* plane (purple). Ties are not a failure; they are the signal that
 ignites the expand branch.
 
-**Tradeoffs.** The redundancy is the product — three answers where remote
+**Consequences.** The redundancy is the product — three answers where remote
 would buy one. Cost is three answers' tokens you never paid for. The risk
 is slow consensus: three models agreeing is great, three models each with a
 plausible but different answer burns the win and falls to expand.
 
-**Mechanics.** Three refinements make the vote a
+**Refinements.** Three refinements make the vote a
 stronger measurement without changing its shape. (1) **Quorum, not
 full-call-for.** You don't need all N to agree to ship — wait for the first
 ⌊N/2⌋+1 matching answers and return early. This makes the cheap path cheaper
@@ -216,6 +296,8 @@ hoping for it.
 
 ---
 
+**Related Patterns.** Brute-Force (#6) is the same spend as a *selection* rather than a vote; Ensemble (#7) averages instead; Adversarial (#4) distrusts agreement.
+
 ## 3. Master / Slave — a planner splits the job
 
 ![Master / Slave — a planner splits the job into specialist lanes that merge](images/master.svg)
@@ -225,7 +307,9 @@ built for it, and the results come back together. This is Anthropic's
 orchestrator–worker, applied to a single request instead of a multi-day
 research project.
 
-**Motive.** Some jobs are heterogeneous — *write it* and *check it* and
+**Also Known As.** planner/specialist decomposition; the split-and-merge
+
+**Motivation.** Some jobs are heterogeneous — *write it* and *check it* and
 *retrieve the fact* are different skills and no one model is best at all of
 them. A planner buys the divide-and-conquer win: you stop running one
 generalist on everything and let each specialist do its own one thing.
@@ -247,7 +331,7 @@ not wall-clock parallelism but *fit* — each piece goes to the model built
 for it — and a serialized lane that routes well beats a parallel lane that
 runs the wrong generalist.
 
-**Tradeoffs.** The big win of the set for genuinely composite jobs — each
+**Consequences.** The big win of the set for genuinely composite jobs — each
 specialist is simpler, and simple specialists are more reliable. The cost is
 the planner's own judgment: a bad split is worse than no split, because you
 pay the planner, the wrong specialists, *and* a merge that has to stitch
@@ -261,6 +345,8 @@ parts that were never meant to go together. Plan quality is the whole bet.
 
 ---
 
+**Related Patterns.** Pipeline (#10) is the mastered chain's sequential cousin; Strategy (#5) can select it per request.
+
 ## 4. Adversarial — two careful reads, a judge
 
 ![Adversarial — two careful reads disagreeing into a judge's decision](images/adversarial.svg)
@@ -269,7 +355,9 @@ parts that were never meant to go together. Plan quality is the whole bet.
 settles where they disagree. This is multi-agent debate / the dissent gate,
 run as a routing pattern.
 
-**Motive.** The costliest failures in the whole system are the quiet ones —
+**Also Known As.** multi-agent debate; the dissent gate; red-team routing
+
+**Motivation.** The costliest failures in the whole system are the quiet ones —
 the confident wrongness of #1 and the unanimous wrongness of #2. Adversarial
 is the correction: instead of voting for agreement, you *train a
 disagreement* and let disagreement force the system to look again. It is the
@@ -285,7 +373,7 @@ disagreement rather than rubber-stamp a consensus. The shape mirrors
 `knowledge/guardrails.md` and `playbooks/red-team.md`: a single synthesizer
 curates its own evidence, so an adversary is the fix.
 
-**Tradeoffs.** The surest hedge against quiet wrongness, but it never runs
+**Consequences.** The surest hedge against quiet wrongness, but it never runs
 the "easy" path — it spends two reads on every job, even the trivial ones.
 That is the pattern's own misfit: #4 is wasted on a simple lookup.
 
@@ -293,7 +381,7 @@ That is the pattern's own misfit: #4 is wasted on a simple lookup.
 — disagreement that never happens because the two readers were given the same
 prompt the same way. Adversarial thwarts *slips*, not *shared blind spots*.
 
-**Mechanics.** Two gates keep the pattern honest:
+**Refinements.** Two gates keep the pattern honest:
 (1) **Divergence is a setup property, not an instruction.** "Careful
 disagreement" told to two same-family models is two runs of the same prior.
 Induce the disagreement — give read B a devil's-advocate / counter-reading
@@ -315,6 +403,8 @@ therefore their blind spot).
 
 ---
 
+**Related Patterns.** Debate (#9) is the looped form of the two reads; Verifier Gate (#8) is the single-read cost floor; Negative Selection (#11) attacks the shared blind spot.
+
 ## 5. Strategy — each request chooses a pattern
 
 ![Strategy — each request is routed to the pattern that fits it](images/strategy.svg)
@@ -323,7 +413,9 @@ therefore their blind spot).
 The router stops being one shape and becomes the thing that picks the shape.
 This is the meta-pattern that makes the other four composable into one system.
 
-**Motive.** No single pattern wins on every request. A cheap lookup should be
+**Also Known As.** the meta-pattern; plan selection
+
+**Motivation.** No single pattern wins on every request. A cheap lookup should be
 a mate-in-one; a hard question is worth a fan-out; a composite brief deserves
 a master/slave; a consequential answer wants adversarial. The `auto` name in
 Grid's ADR 0013 already gestures at this — the router chooses a model — but it
@@ -342,7 +434,7 @@ compute to spend*, which is the dimension remote routers never had to ask.
 The leaves are labelled by pattern, not by model, because the choice is a
 shape, not a device.
 
-**Tradeoffs.** The composition win — one `auto` endpoint that is genuinely
+**Consequences.** The composition win — one `auto` endpoint that is genuinely
 adaptive. The cost is judging-requires-a-judge: the strategy layer must be
 right about *which pattern*, and a good mate-in-one judgment is not
 guaranteed to transfer to a good strategy judgment. It can fall back to a
@@ -357,6 +449,8 @@ strategy layer needs the same humility it gives the layers below.
 
 ---
 
+**Related Patterns.** Every pattern; Pheromone Router (#14) is the learned Strategy.
+
 ## 6. Brute-Force — many identical tries, keep the best
 
 ![Brute-Force — a deck of identical workers, best of N into the answer](images/brute.svg)
@@ -365,7 +459,9 @@ strategy layer needs the same humility it gives the layers below.
 one. This is the "spin off twenty agents doing the same thing" mode, made
 literal.
 
-**Motive.** Some answers are found by coverage, not by cleverness — open a
+**Also Known As.** best-of-N selection; sampling without cleverness
+
+**Motivation.** Some answers are found by coverage, not by cleverness — open a
 path, and the first N tries that stumble onto it are as good as any planner's
 guess. When tokens are free this becomes the *cheapest* kind of brute force:
 no ranker, no planner to get the seam wrong, just many tries and a selection
@@ -397,7 +493,7 @@ tie-break: name the rule in advance (first pass in submission order / cheapest
 of the passing / lowest token-cost-per-passing-sample), or the pick trails
 into exactly the fluent-picker arbitrariness the gate exists to kill.
 
-**Tradeoffs.** Lowest engineering cost of the whole set — selection beats
+**Consequences.** Lowest engineering cost of the whole set — selection beats
 voting, averaging, and verification. But it is the most sample-hungry: it
 spends N tokens for one answer with no more reliability signal than "one of
 these was best," and it cannot raise the ceiling — only the floor. That is a
@@ -410,7 +506,7 @@ the "best" sample is still uniformly hard, the floor is where it always was.
 **Failure mode.** The best of N bad tries is still a bad try. Brute coverage
 raises the floor; it does nothing for an answer that is uniformly hard.
 
-**Mechanics.** One more constraint turns the deck
+**Refinements.** One more constraint turns the deck
 from a hazard into bounded coverage: **only one worker may act.** N identical
 tries is only safe if the workers are read-only. If a worker can call a tool
 or run code, N tries = N executions — cap N, and let only the selected worker
@@ -422,6 +518,8 @@ deterministic.)
 
 ---
 
+**Related Patterns.** Fan-Out (#2) votes and Brute-Force picks; Verifier Gate (#8) supplies the deterministic gate #6's `best` needs.
+
 ## 7. Ensemble — same prompt, keep the average
 
 ![Ensemble — three workers into a mean that averages their answers](images/ensemble.svg)
@@ -429,7 +527,9 @@ deterministic.)
 **Intent.** Run N answers and keep the *average*, not a winner. Where #2
 *votes* and #6 *selects*, this *averages* — the anti-cleverness pooling rule.
 
-**Motive.** Some answers are noisy numbers: a forecast, a score, a
+**Also Known As.** numerical averaging; the arithmetic mean
+
+**Motivation.** Some answers are noisy numbers: a forecast, a score, a
 coordinate. For those, no single sample is reliable, and no vote is the
 right reduction either — the average of many independent noisy samples is
 provably more stable than any one of them, and the stability grows with N.
@@ -451,13 +551,13 @@ decision plane is one node but its act is arithmetic, not judgment — that is
 the deliberate contrast with the judge in #4. The mean does not "decide"
 which answer is better; it *combines* them.
 
-**Tradeoffs.** The best variance-reduction play in the catalog for numeric
+**Consequences.** The best variance-reduction play in the catalog for numeric
 answers. The costs: it only applies where averaging is a sensible reduction
 (a number, a probability, a vector — not a piece of prose), and it inherits
 the shared-bias problem — if every sample is biased the same way, the mean
 is confidently wrong with small variance (the classic underestimation trap).
 
-**Mechanics.** Two more fixes repair the naive mean
+**Refinements.** Two more fixes repair the naive mean
 beyond the robust statistic in the Motive: (1) **Never let the mean terminate
 the pipeline.** Report dispersion alongside the mean and escalate on high
 dispersion — a tight cluster with a shared prior is the trap, not good news.
@@ -475,6 +575,8 @@ and the wrong needle.
 
 ---
 
+**Related Patterns.** Markowitz Ensemble (#12) fixes #7's central failure; Fan-Out (#2) is the categorical cousin.
+
 ## 8. Verifier Gate — one draft, a check, retry on fail
 
 ![Verifier Gate — one draft passes a check, a dashed loop retries on fail](images/verify.svg)
@@ -483,7 +585,9 @@ and the wrong needle.
 back for another try. This is generator + verifier, and the loop is what
 makes it local-native.
 
-**Motive.** The cleanest split of *doing* from *checking*: generate freely,
+**Also Known As.** the verifier; the retry gate
+
+**Motivation.** The cleanest split of *doing* from *checking*: generate freely,
 then spend cheap, deterministic verification on the output. Its real power is
 one local allows: you can afford to *retry on a failed check*, because a
 failed check costs nothing extra. Remote routers retry sparingly (each retry
@@ -502,7 +606,7 @@ is cheap and repeatable, so the loop can fire many times — bounded by K
 retries, then escalate; it must *not* read as "fire forever on a wrong draft"
 (see the eval-pass cap).
 
-**Tradeoffs.** Turns a single unreliable generation into a bounded retry
+**Consequences.** Turns a single unreliable generation into a bounded retry
 loop — the per-attempt *get it wrong* probability decays geometrically with
 tries only if retries are independent. The failure is when you can't check
 cheaply (a free-text answer with no rubric) or the retry isn't independent
@@ -517,7 +621,7 @@ quiet-fail case again.
 being a real check — if it's a cheap heuristic that can't see the error, the
 loop burns tokens politely confirming the same wrong draft.
 
-**Mechanics.** Three hardenings make the strongest
+**Refinements.** Three hardenings make the strongest
 pattern in the catalog actually safe to ride on: (1) **The verifier must be
 independent of the generator.** A verifier that reads the draft plus the
 same prompt shares the draft's flaw and rubber-stamps (the named failure,
@@ -537,6 +641,8 @@ to a weak check.
 
 ---
 
+**Related Patterns.** Adversarial (#4) and Debate (#9) are heavier checks; Brute-Force (#6) needs #8 to make `best` deterministic.
+
 ## 9. Debate — two reads that loop until they agree
 
 ![Debate — two careful reads into a judge, a dashed loop for disagreement](images/debate.svg)
@@ -546,7 +652,9 @@ the reads back for another round, instead of the judge ruling immediately.
 This is multi-agent debate with rounds, and it's the natural extension of
 the single-round adversarial in #4.
 
-**Motive.** #4's single judge has a ceiling: a genuine disagreement surfaces
+**Also Known As.** the rebuttal loop; adversarial debate
+
+**Motivation.** #4's single judge has a ceiling: a genuine disagreement surfaces
 once and is settled by whoever's framing was more convincing. A fiction that
 a *second* read (of the other's objection) would have broken. Rounds buy
 convergence — the reads keep sharpening each other until they either agree or
@@ -574,7 +682,7 @@ ground-truth lookup where one exists, not certified by two correlated voices
 going quiet together. As K grows, more compute is spent but the probability of
 a wrong ruling falls; the bound keeps an open loop from becoming an open debate.
 
-**Tradeoffs.** The strongest *consensus-forcing* pattern — it turns a single
+**Consequences.** The strongest *consensus-forcing* pattern — it turns a single
 adversarial pass into a self-correcting one. Costs: it is the most
 sample-hungry (K rounds × 2 reads + judgment), and it can *entrench* a shared
 blind spot rather than break it if the two reads are the same model with the
@@ -585,7 +693,7 @@ failure, worse than #4's single quiet slip).
 **Failure mode.** Fake convergence — agreement that is really both reads
 sharing the same primed wrongness, now certified by K rounds of agreement.
 
-**Mechanics.** Consensus-forcing is only worth it if
+**Refinements.** Consensus-forcing is only worth it if
 the consensus is real, and it isn't when the reads are the same family with
 the same prime. One gate fixes it: **require hard divergence before the loop
 is trusted.** The two reads must be different families or robustly different
@@ -598,6 +706,8 @@ above — exhaustion is an escalator, never a forced ruling.)
 
 ---
 
+**Related Patterns.** Adversarial (#4) is the single-pass form; Verifier Gate (#8) is the cheaper check.
+
 ## 10. Pipeline — each step consumes the last
 
 ![Pipeline — scout, write, check as a chain of three steps to the answer](images/handoff.svg)
@@ -607,7 +717,9 @@ one's output — scout → write → check → answer. This is #3's planner with
 the planner: the order is implicit in the job, so no decomposition step is
 needed.
 
-**Motive.** Some jobs have a natural order of operations — you can't write
+**Also Known As.** the handoff; sequential stages
+
+**Motivation.** Some jobs have a natural order of operations — you can't write
 before you know what you're writing about, and you shouldn't check before
 you write. For those, a fixed pipeline is *simpler than a planner*: no master
 to get the seam wrong, just a chain where each link is a well-scoped
@@ -625,13 +737,13 @@ the plan. Nothing is purple because nothing decides: the ordering is fixed,
 and each step is pure work on the previous output. Deliberate contrast with
 #3, where a purple planner has to invent the order.
 
-**Tradeoffs.** Dead simple, and every step is testable in isolation because
+**Consequences.** Dead simple, and every step is testable in isolation because
 each consumes a well-defined artifact. But the chain is only as good as its
 weakest link, and *errors are not caught* — nothing loops back (that's #8's
 job; this pattern deliberately has no gate). A bad `scout` poisons the whole
 pipeline and it ships anyway.
 
-**Mechanics.** The
+**Refinements.** The
 original "no gate" was the worst robustness posture in the catalog: a job
 with a *natural order* is exactly the job guaranteed to compound an upstream
 error into the answer with zero interruption. The fix costs almost nothing
@@ -658,6 +770,8 @@ the chain.
 
 ---
 
+**Related Patterns.** Master / Slave (#3) is the parallelized form; Straggler Backup (#16) covers a failing stage.
+
 ## 11. Negative Selection — force divergence before you judge
 
 ![Negative Selection — three workers, a select node that drops clones, then a vote](images/negative.svg)
@@ -666,7 +780,9 @@ the chain.
 for dissimilarity before the vote* — the immune system training its
 repertoire against self, applied to a fan-out.
 
-**Motive.** #2–#4 all sample then decide, and they all share the documented
+**Also Known As.** forced divergence; diversity screening
+
+**Motivation.** #2–#4 all sample then decide, and they all share the documented
 blind spot: three models on the same corpus happily agree wrong. Agreement is
 a consistency signal, not truth. Negative Selection is the only pattern that
 selects the *input population* to be structurally divergent, so the
@@ -691,7 +807,7 @@ what looks like divergence in the text is convergence in the reasoning path.
 Screen on what they actually *consulted* and *did*, which is where a shared
 blind spot actually lives.
 
-**Tradeoffs.** The direct answer to the catalog's loudest failure — it buys
+**Consequences.** The direct answer to the catalog's loudest failure — it buys
 divergence *by construction*, not by hoping for it. The cost is the extra
 screening step and the fact that forcing difference can reject a genuinely
 right-but-conventional answer: it trades some coverage for independence, which
@@ -702,24 +818,27 @@ than the fan-out launched. And if the surviving pool is under-populated, **absta
 rather than ship** an answer from a pool too small to call diverse: "could not form
 a diverse set" is a legal refuse-exit, not a forced answer.
 
-**Failure mode.** The diversity metric is a proxy, not the truth — two answers
-that are far apart in embedding can still both be wrong for correlated
-reasons. Diversity by construction reduces the shared prior; it does not
-remove it. And the screen is itself a model, not arithmetic: the embedding
-distance is a hidden dependency, so it belongs in the *metric-determinism*
-trust class (machinery) — reproducible only if that embedding is pinned, never
-"arithmetic, trust it." And it has to be *named* to be pinned: the divergence
-metric is a fixed embedding model-file + quant + distance-threshold, resolved
-by the router like any pinned dependency, not a floating "some embedding, some
-drop rule." The tool-call-lineage screen has the same reproducibility problem
-one floor lower — the worker output contract must carry a structured evidence
-trace (`usage.evidence_lineage`) or the "screen on what they consulted" step
-has nothing to screen on.
+**Failure mode.** The diversity metric is a proxy, not the truth — two
+answers far apart in embedding can still both be wrong for correlated reasons.
+Diversity by construction reduces the shared prior; it does not remove it.
 
+**Refinements.** Two reproducibility rules.
+
+1. **Pin the divergence metric.** The screen is itself a model, not arithmetic:
+   the embedding distance is a hidden dependency, so it belongs in the
+   *metric-determinism* trust class. Name it to pin it — a fixed embedding
+   model-file + quant + distance-threshold, resolved by the router like any
+   pinned dependency, never a floating "some embedding, some drop rule."
+2. **Carry the evidence lineage.** The tool-call-lineage screen has the same
+   reproducibility problem one floor lower — the worker output contract must
+   carry a structured evidence trace (`usage.evidence_lineage`) or the "screen
+   on what they consulted" step has nothing to screen on.
 
 **On the Grid stack.** Before judging divergent answers, the router forces divergence by construction — asking a `qwen36-35b-a3b-mtp` worker and a `glm-4.6` worker each to state *what it would not say* — then judges on `qwen36-27b-mtp`. In a diverse-by-construction pool the two-family split is the point: a same-family pair fails the screen almost by definition. The example exposes that the model-distinguishability distance is a hidden dependency: the judge's reproducibility depends on the embedding being pinned, so the divergence metric must live in the metric-determinism trust class, not be treated as arithmetic.
 
 ---
+
+**Related Patterns.** Fan-Out (#2) pools without forcing divergence; Markowitz (#12) and the Byzantine adjudicator (#15) read the same diversity.
 
 ## 12. Markowitz Ensemble — correlation-weighted, not just averaged
 
@@ -729,7 +848,9 @@ has nothing to screen on.
 (#7), treat the ensemble as a *portfolio problem*: weight the members by their
 measured error-correlation so the mean actually reduces variance.
 
-**Motive.** #7's documented failure is averaging correlated erring samples
+**Also Known As.** correlation-weighted averaging; portfolio selection
+
+**Motivation.** #7's documented failure is averaging correlated erring samples
 into a confidently-wrong mean — "beautiful dials, wrong needle." Averaging
 only helps if the errors are independent *and* unbiased, and neither holds for
 models that share training. Markowitz adds the ingredient #7 provably needs:
@@ -751,7 +872,7 @@ correlation that matters. The correlation estimate is fed by the one
 ground-truth authority (machinery), never by "did they say the same thing,"
 or it bakes the shared prior back in as if it were error.
 
-**Tradeoffs.** Repairs #7's central flaw at the source — the pool is chosen by
+**Consequences.** Repairs #7's central flaw at the source — the pool is chosen by
 covariance, not by warm-body count. The costs: it needs the outcome data to
 estimate correlation (ask #13's error ledger / #14's pheromone table), and its
 output is a weight vector — a pooling extension the pick/vote/average/
@@ -786,6 +907,8 @@ the swap budget before any sample runs; on one GPU the pattern degrades toward
 
 ---
 
+**Related Patterns.** Ensemble (#7) is the unweighted case; PID (#13) and Pheromone (#14) feed it the outcome ledger.
+
 ## 13. PID Confidence Loop — a budget that tracks error, history, and trend
 
 ![PID Confidence Loop — set spend, samples, check, with a P·I·D re-command loop](images/pid.svg)
@@ -794,7 +917,9 @@ the swap budget before any sample runs; on one GPU the pattern degrades toward
 loop* whose setpoint is "confidence ≥ threshold" and whose manipulated
 variable is how many samples to spend. This is the router as a controller.
 
-**Motive.** Every existing pattern fixes N once, up front. PID is the only one
+**Also Known As.** the confidence controller; closed-loop budgeting
+
+**Motivation.** Every existing pattern fixes N once, up front. PID is the only one
 that *re-commands N continuously from measurement* — it reacts to the current
 confidence gap, remembers that a request-class keeps silently failing, and
 notices when confidence is dropping across rounds before grinding to a
@@ -813,7 +938,7 @@ confidence is decaying instead of spending all K rounds down a losing
 gradient. The setpoint makes "how sure must we be?" a first-class knob for
 the first time.
 
-**Tradeoffs.** The most *grown-up* budget mechanism in the catalog — it turns
+**Consequences.** The most *grown-up* budget mechanism in the catalog — it turns
 confidence from a hidden property of a chosen pattern into a measured,
 controlled variable. The costs: it needs the confidence-proxy measurement that
 #2/#8 produce, and its I and D terms require the per-request-class history
@@ -821,45 +946,45 @@ that only the stateful patterns (#14, #16) accumulate. It is the controller
 that sits *around* the other patterns, not one more shape.
 
 **Failure mode.** Garbage in the confidence-proxy. If the verifier or vote
-that feeds "measured error" is itself rubber-stamping (#8's failure), the
-loop confidently commands the wrong spend — a controller is only as good as
-its sensor. And the confidence-proxy itself is the weak link for *agentic*
-workers: a model asked "how confident are you?" returns a number that is
-**not a live measurement** — it is a self-report of a black box, sometimes
-calibrated, usually not (a confident model is often wrong). Whatever feeds
-the P term must be *grounded* — a tool outcome, a check that runs — not a
-solicited self-report; measure the confidence the world gives you, not the
-one the model claims. For a pure-compute request class there may be *no*
-external oracle to ground against (no tool, no server to toggle) — in that
-case the honest setting is **P = 0 and degrade to time-boxed-only**, not a P
-that quietly re-imports the self-report it just banned. And the P=0 release is
-partial — the I and D terms eat the same grounding gap: I accumulates "error
-history" and D tracks "confidence deltas," and if both are fed by the same
-ungrounded proxy the loop just re-learns the self-report it cut from P. On a
-pure-compute class with no oracle, **ground I and D to the scarce available
-fact** (a request that genuinely can't fail, a class whose setpoint is
-metered by a real back-end consequence) or zero them too — the honest
-degradation is P=I=D=0 plus time-boxing, a loop that refuses to command spend
-it cannot justify, not a loop that smuggles the same sensor back in through
-two other terms. And the I-term's
-"remember being consistently short" is exactly the durable, crash-recoverable
-per-class counter the ledger exists for: a class that must remember being short
-across a restart can't live in a RAM counter or the learner forgets its own
-failures at the worst moment — run it in the same WAL store as #14/#16. And
-the setpoint is a product hazard if left as "confidence ≥
-threshold": that's an **unbounded wall-clock commitment**, and the I-term
-raises spend on a class that keeps failing, so p95 explodes on exactly the
-requests already failing. Make the contract **time-boxed, not
-confidence-boxed** — "spend at most T ms / K samples, whichever first" — and
-on expiry emit the *abandoned* confidence ("stopped at 0.82, not 0.95") rather
-than hang, plus report the active setpoint and P/I/D terms in the usage blob
-so the caller understands *why* latency jumped. Re-command must obey
-"exhaustion escalates": never emit a forced pick below threshold.
+that feeds "measured error" is itself rubber-stamping (#8's failure), the loop
+confidently commands the wrong spend — a controller is only as good as its
+sensor. And the confidence-proxy is the weak link for *agentic* workers: a
+model asked "how confident are you?" returns a **self-report, not a live
+measurement** — sometimes calibrated, usually not (a confident model is often
+wrong). The loop converges on the sensor you feed it, so an ungrounded proxy
+re-learns the number the model claims instead of the state the world is in.
 
+**Refinements.** Five build rules keep the loop honest.
 
-**On the Grid stack.** `qwen36-27b-mtp`'s spend budget for a request class tracks error, history, and trend like a PID controller — it raises or lowers sample count per class rather than sitting on one setpoint. The example enforces the hard rule: when the budget is exhausted with the target still unmet, the router must admit it and escalate rather than emit a forced pick below threshold. Re-command obeys "exhaustion escalates," and the active setpoint + P/I/D terms go in the usage blob so the caller understands why latency jumped. The confidence that feeds the P term must be grounded — a tool outcome or a check that ran — never a solicited "how confident are you?" self-report, because a confident model is often wrong, and the contract is time-boxed, not confidence-boxed ("spend at most T ms, then emit the abandoned confidence"), or p95 explodes on exactly the failing class.
+1. **Ground the P term.** What feeds P must be a tool outcome or a check that
+   ran, never a solicited self-report — measure the confidence the world gives
+   you, not the one the model claims.
+2. **Pure-compute classes degrade to P = I = D = 0.** With no oracle to ground
+   against (no tool, no server to toggle), the honest setting is zero terms
+   plus time-boxing — a loop that refuses to command spend it cannot justify,
+   not one that smuggles the same self-report back in through I and D.
+3. **The I-term belongs in the ledger.** "Remember being consistently short"
+   is a durable, crash-recoverable per-class counter; it cannot live in a RAM
+   counter or the learner forgets its own failures across a restart — run it
+   in the same WAL store as #14/#16.
+4. **Time-box, don't confidence-box.** A setpoint of "confidence ≥ threshold"
+   is an unbounded wall-clock commitment, and the I-term raises spend on the
+   class that keeps failing — so p95 explodes on exactly the failing requests.
+   Contract "at most T ms / K samples, whichever first"; on expiry emit the
+   *abandoned* confidence ("stopped at 0.82, not 0.95") rather than hang.
+5. **Exhaustion escalates.** Never emit a forced pick below threshold; report
+   the active setpoint and P/I/D terms in the usage blob so the caller
+   understands why latency jumped.
+
+**On the Grid stack.** `qwen36-27b-mtp`'s per-class spend is a PID: it raises
+or lowers sample count from measurement rather than sitting on one setpoint.
+The honest contract is time-boxed ("at most T ms, then emit the abandoned
+confidence"), the P term is grounded, exhaustion escalates, and the active
+setpoint plus P/I/D values ride in the usage blob.
 
 ---
+
+**Related Patterns.** Strategy (#5) is its open-loop forebear; Pheromone (#14) supplies the history; Circuit Breaker (#20) is the brake on its I-term.
 
 ## 14. Pheromone Router — learn which shape wins, with decay
 
@@ -870,7 +995,9 @@ weight over {pattern, model, prompt-template}, reinforce what verified, and
 *decay* the rest. The strategy layer draws from a measured distribution instead
 of a frozen classifier.
 
-**Motive.** #5 classifies the request once, by features, and stays frozen
+**Also Known As.** reinforcement router; decay-weighted learning
+
+**Motivation.** #5 classifies the request once, by features, and stays frozen
 until someone re-tunes it. #14 scores by measured *outcome* — what actually
 verified — and, crucially, un-scores by decay, so when the request mix drifts
 the router follows the live signal instead of entrenching on yesterday's
@@ -889,7 +1016,7 @@ weights by a decay factor so stale winners fade. The strategy layer then draws
 from this distribution. It pairs with #16 as its memory substrate and with #13
 as its controller — #14 is the strategy layer finally scored by evidence.
 
-**Tradeoffs.** Turns a static heuristic into an online learner that follows
+**Consequences.** Turns a static heuristic into an online learner that follows
 drift — the difference between classify-and-freeze and learn-and-track. The
 costs: it only learns from *verified* outcomes (garbage in, garbage out), and
 decay tuning is a real knob — too slow and it never forgets, too fast and it
@@ -958,6 +1085,8 @@ learns*, not a new pattern):
 
 ---
 
+**Related Patterns.** Thompson (#27) fixes its greedy local optimum; Strategy (#5) is its static form; PID (#13) reads the same ledger.
+
 ## 15. Byzantine Adjudicator — spend more when the disagreement is adversarial
 
 ![Byzantine Adjudicator — workers into a classify node: noise versus byzantine split](images/byzantine.svg)
@@ -967,7 +1096,9 @@ divergence as either **noise** or **Byzantine**, and dose the redundancy
 accordingly — a majority vote fixes random scatter but is structurally the
 wrong tool for a correlated, systematic "lie."
 
-**Motive.** #2 assumes crash-like noise (a bare majority works); #4 assumes one
+**Also Known As.** disagreement classification; fault-tolerant pooling
+
+**Motivation.** #2 assumes crash-like noise (a bare majority works); #4 assumes one
 honest judge settles it. Neither asks *what kind* of disagreement this is. A
 model family sharing a training corpus is Byzantine-ish — wrong in the same
 direction, not at random — and a plain vote lets that shared wrongness win.
@@ -987,7 +1118,7 @@ means something like ≥60% of answers in one cluster, ≤1 middle answer, both
 clusters above a reply-count floor. Without the number, the classifier is a
 vibe that fires late or never.
 
-**Tradeoffs.** The fault-model-aware version of the shared-blind-spot defense
+**Consequences.** The fault-model-aware version of the shared-blind-spot defense
 that #11 does by diversity — same goal, different tool. The win: it only
 spends the expensive Judge path when the disagreement looks adversarial, so it
 doesn't double the latency of every fan-out like #4 does. The cost: the
@@ -996,30 +1127,36 @@ Byzantine disagreement as noise re-admits the shared error at majority speed.
 
 **Failure mode.** The two-camp signature is missed or delayed — disagreement
 detected *after* the majority already shipped a correlated-wrong answer. The
-classifier has to fire before the vote commits, not after. And here it must be
-said plainly: **classification is inherently second-phase** — you can't
-classify the divergence shape until the fan-out has returned, and the escalation
-then runs a full divergent judge on top, so the worst case silently pays
-fan-out + classification + a whole #4 and doubles latency without telling the
-caller. The escape is to **sniff with a small N first**: probe with a few
-samples to classify noise-vs-Byzantine *before* committing to full N, making
-the classifier a cheap decision instead of an after-the-fact one. The sniff
-and the camp rule must agree on a number or they silently contradict: a 3-sample
-sniff can *not* meet "≥60% in one cluster, ≤1 middle" (2-of-3 is a coin-flip,
-not a camp), so make the sniff's job *directional* — two answers clustering
-tightly on the same output is the early warning, spending the rule's floor
-(≥ a reply-count floor) — and reserve the full numeric camp test for the
-escalated pool, not the probe. Separately, sniff-and-full-fan is *two* GPU
-rounds per request: budget it — the probe is #26 slack when a seat is free,
-never a guaranteed extra serial round on the critical path. The escalated
-"trusted arbiter" that overrides a majority is the most consequential purple
-node in the catalog — it sits exactly where the machinery warns decision nodes
-are unreliable, and #15 concentrates all trust in it. Every escalation must be
-visible: `usage.escalation_depth`, `usage.divergence_shape: noise|byzantine`.
+classifier has to fire before the vote commits, not after. And classification
+is *inherently second-phase*: the divergence shape can't be classified until
+the fan-out returns, and escalation then runs a full divergent judge on top —
+so the worst case silently costs fan-out + classification + a whole #4 and
+doubles latency without telling the caller.
+
+**Refinements.** Four rules.
+
+1. **Sniff with a small N first.** Probe with a few samples to classify
+   noise-vs-Byzantine *before* committing to full N, making the classifier a
+   cheap decision instead of an after-the-fact one.
+2. **The sniff and the camp rule must agree on a number.** A 3-sample sniff
+   cannot meet "≥60% in one cluster, ≤1 middle" (2-of-3 is a coin-flip, not a
+   camp). Make the sniff *directional* — two answers clustering tightly on the
+   same output is the early warning, spending the rule's reply-count floor —
+   and reserve the full numeric camp test for the escalated pool, not the probe.
+3. **Budget the two GPU rounds.** Sniff-and-full-fan is two rounds per request:
+   the probe belongs in #26 slack when a seat is free, never a guaranteed extra
+   serial round on the critical path.
+4. **Watch the arbiter.** The escalated "trusted arbiter" that overrides a
+   majority is the most consequential purple node in the catalog — it sits
+   where the machinery warns decision nodes are unreliable, and #15
+   concentrates all trust in it. Every escalation must be visible:
+   `usage.escalation_depth`, `usage.divergence_shape: noise|byzantine`.
 
 **On the Grid stack.** When three workers disagree on a sensitive request, the router distinguishes *noise* (answers scatter, a small N fixes it) from *byzantine* (answers cluster into two confident camps — the same-family signature of a shared wrong prior, which a bare majority lets win) and spends more samples on the adversarial case. The escalated adjudicator can only break the shared prior if it is genuinely divergent *from the camp*: on a same-vendor stack, the designated judge `qwen36-35b-a3b-mtp` is the same family as the fighting Qwen workers, so it shares their blind spot and the "structurally divergent arbiter" the Byzantine premise requires may not exist — verify judge-family diversity *before* escalating, else route to a cross-vendor (`glm-4.6`), a tool-grounded check, or the human. The camp test must be numeric (≥60% in one cluster, ≤1 middle), and the classifier fires before the vote commits — the worst case silently pays fan-out + classification + a whole #4, so sniff with a small N first before committing to the full fan. Every escalation surfaces `usage.escalation_depth` and `usage.divergence_shape` visibly, because this adjudicator is the most dangerous node in the catalog.
 
 ---
+
+**Related Patterns.** Fan-Out (#2) is the blind vote it replaces; Circuit Breaker (#20) is the operational response to a confirmed systematic fault.
 
 ## 16. Straggler Backup — duplicate only the overdue worker
 
@@ -1030,7 +1167,9 @@ exceeds its expected time budget, spawn a duplicate on a *different node* and
 take first-to-finish. This is MapReduce speculative execution, transposed to
 the fan-out join.
 
-**Motive.** The parallel patterns optimize correctness but nothing reacts to a
+**Also Known As.** speculative duplication; backup tasks
+
+**Motivation.** The parallel patterns optimize correctness but nothing reacts to a
 slow node. A job is as slow as its slowest worker, and on a contended grid the
 tail is the real cost — "tokens free" does not mean "time free." Straggler
 backup targets *latency to converge*, spending the one signal the current
@@ -1048,7 +1187,7 @@ whole fan. The redundancy is targeted at the bottleneck, not spread over
 everyone. It composes with #2/#6 as a pure latency complement; correctness
 still comes from #8's gate upstream.
 
-**Tradeoffs.** The cheapest latency win in the catalog — a small watchdog over
+**Consequences.** The cheapest latency win in the catalog — a small watchdog over
 an existing fan, using signal the router already drops. The costs: it needs the
 live per-node latency stats, and speculating on an already-correct worker
 wastes one node (cancel the backup the moment the original finishes, plus a
@@ -1057,19 +1196,26 @@ process-group kill).
 **Failure mode.** The expected-time budget is mis-set — too tight and every
 fast worker gets needlessly duplicated; too loose and the straggler still sets
 the pace. The budget has to come from a live latency percentile, not a
-hand-tuned constant. Two product gaps beyond that: first-to-finish means the
-backup can return a *different answer* than the canceled original, and both are
-billable — so report `usage.runs_useful` vs `usage.runs_cancelled` or the
-token count silently hides speculatively-cancelled waste behind the "free
-tokens" framing. And "different node" presupposes a free second node: gate the
-pattern on a live node inventory, don't advertise it on a single-box deployment
-where "different node" doesn't exist. Budget the speculation itself — cap
-concurrent speculations or a flash crowd spawns N redundant runs.
+hand-tuned constant.
 
+**Refinements.** Three build rules.
+
+1. **Report the waste.** First-to-finish means the backup can return a
+   *different answer* than the canceled original, and both are billable — so
+   report `usage.runs_useful` vs `usage.runs_cancelled`, or the token count
+   silently hides speculatively-cancelled waste behind the "free tokens"
+   framing.
+2. **Gate on a real second node.** "Different node" presupposes a free node —
+   gate the pattern on the live node inventory, and do not advertise it on a
+   single-box deployment where the node does not exist.
+3. **Cap the speculation.** Bound concurrent speculations or a flash crowd
+   spawns N redundant runs.
 
 **On the Grid stack.** In a straggler backup, the router duplicates only the overdue worker — a slow long-read worker is shadowed by `laguna-s-2.1` on a second node, taking first-to-finish. The example is honest about the precondition: this needs a real multi-node inventory to be meaningful, and on a single-box deployment "different node" doesn't exist — the pattern must gate on the live-node inventory and refuse to advertise itself where a second lane is fiction. It also caps concurrent speculations, or a flash crowd spawns N redundant runs, and the budget comes from a live latency percentile, not a hand-tuned constant, so a strict worker isn't needlessly duplicated.
 
 ---
+
+**Related Patterns.** Fan-Out (#2) fans up front, #16 fans only the straggler; Circuit Breaker (#20) handles the failing-member case.
 
 ## 17. Materialized Answer — cache the verified answer by a semantic key
 
@@ -1080,7 +1226,9 @@ concurrent speculations or a flash crowd spawns N redundant runs.
 mate-in-one-fast latency, and invalidate lazily when the content fingerprint
 changes. This is a database materialized view on top of the router.
 
-**Motive.** Some of the most expensive jobs in the catalog are also the most
+**Also Known As.** memoization; semantic caching
+
+**Motivation.** Some of the most expensive jobs in the catalog are also the most
 repeatable — "summarize this repo," "explain this function," "what changed
 since X." The whole catalog is stateless per-request (§1–#16 each run inside
 one request); #17 is the first that is *across* requests. A cache hit is
@@ -1097,41 +1245,46 @@ treating refresh as a maintenance job, not a per-read cost. Its write side is
 read-repair, in the Cassandra/Dynamo sense: the winning verified answer writes
 back as a side effect of every adjudicated request, so the cache fills itself.
 
-**Tradeoffs.** Turns the most expensive repeat requests into free material
+**Consequences.** Turns the most expensive repeat requests into free material
 — a genuine step-change in cost and latency where it applies. The costs: it
 only helps *repeat* retrieval-shaped work, and the semantic-key hash can
 miscollide (serving a stale answer as if current) — the invalidation
 fingerprint is the whole integrity story.
 
-**Failure mode.** A content fingerprint that doesn't change when the content
-does — the cache serves a confidently-stale answer because the git hash or
-mtime never budged. Invalidation is a measured property of the underlying
-data, not a may-fall-through-to-fresh. And the cache is the most
-OpenAI-contract-visible object in the catalog: a hit is *by construction*
-older than fresh compute, and without markers the caller can't tell — so the
-envelope must say so (`x-grid-cache: hit|miss`, `x-grid-cache-fingerprint`,
-`x-grid-cache-staleness`), and there must be a freshness bypass
-(`x-grid-cache: bypass` / `fresh`) to force recompute when a user needs current
-data or is debugging. Worst of all, the cache **serializes a verification error
-globally**: one rubber-stamped "verified" write-back (#8's failure) serves that
-wrong answer to every future requester, turning a transient bad check permanent
-and amplified across all clients. Put a confidence floor and the verifier's
-identity on every cache entry and **invalidate on doubt**, not just on
-fingerprint change — a cached answer must never be more trusted than the check
-that wrote it. Two buildability specifics turn that from aspiration into a
-mechanism: the confidence floor has to be a *number* (reject a write-back below
-a stated calibrated threshold, e.g. the verifier's pass rate on held-out bad
-drafts from #8), and "on doubt" needs a concrete trigger — confidence below the
-floor, a verifier-version change that re-validates old entries, or the semantic
-key's stored fingerprint disagreeing with a fresh one. And the cache itself is
-durable state: it lives in the WAL store (same as #14), and the read-repair
-write-back must be atomic/idempotent so two concurrent misses on the same key
-don't both recompute — the write-back is exactly-once, keyed like the ledger.
+**Failure mode.** Two ways the cache lies. A fingerprint that doesn't change
+when content does — the cache serves a confidently-stale answer because the git
+hash or mtime never budged (invalidation is a measured property of the data, not
+a fall-through). And a write-back that serializes a verification error
+globally: one rubber-stamped "verified" entry (#8's failure) serves that wrong
+answer to every future requester, turning a transient bad check permanent and
+amplified across all clients.
 
+**Refinements.** Six rules keep it honest.
+
+1. **Mark the hit.** A hit is by construction older than fresh compute; the
+   envelope must say so (`x-grid-cache: hit|miss`, `x-grid-cache-fingerprint`,
+   `x-grid-cache-staleness`).
+2. **Provide a freshness bypass.** `x-grid-cache: bypass` / `fresh` forces
+   recompute when a user needs current data or is debugging.
+3. **A confidence floor, as a number.** Reject a write-back below a stated
+   calibrated threshold (e.g. the verifier's pass rate on held-out bad drafts
+   from #8).
+4. **Stamp every entry.** Record the verifier's identity and **invalidate on
+   doubt**, not just on fingerprint change — a cached answer must never be more
+   trusted than the check that wrote it.
+5. **Name "on doubt".** A concrete trigger: confidence below the floor, a
+   verifier-version change that re-validates old entries, or the semantic key's
+   stored fingerprint disagreeing with a fresh one.
+6. **Durability and exactly-once.** The cache lives in the WAL store (same as
+   #14); the read-repair write-back is atomic/idempotent and exactly-once,
+   keyed like the ledger, so two concurrent misses on one key don't both
+   recompute.
 
 **On the Grid stack.** A repeated request hits the materialized cache by semantic key (`x-grid-cache: hit|miss`) instead of recomputing — e.g. a "summarize this repo" on `qwen36-35b-a3b-mtp` over the Claude Code (stream-json) lane, where the cache key is the (request-class, repo-fingerprint, model) triple and the hit returns in mate-in-one time. The example places a confidence floor and a verifier identity on every entry and invalidates on doubt — because a cache serializes a verification error globally: one rubber-stamped "verified" write-back serves that wrong answer to every future requester. The cached answer is never more trusted than the check that wrote it, and the fingerprint + staleness go in the `x-grid-cache-fingerprint` / `x-grid-cache-staleness` envelope, with a `bypass`/`fresh` path so a user debugging current data is never served a stale hit against their will.
 
 ---
+
+**Related Patterns.** The outcome ledger shared with #13/#14; a cache lookup is the cheap version of #8's check.
 
 ## 18. Canary Trust-Equity — earn a vote before you ever cast one
 
@@ -1142,7 +1295,9 @@ graduated vote** — it shadows the incumbent on live traffic and only earns the
 right to actually decide once its track record clears a bar. This is staged
 rollout / canary release applied to *which answer the router trusts*.
 
-**Motive.** Every new member of the fleet (#5's pool, #14's candidates) is
+**Also Known As.** shadow traffic; progressive trust; gradual rollout
+
+**Motivation.** Every new member of the fleet (#5's pool, #14's candidates) is
 trusted by default the moment it's admitted — and a model that's confident on
 its first day and wrong by day three gets the same authority as a
 battle-tested one. Local free tokens make the alternative cheap: run the
@@ -1189,7 +1344,7 @@ adjudicated requests through the canary during slack**. Say which; stating both
 as if satisfiable on one box is the contradiction. The equity ledger is durable
 state in the same WAL store as #14/#17, keyed per {request-class, member}.
 
-**Tradeoffs.** Costs a constant shadow run on every canary over its whole
+**Consequences.** Costs a constant shadow run on every canary over its whole
 evaluation window — the honest price of *never trusting a stranger cold*.
 `compare` itself is a purple decision node and must be deterministic or
 calibrated (agreement with the incumbent is a consistency signal, not truth).
@@ -1211,6 +1366,8 @@ voted.
 
 ---
 
+**Related Patterns.** Screening (#24) knows a model's type in idle; Pheromone (#14) learns over time; Slack-Stealing (#26) pays for the shadow.
+
 ## 19. CVaR Budgeting — size the spend by the tail, not the mean
 
 ![CVaR Budgeting — job, a budget over scenarios, weighted sample sizes, the answer](images/cvar.svg)
@@ -1220,7 +1377,9 @@ class**, not its average behavior — spend a lot more on the rare request that'
 both hard and costly to get wrong, and spend the floor on the common cheap
 ones. Conditional Value-at-Risk turned into a token budget.
 
-**Motive.** #5 and #13 budget by *expected* difficulty. But expectation cheats
+**Also Known As.** tail-risk budgeting; expected-shortfall sizing
+
+**Motivation.** #5 and #13 budget by *expected* difficulty. But expectation cheats
 the distribution's tail: the request that's 95% cheap and 5% catastrophic
 averages out to "normal" and gets the default budget right where the rare
 expensive failure hides. The local router owns a finite time budget, so the
@@ -1255,7 +1414,7 @@ reads the **tail-difficulty vs tail-corruption split** (machinery) — before
 member #20 has quarantined; the N it draws comes from the remaining healthy
 pool.
 
-**Tradeoffs.** Redirects budget toward rare hard cases and away from common
+**Consequences.** Redirects budget toward rare hard cases and away from common
 easy ones — the right economic call when the tail costs real money, the wrong
 one when a class's pain is *uniform* (there the mean already budgets correctly,
 and CVaR just wastes tokens on a quantile that isn't riskier). It needs enough
@@ -1275,6 +1434,8 @@ replays).
 
 ---
 
+**Related Patterns.** Strategy (#5) and PID (#13) budget by expectation; Circuit Breaker (#20) is the breaker state #19 must read before pricing.
+
 ## 20. Circuit Breaker + Bulkhead — fail fast, quarantine the toxic class
 
 ![Circuit Breaker + Bulkhead — job, a trip mechanism, a degraded answer and a quarantined model, the answer](images/circuit.svg)
@@ -1285,7 +1446,9 @@ toxic class in its own lane so its failure can't take the grid down. This is
 the circuit breaker and bulkhead from distributed systems, on a router that
 can now *choose a different answer path* instead of hungering on a bad one.
 
-**Motive.** The catalog's correctness patterns (#2, #9, #13, #15) all *spend
+**Also Known As.** fail-fast; the quarantine lane; the bulkhead
+
+**Motivation.** The catalog's correctness patterns (#2, #9, #13, #15) all *spend
 more under duress* — they scale samples up when confidence drops, which is
 exactly wrong when the drop is a broken node or a poisoned class rather than
 a hard-but-honest answer. #13's I-term raises spend on a class that keeps
@@ -1325,7 +1488,7 @@ same-request→same-answer reproduces the pre-trip plan, not the degraded path
 it actually took. The trip resets closed after a cooldown window of clean
 health — the same decay shape as #14's re-earn.
 
-**Tradeoffs.** Trades a little false-trip risk for a lot of collapse-avoidance.
+**Consequences.** Trades a little false-trip risk for a lot of collapse-avoidance.
 The degradation is the point: a grid that trips a bad node and still answers
 is more reliable than one that retries patiently into a brownout. False opens
 are the cost — a transient class that looks broken for 100ms gets deprioritized
@@ -1345,6 +1508,8 @@ to "quarantine onto nothing" (#20 leans on #16's gate).
 
 ---
 
+**Related Patterns.** Straggler (#16) is the timing case; Byzantine (#15) the disagreement case; the degraded re-fan is #2 minus the tripped member.
+
 ## 21. Delphi Consensus — anonymous rounds, iterated until the spread closes
 
 ![Delphi Consensus — job, multiple rounds of anonymous numeric estimates, the answer](images/delphi.svg)
@@ -1355,7 +1520,9 @@ aggregate (not who said what) and revises — until the spread tightens below a
 bar. This is the Delphi method, the one classic group-judgment tool built
 around *shielding the group from its own dominant voice*.
 
-**Motive.** Structural reasons to use the right number: forecasts, deadlines,
+**Also Known As.** anonymous consensus rounds; iterated polling
+
+**Motivation.** Structural reasons to use the right number: forecasts, deadlines,
 landed costs, quantities, confidence scores — every "how much / how big / how
 long" the router answers for an agent that's about to spend real money. The
 naive move is to average the first-round numbers (#7). But the first round is
@@ -1391,7 +1558,7 @@ strong, the tight median must be able to **escalate** — to an arbiter, a
 tool check, or a human — rather than ship a confidently-wrong median with an
 apology attached.
 
-**Tradeoffs.** Costs multiple rounds of latency — it is the slowest pattern in
+**Consequences.** Costs multiple rounds of latency — it is the slowest pattern in
 the catalog and is only worth it for answers that gate real spend. The
 revision loop trusts that a worker will revise *toward* the group; a worker
 that just re-anchors to the median on every round adds noise, not wisdom (each
@@ -1410,25 +1577,30 @@ what" and simultaneously identify outliers to their faces.
 
 **Failure mode.** The median closes on the **wrong shared prior** — three
 workers agree-to-anchor on the same mistaken conventional number, the IQR
-narrows, and the loop reports confident consensus that's really correlated
-(Groupthink moving under a Delphi-shaped mask). The round cap must still
-refuse/escalate rather than rubber-stamp a tight-but-wrong spread — and the
-minimum-rounds floor exists precisely because the termination signal (IQR
-closing) is confounded with the mechanism that feeds it (showing median+IQR
-back): early termination can certify the group's self-induced convergence, so
-a tight spread must also survive a non-feedback probe (one round's revision
-should be measured against an independent estimate, not just the fed-back
-statistics — the same test #12 applies to a "tight cluster"). And anonymity is
-fragile: if any round exposes attribution (the router logs reasons with names
-in its own state, leaked via the envelope), the entire mechanism collapses
-back into first-round anchoring. #21 earns its median only while the
-anonymity (as scoped above), the iteration, and the minimum-rounds floor all
-hold — the moment one breaks it is just #7 with extra steps.
+narrows, and the loop reports confident consensus that is really correlated
+(Groupthink under a Delphi-shaped mask).
 
+**Refinements.** Three guards.
+
+1. **The round cap still refuses/escalates**, rather than rubber-stamp a
+   tight-but-wrong spread.
+2. **Minimum rounds, plus a non-feedback probe.** The termination signal (IQR
+   closing) is confounded with the mechanism that feeds it (showing median+IQR
+   back), so early termination can certify self-induced convergence. A tight
+   spread must survive a non-feedback probe: one round's revision should be
+   measured against an independent estimate, not just the fed-back statistics —
+   the same test #12 applies to a "tight cluster".
+3. **Guard anonymity.** If any round exposes attribution (the router logs
+   reasons with names in its own state, leaked via the envelope), the mechanism
+   collapses back into first-round anchoring. #21 earns its median only while
+   the anonymity, the iteration, and the minimum-rounds floor all hold — the
+   moment one breaks, it is just #7 with extra steps.
 
 **On the Grid stack.** A sensitive estimate runs in anonymous rounds — each worker privately writes a number and a reason, sees only the median and interquartile spread, and revises until the spread closes. `qwen36-27b-mtp`, `qwen36-35b-a3b-mtp`, and the cross-vendor `glm-4.6` participate under `round_id`-keyed anonymity over the OpenClaw lane. The single-node cost must be owned: three models that don't co-reside on a 1-GPU/Apple box turn "rounds" into serial VRAM swaps, so **Delphi on one box is sequential re-loads, not parallel rounds** — the round cap is not a nicety here, it is the difference between a measured estimate and a thrash. The anonymity is scoped, not absolute: per-outlier targeting ("you're an outlier, defend yourself") and movement-logging both require the router to hold the worker→number mapping, so the attribution is retained only long enough to run the rounds and audited for leaks — or the pattern must pick one and drop the other. The example earns the median only while the anonymity, the iteration, and the minimum-rounds floor all hold — the moment any breaks, it collapses into #7 with extra steps.
 
 ---
+
+**Related Patterns.** Ensemble (#7) averages without iterating; Negative Selection (#11) forces the very diversity Delphi want; Screening (#24) feeds its estimates.
 
 ## 22. Trial Sequential Analysis — the learner may only win once N is met
 
@@ -1441,7 +1613,9 @@ the significance boundary each time it peeks at the accumulating data. This is
 the evidence barrier from biostatistics, set in front of the router's *slow
 internal judgment*, not its per-request path.
 
-**Motive.** Every learner in the catalog (#14's pheromones, #18's canary gate,
+**Also Known As.** pre-registered analysis; sequential hypothesis testing
+
+**Motivation.** Every learner in the catalog (#14's pheromones, #18's canary gate,
 #13's tuning, #12's covariance) draws a conclusion from observed outcomes — and
 "tokens are free" tempts the router to trust a *lucky streak of three*. A
 streak of three is how an unlucky day turns into a mistaken promotion that the
@@ -1469,7 +1643,7 @@ because it saves the router from #18's "cleared a small shadow window" false
 confidence. N is an information threshold, never a calendar or convenience
 number. Feeds the same ledger #18/#13/#14 read, keyed per {class, model}.
 
-**Tradeoffs.** Delays promotion — the honest cost of not declaring winners on
+**Consequences.** Delays promotion — the honest cost of not declaring winners on
 streaks, and it imposes the discipline of a pre-registered N on a loop that
 prefers to improvise. It only bites when the learner actually wants to act; on
 "always the same trusted model" it is dead weight. The boundary-widening math
@@ -1504,15 +1678,14 @@ for those interim looks, so 34/40 on 40 trials is still inside the bar: the
 answer is **not yet**, and the refusal is logged as a success. Only once 200
 outcomes accumulate under a spreading boundary does a promotion clear. The
 same gate stops `deepseek-v3` from winning a weight bump on three consecutive
-hard-case wins on a Monday. The refusal must not look like a dead learner:
-N = 200 verified outcomes on a class a single user sees a few times a day is
-days-to-weeks of accumulation, so the router reports the **expected fill-time
-and a starvation-warning envelope** (`usage.learner_eta_days`,
-`usage.learner_starved: true|false`) — the user should know the learner is
-alive and accumulating, not silently stalled, and that "refusal is success"
-has a duration attached to it.
+hard-case wins on a Monday. The refusal must not read as a dead learner — on a class a single user sees
+a few times a day, N = 200 is days-to-weeks of accumulation — so the router
+reports **expected fill-time and a starvation warning** (`usage.learner_eta_days`,
+`usage.learner_starved`) and puts a duration on "refusal is success".
 
 ---
+
+**Related Patterns.** Pheromone (#14) is the greedy learner it curbs; Thompson (#27) is the active-exploration alternative.
 
 ## 23. Evidence-Bar Ladder — proof threshold scales with the cost of error
 
@@ -1526,7 +1699,9 @@ beyond-reasonable-doubt (full divergence + adjudication + hard no on
 ambiguity). This maps the legal evidentiary standards onto the router's
 allocation.
 
-**Motive.** #13 exposes a single per-class setpoint; #19 prices a *pattern* by
+**Also Known As.** consequence-priced proof; the cost-of-error ladder
+
+**Motivation.** #13 exposes a single per-class setpoint; #19 prices a *pattern* by
 tail risk. Neither asks the question that decides everything: **is
 being-wrong-by-acting or being-wrong-by-omitting the expensive failure
 here?** A metadata write that's 55% sure is fine; an irreversible external
@@ -1552,7 +1727,7 @@ explicit. This is directly the Grid Enterprise consequential-action story: a
 fan-out verdict gets hard before it ships, but the shelf — not the pattern —
 sets exactly how hard.
 
-**Tradeoffs.** Adds a classification step and a three-way branch per request —
+**Consequences.** Adds a classification step and a three-way branch per request —
 real weight when a class is already well-known (cache the shelf per class in
 #17's lane). The ladder is only as good as the (cost, error-bias) estimates;
 mislabel a class and you've confidently shipped at the wrong bar. Over-strict
@@ -1581,6 +1756,8 @@ to every request's audit trail stays at **preponderance**: one check, ship.
 
 ---
 
+**Related Patterns.** CVaR (#19) prices spend by tail cost as #23 prices proof by error cost; Verifier Gate (#8) is the default proof bar.
+
 ## 24. Type-Revelation Screening — probe a model's type in idle, before trust
 
 ![Type-Revelation Screening — job, a probe bank and a model, a prior update, allocation](images/screening.svg)
@@ -1594,7 +1771,9 @@ screening from economics of information: the principal can't see the agent's
 type, so it offers tests that make the type reveal itself. Run in idle, off
 the critical path.
 
-**Motive.** #18's canary shadows *real traffic* to prove a new model is safe;
+**Also Known As.** probe-based profiling; idle calibration; type-identification
+
+**Motivation.** #18's canary shadows *real traffic* to prove a new model is safe;
 #22 gates its promotion on verified outcomes. Both spend real trust before a
 winner is chosen. Screening is the complement: it runs *synthetic* probes in
 idle to reveal **what kind of model this is, and where it is weak** — before
@@ -1631,7 +1810,7 @@ with #22's durability, and tie a probe's validity to the slack it ran in (a
 probe on a contended slot measures slowdown, not competence, and must not
 count as a clean hit).
 
-**Tradeoffs.** The battery itself is work: each probe must be calibrated
+**Consequences.** The battery itself is work: each probe must be calibrated
 (known answer, correlated, class-specific) or the screening measures nothing.
 It measures *type*, not *state* — a model that's fine on probes but degraded
 under real load still needs #20's breaker. And it can't see the future: a
@@ -1646,31 +1825,23 @@ that no longer means what it says. The probe bank's discriminating power
 way #22 re-validates its beta — otherwise screening is astrology with a
 likelihood attached.
 
-**On the Grid stack.** During an idle window, the router runs its probe bank
-only on a free seat — behind the OpenClaw lane over lunch, a node that has a
-free seat and will cancel the probe the instant a real request lands. It has
-three probes per class — a known-answer extraction, a planted blind-spot (a
-citation that doesn't exist), an adversarial reframe — and it knows from
-calibration that `qwen36-27b-mtp` hits ~0.9 on extraction but ~0.4 on
-reframes, while `laguna-s-2.1` is the flip. Each hit/miss updates the model's
-Bayesian prior, and over a few idle slots the router builds a fresh type-map:
-route structured extraction to `qwen36-27b-mtp`, route edge-case synthesis to
-`laguna-s-2.1` — before a single real request goes down those paths. On a
-single box, probing a different model than the active one forces a VRAM swap,
-so probes stay bounded to whatever is already resident or waits for a free
-seat rather than displacing the live model. The honest admission threshold
-rides in here: a "type-map of the fleet" is only worth its calibration work
-when the box actually holds **two or more resident models worth distinguishing**
-— on a 1-seat box with ~1–2 rarely-swapped models the map carries near-zero
-differentiation, so screening should refuse to advertise itself below that
-bar and the probe bank's recurring per-class calibration (known-answer,
-correlated, pre-validated) should be offset onto #26's slack, never the
-critical path. It already knows not to ask DeepSeek V4's `deepseek-v3` for
-grounded citations: that blind-spot probe has a permanent red prior, but the
-moral-hazard caveat still routes an occasional cheap real request its way to
-re-measure rather than write it off forever.
+**On the Grid stack.** During an idle window the router runs its probe bank
+only on a free seat (behind the OpenClaw lane, cancelled the instant a real
+request lands). Three probes per class — a known-answer extraction, a planted
+blind-spot (a citation that doesn't exist), an adversarial reframe — and
+calibration shows `qwen36-27b-mtp` hits ~0.9 on extraction but ~0.4 on
+reframes while `laguna-s-2.1` is the flip. Over a few idle slots a fresh
+type-map forms — route extraction to `qwen36-27b-mtp`, edge-case synthesis to
+`laguna-s-2.1` — before real traffic goes down those paths. On a single box,
+probing a non-resident model forces a VRAM swap, so probes stay bounded to
+what is already resident or wait for a free seat rather than displacing the
+live model. And the type-map only earns its calibration when the box holds two
+or more resident models worth distinguishing — below that bar, screening
+refuses to advertise itself.
 
 ---
+
+**Related Patterns.** Canary (#18) is trust earned on live traffic; Thompson (#27) and Pheromone (#14) consume the type-map; Slack-Stealing (#26) pays for the probes.
 
 ## 25. Condorcet Pairwise Pooling — head-to-head beats plurality on a three-way split
 
@@ -1682,7 +1853,9 @@ among the divergent answers and return the one that beats every rival
 pairwise. This is the Condorcet winner from social choice, the pooling rule
 for the split that plurality gets wrong.
 
-**Motive.** #2 pools by plurality — and it fails exactly when local models
+**Also Known As.** pairwise aggregation; social-choice pooling
+
+**Motivation.** #2 pools by plurality — and it fails exactly when local models
 split 3+ ways on a request (a realistic mix: two sizes of local model with
 different inductive biases, plus a drift of opinion, land on three mutually-
 exclusive readings). Plurality crowns the 4-vote faction even when each of the
@@ -1717,7 +1890,7 @@ voter's extraction (on a different seat if one exists)** — never ship a
 Condorcet result over N−1 (router-execution.md's quorum rule carries this
 exception).
 
-**Tradeoffs.** Needs each voter to state a *preference order*, not one vote —
+**Consequences.** Needs each voter to state a *preference order*, not one vote —
 more work per voter and it asks workers to rank answers that may include
 outputs they consider wrong. Respect the two costs the shape hides: the N²
 *tallies* are free, but the **preference-order extraction is N extra in-join
@@ -1745,25 +1918,25 @@ a consensus that was never there.
 
 **On the Grid stack.** Three models land three mutually-exclusive readings of
 a genuinely ambiguous request — `qwen36-27b-mtp` takes the literal parse, the
-bigger `qwen36-35b-a3b-mtp` takes the contextual one, and `glm-4.6` lands on a
-third — 4/3/3, where the plurality lead is not the group's preferred answer.
-Instead of crowning the 4-vote faction, the router has each voter state a
-preference order over the three answers and tallies the tournament: the answer
-that beats both rivals head-to-head wins, even holding no plurality. The N²
-pairwise tallies are trivial locally, but they are not the cost — the N
-preference-order *extractions* are on the critical path and may each need a
-separate generation, so the join straggler is the real latency, not the
-tournament. Two single-box truths follow: the trigger implies three resident
-models, so **gate it on actual multi-model residency or accept serial-swap
-cost** (a 1-GPU box doesn't hold three at once); and a lost voter re-runs on
-the *same* contended seat (no second seat exists on the single box), so "re-run
-on a different seat" is fiction until there is one. A cyclic preference (A>B,
-B>C, C>A) falls back to a Copeland score, escalating on a tie rather than
-forcing one. The one guardrail that must hold: the three "camps" were forced
-diverse (#11) and their independence measured (#12), or the tournament is just
-plurality wearing a Condorcet costume.
+bigger `qwen36-35b-a3b-mtp` the contextual one, `glm-4.6` a third — 4/3/3,
+where the plurality lead is not the group's preferred answer. Instead of
+crowning the 4-vote faction, each voter states a preference order over the
+three answers and the router tallies the tournament: the answer that beats
+both rivals head-to-head wins, even holding no plurality. The N² pairwise
+tallies are trivial locally, but the N preference-order *extractions* are on
+the critical path — that (not the tournament) is the real latency. Two
+single-box truths follow: the trigger needs three resident models, so **gate
+it on actual multi-model residency or accept serial-swap cost** (a 1-GPU box
+doesn't hold three at once); and a lost voter re-runs on the *same* contended
+seat, so "re-run on a different seat" is fiction until one exists. A cyclic
+preference (A>B, B>C, C>A) falls back to a Copeland score, escalating on a tie
+rather than forcing one. The one guardrail that must hold: the three "camps"
+were forced diverse (#11) and their independence measured (#12), or the
+tournament is just plurality wearing a Condorcet costume.
 
 ---
+
+**Related Patterns.** Fan-Out (#2) is plurality pooling #25 replaces; Negative Selection (#11) and Markowitz (#12) guarantee the independence the tournament assumes.
 
 ## 26. Slack-Stealing Scheduler — run background work only in the idle a live request leaves free
 
@@ -1791,7 +1964,9 @@ critical path. And its own contract needs stating, not just wishing: a defined
 (from the live-node inventory's latency percentile), which is what the
 inventory has to expose for the scheduler to have anything to steal.
 
-**Motive.** Three patterns are invalid today because "run in idle" is not a
+**Also Known As.** preemptible background scheduling; idle stealing
+
+**Motivation.** Three patterns are invalid today because "run in idle" is not a
 mechanism. #24's probe bank and #22's learner assume a box that sleeps between
 requests; #18's shadow assumes a spare GPU. None is actually schedulable — a
 probe that starts at 2pm on a contended node measures *slowdown, not
@@ -1822,7 +1997,7 @@ provably harms nothing — it occupies exactly the time live deadlines leave
 free. Account every background run (`usage.probe_runs`, `usage.shadow_runs`,
 `usage.learner_accum`) so eval cost is visible on the invoice.
 
-**Tradeoffs.** Slack is only ever *leftover* — a saturated box has no slack, so
+**Consequences.** Slack is only ever *leftover* — a saturated box has no slack, so
 the learner/probe/shadow starve exactly when the router is busiest, which is
 when their measurements would be least reliable anyway (a fair trade: you most
 need the learner when traffic is telling you the least). Preemption has a cost:
@@ -1858,6 +2033,8 @@ without ceremony the moment anyone needs the GPU.
 
 ---
 
+**Related Patterns.** Canary (#18), Trial Sequential (#22), and Screening (#24) are not runnable without #26's preemptible idle.
+
 ## 27. Thompson Posterior Router — route by sampling each model's posterior, not by argmax
 
 ![Thompson Posterior Router — per-model posterior, sample the draw, the loser still gets pulled](images/thompson.svg)
@@ -1871,7 +2048,9 @@ losing arm is still pulled with probability proportional to its chance of
 actually being best, so the router never fully abandons a contender and the
 evidence concentrates on the true winner as it accumulates.
 
-**Motive.** #14 is exploitation-only: it reinforces verified winners and decays
+**Also Known As.** posterior sampling; bandit exploration
+
+**Motivation.** #14 is exploitation-only: it reinforces verified winners and decays
 the rest, and its "annealed exploration" temperature still biases toward
 winners — it never deliberately spends a run on a loser. So #14 **ratchets into
 a local optimum**: once a class discovers pattern A works, the router keeps
@@ -1917,7 +2096,7 @@ _is_ #24's type-map (the probes are the posterior updates) and it composes with
 screening (same posterior, one shared update loop, not a separate screen then
 a separate router).
 
-**Tradeoffs.** Thompson *actively tries losers* — it spends real request tokens
+**Consequences.** Thompson *actively tries losers* — it spends real request tokens
 on arms the router currently believes are worse, which is wasteful on a noisily-
 varying class until the posterior narrows, so pair it with a cost-aware cap
 (#19) and, by default, run exploration on the cheap slack of #26 rather than
@@ -1967,6 +2146,9 @@ mass to zero and B's fresh wins get pulled again. Exploration is accounted
 its discriminating power the way #22 re-validates its beta.
 
 ---
+
+
+**Related Patterns.** Pheromone (#14) is the greedy learner #27 escapes; Trial Sequential Analysis (#22) locks in the evidence #27 concentrates; Screening (#24) seeds the priors it samples.
 
 ## Cross-cutting: the machinery every pattern runs on
 

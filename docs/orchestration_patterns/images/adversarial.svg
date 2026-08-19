@@ -1,53 +1,34 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 563" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1504 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1100" height="563" fill="#fff"/>
-  <rect x="70" y="307" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="110" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <circle cx="166" cy="340" r="9" fill="#2b2b29"/>
-  <rect x="344" y="177" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="410" y="219" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
-  <rect x="344" y="437" width="131" height="66" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
-  <text x="410" y="479" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
-  <path d="M166 340 C186 340, 324 210, 344 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M476 210 C626 210, 539 340, 689 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M166 340 C186 340, 324 470, 344 470" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M476 470 C626 470, 539 340, 689 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="280" y="158" text-anchor="middle" fill="#2b2b29" font-size="24">careful disagreement</text>
-  <rect x="689" y="307" width="122" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="750" y="349" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
-  <rect x="814" y="307" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="885" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
-  <path d="M821 340 C841 340, 784 340, 804 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="826" y="288" text-anchor="middle" fill="#2b2b29" font-size="24">a single answer</text>
+  <rect width="1504" height="450" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Adversarial — two careful reads, a judge</text>
+  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">careful disagreement</text>
+  <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 506 210, 506 328, 594 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 92 C 842 92, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 738 328 C 842 328, 842 210, 945 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1073 210 C 1168 210, 1168 210, 1262 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
+  <rect x="594" y="59" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read A</text>
+  <rect x="594" y="295" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="338" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">read B</text>
+  <rect x="945" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1009" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">judge</text>
+  <rect x="1262" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1335" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 </svg>

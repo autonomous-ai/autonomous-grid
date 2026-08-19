@@ -1,58 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 582" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1340 450" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="ha" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Ha" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#a1a099" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hg" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hg" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5a912f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hp" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hp" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#5d579d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hc" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hc" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#ad5130" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="hk" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M1.5 1 L10 5 L1.5 9" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
-    <marker id="Hk" markerWidth="19" markerHeight="19" refX="13" refY="6.5" orient="auto" markerUnits="userSpaceOnUse">
-      <path d="M2 1.5 L12.5 6.5 L2 11.5" fill="none" stroke="#2b2b29" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>
-  <rect width="1100" height="582" fill="#fff"/>
-  <rect x="70" y="307" width="80" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="110" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
-  <rect x="355" y="307" width="110" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="410" y="349" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">class of cost</text>
-  <path d="M160 340 C180 340, 266 340, 286 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="268" y="288" text-anchor="middle" fill="#2b2b29" font-size="24">which error is worse?</text>
-  <rect x="504" y="177" width="113" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="560" y="219" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pass</text>
-  <path d="M524 340 C644 340, 384 210, 504 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="486" y="307" width="148" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="560" y="349" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">checks</text>
-  <path d="M524 340 C644 340, 366 340, 486 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <rect x="494" y="437" width="131" height="66" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
-  <text x="560" y="479" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">divide</text>
-  <path d="M524 340 C644 340, 374 470, 494 470" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <text x="560" y="158" text-anchor="middle" fill="#2b2b29" font-size="24">preponderance</text>
-  <text x="560" y="340" text-anchor="middle" fill="#2b2b29" font-size="24">clear-and-convincing</text>
-  <text x="560" y="522" text-anchor="middle" fill="#2b2b29" font-size="24">beyond-reasonable-doubt</text>
-  <rect x="640" y="307" width="141" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
-  <text x="710" y="349" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
-  <path d="M624 210 C684 210, 572 340, 632 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M642 340 C702 340, 572 340, 632 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
-  <path d="M634 470 C694 470, 572 340, 632 340" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect width="1340" height="450" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Evidence-Bar Ladder — proof threshold scales with the cost of error</text>
+  <path d="M 120 210 C 178 210, 178 210, 237 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 499 210 C 636 210, 636 92, 773 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 499 210 C 628 210, 628 210, 756 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 499 210 C 628 210, 628 328, 756 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 884 92 C 991 92, 991 210, 1099 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 901 210 C 1000 210, 1000 210, 1099 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 901 328 C 1000 328, 1000 210, 1099 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="237" y="177" width="262" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="368" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">class of cost</text>
+  <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">which error is worse?</text>
+  <rect x="773" y="59" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="828" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pass</text>
+  <text x="828" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">preponderance</text>
+  <rect x="756" y="177" width="145" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="828" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">checks</text>
+  <text x="828" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">clear-and-convincing</text>
+  <rect x="756" y="295" width="145" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="828" y="338" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">divide</text>
+  <text x="828" y="397" text-anchor="middle" fill="#2b2b29" font-size="21">beyond-reasonable-doubt</text>
+  <rect x="1099" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1171" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
 </svg>
