@@ -1754,6 +1754,8 @@ and the caller must see *why* in the envelope. It is the one pattern that
 deliberately *returns a worse answer than it could have*, which is only honest
 if the envelope says the breaker is open.
 
+**Known Uses.** Netflix Hystrix, resilience4j, Akka's CircuitBreaker, and every microservice bulkhead: a failing call is tripped open and isolated in its own lane so one bad dependency can't collapse the caller — the exact fail-fast/quarantine promise, minus the ability to route to a different answer path.
+
 **Failure mode.** The breaker trips on **noise, not signal** — a burst of
 slow/failed samples during normal contention opens the circuit, and the router
 now serves degraded answers for a healthy-but-busy grid. The trip threshold
@@ -1875,6 +1877,8 @@ audited for leaks) or it drops per-outlier targeting and revises purely off
 the shared statistics. Pick one; the catalog can't claim "never split who wrote
 what" and simultaneously identify outliers to their faces.
 
+**Known Uses.** The RAND Delphi method (forecast rounds, anonymous estimates, median+IQR feedback) and forecast aggregation markets: both shield a group from its own dominant voice so an outlier can pull the number instead of being averaged down in round one.
+
 **Failure mode.** The median closes on the **wrong shared prior** — three
 workers agree-to-anchor on the same mistaken conventional number, the IQR
 narrows, and the loop reports confident consensus that is really correlated
@@ -1975,6 +1979,8 @@ its counter from the exactly-once, durable, per-{class, model}-ordered ledger
 count), or its rigor is ceremony over a ledger that double-counts when the box
 blinks.
 
+**Known Uses.** Group-sequential clinical trials and Cochrane's Trial Sequential Analysis: a pre-specified look schedule with a widening (O'Brien–Fleming) boundary is the standard guard against peeking inflating significance — #22 is that discipline applied to a router's own learner.
+
 **Failure mode.** Pre-registration becomes theater — the router
 "re-estimates" N after a favorable early peek and inflates its own bar to
 pass, which is exactly the goal-seeking the barrier exists to stop. N and the
@@ -2064,6 +2070,8 @@ mislabel a class and you've confidently shipped at the wrong bar. Over-strict
 bars on cheap work waste tokens that the preponderance shelf would have spent
 on volume.
 
+**Known Uses.** Legal evidentiary standards (preponderance → clear-and-convincing → beyond-reasonable-doubt) and risk-tiered approval in banking/compliance: the first maps cost-of-error to proof; the second gates irreversible actions behind a stricter bar than cheap reversible ones.
+
 **Failure mode.** The cost axis goes stale — a request-class drifts into
 irreversible territory (a "preponderance" write starts a process you can't
 un-run) while its shelf label lags, and the router ships past-the-beyond-
@@ -2141,6 +2149,8 @@ is routed. Screening runs entirely off the path a request takes.
 It measures *type*, not *state* — a model that's fine on probes but degraded
 under real load still needs #20's breaker. And it can't see the future: a
 model that aced this class last month drifts, which is why probes regenerate.
+
+**Known Uses.** Screening in the economics of information: insurers and lenders run tests that make a hidden 'type' reveal itself (credit scoring, underwriting) rather than pay to observe it directly — the principal can't see the agent's type, so it offers tests that do.
 
 **Failure mode.** The probes become a *signaling* game instead of a screening
 test — operators learn the exam as a set of tells (the model that scores high
@@ -2269,6 +2279,8 @@ tournament must not crown the most fluent camp over the most correct one.
 Hold it as a **non-default leaf behind #5**, selected only for that trigger,
 not a shape #5 auto-uses on routine traffic.
 
+**Known Uses.** Ranked-choice / social-choice voting and Wikipedia's pairwise Condorcet methods: preference orders resolved into a tournament whose winner beats every rival pairwise, with Copeland/Borda fallbacks and Arrow's impossibility as the honest warrant for choosing by request shape.
+
 **Failure mode.** The voters were never truly independent — three "camps"
 turn out to be two correlated models plus the incumbent's echo (the same
 shared blind spot #11 warns about), so the Condorcet winner is just the
@@ -2389,6 +2401,8 @@ behind it. And it assumes the router can *measure* deadlines and slack at all,
 which leans on the live-node inventory nothing else builds (must exist, see
 cross-cutting); without EDF discipline, "background" quietly becomes
 "background-with-priority" and contends after all.
+
+**Known Uses.** Real-time earliest-deadline-first schedulers and Kubernetes background/spot preemption: work is dispatched by deadline and only idle capacity is spent on background jobs that preempt cleanly — the local-box analog that funds probes, shadow runs, and learner accumulation.
 
 **Failure mode.** Background work is treated as low-priority *load* rather than
 preemptible *slack*, so at the first traffic spike (or the first non-preemptible
@@ -2512,6 +2526,8 @@ respect #20's breaker state and #26's capacity — never sample onto (or promote
 via #22) an arm that's quarantined or non-resident. Report the exploration
 itself (`usage.thompson_draws`, per-arm posterior) so the cost of learning is
 visible, not hidden in total tokens.
+
+**Known Uses.** Thompson sampling at industrial scale: ad-auction bidding, Netflix and Spotify ranking, and online bandit platforms draw once per arm and pull the highest sample so exploration is automatic and self-ending — #27 is the same machinery over a per-{pattern, model, template} Bayesian bank.
 
 **Failure mode.** The labels feeding the posterior are wrong — a verifier that
 rubber-stamps a shared prior, a ledger fed by agreement rather than by the
