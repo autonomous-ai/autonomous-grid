@@ -892,6 +892,17 @@ brief, later steps have no way to check their work against provenance; carry
 the original request (or a guarded summary) through so any step or later
 review can ground back.
 
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def pipeline(request, steps, contract):
+    out = request                                    # carry the original brief forward
+    for step in steps:                               # fixed order: the line is the plan
+        out = step(out, original=request)            # each step consumes the last
+        if not contract.ok(out):                     # cheap deterministic manifest, not an LLM judge
+            return abort(request, out)               # halt and escalate; never feed poison forward
+    return out
+```
+
 **On the Grid stack.** A document pipeline — extract, summarize, translate, format — chains `qwen36-27b-mtp` steps through the Hermes lane, each consuming the last. The example shows a small extraction error at the front being serialized and magnified through every later step, and it demands a verifier somewhere in the chain (#8) to break the compounding before the wrong transcript ships onward. The original "no gate" posture is the worst robustness choice in the catalog: a natural-order job is exactly the one guaranteed to compound an upstream error, and a cheap deterministic interface contract after `extract` (non-empty, schema-shaped) costs almost nothing and does not invite #8's full LLM loop.
 
 ---
@@ -959,6 +970,16 @@ Diversity by construction reduces the shared prior; it does not remove it.
    reproducibility problem one floor lower — the worker output contract must
    carry a structured evidence trace (`usage.evidence_lineage`) or the "screen
    on what they consulted" step has nothing to screen on.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def negative_selection(request, reads, judge):
+    a = reads.A(request)                                  # the plain read
+    b = reads.B(request, focus="what it would NOT say")   # divergence by construction
+    if not diverge(a, b, metric=EMBEDDING_PINNED):        # screen is a pinned dependency, not arithmetic
+        return hand_up(request)                           # same-family pair fails by construction
+    return judge(a, b)                                    # judge only the forced-divergent pair
+```
 
 **On the Grid stack.** Before judging divergent answers, the router forces divergence by construction — asking a `qwen36-35b-a3b-mtp` worker and a `glm-4.6` worker each to state *what it would not say* — then judges on `qwen36-27b-mtp`. In a diverse-by-construction pool the two-family split is the point: a same-family pair fails the screen almost by definition. The example exposes that the model-distinguishability distance is a hidden dependency: the judge's reproducibility depends on the embedding being pinned, so the divergence metric must live in the metric-determinism trust class, not be treated as arithmetic.
 
@@ -1028,6 +1049,15 @@ fan** — glm-4.6 and the Qwen read don't share a GPU, so on a 1-seat box the
 swap on the critical path. The portfolio's variance win can be partly eaten by
 the swap budget before any sample runs; on one GPU the pattern degrades toward
 #7 plus swap cost, which the latency number has to include.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def markowitz(request, models, cov):
+    if cov.observations(class_of(request)) < MIN_GRADED:
+        return plain_average(request, models)             # unmeasured -> honest plain mean, say so
+    weights = min_variance_weights(cov, models)           # over labeled outcomes, not raw disagreement
+    return blend(models, weights, covariance=cov.sha())   # attrib the blend: caller sees it's a blend
+```
 
 **On the Grid stack.** A demand forecast is not averaged but correlation-weighted: two same-family models (`qwen36-27b-mtp`, `qwen36-35b-a3b-mtp`) contribute *less* than their count because they track each other's errors, while the cross-vendor `glm-4.6` earns a heavier weight for being negatively/noisily correlated. The covariance must be computed over **labeled outcomes, not raw disagreement** — two models agreeing-wrong together is the correlation that matters, and same-model disagreement is a consistency signal, not an error. The example exposes that the returned value is a blend with no single contributing answer — the envelope must carry `usage.output_blend` with the model weights and the covariance-matrix hash, so the caller knows what it actually got, and on a model with no history it must degrade to a plain average and say so (`usage.weighting: unmeasured`).
 
@@ -1101,6 +1131,18 @@ re-learns the number the model claims instead of the state the world is in.
 5. **Exhaustion escalates.** Never emit a forced pick below threshold; report
    the active setpoint and P/I/D terms in the usage blob so the caller
    understands why latency jumped.
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def pid(request, setpoint=0.95, budget=5.0):
+    p = i = d = 0.0
+    while elapsed() < budget:                            # time-box, not confidence-box
+        conf = measure(run_samples(request, spend(p, i, d)))  # grounded, never a self-report
+        p, i, d = terms(conf - setpoint, err[cls(request)])   # P gap, I remembers, D trend
+        if conf >= setpoint:
+            return ok(request, conf)
+    return abandoned(request, conf)                      # "stopped at 0.82, not 0.95"; never a forced pick
+```
 
 **On the Grid stack.** `qwen36-27b-mtp`'s per-class spend is a PID: it raises
 or lowers sample count from measurement rather than sitting on one setpoint.
@@ -1206,6 +1248,18 @@ learns*, not a new pattern):
   reinforce-the-winner would. (Costly at large N — use the estimator, and it's
   metric-deterministic, not arithmetic: pin + calibrate it.)
 
+
+**Sample Code.** *(A working sketch, not the shipped stack — every name is a parameter.)*
+```python
+def pheromone_router(request, weights):
+    key = replay_key(request)                            # round_id + seed: a policy snapshot, not a seed
+    shape, model, tpl = draw(weights[key])               # sample the learned distribution
+    answer = run(shape, model, tpl, request)
+    if verified(answer):                                 # only verified outcomes may learn
+        weights[key][(shape, model, tpl)] += DEPOSIT     # reinforce the winner
+        weights = decay_and_snapshot(weights)            # one atomic write: decay + freeze the round
+    return answer
+```
 
 **On the Grid stack.** The pheromone router learns which shape wins per request-class, with decay so stale favorites fade. `laguna-s-2.1` (the local pin on structured extraction) and `qwen36-27b-mtp` compete over the Hermes lane; a win raises that worker's pheromone, a loss lowers it, and the term decays so a worker the workload has drifted away from must re-earn rather than coast. The example guards the learner against free-riding — a worker rewarded for lucky early wins on its hot stablemate's coattails — which is why credit is attributed by Shapley marginal contribution, not dumped on the winning combination. The rewarding rule must be pinned and calibrated, never treated as arithmetic, and the whole learned state is a `round_id` policy snapshot, not a seed: same request at 9am and 9pm can otherwise route to a different pattern. But Shapley is not free of a definition: it needs a **value function V(coalition)** — the score a subset of the N models would have produced *had only they run* — and naming it is the hard part, because "score of a subset that didn't actually run" is a counterfactual you must estimate. For the local router the honest V is the verifier's verdict on the subset's best effort (re-run the small coalition against #8's check), not a smooth analytic surrogate; make that explicit so credit assignment doesn't silently become a hand-waved estimator over an undefined V.
 
