@@ -180,6 +180,7 @@ fixed and mean the same thing in every pattern:
 - **Mechanics** — how the parts collaborate: who decides, who waits, what
   crosses which edge.
 - **Consequences** — what the pattern costs and what it forgives.
+- **Known Uses** — real systems and techniques that already run this shape, so the abstraction is anchored, not invented.
 - **Failure mode** — the specific way this pattern goes wrong, and the honest
   version of its promise.
 - **Refinements** — how to build it: the concrete rules that keep the promise
@@ -302,6 +303,8 @@ hundred readers expose the same world surface. The price is N−1 seats of
 warm-session cost and the scheduler's serial-swap time, so the gate must be
 paired with a budget that prices it.
 
+**Known Uses.** Single-writer / single-flight discipline wherever N readers could each act: a PostgreSQL advisory lock, an etcd/leader lease, an actor's single-threaded mailbox, an idempotent etag-or-CAS mutation. Every one enforces 'N−1 may read, one may write,' the same way the act-gate caps a fan.
+
 **Failure mode.** The gate is *asserted* in a prompt instead of *enforced* by
 a mechanism. Read-only that can't be mechanically enforced is a hope, and a
 losing agent that can `git push` makes the whole fan N× actors wearing N−1
@@ -412,6 +415,8 @@ seat back from the snapshot.
 most requests from cold-start into context-swap, which is what makes the
 N−1-reader fan in #1 affordable at all.
 
+**Known Uses.** Session and connection lifecycle management: connection pools that warm and reuse instead of cold-starting, OS process/container lifecycle, browser session-restore, and keep-alive caches — all turn an expensive spawn into a cheap resume, which is exactly what the warm/handoff/kill transitions do for a resident session.
+
 **Failure mode.** Handoff over-claiming. The moment a router treats
 cross-harness handoff as a free context move, it will route an overdue Claude
 Code session onto a Codex seat and get a cold restart back — slower than the
@@ -501,6 +506,8 @@ green lanes — Codex exec (bounded coding), Claude Code (open work), Hermes ACP
 *role → lane → the gate that lane enforces*, and any one of the three missing
 is a mis-route caught before dispatch. The harness stops being an
 implementation detail and becomes part of the routing decision it always was.
+
+**Known Uses.** Policy routing by declared role: RBAC where a role names the lanes it may enter, and network/harness traffic-engineering where the routing decision is 'role → lane → gate,' not a per-request ad-hoc pick. CI platforms route a job to the runner that may run it the same way.
 
 **Failure mode.** The lane table read as a menu of warm seats. A five-lane
 table on a 1-GPU/Apple box is not five resident lanes — the box holds ~1–2
@@ -602,6 +609,8 @@ use. The scheduler has four numbers an operator actually sets — the idle
 threshold, the preemption trigger, the residency bound, and the snapshot's
 home.
 
+**Known Uses.** Preemptive scheduling: OS time-slicing, cloud spot/preemptible instances, and Kubernetes eviction all treat the running unit as preemptible and restartable from a checkpoint — the seat-as-executor pattern is that discipline on a 1-seat GPU box.
+
 **Failure mode.** A policy statement with no numbers. Until the idle
 threshold, preemption trigger, residency bound, and snapshot destination are
 filled in, "background work runs when idle" is a mandate, not a spec — and the
@@ -682,6 +691,8 @@ box at the same read-only risk level every fan already accepts, and only climbs
 as the evidence says. The admission bar itself is a number the builder sets
 from its own verifier run — N wins at X% agreement with the authority — not a
 universal threshold.
+
+**Known Uses.** Progressive delivery and staged trust: canary → controlled → full rollouts, and CI trust ladders (build → test → integration → production) that grant a new actor a little more reach only as evidence accumulates — Staged Admission is the agent-layer version of that ladder.
 
 **Failure mode.** The bar set before the verifier is trustworthy. If #6's
 authority is an ungrounded vote, the shadow is scoring against noise and "≥ N
@@ -773,6 +784,8 @@ escalates to the real authority instead.
 a named ground, and a replay can tell a fact-forced verdict from a consensus
 guess. The weak arm buys coverage where no mechanical check exists — and
 nothing more, which is exactly why it stays a proposal.
+
+**Known Uses.** Tests, schema checks, and CI as the ground-truth authority: a passing suite or conformance check certifies a change regardless of the model's prior, and a reward model is a verifier the same way a test is — an independent, grounded fact outranks any session's report.
 
 **Failure mode.** The verifier as a session. The moment a fan's own sibling —
 same harness, same working tree, same prior — is allowed to certify, "the
@@ -868,6 +881,8 @@ cache and the audit of what it did survive the box, not just the session.
 a replay that answers "what actually happened, in what order." The export
 buys recoverability — the one upgrade the single-box rule allows — without
 introducing a second truth that could diverge from the first.
+
+**Known Uses.** Write-ahead logging: PostgreSQL's WAL, SQLite's rollback journal, and every append-only event log make the durable log the single source of truth for crash recovery and replay — Only-One-Ledger is the WAL discipline with an explicit periodic export so 'one box' never means 'one point of loss.'
 
 **Failure mode.** "Only truth" read as "only copy." On a single box the WAL
 *is* the node, so a disk wipe silently destroys the very state the layer
