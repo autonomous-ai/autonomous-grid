@@ -249,3 +249,31 @@ diagram consistency per pattern) and *front-matter polish*, not restructure.
 figure exactly; (b) confirm the decision-key's step targets (#-numbers) match
 the catalogue cross-references (spot-checked correct); (c) consider a one-page
 "catalog map" figure linking the 27 by the listed families.
+
+---
+
+## Round 8 — statement-vs-diagram audit + catalog map
+
+**Changes applied.** All 27 patterns carry a figure with a caption; verified
+one-to-one (`images/*.svg`, no missing/duplicate images, captions consistent
+with each pattern's `Structure`). The composed overview `images/index.svg`
+(which renders all 27 patterns, verified present by title) was an **orphan
+asset** — added a "The catalog, as one figure" pointer with the index at the
+catalog's entry (before pattern #1), framing the families as
+primitive → composition → stateful → epistemic → machinery. Structure
+integrity re-verified: all 27 complete.
+
+## Round 9 — related-pattern network audit
+
+**Finding: clean, no edit.** Audited every `Related Patterns` footer: all
+cross-references fall in 1–27, none out of range, and the apparent
+"self-references" (#6, #7, #8, #16, #19, #23, #25, #26, #27) are legitimate
+prose ("#6's `best`", "#8 to make `best` deterministic", "#27 escapes") —
+a pattern naming its own node/role in a comparator sentence, not an erroneous
+pointer. The family graph is internally consistent; no change made.
+
+**Panel status.** The catalog has absorbed the GoF restructure and now passes
+every audit thrown at it (structure, diagrams, statements-vs-figures, related-
+pattern graph). Further rounds are converging on verification passing clean;
+remaining open item is the optional `agents.md` companion (external to this
+repo) and any fresh judge critique.
