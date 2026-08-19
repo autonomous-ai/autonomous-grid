@@ -2013,7 +2013,7 @@ pass — a bright streak — but the O'Brien–Fleming boundary has already wide
 for those interim looks, so 34/40 on 40 trials is still inside the bar: the
 answer is **not yet**, and the refusal is logged as a success. Only once 200
 outcomes accumulate under a spreading boundary does a promotion clear. The
-same gate stops `deepseek-v3` from winning a weight bump on three consecutive
+same gate stops `deepseek-v4-flash` from winning a weight bump on three consecutive
 hard-case wins on a Monday. The refusal must not read as a dead learner — on a class a single user sees
 a few times a day, N = 200 is days-to-weeks of accumulation — so the router
 reports **expected fill-time and a starvation warning** (`usage.learner_eta_days`,
@@ -2092,7 +2092,7 @@ def evidence_bar(request, cls, ledger, learner):
 
 **On the Grid stack.** A fan-out of Codex (`exec --json`) writing a config
 file to disk sits on the **clear-and-convincing** shelf: fan-out across
-`qwen38-27b-mtp` and the cross-vendor `deepseek-v3`, then a verifier against
+`qwen38-27b-mtp` and the cross-vendor `deepseek-v4-flash`, then a verifier against
 the config schema before the write lands — biased toward a check before acting,
 because a bad config is re-editable. By contrast a request to push code to a
 live repo that kicks a deploy (a Grid Enterprise consequential action) lands
