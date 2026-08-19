@@ -110,6 +110,24 @@ planning, and sub-agent splitting are all yours to build.
 - **Codex** — *not* for a one-file, one-session task a thin harness resolves faster (worktrees and PR pipelines are overhead on one bounded change), and *not* where you want the thinnest auditable seat — that home is Pi.
 - **Pi** — *not* when you want the harness to hand you planning, sub-agents, or governance: Pi deliberately ships none of those, so pick it only when you are ready to build and own the loop.
 
+**Where these claims come from — each home-base is a live project, not an
+abstraction.** The taxonomy above is not a taste judgment; every base is a
+real, current, checkable thing, and the layer it owns is the layer its own
+surface ships. For the record, as of this writing: **OpenClaw** is
+`openclaw/openclaw` ("your own personal AI assistant… any OS, any platform"),
+**Hermes Agent** is `NousResearch/hermes-agent` ("the agent that grows with
+you," with its self-evolution and agent-governance siblings), **Claude Code**
+is `anthropics/claude-code` (the terminal agentic coder), **Codex** is
+`openai/codex` (the lightweight terminal coding agent), and **Pi** is
+`earendil-works/pi` (the Pi agent harness — an agent runtime, a coding-agent
+CLI, and a unified LLM API) whose README states the property this catalog leans
+on hardest for it: *no built-in permission system; it runs with the
+permissions of the user and process that launched it.* **Claude Cowork** is
+Anthropic's managed desktop agent (no public repo; the name is confirmed by
+the many open reimplementations that describe themselves as "Open Source
+version of Claude Cowork"). Point the list above at those sources and the
+"which job" layer follows; the rosters move, the layers do not.
+
 Two routing rules hold across the whole layer:
 
 - **The harness adds a tooling reflex, not a training tail.** Two agents on
