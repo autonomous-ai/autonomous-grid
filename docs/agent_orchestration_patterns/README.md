@@ -46,6 +46,15 @@ Claude Code         | stream-json      | `--no-tools` for read-only           | 
 Codex               | `exec --json`    | sandbox / read-only flag              | per-tool JSON events
 OpenClaw            | fan-out worker   | each copy is a full agent, act step gated by the router | N parallel sessions
 
+**On names: ACP is the wire, Hermes Agent is the product.** The first lane's
+"ACP" is **Agent Client Protocol** — the open, editor-and-agent-neutral wire
+(`agentclientprotocol/agent-client-protocol`), the transport a harness speaks,
+not a product. **Hermes Agent** (Nous Research, `NousResearch/hermes-agent`)
+is one *product that speaks* that wire; a reader should never read "Hermes ACP
+the lane" as "Hermes Agent the home-base" — the lane is how it is driven, the
+home-base is what it remembers. Where this catalog writes the lane it says
+"Hermes ACP"; where it means the memory product it says "Hermes Agent".
+
 The coding-agent engines (Cursor, OpenCode, Pi, Command Code, Devin, Muse
 Code, Amp) sit in the same seat pool — Pi is a Fleet coding-engine, *not* a
 model and *not* a lane; it joins the fan when a task is agent-shaped, never
