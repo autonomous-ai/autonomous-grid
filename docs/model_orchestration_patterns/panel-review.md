@@ -393,3 +393,24 @@ Related) — every pattern carries prose, figure, Known Uses, and Sample Code
 (27/27 × 4). Remaining candidate work: extend Known Uses to the 7-pattern
 agent catalog for symmetry, and a final holistic read of the assembled front
 matter.
+
+---
+
+## Round 14 — agent-layer symmetry (closes Round 13's open item)
+
+**Finding.** Round 13's "remaining candidate work — extend Known Uses to the
+7-pattern agent catalog for symmetry" is now closed. The agent layer shipped
+`Known Uses` in all 7 patterns (each anchored to a real discipline: advisory
+locks/leader leases, connection pooling, RBAC role→lane→gate, preemptive
+scheduling, canary/CI trust ladders, tests-as-ground-truth, write-ahead
+logging) and announced the section in the agent "How to read a pattern"
+front matter. Both catalogs now carry the same 12-element skeleton, verified
+in a single cross-catalog pass: order uniform, `ast.parse` clean, backticks
+balanced, all image refs resolve (28 model, 9 agent), diagrams regenerate
+identically with geometry checks green (27/27 model `verok`, 7/7 agent).
+
+**Round 14 finding.** The model-layer open item is resolved; the two catalogs
+are symmetric against the announced skeleton. Correctness note: 12 model
+patterns intentionally have no `Refinements` (their guidance is already
+narrative/cohesive), which is the announced "where guidance separates" rule,
+not an audit failure.
