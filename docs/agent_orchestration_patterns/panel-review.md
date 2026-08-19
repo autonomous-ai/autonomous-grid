@@ -325,3 +325,31 @@ local SoTA model (`qwen38-27b-mtp`, `qwen38-35b-a3b-mtp`, `glm-5.2`,
 
 **Commit/push.** Diagram fix committed and pushed as `ce675c9`; this round's
 ranker precision is committed alongside this log entry. All checks green.
+
+---
+
+## Round 22 — figure accessibility (`<title>`) + one latent label collision
+
+**Finding.** Every SVG `<svg>` root carried an empty (or absent) `<title>`.
+The README has caption alt-text, but the figures themselves did not
+self-describe — a real accessibility/GoF-alignment gap: GoF's figures are
+self-contained and captioned, and a screen reader should be able to name a
+diagram on its own.
+
+**Changes applied (both catalogs, one shared engine).**
+- Added a descriptive `<title id="t">` to every figure root (the builder's
+  human-readable `Diagram` title) plus `role="img" aria-labelledby="t"`, so
+  each SVG names itself. `index.svg` in both catalogs got a title too.
+- All **28 model** + **9 agent** SVGs now carry titles.
+- The shared-engine change surfaced a **latent** label collision in agent
+  `lifecycle.svg`: `spawn (cold)` (≈87px at min font) could not fit the 81px
+  gap between `job` and `seat`, so it overdrew the `job` node. The cold/warm
+  contrast is already carried by the `warm → resume` edge and the `warm`
+  node's `note`, so the label became `spawn` — every documented transition
+  still authentic, and the figure now verifies clean.
+
+**Verified.** Both generators regen green (`verok` / `verify ok` for all
+patterns), residual-overlap diagnostic = **0 issues**. PNG contact sheets
+re-rendered under `/tmp/model_fresh` and `/tmp/agent_fresh2`.
+
+**Commit/push.** `05e609b`. All checks green.
