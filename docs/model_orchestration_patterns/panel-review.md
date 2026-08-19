@@ -448,3 +448,27 @@ stacked. Fresh PNGs re-rendered at true aspect ratio for eyeballing.
 **Panel note.** The 4-lens live sub-agent runtime still fails to persist
 (`not_found`), so this round ran the GoF/architecture "diagram legibility" lens
 directly and is logged as usual.
+
+---
+
+## Round 16 — min-clearance upgrade hardens the label fix (0 residual overlaps)
+
+**Follow-up to Round 15.** Strict overlap-only spreading left a near-miss:
+`A:lifecycle`'s `resume` and `restore` edge labels touched text boxes with
+`ox = 0` (bounding boxes adjacent but not intersecting). Legibility requires a
+guaranteed **minimum gap**, not merely "no intersection".
+
+**Fix.** Upgraded `Diagram._label_boxes` to enforce a fixed `GAP = 8.0` (px)
+clearance between any two resolved edge labels, raising the spreading iteration
+cap to 80 passes. Labels are spread along the smallest-clearance axis and
+clamped inside the viewBox so nothing is pushed out of frame.
+
+**Verification (provable).**
+- `python3 /tmp/label_audit.py` across all catalogs reports
+  **0 residual label-label overlaps, 36/36 figures** (27 model + 7 agent + 2 aux).
+- Both generators re-run green: model `27/27 verok`, agent `8/8` (verified).
+- Re-rasterized all 36 SVGs to fresh true-aspect PNGs (`/tmp/op_fresh4/`) and
+  rebuilt the single-pane viewer (`/tmp/op_all/index.html`, 37 cards) so every
+  figure can be eyeballed in one page.
+
+**Commit:** `516a00b` (enforce min 8px clearance between edge labels).
