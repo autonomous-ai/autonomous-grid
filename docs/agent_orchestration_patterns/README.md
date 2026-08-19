@@ -297,7 +297,9 @@ binds is the one that decides:
    weaker lane.
 2. **Which harness owns the task, and is it resident?** → #3. Residency
    first; stage a lane swap only when the task genuinely needs a harness the
-   box isn't running.
+   box isn't running. (For *which* harness to reach for at all — the layer of
+   work it lives in — see **Which harness for which job** above; residency
+   picks the lane, the layer picks the harness.)
 3. **Does the plan assume background work?** → #4. If the box can't name the
    idle threshold, the preemption trigger, and the residency bound, the
    "runs in the background" promise isn't real yet.
