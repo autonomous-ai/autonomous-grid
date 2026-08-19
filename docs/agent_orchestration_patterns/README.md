@@ -388,6 +388,26 @@ happens, where a decision is made, and which edges loop back.
 The same roles and edge types appear in all seven figures; `docs/DIAGRAMS.md`
 is the formal register, and this block is the field guide.
 
+**Three binds, seven shapes.** *(If you read one thing, read this — it is
+the shape of the whole agent layer.)* The model layer decides *how many
+samples* and *how they pool*; the agent layer runs on top and decides what a
+sample is *allowed to do*. Its seven shapes are not seven unrelated ideas —
+they are the same three scarce things, defended once each. **The seat** is
+VRAM residency: the box holds a handful of resident sessions, so #4 (the seat
+is the executor — background work lives only in the idle) and #2 (session
+lifecycle — the resident session is a cache that must outlive the request and
+the crash) make residency a first-class unit, not a side effect. **The act**
+is a world-touching write: #1 (the act-gate — N−1 read, one `round_id`-keyed
+actor) bounds a fan's writes to one mutation, and #3 (route across harness
+lanes — role → lane → gate) settles *which* resident session may own the task
+at all. **The fact** is what may certify: #5 (staged admission — a new harness
+earns the act) gates who is trusted, #6 (the verifier is ground truth — a test
+is a fact, a session is a report) gates what may certify a verdict, and #7
+(only one ledger) makes the act log durable enough to survive the box that
+wrote it. A fan only needs an act-gate if seats are real, and only needs a
+verifier and a ledger if acts are real — so the natural read runs seat (#4,
+#2) → act (#1, #3) → fact (#5, #6, #7).
+
 ## The one sentence per pattern
 
 | # | Pattern | The move | Use it when |

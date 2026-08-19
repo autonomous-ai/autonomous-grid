@@ -766,3 +766,28 @@ frame names stay parameter placeholders. Purely additive prose — no fact
 removed or contradicted.
 
 **Commit/push.** (R39 — this commit).
+
+## Round 40
+
+**Change.** Added the agent layer's organizing thesis — **"Three binds, seven
+shapes"** — placed directly before the one-sentence table, mirroring the model
+layer's "Two levers, twenty-seven shapes" intro. It gives the seven agent
+patterns the same single-shot framing the model catalog has: the model layer
+decides *how many samples and how they pool*; the agent layer decides what a
+sample is *allowed to do* — defending the same three scarce things once each:
+
+- **The seat** (VRAM residency): #4 seat-as-executor, #2 session lifecycle.
+- **The act** (world-touching write): #1 act-gate, #3 route across lanes.
+- **The fact** (what may certify): #5 staged admission, #6 verifier, #7 ledger.
+
+Closes with the natural read order (seat → act → fact) without contradicting
+the runtime decision-order key (which correctly still leads with #1's act
+question). Cross-checks every `#N` tag, all agent-layer refs in range.
+
+**Verification.** Markdown balanced (backticks/bold); structure intact (7
+patterns + skeleton); no claim contradicts the existing decision-order key or
+anything in `agents.md`. Repairs one factual slip during drafting (the thesis
+initially claimed entries run in family order — they run numerically #1–#7),
+caught before commit.
+
+**Commit/push.** (R40 — this commit).
