@@ -51,6 +51,56 @@ Code, Amp) sit in the same seat pool — Pi is a Fleet coding-engine, *not* a
 model and *not* a lane; it joins the fan when a task is agent-shaped, never
 when the router is just picking model reads.
 
+**Which harness for which job.** The lanes above are *how to drive* a session;
+*which harness to drive* is a separate decision, and it is settled by the
+**layer of work**, not by a benchmark score. Five layers of agent work, five
+home bases:
+
+- **Channel layer — OpenClaw.** If the task starts where the operator already
+  lives (Slack, Telegram, Discord, email) and the answer spans several tools,
+  OpenClaw is the substrate: a self-hostable agent that sits *in* the channel,
+  reaches browsers, files, and other agents by plugin, and is at its best
+  orchestrating messy operational work around you. Its weakness is that
+  governance is yours — it ships rope, not a permission model, so it rewards a
+  team that will own audit logs, secrets management, and human approval gates.
+- **Memory layer — Hermes Agent.** If the value is an agent that *remembers* —
+  builds skills from experience, carries a persistent model of you across
+  sessions, and swaps providers freely — Hermes Agent (Nous Research) is the
+  home base. It is model-agnostic (OpenRouter, NVIDIA NIM, Hugging Face, and
+  the OpenAI/Anthropic endpoints are interchangeable backends), and it is
+  strongest where failures are *context* failures, not reasoning failures. Its
+  weakness is that self-improvement needs review: you must be able to state
+  what it learned and why before it keeps the memory.
+- **Desktop layer — Claude Cowork.** If the worker is a non-technical
+  professional delegating file, browser, and spreadsheet work with no terminal
+  in sight, Claude Cowork is the intent: agentic execution packaged behind a
+  managed desktop app. You trade self-hosting and deep customization for turnkey
+  ergonomics, and Anthropic is explicit that it is not for regulated workloads.
+- **Coding layer — Claude Code.** If the deliverable is a code change under an
+  engineering loop — read the repo, edit, diff, test, review, merge — Claude
+  Code is the ergonomic fit: a repo-aware developer workspace with parallel
+  sessions, subagents, plugins, connectors, and local/remote/SSH environments.
+  Its cost is that it assumes engineering discipline and permission hygiene on
+  your side.
+- **Command-center layer — Codex.** If the work is *many* agents across *many*
+  repos running in parallel, Codex is the intent: an engineering operations
+  layer with worktrees, cloud environments, and PR-oriented throughput — less a
+  single-developer cockpit than a way to supervise a fleet.
+
+**The harnesses are not rivals; they are home bases that reach outward.**
+OpenClaw reaches layers 2–4 by plugin; Codex is deeply capable at the coding
+layer too. The decision is which *home* matches the task's layer — not which
+tool is "better" in the abstract.
+
+**Pi is the "bring your own discipline" seat.** Pi is neither a model nor a
+lane but a *minimal agent harness*: it ships strong defaults and deliberately
+skips sub-agents and plan mode, so you compose the loop yourself and extend it
+with packages (skills, prompt templates, themes) via npm or git. Pick it when
+you want the thinnest, most auditable engine under *your* orchestration — the
+harness that most literally matches this catalog's "you are the router"
+stance. Its weakness is the flip side: nothing is handed to you, so governance,
+planning, and sub-agent splitting are all yours to build.
+
 Two routing rules hold across the whole layer:
 
 - **The harness adds a tooling reflex, not a training tail.** Two agents on
