@@ -14,8 +14,8 @@
   <rect width="1206" height="332" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Materialized Answer — cache the verified answer by a semantic key</text>
   <text x="694" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">hit → short-circuits</text>
-  <text x="510" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">miss → compute</text>
-  <text x="861" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">verified → cache</text>
+  <text x="510" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">miss → compute</text>
+  <text x="861" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">verified → cache</text>
   <path d="M 120 92 C 216 92, 216 92, 312 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 92 C 694 92, 694 92, 964 92" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 424 92 C 510 92, 510 210, 596 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

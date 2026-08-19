@@ -14,7 +14,7 @@
   <rect width="1100" height="332" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">The seat is the executor — background only in the idle</text>
   <text x="170" y="142" text-anchor="middle" fill="#2b2b29" font-size="23">spawned when idle</text>
-  <text x="212" y="265" text-anchor="end" fill="#2b2b29" font-size="23">yields to snapshot</text>
+  <text x="256" y="265" text-anchor="end" fill="#2b2b29" font-size="23">yields to snapshot</text>
   <path d="M 120 92 C 174 92, 174 92, 228 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 92 C 164 92, 164 210, 208 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 508 92 C 661 92, 661 92, 814 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

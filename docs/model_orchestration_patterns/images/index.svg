@@ -18,7 +18,7 @@
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Mate-in-One — pick the best fit</text>
   <text x="216" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one prompt</text>
   <text x="514" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">best fit</text>
-  <text x="849" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
+  <text x="849" y="74" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
   <path d="M 120 92 C 216 92, 216 92, 312 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 92 C 514 92, 514 92, 605 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 750 92 C 849 92, 849 92, 948 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -49,8 +49,8 @@
   <rect width="1520" height="568" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Fan-Out — same prompt, N answers, a vote</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="1172" y="294" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
-  <text x="1095" y="328" text-anchor="start" fill="#2b2b29" font-size="23">ties → expand</text>
+  <text x="1172" y="295" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
+  <text x="1095" y="327" text-anchor="start" fill="#2b2b29" font-size="23">ties → expand</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -94,9 +94,9 @@
   </defs>
   <rect width="1582" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Master / Slave — a planner splits the job</text>
-  <text x="204" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">plan + split</text>
+  <text x="204" y="192" text-anchor="middle" fill="#2b2b29" font-size="21">plan + split</text>
   <text x="490" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">specialists</text>
-  <text x="1246" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
+  <text x="1246" y="192" text-anchor="middle" fill="#2b2b29" font-size="19">a single answer</text>
   <path d="M 120 210 C 204 210, 204 210, 287 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 449 210 C 552 210, 552 92, 655 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 449 210 C 548 210, 548 328, 647 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -169,7 +169,7 @@
   </defs>
   <rect width="1340" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Strategy — each request chooses a pattern</text>
-  <text x="187" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">each request</text>
+  <text x="187" y="192" text-anchor="middle" fill="#2b2b29" font-size="16">each request</text>
   <text x="490" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">cost × speed × needs</text>
   <path d="M 120 210 C 187 210, 187 210, 254 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 482 210 C 598 210, 598 92, 714 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -208,8 +208,8 @@
   </defs>
   <rect width="1654" height="214" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Brute-Force — many identical tries, keep the best</text>
-  <text x="464" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="972" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">a pick, not a judgment</text>
+  <text x="464" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
+  <text x="972" y="74" text-anchor="middle" fill="#2b2b29" font-size="21">a pick, not a judgment</text>
   <path d="M 120 92 C 219 92, 219 92, 318 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 92 C 464 92, 464 92, 510 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 822 92 C 972 92, 972 92, 1121 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -279,7 +279,7 @@
   <rect width="1504" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Debate — two reads that loop until they agree</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">careful disagreement</text>
-  <text x="1168" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
+  <text x="1168" y="192" text-anchor="middle" fill="#2b2b29" font-size="19">a single answer</text>
   <text x="302" y="399" text-anchor="end" fill="#2b2b29" font-size="23">disagree → again</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -353,7 +353,7 @@
   <rect width="1486" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Ensemble — same prompt, keep the average</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="1155" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">average the answers</text>
+  <text x="1155" y="192" text-anchor="middle" fill="#2b2b29" font-size="14">average the answers</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -478,7 +478,7 @@
   </defs>
   <rect width="1616" height="214" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">PID Confidence Loop — a budget that tracks error, history, trend</text>
-  <text x="254" y="163" text-anchor="end" fill="#2b2b29" font-size="23">P · I · D re-command</text>
+  <text x="284" y="163" text-anchor="end" fill="#2b2b29" font-size="23">P · I · D re-command</text>
   <path d="M 120 92 C 195 92, 195 92, 270 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 466 92 C 573 92, 573 92, 680 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 842 92 C 949 92, 949 92, 1057 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -515,7 +515,7 @@
   <rect width="1256" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Pheromone Router — learn which shape wins, with decay</text>
   <text x="470" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">learned weights</text>
-  <text x="280" y="399" text-anchor="end" fill="#2b2b29" font-size="23">verified → reinforce, others decay</text>
+  <text x="477" y="399" text-anchor="end" fill="#2b2b29" font-size="23">verified → reinforce, others decay</text>
   <path d="M 120 210 C 208 210, 208 210, 296 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 210 C 535 210, 535 92, 630 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 210 C 531 210, 531 210, 622 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -597,8 +597,8 @@
   <rect width="880" height="332" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Straggler Backup — duplicate only the overdue worker</text>
   <text x="208" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one try</text>
-  <text x="539" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
-  <text x="368" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">overdue</text>
+  <text x="539" y="74" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
+  <text x="368" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">overdue</text>
   <text x="560" y="138" text-anchor="middle" fill="#2b2b29" font-size="23">first to finish</text>
   <path d="M 120 92 C 208 92, 208 92, 296 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 92 C 539 92, 539 92, 638 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -632,8 +632,8 @@
   <rect width="1206" height="332" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Materialized Answer — cache the verified answer by a semantic key</text>
   <text x="694" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">hit → short-circuits</text>
-  <text x="510" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">miss → compute</text>
-  <text x="861" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">verified → cache</text>
+  <text x="510" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">miss → compute</text>
+  <text x="861" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">verified → cache</text>
   <path d="M 120 92 C 216 92, 216 92, 312 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 92 C 694 92, 694 92, 964 92" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 424 92 C 510 92, 510 210, 596 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -665,9 +665,9 @@
   </defs>
   <rect width="1598" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Canary Trust-Equity — earn a vote before you ever cast one</text>
-  <text x="195" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">same request</text>
+  <text x="195" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">same request</text>
   <text x="208" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">shadow</text>
-  <text x="954" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">shadow → compare → gate</text>
+  <text x="954" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">shadow → compare → gate</text>
   <text x="1267" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">earns a vote</text>
   <path d="M 120 210 C 195 210, 195 92, 270 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 208 210, 208 328, 296 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
@@ -705,7 +705,7 @@
   </defs>
   <rect width="1206" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">CVaR Budgeting — size the spend by the tail, not the mean</text>
-  <text x="470" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">pick the tail-safe shape</text>
+  <text x="470" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">pick the tail-safe shape</text>
   <path d="M 120 210 C 216 210, 216 210, 312 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 523 210, 523 92, 622 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 510 210, 510 328, 596 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -831,8 +831,8 @@
   </defs>
   <rect width="1716" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Trial Sequential Analysis — the learner only wins once N is met</text>
-  <text x="191" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">same class</text>
-  <text x="1393" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">only at the threshold</text>
+  <text x="186" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">same class</text>
+  <text x="1393" y="192" text-anchor="middle" fill="#2b2b29" font-size="17">only at the threshold</text>
   <path d="M 120 210 C 191 210, 191 92, 262 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 195 210, 195 328, 270 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 474 92 C 573 92, 573 210, 672 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -912,7 +912,7 @@
   </defs>
   <rect width="1766" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Type-Revelation Screening — probe a model's type in idle, before trust</text>
-  <text x="330" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">idle, off critical path</text>
+  <text x="330" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">idle, off critical path</text>
   <path d="M 120 210 C 191 210, 191 92, 262 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 212 210, 212 328, 304 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 474 92 C 565 92, 565 210, 655 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -952,7 +952,7 @@
   <rect width="1538" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Condorcet Pairwise Pooling — head-to-head beats plurality</text>
   <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">3+ camps</text>
-  <text x="1214" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">Condorcet, not plurality</text>
+  <text x="1214" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">Condorcet, not plurality</text>
   <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 92, 594 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 210 C 506 210, 506 210, 594 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
@@ -1029,7 +1029,7 @@
   </defs>
   <rect width="1306" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Thompson Posterior Router — route by sampling each posterior</text>
-  <text x="966" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">verified wins feed back</text>
+  <text x="966" y="192" text-anchor="middle" fill="#2b2b29" font-size="13">verified wins feed back</text>
   <path d="M 120 210 C 187 210, 187 92, 254 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 187 210, 187 210, 254 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 187 210, 187 328, 254 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

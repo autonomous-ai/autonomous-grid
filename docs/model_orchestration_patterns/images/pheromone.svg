@@ -14,7 +14,7 @@
   <rect width="1256" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Pheromone Router — learn which shape wins, with decay</text>
   <text x="470" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">learned weights</text>
-  <text x="280" y="399" text-anchor="end" fill="#2b2b29" font-size="23">verified → reinforce, others decay</text>
+  <text x="477" y="399" text-anchor="end" fill="#2b2b29" font-size="23">verified → reinforce, others decay</text>
   <path d="M 120 210 C 208 210, 208 210, 296 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 210 C 535 210, 535 92, 630 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 440 210 C 531 210, 531 210, 622 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

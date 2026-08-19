@@ -13,7 +13,7 @@
   </defs>
   <rect width="1682" height="332" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">The verifier is ground truth, not a session</text>
-  <text x="171" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one try</text>
+  <text x="171" y="74" text-anchor="middle" fill="#2b2b29" font-size="21">one try</text>
   <text x="1203" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
   <text x="620" y="164" text-anchor="middle" fill="#2b2b29" font-size="23">no fact to offer</text>
   <text x="919" y="142" text-anchor="middle" fill="#2b2b29" font-size="23">proposed only</text>

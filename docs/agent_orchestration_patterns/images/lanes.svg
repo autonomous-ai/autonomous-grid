@@ -14,7 +14,7 @@
   <rect width="2136" height="568" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Route across harness lanes — role → lane → gate</text>
   <text x="216" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">each request</text>
-  <text x="1804" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">act contract binds</text>
+  <text x="1804" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">act contract binds</text>
   <path d="M 120 210 C 216 210, 216 210, 312 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 502 210, 502 210, 580 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 775 210 C 853 210, 853 92, 931 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

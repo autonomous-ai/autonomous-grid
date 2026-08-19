@@ -15,7 +15,7 @@
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Mate-in-One — pick the best fit</text>
   <text x="216" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">one prompt</text>
   <text x="514" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">best fit</text>
-  <text x="849" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">a single answer</text>
+  <text x="849" y="74" text-anchor="middle" fill="#2b2b29" font-size="20">a single answer</text>
   <path d="M 120 92 C 216 92, 216 92, 312 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 92 C 514 92, 514 92, 605 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 750 92 C 849 92, 849 92, 948 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

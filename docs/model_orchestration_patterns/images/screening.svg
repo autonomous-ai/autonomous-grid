@@ -13,7 +13,7 @@
   </defs>
   <rect width="1766" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Type-Revelation Screening — probe a model's type in idle, before trust</text>
-  <text x="330" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">idle, off critical path</text>
+  <text x="330" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">idle, off critical path</text>
   <path d="M 120 210 C 191 210, 191 92, 262 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 212 210, 212 328, 304 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 474 92 C 565 92, 565 210, 655 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

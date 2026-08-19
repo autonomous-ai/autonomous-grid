@@ -13,10 +13,10 @@
   </defs>
   <rect width="1720" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Staged admission — shadow before it may act</text>
-  <text x="160" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">live traffic</text>
-  <text x="164" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">shadow</text>
+  <text x="160" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">live traffic</text>
+  <text x="168" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">shadow</text>
   <text x="1067" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">learns the bar</text>
-  <text x="1364" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">promoted to act</text>
+  <text x="1364" y="192" text-anchor="middle" fill="#2b2b29" font-size="16">promoted to act</text>
   <path d="M 120 210 C 160 210, 160 92, 201 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 164 210, 164 328, 208 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
   <path d="M 535 92 C 686 92, 686 210, 836 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

@@ -14,7 +14,7 @@
   <rect width="3620" height="568" fill="#fff"/>
   <text x="86" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">One local box — a defect, N agents, one writer</text>
   <text x="1772" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the one</text>
-  <text x="2381" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the write step</text>
+  <text x="2381" y="192" text-anchor="middle" fill="#2b2b29" font-size="20">the write step</text>
   <text x="3070" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
   <text x="2159" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">fsync first</text>
   <text x="2339" y="428" text-anchor="middle" fill="#2b2b29" font-size="23">one entry per round</text>

@@ -13,8 +13,8 @@
   </defs>
   <rect width="1538" height="450" fill="#fff"/>
   <text x="170" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Only one ledger — the fsync'd box is the only truth</text>
-  <text x="860" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">events, not state</text>
-  <text x="1199" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">off-box, on a cadence</text>
+  <text x="860" y="192" text-anchor="middle" fill="#2b2b29" font-size="18">events, not state</text>
+  <text x="1199" y="192" text-anchor="middle" fill="#2b2b29" font-size="14">off-box, on a cadence</text>
   <path d="M 302 92 C 459 92, 459 210, 616 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 330 210 C 473 210, 473 210, 616 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 330 328 C 473 328, 473 210, 616 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

@@ -13,7 +13,7 @@
   </defs>
   <rect width="1616" height="214" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">PID Confidence Loop — a budget that tracks error, history, trend</text>
-  <text x="254" y="163" text-anchor="end" fill="#2b2b29" font-size="23">P · I · D re-command</text>
+  <text x="284" y="163" text-anchor="end" fill="#2b2b29" font-size="23">P · I · D re-command</text>
   <path d="M 120 92 C 195 92, 195 92, 270 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 466 92 C 573 92, 573 92, 680 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 842 92 C 949 92, 949 92, 1057 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

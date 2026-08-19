@@ -13,9 +13,9 @@
   </defs>
   <rect width="1598" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Canary Trust-Equity — earn a vote before you ever cast one</text>
-  <text x="195" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">same request</text>
+  <text x="195" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">same request</text>
   <text x="208" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">shadow</text>
-  <text x="954" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">shadow → compare → gate</text>
+  <text x="954" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">shadow → compare → gate</text>
   <text x="1267" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">earns a vote</text>
   <path d="M 120 210 C 195 210, 195 92, 270 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 120 210 C 208 210, 208 328, 296 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>

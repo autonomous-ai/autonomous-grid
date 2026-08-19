@@ -13,7 +13,7 @@
   </defs>
   <rect width="1206" height="450" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">CVaR Budgeting — size the spend by the tail, not the mean</text>
-  <text x="470" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">pick the tail-safe shape</text>
+  <text x="470" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">pick the tail-safe shape</text>
   <path d="M 120 210 C 216 210, 216 210, 312 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 523 210, 523 92, 622 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 424 210 C 510 210, 510 328, 596 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

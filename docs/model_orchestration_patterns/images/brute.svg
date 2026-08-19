@@ -13,8 +13,8 @@
   </defs>
   <rect width="1654" height="214" fill="#fff"/>
   <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Brute-Force — many identical tries, keep the best</text>
-  <text x="464" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
-  <text x="972" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">a pick, not a judgment</text>
+  <text x="464" y="43" text-anchor="middle" fill="#2b2b29" font-size="23">same prompt</text>
+  <text x="972" y="74" text-anchor="middle" fill="#2b2b29" font-size="21">a pick, not a judgment</text>
   <path d="M 120 92 C 219 92, 219 92, 318 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 418 92 C 464 92, 464 92, 510 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
   <path d="M 822 92 C 972 92, 972 92, 1121 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>

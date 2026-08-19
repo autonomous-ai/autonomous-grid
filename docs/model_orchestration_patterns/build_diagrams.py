@@ -34,6 +34,7 @@ STAGE  = 198         # horizontal pitch between stage columns
 M_L, M_R, M_T, M_B = 70, 96, 92, 88   # margins
 NODE_FS = 28         # label inside a node
 EDGE_FS = 23         # label on an edge
+MIN_EDGE_FS = 12      # floor for auto-fit, so long labels stay readable
 
 def text_w(s, fs):
     return max(1, len(s)) * fs * 0.60
@@ -223,7 +224,18 @@ class Diagram:
                  f'stroke-width="{sw}"{dash} marker-end="{self._mk(marker, color)}"/>')
 
     def _label_boxes(self, W, Hh):
-        """Compute every edge label's box; iteratively spread colliding pairs."""
+        """Place every edge label so it clears its own node, every other node,
+        the other labels, and the canvas edge.
+
+        A label's box is resolved *anchor-aware* (an ``end``-anchored caption's
+        box really spans left of its anchor point, not around it). Then, in a
+        small relaxation loop, each label is (1) shrunk if it is wider than the
+        gap between its two endpoint nodes (so it never overdrawn a node it is
+        attached to), (2) pushed out of any unrelated node, and (3) kept apart
+        from every other label, all while staying fully inside the viewBox.
+        The first loop pass shrinks; the later passes only nudge, so a finished
+        label is always readable at its final size.
+        """
         boxes = []
         for e in self.edges:
             if not e["label"]:
@@ -232,6 +244,8 @@ class Diagram:
             a, b = e["a"], e["b"]
             x1, y1 = self.xr(a), self.cy(a)
             x2, y2 = self.xl(b), self.cy(b)
+            fs = EDGE_FS
+            anchor = "middle"
             if e.get("lp"):
                 lp = e["lp"]
                 mx, my = lp[0], lp[1]
@@ -244,10 +258,116 @@ class Diagram:
                 mx, my = (x1 + x2) / 2, (y1 + y2) / 2
                 anchor = "middle"
             baseline = my - 18
-            boxes.append([mx, baseline, text_w(e["label"], EDGE_FS) + 8, 26, anchor])
-        GAP = 8.0  # minimum clearance between any two labels
-        for _ in range(80):
+            boxes.append([mx, baseline, text_w(e["label"], fs) + 8, 26, anchor, fs, a, b])
+
+        def lrange(box):
+            """(x0, x1) the label really occupies, honouring its anchor."""
+            mx, base, bw, bh, anchor = box[0], box[1], box[2], box[3], box[4]
+            if anchor == "end":
+                return (mx - bw, mx)
+            if anchor == "start":
+                return (mx, mx + bw)
+            return (mx - bw / 2, mx + bw / 2)
+
+        def yspan(box):
+            return (box[1] - box[3] / 2, box[1] + box[3] / 2)
+
+        def overlaps(box, nid):
+            if self.nodes[nid]["kind"] == "dot":
+                return False
+            x0, x1 = lrange(box)
+            y0, y1 = yspan(box)
+            nx0, ny0 = self.xl(nid), self.top(nid)
+            nx1, ny1 = self.xr(nid), self.bottom(nid)
+            return x0 < nx1 and nx0 < x1 and y0 < ny1 and ny0 < y1
+
+        # ---- pass 0: shrink so each label fits the gap between its endpoints.
+        for i, box in enumerate(boxes):
+            if box is None:
+                continue
+            e = self.edges[i]
+            fs = box[5]
+            lab = e["label"]
+            y0, y1 = yspan(box)
+            # The label owns the *gap* between its two end nodes, not their
+            # outer span: a node left of the label center bounds us on the
+            # right edge, a node right of center bounds us on the left edge.
+            # (The old code took max-of-right-edges / min-of-left-edges, which
+            # measured the outside-to-outside width and always under-shrunk.)
+            mx = box[0]
+            left, right = -1e9, 1e9
+            for nid in (e["a"], e["b"]):
+                n = self.nodes[nid]
+                if n["kind"] == "dot":
+                    continue
+                ny0, ny1 = self.top(nid), self.bottom(nid)
+                if not (y1 > ny0 and y0 < ny1):
+                    continue
+                nx0, nx1 = self.xl(nid), self.xr(nid)
+                if nx0 <= mx:
+                    left = max(left, nx1)
+                if nx1 >= mx:
+                    right = min(right, nx0)
+            avail = right - left - 4
+            if avail > 0:
+                # Step the font size down (with a floor) until the *actual*
+                # text_w fits, so the resolved width below never overdraws an
+                # end node. Uses text_w directly, not the 0.6*len estimate.
+                fit = fs
+                while fit > MIN_EDGE_FS and text_w(lab, fit) + 8 > avail:
+                    fit -= 1
+                if fit != fs:
+                    fs = fit
+                    box[2] = text_w(lab, fs) + 8
+                    box[5] = fs
+
+        # ---- relaxation: node clearance + label-label spread + canvas clamp.
+        import math
+        GAP = 6.0          # clearance between any two labels
+        NODE_CLR = 3.0     # extra so a label never touches a node's border
+        for _ in range(120):
             moved = False
+            # label <- unrelated + endpoint node clearance
+            for i, box in enumerate(boxes):
+                if box is None:
+                    continue
+                for nid, n in self.nodes.items():
+                    if n["kind"] == "dot":
+                        continue
+                    x0, x1 = lrange(box)
+                    y0, y1 = yspan(box)
+                    px = NODE_CLR
+                    nx0, ny0 = self.xl(nid), self.top(nid)
+                    nx1, ny1 = self.xr(nid), self.bottom(nid)
+                    if not (x0 < nx1 + 0.0 and nx0 < x1 + 0.0 and y0 < ny1 + 0.0 and ny0 < y1 + 0.0):
+                        continue
+                    # penetrate on each side (>=0 means no overlap on that side)
+                    dl = nx1 - x0      # push right by dl+px to clear left edge of node
+                    dr = x1 - nx0      # push left  by dr+px to clear right edge of node
+                    dt = ny1 - y0      # push down  by dt+px to clear top edge
+                    db = y1 - ny0      # push up   by dt (db=penetration from bottom)
+                    # smallest viable push wins; prefer vertical if similar (keeps label on its edge)
+                    pushes = [
+                        ("x", dl + px, 1.0),
+                        ("x", dr + px, 1.0),
+                        ("y", dt + px, 0.8),
+                        ("y", db + px, 0.8),
+                    ]
+                    pushes.sort(key=lambda t: t[1] * t[2])
+                    axis, dist, _ = pushes[0]
+                    if axis == "x":
+                        if dl < dr:
+                            box[0] += dl + px
+                        else:
+                            box[0] -= dr + px
+                    else:
+                        if dt < db:
+                            box[1] += dt + px
+                        else:
+                            box[1] -= db + px
+                    moved = True
+                    break
+            # label <- label spread
             for i in range(len(boxes)):
                 if boxes[i] is None:
                     continue
@@ -255,9 +375,13 @@ class Diagram:
                     if boxes[j] is None:
                         continue
                     bi, bj = boxes[i], boxes[j]
-                    dx = bj[0] - bi[0]
+                    ai0, ai1 = lrange(bi)
+                    aj0, aj1 = lrange(bj)
+                    ci = (ai0 + ai1) / 2
+                    cj = (aj0 + aj1) / 2
+                    dx = cj - ci
                     dy = bj[1] - bi[1]
-                    gx = abs(dx) - (bi[2] + bj[2]) / 2
+                    gx = abs(dx) - (ai1 - ai0) / 2 - (aj1 - aj0) / 2
                     gy = abs(dy) - (bi[3] + bj[3]) / 2
                     if gx < GAP and gy < GAP:
                         moved = True
@@ -273,23 +397,46 @@ class Diagram:
                             bj[1] += sgn * mov
             if not moved:
                 break
+        # final canvas clamp (anchor-aware, full extents, never negative)
         for box in boxes:
             if box is None:
                 continue
             bw, bh = box[2], box[3]
-            box[0] = min(max(box[0], bw / 2 + 2), W - bw / 2 - 2)
+            x0, x1 = lrange(box)
+            if x0 < 0:
+                box[0] += -x0
+            elif x1 > W:
+                box[0] -= (x1 - W)
             box[1] = min(max(box[1], bh / 2 + 2), Hh - bh / 2 - 2)
         return boxes
 
     def _elabel(self, p, e, box):
         lab = e["label"]
-        mx, baseline, bw, bh, anchor = box
+        mx, baseline, bw, bh, anchor, fs = box[0], box[1], box[2], box[3], box[4], box[5]
         p.append(f'  <text x="{mx:.0f}" y="{baseline:.0f}" text-anchor="{anchor}" '
-                 f'fill="{INK}" font-size="{EDGE_FS}">{esc(lab)}</text>')
+                 f'fill="{INK}" font-size="{fs}">{esc(lab)}</text>')
 
-    # --- verification -------------------------------------------------------
+    def _node_overlap(self, box, nid):
+        """Does this label box cover node nid's body?"""
+        bw, bh = box[2], box[3]
+        if self.nodes[nid]["kind"] == "dot":
+            return False
+        mx = box[0]
+        if box[4] == "end":
+            lx0, lx1 = mx - bw, mx
+        elif box[4] == "start":
+            lx0, lx1 = mx, mx + bw
+        else:
+            lx0, lx1 = mx - bw / 2, mx + bw / 2
+        ly0, ly1 = box[1] - bh / 2, box[1] + bh / 2
+        nx0, ny0 = self.xl(nid), self.top(nid)
+        nx1, ny1 = self.xr(nid), self.bottom(nid)
+        return lx0 < nx1 and nx0 < lx1 and ly0 < ny1 and ny0 < ly1
+
     def verify(self):
-        """Crude but real checks: text fits its node; nodes don't collide."""
+        """Crude but real checks: text fits its node; nodes don't collide;
+        edge labels clear canvas, nodes, and one another (the same resolved
+        positions the render draws, so a green verify means readable text)."""
         problems = []
         W, Hh = self._geom()
         for nid, n in self.nodes.items():
@@ -301,7 +448,6 @@ class Diagram:
                     ts = text_w(n["sub"], EDGE_FS)
                     if ts + 8 > n["w"]:
                         problems.append(f"{nid}: subline too wide for node")
-                # nothing may leave the canvas (stage-0 left clip, wide notes)
                 x0, y0 = self.xl(nid), self.top(nid)
                 x1, y1 = self.xr(nid), self.bottom(nid)
                 if n.get("note"):
@@ -318,23 +464,22 @@ class Diagram:
                 if o[0] < box[2] and box[0] < o[2] and o[1] < box[3] and box[1] < o[3]:
                     problems.append(f"overlap {nid} & {o[4]}")
             seen.append((*box, nid))
-        # edge labels: use the same resolved positions as the render, check
-        # viewBox clipping, node overlap, and label-vs-label collision.
         lboxes = self._label_boxes(W, Hh)
         for i, e in enumerate(self.edges):
             if not e["label"]:
                 continue
             box = lboxes[i]
             bw, bh = box[2], box[3]
-            lbox = (box[0] - bw / 2, box[1] - bh / 2, box[0] + bw / 2, box[1] + bh / 2)
+            if box[4] == "end":
+                lbox = (box[0] - bw, box[1] - bh / 2, box[0], box[1] + bh / 2)
+            elif box[4] == "start":
+                lbox = (box[0], box[1] - bh / 2, box[0] + bw, box[1] + bh / 2)
+            else:
+                lbox = (box[0] - bw / 2, box[1] - bh / 2, box[0] + bw / 2, box[1] + bh / 2)
             if lbox[0] < 0 or lbox[1] < 0 or lbox[2] > W or lbox[3] > Hh:
                 problems.append(f"label '{e['label']}' clipped by viewBox")
             for nid in self.nodes:
-                if nid in (e["a"], e["b"]):
-                    continue
-                nbox = (self.xl(nid), self.top(nid), self.xr(nid), self.bottom(nid))
-                if (lbox[0] < nbox[2] and nbox[0] < lbox[2]
-                        and lbox[1] < nbox[3] and nbox[1] < lbox[3]):
+                if self._node_overlap(box, nid):
                     problems.append(f"label '{e['label']}' overlaps node {nid}")
         for i in range(len(lboxes)):
             if lboxes[i] is None:
@@ -343,8 +488,18 @@ class Diagram:
                 if lboxes[j] is None:
                     continue
                 bi, bj = lboxes[i], lboxes[j]
-                li = (bi[0] - bi[2] / 2, bi[1] - bi[3] / 2, bi[0] + bi[2] / 2, bi[1] + bi[3] / 2)
-                lj = (bj[0] - bj[2] / 2, bj[1] - bj[3] / 2, bj[0] + bj[2] / 2, bj[1] + bj[3] / 2)
+                ai0, ai1 = (bi[0] - bi[2] / 2, bi[0] + bi[2] / 2)
+                aj0, aj1 = (bj[0] - bj[2] / 2, bj[0] + bj[2] / 2)
+                if bi[4] == "end":
+                    ai0, ai1 = bi[0] - bi[2], bi[0]
+                elif bi[4] == "start":
+                    ai0, ai1 = bi[0], bi[0] + bi[2]
+                if bj[4] == "end":
+                    aj0, aj1 = bj[0] - bj[2], bj[0]
+                elif bj[4] == "start":
+                    aj0, aj1 = bj[0], bj[0] + bj[2]
+                li = (ai0, bi[1] - bi[3] / 2, ai1, bi[1] + bi[3] / 2)
+                lj = (aj0, bj[1] - bj[3] / 2, aj1, bj[1] + bj[3] / 2)
                 if (li[0] < lj[2] and lj[0] < li[2]
                         and li[1] < lj[3] and lj[1] < li[3]):
                     problems.append(f"labels '{self.edges[i]['label']}' & "
