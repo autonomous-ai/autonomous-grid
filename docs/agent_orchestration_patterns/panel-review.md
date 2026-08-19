@@ -496,3 +496,35 @@ a draft line that said Command Code "publishes no open repo to anchor yet"
 
 **Commit/push.** `032de24` (initial provenance), then the Command Code
 correction in the same working round.
+
+---
+
+## Round 27 — "which exec seat for which shape" decider
+
+**Lens: software architecture + the user's explicit "when to use what" ask.**
+Round 26 grounded the seat-pool engines in provenance but they were still only
+*named* — nothing told a reader when to pick Aider over OpenCode over Command
+Code over Codex over Claude Code over Pi at the lane. Pattern 3 routes by
+*layer* (role → lane → gate, four lanes) and does not help choose among the
+coding engines that can all occupy the exec seat. That is the exact
+"understand their strengths and weaknesses and when to use what" the user
+asked for, so this round added a compact decider directly after the seat-pool
+sentence in the front matter.
+
+**What it says (each grounded in a verified differentiator):**
+- **Aider** (`aider-chat`) — thin, git-native pair-programming seat for an
+  experienced dev driving small-to-medium diffs.
+- **OpenCode** (`anomalyco/opencode`) — open terminal TUI; configurable,
+  auditable, hackable across many models.
+- **Command Code** (`command-code`) — the seat that *learns your taste*
+  (Taste compiler, portable `taste.md`).
+- **Codex vs Claude Code** — the two defaults split by reach: Codex the
+  supervised sandboxed exec + worktrees/PR pipelines (fleet), Claude Code the
+  ergonomic single-developer workspace (one repo done well).
+- **Pi** — minimal DIY seat (no permissions/plan/sub-agents); **Cursor/Devin**
+  — managed GUI/fleet ends when you hand the loop to a product, not a lane.
+
+**Verification.** Agent + model regens clean; geometry 0 issues; all 7 agent
+patterns structurally intact.
+
+**Commit/push.** `f0e71dd`.
