@@ -609,3 +609,36 @@ pipes/row); markdown globally balanced; both diagram regens green; geometry 0
 issues; structure intact.
 
 **Commit/push.** (R32 — this commit).
+
+## Round 33 — GoF lens: catalogs lacked per-pattern Applicability
+
+**Critique.** GoF's canonical skeleton places **Applicability** — a crisp
+"use it when / avoid it when" — right after *Motivation*, and both layers
+were missing it as a per-pattern section. The one-sentence tables held the
+"use it when" content in the front matter only; a reader who landed mid-pattern
+had no positive/negative fork. GoF pairs Applicability with the negative case
+from each pattern's own *Failure mode*, which is the signature move this
+catalog was still lacking.
+
+**Changes applied.**
+- Added a **Applicability** section to all 7 agent patterns, immediately after
+  *Motivation* and before *Structure* (per pattern: act-gate single-writer;
+  session residency; harness routing; canary/shadow; credential/tool-sink;
+  label-routing equity; only-one-ledger).
+- Each Applicability carries the positive ("use it when") and the negative
+  ("avoid it when") sourced from that pattern's own *Failure mode* — e.g. a
+  gate asserted in a prompt is a hope, not a gate.
+- Added **Applicability** to the "How to read a pattern" skeleton announcement
+  so the announced skeleton matches reality.
+
+**Verification.** 7 pattern sections intact; every pattern now has Intent ·
+AKA · Motivation · Applicability · Structure · Mechanics · Consequences ·
+Known Uses · Failure mode · Refinements · Sample Code · On the Grid stack ·
+Related Patterns in correct order (script-checked, all OK); markdown globally
+balanced (backtick/bold); blank-line spacing normalized before each Structure.
+
+**Open items.** Extend the same Applicability pass to the model layer (27
+patterns) — the positive halves are in its one-sentence table, the negatives in
+its Failure modes.
+
+**Commit/push.** (R33 — this commit).

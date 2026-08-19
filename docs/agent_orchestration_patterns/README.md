@@ -337,6 +337,8 @@ fixed and mean the same thing in every pattern:
   it by what you already call it.
 - **Motivation** — the concrete pressure that makes the pattern worth having;
   the failure it answers.
+- **Applicability** — the crisp “use it when / avoid it when” test, so you
+  can apply the pattern without first reading the whole entry.
 - **Structure** — the diagram and the parts it names.
 - **Mechanics** — how the parts collaborate: who decides, who waits, what
   crosses which edge.
@@ -445,6 +447,15 @@ agent write costs a file, an API call, a sent message. Every redundant agent
 that *can* act is an N× risk multiple you did not price, so the fan's risk
 must be independent of its size.
 
+**Applicability.** Use it when a fan spawns agents and more than one of them
+*can* touch the world, and you want the fan to grow without its risk growing
+with it — every redundant reader is fine only because it cannot act. Avoid it
+when the readers' read-only cannot be enforced by a mechanism: a gate asserted
+in a prompt (a harness that can still `git push`) is a hope, not a gate, and it
+turns the fan into N actors wearing N−1 masks. And there must be one
+idempotent, `round_id`-keyed mutation to hand the single actor — no key, no
+gate.
+
 **Structure.** Coral `job` in, a dot where the fan splits, N−1 green
 read-only sessions, a purple `select`, one green `actor` below it, and the
 coral exit is the one `act` step — a single idempotent mutation, keyed by
@@ -542,6 +553,15 @@ any single read it performs. Left unmanaged, that state is a leak — a
 resident session that is never killed is a politely-named resource leak on a
 1-seat box. Managed, it is a cache: a `round_id`-frozen snapshot you can
 restore in a context swap instead of paying a cold start.
+
+**Applicability.** Use it when a session's context must outlive the request —
+and ideally the crash — and warm-state reuse is cheaper than a cold start, so
+the four transitions (spawn, warm, handoff, kill) earn their management. Avoid
+it when the traffic is stateless one-shot reads: a cold start is fine and a
+resident session that is never killed is a politely named leak. And use
+handoff sparingly — it is a genuine primitive only within the same harness;
+cross-lane "handoff" is a restart, and pricing it as a free context move
+over-claims the pattern.
 
 **Structure.** Coral `job` in, one green `seat` (the resident session) at the
 center, and the four transitions as purple decisions fanned out above and
@@ -645,6 +665,13 @@ a bounded, scriptable coding task goes to the exec seat. The *model* inside
 the lane is the second question. Route by the model and you'll put a
 verifiable job on a lane whose act-gate you can't actually enforce.
 
+**Applicability.** Use it when the task is agent-shaped and the harness is
+part of the decision — the act contract, the residency, then the model decide
+which lane carries it. Avoid it when the task is a pure model read with no
+session to hold: route that at the model layer, not here. And don't read the
+lane table as a menu of warm seats — a 1–2-seat box does not hold five lanes;
+each row is "role → lane → the model that fits *if* it is the resident one."
+
 **Structure.** Coral `job` in, a purple `pick lane` (residency first), four
 green lanes — Codex exec (bounded coding), Claude Code (open work), Hermes ACP
 (verifiable), OpenClaw fan (N copies) — each flowing to the coral `answer`.
@@ -743,6 +770,14 @@ lands. On a 1–2-seat box there is no such machine until the seat itself is the
 executor, with preemption and a residency bound. No agent-layer pattern that
 promises background work is real until this exists.
 
+**Applicability.** Use it when canaries, warming, or shadow admission assume
+background work that must yield to a deadline-bearing request — the executor is
+only real once the seat itself carries preemption and a residency bound. Avoid
+it when you can't name the idle threshold, the preemption trigger, the residency
+bound, and the snapshot destination: until those are numbers, "runs in the
+background" is a mandate, not a spec, and the box either starves the live
+request or starves the cache.
+
 **Structure.** Two rows. The live row on top: coral `job` → green `live`
 (request, deadline-bearing) → coral `answer`. The background row beneath:
 green `background jobs` (shadow · warm · probe — one pool, varies by job) →
@@ -832,6 +867,14 @@ being admitted can now touch the world. A new coding engine that gets an act
 step on day one is an N× risk multiple with no reputation — the exact thing
 #1 exists to prevent, at admission time instead of per-request.
 
+**Applicability.** Use it when a harness, a credential scope, or a tool-sink
+you don't yet trust must earn the act step — shadow read-only first, then
+bounded act, then full act, scored against a ground-truth authority. Avoid it
+when there is no new actor to admit (trust is uniform), and *especially* when
+the authority isn't grounded: if #6 is an ungrounded vote, the shadow scores
+against noise and the bar certifies promotion of whatever flatters the
+verifier.
+
 **Structure.** Coral `job` in, splitting into a green `resident` (live
 traffic) and a green `new harness` (shadow, read-only shells only, dashed
 edge) — both flowing to a purple `score` (against the ground-truth authority),
@@ -918,6 +961,14 @@ as the workers — it confirms the shared session, not the fact. Where the layer
 can, verify against a deterministic external fact — a test pass, a schema
 check. Those anchor the verdict outright; they do not depend on the model's
 prior.
+
+**Applicability.** Use it when a label changes routing, equity, or admission
+and an external deterministic fact — a test pass, a schema check — can certify
+it. The verifier outranks any session's report because it shares none of the
+workers' prior. Avoid it when no mechanical check exists: the weak, consensus
+arm may *propose* and log a judgment call, but never certify it — certifying
+from a shared session is two runs of one prior agreeing, unanimous-but-wrong
+in a lab coat.
 
 **Structure.** Coral `job` in, a green `draft` (one try), a purple `check`
 (test · schema — a fact) on the main row to the coral `answer` (certified).
@@ -1021,6 +1072,13 @@ ledger per harness+class, the act log — all `round_id`-stamped events in that
 one truthful log. A session's action, a canary graduation, an act-gate denial
 are *events*, not silent state mutations; a replay must reproduce the actual
 path a request took, including which agent acted and when.
+
+**Applicability.** Use it when the act log, context snapshots, and per-harness
+reputation must survive the box that wrote them and you can hold exactly one
+writer — one fsync'd, `round_id`-stamped log, exported off-box on a cadence.
+Avoid it when "only truth" collapses into "only copy": a single box that never
+exports is a single point of total loss, and replay-from-log is impossible when
+the log itself dies.
 
 **Structure.** Three green events — `act`, `graduation`, `denial` — converging
 on a purple `append` (round_id-stamped events), into a stacked-deck `WAL`
