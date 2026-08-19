@@ -345,10 +345,7 @@ for a genuinely independent read. Only then does the router pass one concrete
 patch through to **Claude Code (stream-json)** with tools enabled for the one
 write step, and only that actor holds the approval to open the network for the
 one `git push`. The fan is N=4: three readers plus a separate actor — the N−1
-arithmetic is 3 losing + 1, one seat, serial swaps. Give the readers no
-credential-bearing mounts; that bounds the credential path, not the whole leak
-surface, so treat anything they read as exposed. The `git push` is the one
-idempotent mutation, `round_id`-keyed so a retry pushes once. And the fan
+arithmetic is 3 losing + 1, one seat, serial swaps. And the fan
 needs a number or "fan it" has no bound an operator can trust overnight: a
 **seat-seconds / serial-swap budget keyed on distinct model loads, not worker
 count** — `swap_cost × (distinct models touched)`, because same-model members
