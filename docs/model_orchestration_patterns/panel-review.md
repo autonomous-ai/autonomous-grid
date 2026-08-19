@@ -323,3 +323,38 @@ same-line headers.)
 all 27 skeletons complete. Word count identical before/after (27187 = 27187)
 and diff is 49/49 lines = pure reorder, zero content change — every fact
 preserved.
+
+---
+
+## Round 12 — GoF Sample Code: complete the catalog (all 27)
+
+**Critique (GoF lens).** The book's *Sample Code* — a compact, parameter-
+named sketch added to every pattern — is one of its most-used sections, but
+this catalog only had it in the 7-pattern agent catalog (done earlier) and the
+first 19 model patterns. Patterns #20–#27 were the gap, exactly the machinery
+patterns where a runnable-in-spirit sketch (fail-fast breaker, anonymous
+median rounds, pre-registered evidence barrier, consequence-priced shelf,
+screening battery, pairwise tournament, slack steal, posterior draw) most
+helps a practitioner.
+
+**Changes applied.** Added **Sample Code** to the final eight model patterns
+(#20 Circuit Breaker+Bulkhead, #21 Delphi, #22 Trial Sequential, #23
+Evidence-Bar Ladder, #24 Screening, #25 Condorcet, #26 Slack-Stealing, #27
+Thompson Router), each inserted between `Refinements`/`Consequences` and `On
+the Grid stack`, matching the announced skeleton and the established header/
+comment-caveat style. Every snippet carries the pattern's honest caveat in a
+comment (grounded → measured threshold; single-node → bulkhead is a fiction;
+refusal → never front-run a streak; screening → only in idle + <2 resident
+refuses; condorcet → never tally over N−1; slack → idlers only in the slack
+window; thompson → only verified tool-grounded labels).
+
+**Verification.** `ast.parse` on all 27 fences: no SyntaxError. Triple-backtick
+balance: even. No 4+-blank-line artifacts. Section-order audit: `NONE` out of
+order across all 27 (Sample Code sits before `On the Grid stack` in every
+pattern). All 27 model patterns now carry Sample Code (100%), matching the
+agent catalog's 7/7.
+
+**Round 12 finding.** The model catalog is now prose + figure + sample-code
+complete for every pattern. Remaining candidate work: a "Known Uses" column
+in the GoF sense (real deployments per pattern), and re-running the cross-
+catalog audits after the rename.
