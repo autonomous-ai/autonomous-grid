@@ -236,14 +236,26 @@ def home_directory() -> Path:
     return home
 
 
-def preflight() -> None:
+def preflight(task_root: Path | None = None) -> None:
     """Check what `policy()` will need, early enough to be worth reporting.
 
     `policy()` runs from `agent_argv`, which is built AFTER the task's checkout — so without this a
     provider with a broken `HOME` fetches a repository, links a transcript, and only then fails with
     a message about the task runner. Called from `task_agent.preflight()`.
+
+    `task_root` is passed IN rather than read here, for `_task_root_of`'s reason: `task_agent`
+    imports this module, so asking it for `workspace_root()` would close a cycle. `None` skips that
+    one check rather than guessing, which keeps every existing caller honest.
+
+    ⚠️ **The configuration check runs BEFORE the socket proof**, which binds real sockets: an
+    operator whose `GRID_TASK_ROOT` is in the wrong place should be told that, not made to wait on
+    an unrelated probe that is about to succeed anyway.
     """
     home_directory()
+    if task_root is not None:
+        _refuse_a_path_inside_a_denied_tree(
+            f"{WORKSPACE_ROOT_HINT}", _resolved(task_root),
+            [_resolved(home_directory()), _resolved(paths.grid_home())], SystemExit)
     _prove_the_sandbox_can_bind_its_sockets()
 
 
@@ -367,6 +379,54 @@ def _read_rule(path: str) -> str:
     return f"Read(/{path}/**)"
 
 
+def _denied_ancestor(path: str, denied: list[str]) -> str | None:
+    """The denied tree `path` sits inside, or `None`. Both sides must already be `_resolved`.
+
+    Equality counts: a workspace that IS a denied directory is inside it for every purpose here.
+    """
+    target = Path(path)
+    for tree in denied:
+        parent = Path(tree)
+        if target == parent or parent in target.parents:
+            return tree
+    return None
+
+
+def _refuse_a_path_inside_a_denied_tree(what: str, path: str, denied: list[str], raise_as):
+    """ND-01 — the two layers disagree about a path under a denied tree, and only one says so.
+
+    `policy` builds two controls over the same paths. The sandbox's `filesystem` block has
+    `denyRead` **and** `allowRead`, and there the allow really does win: a workspace under a denied
+    `$HOME` stays readable, and `tests/e2e_agent_sandbox.py` measured that against the real binary.
+    The `permissions` block has **only** `deny`, because Claude Code's permission layer has no allow
+    that beats one — so the same workspace is covered by `Read(//$HOME/**)` with nothing to
+    re-allow it.
+
+    MEASURED 2026-08-20 on Claude Code 2.1.234, two arms, same prompt and same project shape: with
+    the root inside `$HOME` the `Write` tool returns `is_error: true` and the agent says so in its
+    own words (*"blocked by a Read deny rule in your permission settings"*), then works around it
+    with a shell redirect — 5 turns, 24 s. With the root outside, `Write` succeeds first time —
+    3 turns, 15 s. **The task reports `completed` either way**, so the whole cost is invisible: a
+    less capable agent fails a task that should have run, and nothing anywhere says why.
+
+    ⚠️ **Refused rather than repaired, because the repair is not available.** The obvious fix —
+    drop the ancestor from `denyRead` to make room for the workspace — is only sound for the sandbox
+    layer. In the `permissions` layer it would hand the in-process `Read` tool the operator's whole
+    home directory, which is the hole that layer exists to close (measured: without it, a run with
+    the entire sandbox above still read a file outside the workspace). So the configuration is
+    refused, loudly, at the two places that can see it.
+    """
+    inside = _denied_ancestor(path, denied)
+    if inside is None:
+        return
+    raise raise_as(
+        f"{what} {path} is inside {inside}, which the agent sandbox denies. The sandbox itself "
+        f"would re-allow the workspace, but the permission layer that governs the Write tool has "
+        f"no allow that beats a deny — so the agent would silently lose Write, work around it, and "
+        f"still report success. Point {WORKSPACE_ROOT_HINT} at a directory outside {inside} "
+        f"(for example /Users/Shared/gnd on macOS, or /var/grid on Linux).")
+
+
 _WARNED_ABOUT: set[str] = set()
 
 
@@ -418,6 +478,10 @@ def policy(workspace: Path, config_dir: Path) -> dict:
     _warn_if_the_path_is_long_enough_to_break_exec(workspace_path)
     home = home_directory()
     denied = [_resolved(home), _resolved(paths.grid_home()), _resolved(config_dir)]
+    # ⚠️ ND-01. The invariant is checked HERE, where the two lists are built and where the
+    # disagreement between them lives — the argument `task_agent._safe_segment` makes for validating
+    # a path at the point it is constructed rather than at each caller.
+    _refuse_a_path_inside_a_denied_tree("the task workspace", workspace_path, denied, ValueError)
     # The workspace is re-allowed explicitly, and it matters on a dev box: `GRID_TASK_ROOT` may sit
     # under the home directory that was just denied, and `allowRead` is what takes precedence.
     allowed = [workspace_path]

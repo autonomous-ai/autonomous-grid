@@ -733,7 +733,9 @@ def preflight() -> None:
     permission_mode()
     _passthrough_env_names()
     if task_sandbox.enabled():
-        task_sandbox.preflight()
+        # The root is handed over rather than read there: `task_sandbox` cannot import this module
+        # (it would close a cycle), and this is the one caller that already knows the answer.
+        task_sandbox.preflight(task_root=workspace_root())
 
 
 def _require_version_for_the_sandbox(binary: str) -> None:
