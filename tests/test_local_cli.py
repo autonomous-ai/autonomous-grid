@@ -35399,6 +35399,10 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
     # positional for argparse to place ambiguously, and `project_arg` needs no new shape for it.
     (["project", "rename", "P1", "--name", "billing"],
      ["project", "rename", "--project", "P1", "--name", "billing"]),
+    # ADR 0035 D-b / issue 56. `--yes` is carried in both rows because it is REQUIRED — the command
+    # never asks (D-g) — and a row that parsed without it would be pinning a spelling nobody can
+    # actually run. It is a flag with no value, so it places no positional and needs no new shape.
+    (["project", "leave", "P1", "--yes"], ["project", "leave", "--project", "P1", "--yes"]),
     (["project", "member", "list", "P1"], ["project", "member", "list", "--project", "P1"]),
     (["project", "member", "add", "P1", "--email", "a@b.c"],
      ["project", "member", "add", "--project", "P1", "--email", "a@b.c"]),
@@ -37488,3 +37492,208 @@ def test_a_usage_error_without_json_prints_no_envelope(monkeypatch, tmp_path, ca
         cli.main(["task", "list", "--no-such-flag"])
 
     assert "{" not in capsys.readouterr().err
+
+
+# --- ADR 0035 D-b … D-g / issue 56: `grid project leave` ---
+#
+# One route, no body, and the caller is resolved from the token — so unlike every other project
+# command there is nothing here for a client to look up first. `--yes` is a FLAG and not a prompt,
+# for the reason `project_delete`'s `--json` branch records the hard way: a confirm somebody
+# declines exits 0, and 0 on this plane means *done*.
+
+
+def _leave_reply(project_id="P1", member_key="abc123"):
+    return {"left": True, "project_id": project_id, "member_key": member_key}
+
+
+def test_project_leave_posts_to_the_leave_route_with_no_body(monkeypatch, tmp_path, capsys):
+    """The tracer bullet. The point of the route is that the caller names only the project.
+
+    A `member_key` in this request would mean the CLI had to learn one first — `grid project member
+    list`, find your own email, copy 32 hex characters — which is the three-step workaround this
+    command exists to delete, surviving into the fix meant to remove it (ADR 0035 D-b).
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = request.content
+        return httpx.Response(200, json=_leave_reply())
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "leave", "P1", "--yes"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/leave")
+    # ⚠️ `httpx` hands this back as BYTES. `str(...)` renders `b''`, which is truthy and is not
+    # `""`, so an assertion written the obvious way passes for every body and fails for none — the
+    # trap `test_nothing_about_default_ever_reaches_the_relay` records for a query string.
+    assert seen["body"] == b"", seen["body"]
+    out = capsys.readouterr().out
+    assert "P1" in out, out
+
+
+def test_leave_without_yes_sends_nothing_at_all(monkeypatch, tmp_path, capsys):
+    """⚠️ A flag and NOT a prompt, and the exit code is the reason (ADR 0035 D-g).
+
+    `grid project delete` asks and falls back to `--yes`. This one cannot: `system.confirm` answers
+    False for EOF and for Ctrl-C, and a declined confirm returns **0** — which on this plane means
+    *done*. A script driving the CLI would read a refused departure as a completed one, and the
+    person is still in a project their tooling believes they left.
+
+    "Sends nothing" is asserted rather than assumed, because a refusal that fired *after* the
+    request would be the same failure wearing a message.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    sent = []
+
+    def handler(request):
+        sent.append(request.url.path)
+        return httpx.Response(200, json=_leave_reply())
+
+    _mock_relay(monkeypatch, handler)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "leave", "P1"])
+
+    assert sent == [], f"it refused, but only after asking the relay to do it: {sent}"
+    message = str(caught.value)
+    assert caught.value.code != 0, "declining and leaving must not be the same exit code"
+    assert "--yes" in message, message
+    # The refusal IS the confirmation text — the only moment this command has to say the part
+    # somebody cannot see coming.
+    assert "grid task list" in message, (
+        f"nothing warned that leaving takes your own history with you: {message!r}")
+
+
+def test_leave_without_yes_under_json_refuses_and_sends_nothing_too(monkeypatch, tmp_path, capsys):
+    """`--json` is the mode an application drives, and it is where `grid project delete`'s first
+    version exited 0 with an interactive prompt on stdout. There is nobody to ask and no flag to
+    infer, so the answer is the same refusal — with the sentence where a program can read it."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    sent = []
+    _mock_relay(monkeypatch, lambda r: (sent.append(r.url.path),
+                                        httpx.Response(200, json=_leave_reply()))[1])
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "leave", "P1", "--json"])
+
+    assert sent == [], sent
+    assert caught.value.code != 0
+    envelope = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert "--yes" in envelope["error"]["message"], envelope
+
+
+@pytest.mark.parametrize("body", [{}, {"left": False}, {"left": "true"}, {"left": None},
+                                  {"project_id": "P1"}], ids=["absent", "false", "string", "null",
+                                                              "other-keys"])
+@pytest.mark.parametrize("extra", [[], ["--json"]], ids=["plain", "json"])
+def test_a_reply_that_does_not_say_you_left_is_never_reported_as_leaving(
+        monkeypatch, tmp_path, capsys, body, extra):
+    """The house guard, and `--json` is half of what it is for (ADR 0034 D-m, issue 46).
+
+    Emitted then validated, never returned on: in the two commands this one is modelled on the guard
+    was unreachable under `--json`, which is the one mode an application drives — so a body that
+    never confirmed anything exited 0 there.
+
+    `is not True` and never a truthiness test: `"true"` is a string a relay could plausibly send and
+    is truthy, and reporting it as a departure leaves somebody no longer watching a project they are
+    still in, while their colleagues go on sending them work.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "leave", "P1", "--yes", *extra])
+
+    assert caught.value.code != 0, capsys.readouterr()
+    assert "did not say you had left" in str(caught.value), str(caught.value)
+
+
+def test_an_old_relay_says_what_the_silence_means_and_names_the_way_out(monkeypatch, tmp_path):
+    """A new ROUTE degrades LOUDLY — a bare framework 404 — which is exactly why ADR 0035 D-b chose
+    one over relaxing `DELETE …/members/{member_key}`.
+
+    ⚠️ It must not be `_OLD_RELAY`, which says the relay has no projects at all: this relay has the
+    whole project plane and is missing one route, and that sentence sends somebody to check a
+    feature that is working perfectly. And it has to say the person is STILL A MEMBER — the whole
+    value of a loud degrade is that nobody is left guessing which side of the change they are on.
+    """
+    from remote import relay
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "leave", "P1", "--yes"])
+
+    assert str(caught.value) == relay._OLD_RELAY_NO_LEAVE
+    assert str(caught.value) != relay._OLD_RELAY
+    assert "still a member" in str(caught.value), str(caught.value)
+    assert "grid project member remove" in str(caught.value), (
+        "the one sentence a member gets on an old relay does not name the way off the project")
+
+
+@pytest.mark.parametrize("status, code, message", [
+    (422, "owner_cannot_be_removed",
+     "The project's owner cannot be removed from it — use grid project archive P1"),
+    (409, "project_is_grid_visible",
+     "Project P1 is reachable by everyone on this grid, so leaving would revoke nothing"),
+])
+def test_the_relays_two_refusals_reach_the_person_verbatim(
+        monkeypatch, tmp_path, status, code, message):
+    """⚠️ **No fourth parsed refusal code** (ADR 0035 D-g). Exactly three codes are read anywhere
+    across the two repositories, and keeping the count that low is itself the contract: each relay
+    message already names the way forward, and a fourth reader is a fourth thing a reworded relay
+    could break.
+
+    So what is pinned here is that the relay's own sentence arrives unedited. A CLI that branched on
+    either code would be free to rewrite it, and the day the relay reworded one, this command would
+    start explaining the wrong thing with nothing red anywhere.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(
+        status, json={"detail": {"code": code, "message": message}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "leave", "P1", "--yes"])
+
+    assert str(caught.value) == message, str(caught.value)
+
+
+def test_leaving_says_what_it_did_not_do(monkeypatch, tmp_path, capsys):
+    """"Leave" is a word people expect to be destructive, and it is not (ADR 0035 D-c): no task is
+    cancelled and nothing of theirs is collected.
+
+    Somebody who believes it stopped their running task will not go and stop it — so the output says
+    so, and names the owner as the only one who can put them back rather than offering them a
+    command they would be refused for.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_leave_reply()))
+
+    assert cli.main(["project", "leave", "P1", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "finishes normally" in out, out
+    assert "grid task list" in out, f"nothing said where their own history went: {out!r}"
+    assert "owner" in out, out
+
+
+def test_leaving_under_json_prints_the_relays_document_and_nothing_else(monkeypatch, tmp_path,
+                                                                       capsys):
+    """stdout stays one parseable thing — `cli/json_error.py`'s contract."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_leave_reply()))
+
+    assert cli.main(["project", "leave", "P1", "--yes", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == _leave_reply()

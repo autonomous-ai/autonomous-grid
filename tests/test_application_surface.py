@@ -60,7 +60,7 @@ APPLICATION_SURFACE = frozenset({
     "grid project create", "grid project list", "grid project status",
     "grid project files", "grid project file", "grid project download",
     "grid project archive", "grid project unarchive", "grid project delete",
-    "grid project share", "grid project private", "grid project rename",
+    "grid project share", "grid project private", "grid project rename", "grid project leave",
     "grid project member list", "grid project member add", "grid project member remove",
 })
 
@@ -113,6 +113,7 @@ _HANDLER_MODULES = (
     "cli/project_archive.py",
     "cli/project_visibility.py",
     "cli/project_rename.py",
+    "cli/project_leave.py",
     "cli/json_error.py",
 )
 

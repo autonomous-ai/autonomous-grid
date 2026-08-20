@@ -1960,7 +1960,11 @@ def test_every_command_this_cli_tells_you_to_run_actually_parses():
     # and its hint is the harder one: it offers `grid project rename <id> --name <old>`, which has a
     # REQUIRED flag — exactly the shape that produced three of the four defects this test was
     # written for.
-    from cli import project_archive, project_rename, remote_project, remote_task
+    # `project_leave` (ADR 0035 D-b, issue 56) joins them, and it is the shape that produced three
+    # of the four defects this test was written for: the line it prints is the OWNER's
+    # `grid project member add <id> --email <address>`, which has a required flag AND a free-text
+    # value after it.
+    from cli import project_archive, project_leave, project_rename, remote_project, remote_task
 
     def printed_strings(module) -> list[str]:
         """Every literal a `print(...)` in this module emits, with each `{...}` as one token."""
@@ -1978,7 +1982,7 @@ def test_every_command_this_cli_tells_you_to_run_actually_parses():
         return out
 
     hints = []
-    for module in (project_archive, project_rename, remote_project, remote_task):
+    for module in (project_archive, project_leave, project_rename, remote_project, remote_task):
         for text in printed_strings(module):
             found = re.search(r"grid (?:task|project) [a-z][^\n]*", text)
             if found:
@@ -2318,6 +2322,92 @@ def test_the_relay_still_refuses_a_rename_from_anybody_but_the_owner():
     assert "refuse_if_archived" in body, (
         "the rename route no longer refuses an archived project (ADR 0035 D-f), and "
         "`grid project rename --help` in this repository still says it does")
+
+
+def test_the_leave_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0035 D-b (issue 56): `POST /relay/v1/projects/{project_id}/leave`.
+
+    The path is the whole contract here — there is no body and no `member_key`, which is the point
+    of the route — and a drift is silent in the worst direction, the one issues 45 and 47 record:
+    this CLI would post to a path the relay does not serve, get FastAPI's bare 404, and
+    `missing_route_hint` would turn it into `_OLD_RELAY_NO_LEAVE` about a relay that is perfectly up
+    to date. That sentence tells the member *you are still a member* and sends them to the project's
+    owner — so a typo in this repository would deliver, in full sincerity, the exact dead end this
+    command was written to remove.
+    """
+    from remote import relay
+
+    assert _client_paths(relay.leave_project) <= _served("project_leave.py", "{project_id}"), (
+        f"this CLI leaves at {sorted(_client_paths(relay.leave_project))}, which grid-src's "
+        f"project_leave.py does not serve")
+
+
+def test_the_leave_reply_still_says_the_caller_left():
+    """`left`, and it raises **nowhere** — which is why it is pinned here.
+
+    `cli/project_leave.py` refuses to report a departure the relay did not confirm, keyed on
+    `answer.get("left") is not True`. Drop the key on the relay and every landed leave is reported
+    as a FAILURE — the member is told they may still be a member of a project they have just left,
+    and the remedy the refusal names (`grid project list`) agrees with the relay rather than with
+    the CLI, so nothing anywhere connects the two. Both suites stay green.
+
+    Read out of the route's own strings rather than restated, and paired with the reader whose
+    behaviour it protects, so the two spellings cannot drift apart.
+    """
+    from cli import project_leave  # noqa: F401  — the reader whose behaviour this protects
+
+    route = _relay_function_strings("leave_project", module="project_leave.py")
+    assert "left" in route, (
+        "grid-src's leave route no longer answers with `left`, so `grid project leave` refuses "
+        "every successful departure as an answer it cannot read")
+
+
+def test_the_two_removal_routes_still_share_one_implementation():
+    """⚠️ **Issue 56's first acceptance criterion, checked from this side**, because this is the
+    repository that pays for it being wrong.
+
+    `DELETE …/members/{member_key}` and `POST …/leave` mean the same thing to a project and differ
+    only in who may ask. Two spellings of "remove a member" is the two-authorization-models failure
+    this plane keeps warning about, and the grid-visible refusal is the one nobody would think to
+    copy: on a grid-visible project the membership row is not what grants access, so removing it
+    revokes nothing and the next request mints it straight back with an identical key.
+
+    A copy that lost that refusal answers **200** to `grid project leave`, and this CLI would print
+    "You have left project P1" over a departure that did not happen — a reply that says what the
+    caller asked for is not evidence the caller got it. Nothing here can see that, which is exactly
+    why the structure is pinned rather than the behaviour.
+    """
+    import ast
+
+    source = _relay_module("project_leave.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+
+    route = next((n for n in ast.walk(ast.parse(source.read_text()))
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == "leave_project"), None)
+    assert route is not None, (
+        "grid-src's project_leave.py no longer has a `leave_project` route, so this check reads "
+        "nothing")
+
+    body = ast.unparse(route)
+    assert "remove_membership" in body, (
+        "grid-src's leave route no longer calls the shared `projects.remove_membership`, so this "
+        "plane now has two opinions about what removing a member means — and the one this CLI "
+        "reaches is the copy, which is where the grid-visible refusal goes missing first")
+    assert "refuse_unless_reachable" in body, (
+        "grid-src's leave route no longer runs the project-shaped 404 first, so it can tell a "
+        "stranger whether a project id is real — on the one route in this plane that needs no "
+        "setup at all to call")
+    # ⚠️ The ABSENCE, and it is a decision rather than an oversight (ADR 0035 D-f). The rule that
+    # recruits a route into `project_writable` — *does it move a ref or write a row?* — would take
+    # `leave`, and it has already pulled in two routes nobody thought of. Refusing it would trap a
+    # member in a project nobody is working in and make them ask its owner to REOPEN the project
+    # purely so they could walk away from it. `grid project leave --help` here promises otherwise.
+    assert "refuse_if_archived" not in body, (
+        "grid-src's leave route now refuses an archived project, which ADR 0035 D-f decides "
+        "against — a member would have to ask the owner to unarchive a project in order to leave "
+        "it, and `grid project leave --help` in this repository says archiving does not stop them")
 
 
 def test_a_project_you_are_not_a_member_of_can_never_read_as_yours():

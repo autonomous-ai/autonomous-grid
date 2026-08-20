@@ -650,6 +650,35 @@ def _add_project(sub) -> None:
     privater.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     privater.set_defaults(handler=cmd_remote_project)
 
+    # ADR 0035 D-b / issue 56 — the member's own way off a project. Registered immediately before
+    # the `member` group because it is the counterpart to `member remove` down there: the two mean
+    # the same thing to the project, and only who may ask differs. A person reading `member remove`
+    # and finding it is the owner's should see this on the same screen.
+    leaver = project_sub.add_parser(
+        "leave",
+        help="Take yourself off a project",
+        description=(
+            "Leave a project you are a member of. You do not need the owner to do it for you.\n\n"
+            "Nothing of yours is stopped or thrown away: any task you have already asked for runs "
+            "and finishes normally. What changes is that the project stops answering to you — you "
+            "can no longer read it, send it work, or see its tasks.\n\n"
+            "YOUR TASKS IN IT LEAVE `grid task list` WITH YOU, and only the project's owner can "
+            "put you back. That is why --yes is required: this command never asks.\n\n"
+            "The owner of a project cannot leave it — nobody could reach it afterwards, and there "
+            "is no way to hand it over. Use `grid project archive` to stop it accepting work, or "
+            "`grid project delete` to remove one that holds nothing."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(leaver)
+    # ⚠️ **Required, with no interactive fallback** (ADR 0035 D-g), unlike `delete` above. A confirm
+    # somebody declines exits 0, and 0 on this plane means *done* — so a script would read a refused
+    # departure as a completed one. The refusal without it is where the warning lives.
+    leaver.add_argument(
+        "--yes", action="store_true",
+        help="Required. Says you meant it — this command never asks.")
+    leaver.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    leaver.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    leaver.set_defaults(handler=cmd_remote_project)
+
     member = project_sub.add_parser("member", help="List, add and remove project members")
     member_sub = member.add_subparsers(dest="member_action", required=True)
 
