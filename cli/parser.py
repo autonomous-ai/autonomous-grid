@@ -593,6 +593,30 @@ def _add_project(sub) -> None:
     remover.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     remover.set_defaults(handler=cmd_remote_project)
 
+    # ADR 0035 D-a / issue 55 — changing what a project is called. Registered next to the lifecycle
+    # verbs above because it answers a neighbouring question about the same row: a person tidying up
+    # is often renaming and archiving in the same sitting.
+    renamer = project_sub.add_parser(
+        "rename",
+        help="Change what a project is called",
+        description=(
+            "Give a project a different name.\n\n"
+            "Its id does not change, so every clone, script and saved link still reaches it — the "
+            "new name appears in `grid project list` and nowhere else has to be updated.\n\n"
+            "This is what to use instead of creating a project with the new name. `grid project "
+            "create` finds a project BY name, so creating one with a new name gives you a second, "
+            "empty project and leaves your work in the first.\n\n"
+            "Owner only, and refused while the project is archived — unarchive it first. The old "
+            "name becomes free the moment this succeeds."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    project_arg.add_project(renamer)
+    renamer.add_argument(
+        "--name", required=True,
+        help="What to call it from now on.")
+    renamer.add_argument("--grid", default=None, help="Grid to act on (default: active grid).")
+    renamer.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    renamer.set_defaults(handler=cmd_remote_project)
+
     # ADR 0034 D-k / issue 36 — who on the grid may reach a project. Registered next to the
     # lifecycle verbs above because they answer neighbouring questions about the same row, and a
     # person deciding to archive a project is often deciding who should see it.

@@ -35394,6 +35394,11 @@ _BOTH_SPELLINGS: list[tuple[list[str], list[str]]] = [
     # count assertion below is for.
     (["project", "share", "P1"], ["project", "share", "--project", "P1"]),
     (["project", "private", "P1"], ["project", "private", "--project", "P1"]),
+    # ADR 0035 D-a / issue 55. ⚠️ `--name` is a REQUIRED flag rather than a second positional, so
+    # `rename` is the `member add` shape and not the `member remove` one: there is no lone
+    # positional for argparse to place ambiguously, and `project_arg` needs no new shape for it.
+    (["project", "rename", "P1", "--name", "billing"],
+     ["project", "rename", "--project", "P1", "--name", "billing"]),
     (["project", "member", "list", "P1"], ["project", "member", "list", "--project", "P1"]),
     (["project", "member", "add", "P1", "--email", "a@b.c"],
      ["project", "member", "add", "--project", "P1", "--email", "a@b.c"]),
@@ -35999,6 +36004,510 @@ def test_project_share_claims_the_widening_when_the_relay_does_serve_it(
     out = capsys.readouterr().out
     assert "Anyone signed in to this grid can now work in it" in out, out
     assert "does not share projects grid-wide" not in out, out
+
+
+# --- ADR 0035 D-a / D-g / issue 55: `grid project rename` ---
+#
+# One route, and the reply carries `previous_name` beside the new one. That key is what lets this
+# CLI warn about `default` in BOTH directions — the relay deliberately knows nothing about that
+# convention (ADR 0033 D-o), so the whole rule lives on this side and every test below asserts the
+# request body stayed `{"name": ...}` alone.
+
+
+def test_project_rename_posts_the_new_name_and_prints_the_id_that_did_not_change(
+        monkeypatch, tmp_path, capsys):
+    """The tracer bullet. One route, the name in the body, and the **id** in the output.
+
+    Printing the id is not decoration: a rename FREES the old name, and `grid project create` is
+    create-or-get by name — so a colleague whose script still says the old one now gets a new, empty
+    project. The id is the address that did not change, which is the only mitigation there is.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "id": "P1", "name": "billing", "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "grid", "previous_name": "scratch"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert rc == 0
+    assert (seen["method"], seen["path"]) == ("POST", "/relay/v1/projects/P1/name")
+    assert seen["body"] == {"name": "billing"}, seen["body"]
+    out = capsys.readouterr().out
+    assert "P1" in out, out
+    assert "billing" in out, out
+    assert "scratch" in out, f"the name it used to have is not shown: {out!r}"
+
+
+def _rename_reply(previous, name="billing"):
+    return {"id": "P1", "name": name, "owner_id": "alice", "created_at": None,
+            "archived": False, "visibility": "grid", "previous_name": previous}
+
+
+@pytest.mark.parametrize("previous,new,expected", [
+    ("default", "billing", "refuse"),          # renaming AWAY from it — the shorthand stops working
+    ("scratch", "default", "land work here"),  # renaming TO it — the shorthand starts working
+])
+def test_renaming_to_or_from_default_says_what_it_does_to_a_projectless_task_create(
+        monkeypatch, tmp_path, capsys, previous, new, expected):
+    """ADR 0035 D-g, and it has to fire in BOTH directions because they break differently.
+
+    `grid task create` with no --project looks up the caller's own project called `default`
+    (ADR 0033 D-o). So renaming away from that name makes the command start REFUSING, and renaming
+    to it silently changes where the next unqualified task LANDS. A person can only act on the one
+    they are in, so one shared sentence would describe the other's failure.
+
+    On stderr, so that `--json`'s stdout stays one parseable document.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply(previous, new)))
+    rc = cli.main(["project", "rename", "P1", "--name", new])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "default" in captured.err, f"nothing warned about default: {captured.err!r}"
+    assert expected in captured.err, captured.err
+
+
+def test_a_rename_that_touches_no_default_says_nothing_about_one(monkeypatch, tmp_path, capsys):
+    """⚠️ The negative control, and without it the two rows above prove nothing.
+
+    A warning that fires on every rename is a warning people learn to skip, and it would be the one
+    thing standing between somebody and a silently relocated `grid task create`.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("scratch")))
+    rc = cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "default" not in captured.err, captured.err
+    assert "default" not in captured.out, captured.out
+
+
+@pytest.mark.parametrize("previous,new", [("default-old", "billing"), ("scratch", "my-default")])
+def test_the_default_warning_keys_on_the_whole_name_and_not_a_substring(
+        monkeypatch, tmp_path, capsys, previous, new):
+    """A project called `default-old` is not the caller's default project.
+
+    The paired negative for the two rows above: `grid task create` matches the name exactly, so a
+    substring test here would warn about projects that command has never resolved — and a warning
+    that cries wolf is one nobody reads on the day it is true.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply(previous, new)))
+    assert cli.main(["project", "rename", "P1", "--name", new]) == 0
+
+    assert "Note:" not in capsys.readouterr().err
+
+
+def test_nothing_about_default_ever_reaches_the_relay(monkeypatch, tmp_path, capsys):
+    """⚠️ `default` is a pure CLIENT convention and the relay deliberately no longer resolves it for
+    anybody (ADR 0033 D-o). Sending it — as a flag, a hint or an extra key — would rebuild the
+    coupling ADR 0035 D-g says must not exist, and the relay would then own a rule it cannot see the
+    other half of."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        # ⚠️ `httpx` hands this back as BYTES, not a string. `str(...)` on it renders `b''`, which is
+        # truthy and is not `""` — an assertion written the obvious way passes for every query
+        # string and fails for none.
+        seen["query"] = request.url.query
+        return httpx.Response(200, json=_rename_reply("default", "default"))
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(["project", "rename", "P1", "--name", "default"]) == 0
+
+    assert seen["body"] == {"name": "default"}, seen["body"]
+    assert seen["query"] == b"", seen["query"]
+
+
+def test_the_default_warning_still_reaches_stderr_under_json(monkeypatch, tmp_path, capsys):
+    """`--json` is the mode an application drives, and it is the one where a person is least likely
+    to notice. stdout stays exactly the relay's document — parsed here, not merely inspected, because
+    "one parseable document" is the contract and a warning leaking into it would break every client
+    at once."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("default")))
+    rc = cli.main(["project", "rename", "P1", "--name", "billing", "--json"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["previous_name"] == "default", captured.out
+    assert "default" in captured.err, captured.err
+
+
+@pytest.mark.parametrize("typed", ["  acme  ", "acme ", " acme"])
+def test_a_name_the_relay_normalises_is_still_reported_as_the_rename_it_was(
+        monkeypatch, tmp_path, capsys, typed):
+    """⚠️ The relay STRIPS the name it stores and echoes (`projects.requested_name`), so a caller who
+    typed a trailing space gets back a name that is not byte-identical to what they asked for.
+
+    Found by a silent-failure sweep. An identity check against `args.name` turned every such rename
+    into a reported FAILURE for a rename that had landed — and the refusal's own remedy re-runs the
+    same request, so the false failure repeats forever. The person's next move is
+    `grid project create --name acme`, which is create-or-get BY NAME: a second, empty project, and
+    their work left in the first. That is the exact fork this command exists to prevent, delivered
+    by the command itself.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("scratch", "acme")))
+    rc = cli.main(["project", "rename", "P1", "--name", typed])
+
+    assert rc == 0
+    assert "acme" in capsys.readouterr().out
+
+
+def test_a_default_named_with_stray_whitespace_still_warns(monkeypatch, tmp_path, capsys):
+    """The compound worst case of the one above, and the reason it was HIGH rather than cosmetic.
+
+    `--name "default "` really does make the project the caller's `default` — the relay strips it —
+    so the next `grid task create` with no `--project` starts landing work there. A warning keyed on
+    the raw argument cannot see it, because `"default " != "default"`.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("scratch", "default")))
+    assert cli.main(["project", "rename", "P1", "--name", "default "]) == 0
+
+    assert "default" in capsys.readouterr().err
+
+
+def test_renaming_a_default_project_to_default_warns_about_nothing(monkeypatch, tmp_path, capsys):
+    """⚠️ The relay's documented no-op — already called `default`, asked for `default` again.
+
+    Nothing changed, so nothing will refuse and nothing has moved. Warning here makes stderr
+    contradict stdout in the same invocation ("was already called default" beside "that command
+    will now refuse"), by the exact mechanism this warning's own negative control exists to prevent:
+    a warning that cries wolf is one nobody reads on the day it is true.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("default", "default")))
+    assert cli.main(["project", "rename", "P1", "--name", "default"]) == 0
+
+    captured = capsys.readouterr()
+    assert "already" in captured.out.lower(), captured.out
+    assert captured.err == "", f"warned about a rename that changed nothing: {captured.err!r}"
+
+
+@pytest.mark.parametrize("previous", [None, 7, {"was": "scratch"}])
+def test_a_reply_with_no_usable_previous_name_still_reports_the_rename(
+        monkeypatch, tmp_path, capsys, previous):
+    """*Absent ⇒ say nothing about the old name.* The rename itself is confirmed by `name`, which the
+    guard above has already checked, so this is advice going missing rather than a state claim — it
+    degrades instead of refusing.
+
+    What must NOT happen is an undo line naming `None`, or a traceback out of the comparison.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    body = _rename_reply("scratch")
+    if previous is None:
+        del body["previous_name"]
+    else:
+        body["previous_name"] = previous
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=body))
+    rc = cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "billing" in out, out
+    assert "Undo with" not in out, f"offered an undo naming a name it never learned: {out!r}"
+
+
+@pytest.mark.parametrize("reply", [
+    {"id": "P1"},                                        # the key is missing entirely
+    {"id": "P1", "name": "scratch"},                     # the relay kept the OLD name
+    {"id": "P1", "name": True},                          # a boolean where a name belongs
+    {"id": "P1", "name": "Billing"},                      # a different spelling of what was asked
+    ["billing"],                                          # not an object at all
+])
+def test_project_rename_refuses_to_call_an_unreadable_reply_a_rename(monkeypatch, tmp_path, reply):
+    """The house guard. Somebody told their project is renamed tells a colleague the new name, and
+    from then on nothing answers to it — while the old name is still what the project is called and
+    is now the one they have stopped using.
+
+    ⚠️ Compared against the name that was ASKED for, never a truthiness test on the key.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=reply))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert "did not say" in str(caught.value), caught.value
+
+
+def test_the_guard_still_refuses_under_json_after_the_document_is_written(
+        monkeypatch, tmp_path, capsys):
+    """⚠️ **Emitted, then validated — never returned on** (ADR 0034 D-m, issue 46).
+
+    `--json` is the one mode an application drives, and it is where this guard was unreachable in
+    both commands this one is modelled on: `if _emit(...): return 0` exited **0** for a reply that
+    said nothing, so a client read a mangled answer as a completed rename. stdout still carries the
+    document — that contract is not broken by refusing — and the exit code is what says no.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={"id": "P1", "name": "scratch"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "rename", "P1", "--name", "billing", "--json"])
+
+    assert "did not say" in str(caught.value), caught.value
+    assert json.loads(capsys.readouterr().out) == {"id": "P1", "name": "scratch"}
+
+
+def test_a_rename_that_changed_nothing_is_not_reported_as_an_act(monkeypatch, tmp_path, capsys):
+    """`previous_name == name` — the relay saying the project was already called that.
+
+    Not an error: `idx_projects_owner_name` is satisfied by the row itself, so re-submitting an
+    unchanged form is the outcome the caller wanted. But saying "is now called" would claim an act
+    that did not happen, which is the distinction `changed is False` draws for archive and
+    visibility — carried here by one key instead of two.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("billing")))
+    rc = cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already" in out.lower(), out
+
+
+def test_a_rename_offers_the_way_back_by_name(monkeypatch, tmp_path, capsys):
+    """The old name is free the moment this succeeds, so the way back is a real command — and it is
+    the only place a person can read what the project used to be called once the listing has moved
+    on."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("scratch")))
+    assert cli.main(["project", "rename", "P1", "--name", "billing"]) == 0
+
+    # `--name=` rather than `--name `: the value is the relay's and may hold a space or a leading
+    # dash, so it is shell-quoted into the `=` form. Asserted by RETYPING rather than by matching
+    # the string, so the format can change again without this test having an opinion about it.
+    undo = [line for line in capsys.readouterr().out.splitlines()
+            if line.startswith("Undo with:")]
+    assert undo, "the way back is not offered at all"
+    settled = cli.build_parser().parse_args(
+        shlex.split(undo[0].split("Undo with:", 1)[1].strip())[1:])
+    assert (settled.project_id, settled.name) == ("P1", "scratch"), undo[0]
+
+
+@pytest.mark.parametrize("previous", ["my old app", "-evil", "it's mine", "a b"])
+def test_the_undo_line_parses_even_when_the_old_name_needs_quoting(
+        monkeypatch, tmp_path, capsys, previous):
+    """⚠️ A project name may hold spaces, quotes and a leading dash — `requested_name` strips it and
+    bounds its length and nothing more.
+
+    So the undo line is built from a value this CLI does not control, and it is the one thing a
+    person copies at exactly the moment they want their old name back. Unquoted,
+    `--name my old app` is `unrecognized arguments: old app` and `--name -evil` is `expected one
+    argument`. The house already owns this rule — `remote_task._no_trunk_message` shlex-quotes its
+    suggestion so a prompt with a space pastes back as ONE argument.
+
+    ⚠️ `test_every_command_this_cli_tells_you_to_run_actually_parses` cannot catch this: it blanks
+    every `{...}` to a single token, so it retypes a line that is not the line a person sees. This
+    test puts the real value through the real parser.
+    """
+    import shlex
+
+    from cli.parser import build_parser
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply(previous)))
+    assert cli.main(["project", "rename", "P1", "--name", "billing"]) == 0
+
+    undo = [line for line in capsys.readouterr().out.splitlines() if line.startswith("Undo with:")]
+    assert undo, "the way back is not offered at all"
+    argv = shlex.split(undo[0].split("Undo with:", 1)[1].strip())
+    assert argv[0] == "grid", argv
+    settled = build_parser().parse_args(argv[1:])
+    assert settled.name == previous, (
+        f"the undo line this CLI printed does not name {previous!r} when retyped: {argv}")
+
+
+def test_an_empty_previous_name_is_not_treated_as_a_name(monkeypatch, tmp_path, capsys):
+    """`isinstance("", str)` is True, so the empty string is the one wrong VALUE the type guard lets
+    through — into the two places `previous` is printed rather than compared.
+
+    It produced `and was ` followed by `Undo with: grid project rename P1 --name`, a dangling flag
+    argparse refuses. Not reachable from a correct relay, but the guard's stated job is to survive a
+    reply this build cannot fully read, and this is the shape it was missing.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("")))
+    assert cli.main(["project", "rename", "P1", "--name", "billing"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Undo with" not in out, f"offered an undo naming nothing: {out!r}"
+    assert not out.rstrip().endswith("and was"), out
+
+
+def test_renaming_to_default_says_the_shorthand_starts_working(monkeypatch, tmp_path, capsys):
+    """⚠️ The "to" direction cannot describe work MOVING, because that state cannot exist.
+
+    `idx_projects_owner_name` is `(owner_id, name)` and covers archived rows, so a rename to
+    `default` only succeeds when the caller has no project of that name at all — meaning
+    `grid task create` with no `--project` was **refusing** beforehand, not landing somewhere else.
+    The rename is what makes the shorthand start working.
+
+    D-g's whole point is that each direction names the failure the reader is actually in, so a
+    sentence describing a state they cannot be in is the same defect as no warning at all.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json=_rename_reply("scratch", "default")))
+    assert cli.main(["project", "rename", "P1", "--name", "default"]) == 0
+
+    err = capsys.readouterr().err
+    assert "default" in err, err
+    assert "used to go" not in err, (
+        f"the warning describes work moving from somewhere, which cannot have existed: {err!r}")
+
+
+def test_the_rename_route_on_an_old_relay_says_the_relay_is_old(monkeypatch, tmp_path):
+    """A brand-new route, so a relay that predates it answers the bare framework 404 — which reads
+    as "your project is gone" unless it is turned into a sentence naming the relay.
+
+    ⚠️ It must also steer them AWAY from `grid project create --name <new>`, which is the obvious
+    next move and is create-or-get BY NAME: it would hand them a second, empty project and leave
+    their work in this one. That is the exact failure this command exists to prevent, so the
+    old-relay path must not deliver it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": "Not Found"}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    message = str(caught.value)
+    assert "relay" in message.lower(), caught.value
+    # ⚠️ NOT `_OLD_RELAY`'s sentence: this relay HAS projects and is missing one route.
+    assert "does not have projects yet" not in message.lower(), caught.value
+    assert "grid project create" in message, caught.value
+
+
+def test_a_real_404_from_the_rename_route_is_not_masked(monkeypatch, tmp_path):
+    """The paired negative: a relay that HAS the route and answers 404 about the project must show
+    its own words, not "your relay is too old"."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={
+        "detail": {"code": "no_such_project", "message": "No such project"}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert "no such project" in str(caught.value).lower(), caught.value
+    assert "predates" not in str(caught.value).lower(), caught.value
+
+
+def test_a_taken_name_reaches_the_caller_in_the_relays_own_words(monkeypatch, tmp_path):
+    """⚠️ `project_name_taken` is deliberately **not** a fourth parsed refusal code (ADR 0035 D-g).
+
+    Exactly three codes are read across the two repositories and keeping the count that low is the
+    contract — every other refusal is displayed verbatim, because each relay message already names
+    the way forward and a fourth reader is a fourth thing a reworded relay could break. So what is
+    pinned here is that the relay's SENTENCE survives intact, not that anything branched on it.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    remedy = ("You already have a project called 'billing', and a name can only be used once. "
+              "Pick another name, or see what you have with: grid project list")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(409, json={
+        "detail": {"code": "project_name_taken", "message": remedy}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["project", "rename", "P1", "--name", "billing"])
+
+    assert remedy in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("argv", [
+    ["project", "rename", "P1", "--name", "billing"],
+    ["project", "rename", "--project", "P1", "--name", "billing"],
+])
+def test_both_spellings_of_the_project_id_reach_the_same_route(monkeypatch, tmp_path, capsys, argv):
+    """ADR 0033 D-a / issue 28 — registered through `project_arg.add_project` like every other
+    project command, so somebody moving between the `task` and `project` groups never has to change
+    hands."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        return httpx.Response(200, json=_rename_reply("scratch"))
+
+    _mock_relay(monkeypatch, handler)
+    assert cli.main(argv) == 0
+
+    assert seen["path"] == "/relay/v1/projects/P1/name", seen
+
+
+def test_a_rename_cannot_break_a_clone(monkeypatch, tmp_path):
+    """⚠️ A clone keys entirely on the project **id** — the name appears nowhere in its
+    configuration — which is why a rename is safe at all.
+
+    Asserted against the real config writer rather than restated, so that nobody later "fixes" a
+    clone to follow the name and turns every rename into a broken working copy on somebody else's
+    machine.
+    """
+    import inspect
+
+    from cli import remote_project
+
+    for handler in (remote_project._project_clone, remote_project._project_refresh):
+        source = inspect.getsource(handler)
+        assert "project_id" in source, f"{handler.__name__} no longer keys on the project id"
+        # The relay's `name` key, in the two shapes a reply is ever read by. A narrow scan on
+        # purpose: `--name`, `network_id` and `__name__` are all ordinary here, and a broad match
+        # would be exempted into uselessness within a release.
+        for shape in ('.get("name")', "['name']", '["name"]'):
+            assert shape not in source, (
+                f"{handler.__name__} now reads the project's NAME off the relay's reply. A rename "
+                f"would break every clone made before it — the id is the only thing about a "
+                f"project that does not change, which is what makes renaming safe at all")
 
 
 # ---------------------------------------------------------------------------

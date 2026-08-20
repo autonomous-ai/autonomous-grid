@@ -60,7 +60,7 @@ APPLICATION_SURFACE = frozenset({
     "grid project create", "grid project list", "grid project status",
     "grid project files", "grid project file", "grid project download",
     "grid project archive", "grid project unarchive", "grid project delete",
-    "grid project share", "grid project private",
+    "grid project share", "grid project private", "grid project rename",
     "grid project member list", "grid project member add", "grid project member remove",
 })
 
@@ -112,6 +112,7 @@ _HANDLER_MODULES = (
     "cli/project_download.py",
     "cli/project_archive.py",
     "cli/project_visibility.py",
+    "cli/project_rename.py",
     "cli/json_error.py",
 )
 
@@ -343,6 +344,51 @@ def test_what_the_application_facing_handlers_print_speaks_no_git():
         f"not looking at what it thinks it is")
     assert not found, (
         "git vocabulary in what an application-facing handler prints (ADR 0034 D-m):\n  "
+        + "\n  ".join(sorted(found)))
+
+
+# Module-level sentence TABLES on the application's surface, as `(module, attribute)`. `_printed_
+# strings` walks the SINKS — what is handed to `print`/`SystemExit`/`TaskRefusal` — and collects only
+# the `Constant` pieces of an f-string, so a sentence reached through a `Name` subscript
+# (`_DEFAULT_WARNINGS[direction]`) is invisible to it: from that whole warning path it yields
+# `'Note: '`, `' '` and `'.'`.
+#
+# ⚠️ That is a pre-existing hole (`_MERGE_TURN_LABEL` has it too), and `_printed_strings`' own
+# docstring claims module-level constants are "covered where they are used" — which is not true for
+# a table. Widening the walker to every module-level string was rejected: it would drag in the wire
+# constants that docstring explains it must NOT report. So the tables are named here instead, which
+# keeps the exemption a decision somebody makes rather than an accident of AST shape.
+_SENTENCE_TABLES = (
+    ("cli/project_rename.py", "_DEFAULT_WARNINGS"),
+)
+
+
+def test_the_sentence_tables_the_walker_cannot_reach_speak_no_git():
+    """The half of the scan `_printed_strings` structurally cannot see.
+
+    Found in review of ADR 0035 D-g (issue 55): `cli/project_rename._DEFAULT_WARNINGS` holds the two
+    sentences a person reads when a rename moves their `default` project, on a command that IS on
+    `APPLICATION_SURFACE` — and not one word of them reaches the scan above.
+    """
+    import importlib
+
+    checked = 0
+    found = []
+    for relative, attribute in _SENTENCE_TABLES:
+        module = importlib.import_module(relative[:-3].replace("/", "."))
+        table = getattr(module, attribute, None)
+        assert isinstance(table, dict) and table, (
+            f"{relative}:{attribute} is gone or is no longer a non-empty dict, so this check reads "
+            f"nothing — point it at whatever replaced it rather than deleting it")
+        for key, sentence in table.items():
+            assert isinstance(sentence, str) and sentence, (relative, attribute, key)
+            checked += 1
+            for word in offences(sentence):
+                found.append(f"{relative}:{attribute}[{key!r}] says {word!r}")
+    # The floor, for the reason every other scan in this file has one.
+    assert checked >= 2, f"only {checked} sentences were read out of {len(_SENTENCE_TABLES)} tables"
+    assert not found, (
+        "git vocabulary in a sentence table the printed-string walker cannot reach:\n  "
         + "\n  ".join(sorted(found)))
 
 

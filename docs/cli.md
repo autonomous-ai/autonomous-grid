@@ -1437,6 +1437,31 @@ in that case the recovery is a new project, not this command.
 Both are the project **owner's**. Another member is refused with a reason; someone who is not a
 member gets the same "no such project" a stranger always gets.
 
+### Renaming a project
+
+`grid project rename <id> --name <new>` changes what a project is called.
+
+**Its id does not change**, so nothing that points at the project has to be updated — clones keep
+working, scripts that name the id keep working, and anyone who has bookmarked it still gets there.
+The new name shows up in `grid project list` and nowhere else has to follow.
+
+This is what to reach for instead of creating a project under the new name. `grid project create`
+finds a project *by* name, so creating one with a new name hands you a second, empty project and
+leaves your work in the first — which is the mistake this command exists to remove.
+
+Two things to know:
+
+- **The old name becomes free.** A colleague whose script still says `grid project create --name
+  <old>` will now get a new, empty project rather than yours. Give them the **id**, which is what
+  the rename prints back, because the id is the part that did not change.
+- **If you rename to or from `default`, it says so.** A task created with no `--project` runs in
+  your own project called `default`, so renaming one *to* that name moves where your next such task
+  lands, and renaming *away from* it makes that shorthand stop working until you have another.
+
+It is the project **owner's**, like archiving and deleting, and it is refused while the project is
+archived — `grid project unarchive <id>` first. A name only has to be unique among your own
+projects: two people on one grid can each have an `acme`.
+
 ### Who can reach a project
 
 On a grid the control plane provisions per email domain, **anyone signed in can work in any project
