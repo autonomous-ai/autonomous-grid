@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3620 568" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+  <title id="t">One local box — a defect, N agents, one writer</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="3620" height="568" fill="#fff"/>
+  <text x="86" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">One local box — a defect, N agents, one writer</text>
+  <text x="1772" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the one</text>
+  <text x="2381" y="192" text-anchor="middle" fill="#2b2b29" font-size="20">the write step</text>
+  <text x="3070" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
+  <text x="2159" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">fsync first</text>
+  <text x="2339" y="428" text-anchor="middle" fill="#2b2b29" font-size="23">one entry per round</text>
+  <text x="273" y="475" text-anchor="end" fill="#2b2b29" font-size="23">resume</text>
+  <path d="M 158 210 C 224 210, 224 210, 289 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 568 210 C 664 210, 664 92, 760 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 568 210 C 647 210, 647 210, 725 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 568 210 C 671 210, 671 328, 773 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1052 92 C 1154 92, 1154 210, 1256 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1086 210 C 1171 210, 1171 210, 1256 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1038 328 C 1147 328, 1147 210, 1256 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1673 210 C 1772 210, 1772 210, 1871 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2288 210 C 2381 210, 2381 210, 2473 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2917 210 C 3070 210, 3070 210, 3222 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2288 210 C 2159 210, 2159 446, 2030 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2130 446 C 2339 446, 2339 446, 2549 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2841 446 C 2938 446, 2938 493, 2890 493 C 192 493, 192 210, 289 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="14" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="86" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defect</text>
+  <rect x="289" y="177" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="429" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
+  <text x="429" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · fan</text>
+  <text x="429" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">3 read-only shells, one worktree each</text>
+  <rect x="760" y="59" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="906" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex</text>
+  <text x="906" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-27b · repro</text>
+  <rect x="725" y="177" width="361" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="906" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="906" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">deepseek-v4-flash · fix</text>
+  <rect x="773" y="295" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="906" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenCode</text>
+  <text x="906" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · fix</text>
+  <rect x="1256" y="177" width="417" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1465" y="201" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">reviewer</text>
+  <text x="1465" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">cross-vendor · never itself</text>
+  <text x="1465" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">a different lane than the fix</text>
+  <rect x="1871" y="177" width="417" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2080" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="2080" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · the one writer</text>
+  <text x="2080" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-keyed, fsync first</text>
+  <rect x="2473" y="177" width="444" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2695" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex exec</text>
+  <text x="2695" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-27b · test · is a fact</text>
+  <rect x="3222" y="177" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="3337" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">shipped fix</text>
+  <text x="3337" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">tokens free · no rate limit · on your box</text>
+  <rect x="2022" y="405" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="2014" y="397" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="2030" y="413" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2080" y="456" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">WAL</text>
+  <text x="2080" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">round_id keys, one box</text>
+  <rect x="2549" y="413" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2695" y="437" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">NAS</text>
+  <text x="2695" y="469" text-anchor="middle" fill="#2b2b29" font-size="23">one copy per round</text>
+  <text x="2695" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">off the box · outlives the box</text>
+</svg>

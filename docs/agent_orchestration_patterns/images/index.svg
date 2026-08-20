@@ -1,0 +1,425 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3700 4518" font-family="Avenir Next, Nunito, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t">
+<title id="t">agent orchestration patterns — all figures</title>
+<rect width="3700" height="4518" fill="#fff"/>
+<g transform="translate(30,40)">
+
+  <title id="t">The act-gate — N−1 read-only, one actor</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="2000" height="568" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">The act-gate — N−1 read-only, one actor</text>
+  <text x="256" y="56" text-anchor="middle" fill="#2b2b29" font-size="23">N−1 may read</text>
+  <text x="1151" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">the one</text>
+  <text x="1522" y="428" text-anchor="middle" fill="#2b2b29" font-size="23">the write step</text>
+  <path d="M 120 210 C 219 210, 219 210, 318 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 466 210, 466 92, 513 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 458 210, 458 210, 499 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 418 210 C 462 210, 462 328, 506 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 819 92 C 972 92, 972 210, 1126 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 833 210 C 979 210, 979 210, 1126 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 826 328 C 976 328, 976 210, 1126 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1198 243 C 1198 269, 1198 387, 1198 413" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1365 446 C 1522 446, 1522 446, 1680 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <circle cx="368" cy="210" r="9" fill="#2b2b29"/>
+  <rect x="513" y="59" width="306" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="666" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">glm-5.2 · read-only</text>
+  <text x="666" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">full session, gated</text>
+  <rect x="499" y="177" width="334" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex</text>
+  <text x="666" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · sandbox</text>
+  <rect x="506" y="295" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="666" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
+  <text x="666" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · quorum</text>
+  <rect x="1126" y="177" width="145" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1198" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">select</text>
+  <rect x="1031" y="413" width="334" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1198" y="437" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="1198" y="469" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · tools on</text>
+  <text x="1198" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">the only one that may act</text>
+  <rect x="1680" y="413" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1730" y="456" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">act</text>
+  <text x="1730" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">one idempotent mutation, round_id-keyed</text>
+
+</g>
+<g transform="translate(30,698)">
+
+  <title id="t">Session lifecycle — four transitions, one resident session</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1446" height="450" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Session lifecycle — four transitions, one resident session</text>
+  <text x="160" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">spawn</text>
+  <text x="680" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">resume</text>
+  <text x="677" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">duplicate context</text>
+  <text x="690" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">cancel</text>
+  <text x="1063" y="74" text-anchor="middle" fill="#2b2b29" font-size="17">snapshot (round_id)</text>
+  <text x="784" y="133" text-anchor="middle" fill="#2b2b29" font-size="23">restore</text>
+  <path d="M 120 210 C 160 210, 160 210, 201 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 535 210 C 690 210, 690 92, 844 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 535 210 C 677 210, 677 210, 819 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 535 210 C 690 210, 690 328, 844 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 956 92 C 1063 92, 1063 92, 1170 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 981 210 C 1076 210, 1076 92, 1170 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 956 328 C 1076 328, 1076 328, 1196 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1349 92 C 775 92, 775 210, 201 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="201" y="177" width="334" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="368" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · resident</text>
+  <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">resident session</text>
+  <rect x="844" y="59" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="900" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">warm</text>
+  <text x="900" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">the layer's cache · same harness</text>
+  <rect x="819" y="177" width="162" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="900" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">handoff</text>
+  <text x="900" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">duplicate context · same harness</text>
+  <rect x="844" y="295" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="900" y="338" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">kill</text>
+  <text x="900" y="397" text-anchor="middle" fill="#2b2b29" font-size="21">cancel · frees the seat</text>
+  <rect x="1162" y="51" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="1154" y="43" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="1170" y="59" width="178" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1260" y="102" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">snapshot</text>
+  <text x="1260" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-frozen, off-box</text>
+  <rect x="1196" y="295" width="128" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1260" y="338" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">freed</text>
+
+</g>
+<g transform="translate(30,1238)">
+
+  <title id="t">Route across harness lanes — role → lane → gate</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="2136" height="568" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Route across harness lanes — role → lane → gate</text>
+  <text x="216" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">each request</text>
+  <text x="1804" y="192" text-anchor="middle" fill="#2b2b29" font-size="15">act contract binds</text>
+  <path d="M 120 210 C 216 210, 216 210, 312 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 424 210 C 502 210, 502 210, 580 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 775 210 C 853 210, 853 92, 931 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 775 210 C 846 210, 846 210, 917 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 775 210 C 850 210, 850 328, 924 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 775 210 C 825 210, 825 446, 876 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1210 92 C 1406 92, 1406 210, 1602 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1223 210 C 1413 210, 1413 210, 1602 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1216 328 C 1409 328, 1409 210, 1602 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1265 446 C 1433 446, 1433 210, 1602 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1713 210 C 1804 210, 1804 210, 1894 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="312" y="177" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="368" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">role</text>
+  <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">task mutability: read-only / write</text>
+  <rect x="580" y="177" width="195" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="677" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">pick lane</text>
+  <text x="677" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">residency first</text>
+  <rect x="931" y="59" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1070" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex</text>
+  <text x="1070" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-27b · exec</text>
+  <text x="1070" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">bounded coding</text>
+  <rect x="917" y="177" width="306" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1070" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="1070" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · stream</text>
+  <text x="1070" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">open work</text>
+  <rect x="924" y="295" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1070" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="1070" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">laguna-s-2.1 · ACP</text>
+  <text x="1070" y="397" text-anchor="middle" fill="#2b2b29" font-size="21">verifiable</text>
+  <rect x="876" y="413" width="389" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1070" y="437" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw fan</text>
+  <text x="1070" y="469" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · worker pool</text>
+  <text x="1070" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">N copies</text>
+  <rect x="1602" y="177" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1657" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">gate</text>
+  <text x="1657" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">enforceable act contract</text>
+  <rect x="1894" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1967" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+
+</g>
+<g transform="translate(30,1896)">
+
+  <title id="t">The seat is the executor — background only in the idle</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1100" height="332" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">The seat is the executor — background only in the idle</text>
+  <text x="170" y="142" text-anchor="middle" fill="#2b2b29" font-size="23">spawned when idle</text>
+  <text x="256" y="265" text-anchor="end" fill="#2b2b29" font-size="23">yields to snapshot</text>
+  <path d="M 120 92 C 174 92, 174 92, 228 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 120 92 C 164 92, 164 210, 208 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M 508 92 C 661 92, 661 92, 814 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 528 210 C 667 210, 667 210, 805 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 967 210 C 1147 210, 1147 283, 1057 283 C 48 283, 48 92, 228 92" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="228" y="59" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · live</text>
+  <text x="368" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">deadline-bearing</text>
+  <rect x="814" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="886" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+  <rect x="208" y="177" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">background jobs</text>
+  <text x="368" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">varies by job · pool</text>
+  <text x="368" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">shadow · warm · probe — one background pool</text>
+  <rect x="805" y="177" width="162" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="886" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">preempt</text>
+  <text x="886" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">evict to snapshot, fsync first</text>
+
+</g>
+<g transform="translate(30,2318)">
+
+  <title id="t">Staged admission — shadow before it may act</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1720" height="450" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Staged admission — shadow before it may act</text>
+  <text x="160" y="141" text-anchor="middle" fill="#2b2b29" font-size="23">live traffic</text>
+  <text x="168" y="251" text-anchor="middle" fill="#2b2b29" font-size="23">shadow</text>
+  <text x="1067" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">learns the bar</text>
+  <text x="1364" y="192" text-anchor="middle" fill="#2b2b29" font-size="16">promoted to act</text>
+  <path d="M 120 210 C 160 210, 160 92, 201 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 120 210 C 164 210, 164 328, 208 328" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <path d="M 535 92 C 686 92, 686 210, 836 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 528 328 C 682 328, 682 210, 836 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 964 210 C 1067 210, 1067 210, 1170 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1282 210 C 1364 210, 1364 210, 1446 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="20" y="177" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="201" y="59" width="334" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · resident</text>
+  <rect x="208" y="295" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
+  <text x="368" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · shadow</text>
+  <text x="368" y="397" text-anchor="middle" fill="#2b2b29" font-size="21">read-only shells only</text>
+  <rect x="836" y="177" width="128" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="900" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">score</text>
+  <text x="900" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">vs Codex exec --json test/schema</text>
+  <rect x="1170" y="177" width="111" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1226" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">gate</text>
+  <text x="1226" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">≥N wins at ≥X% — new harness only</text>
+  <rect x="1446" y="177" width="178" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1535" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">act step</text>
+
+</g>
+<g transform="translate(30,2858)">
+
+  <title id="t">The verifier is ground truth, not a session</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1682" height="332" fill="#fff"/>
+  <text x="70" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">The verifier is ground truth, not a session</text>
+  <text x="171" y="74" text-anchor="middle" fill="#2b2b29" font-size="21">one try</text>
+  <text x="1203" y="74" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
+  <text x="620" y="164" text-anchor="middle" fill="#2b2b29" font-size="23">no fact to offer</text>
+  <text x="919" y="142" text-anchor="middle" fill="#2b2b29" font-size="23">proposed only</text>
+  <path d="M 120 92 C 171 92, 171 92, 222 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 514 92 C 633 92, 633 92, 752 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 964 92 C 1203 92, 1203 92, 1442 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 514 92 C 572 92, 572 210, 629 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1087 210 C 920 210, 920 92, 752 92" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="20" y="59" width="100" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="70" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">job</text>
+  <rect x="222" y="59" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="368" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="368" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-27b · draft</text>
+  <rect x="752" y="59" width="212" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="858" y="102" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">Codex exec</text>
+  <text x="858" y="161" text-anchor="middle" fill="#2b2b29" font-size="21">test · schema — a fact</text>
+  <rect x="629" y="177" width="458" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="858" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">consensus</text>
+  <text x="858" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-5.2 over Codex · two tails</text>
+  <text x="858" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">two tails agree</text>
+  <rect x="1442" y="59" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="1514" y="102" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">answer</text>
+
+</g>
+<g transform="translate(30,3280)">
+
+  <title id="t">Only one ledger — the fsync'd box is the only truth</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1538" height="450" fill="#fff"/>
+  <text x="170" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">Only one ledger — the fsync'd box is the only truth</text>
+  <text x="860" y="192" text-anchor="middle" fill="#2b2b29" font-size="18">events, not state</text>
+  <text x="1199" y="192" text-anchor="middle" fill="#2b2b29" font-size="14">off-box, on a cadence</text>
+  <path d="M 302 92 C 459 92, 459 210, 616 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 330 210 C 473 210, 473 210, 616 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 330 328 C 473 328, 473 210, 616 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 760 210 C 860 210, 860 210, 960 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1101 210 C 1199 210, 1199 210, 1297 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <rect x="38" y="59" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="170" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="170" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · act</text>
+  <rect x="10" y="177" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="170" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="170" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">glm-5.2 · graduation</text>
+  <rect x="10" y="295" width="320" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="170" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
+  <text x="170" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · denial</text>
+  <rect x="616" y="177" width="145" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="688" y="220" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">append</text>
+  <text x="688" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-stamped events</text>
+  <rect x="952" y="169" width="141" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="944" y="161" width="141" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="960" y="177" width="141" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1031" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">WAL</text>
+  <text x="1031" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">one box</text>
+  <text x="1031" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">append-only · no replication</text>
+  <rect x="1297" y="177" width="145" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="1370" y="220" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">export</text>
+  <text x="1370" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">different medium</text>
+
+</g>
+<g transform="translate(30,3820)">
+
+  <title id="t">One local box — a defect, N agents, one writer</title>
+  <defs>
+    <marker id="ha" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#a1a099" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Ha" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#a1a099" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hg" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5a912f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hg" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5a912f" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hp" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#5d579d" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hp" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#5d579d" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hc" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#ad5130" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hc" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#ad5130" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="hk" markerWidth="13.3" markerHeight="13.3" refX="11" refY="7.0" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 2.2 L11.5 7.0 L2 11.8" fill="none" stroke="#2b2b29" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="Hk" markerWidth="18.1" markerHeight="18.1" refX="15" refY="9.5" orient="auto" markerUnits="userSpaceOnUse"><path d="M2 3.0 L15.6 9.5 L2 16.0" fill="none" stroke="#2b2b29" stroke-width="3.0" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="3620" height="568" fill="#fff"/>
+  <text x="86" y="34" text-anchor="start" fill="#2b2b29" font-size="23" font-weight="700">One local box — a defect, N agents, one writer</text>
+  <text x="1772" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">the one</text>
+  <text x="2381" y="192" text-anchor="middle" fill="#2b2b29" font-size="20">the write step</text>
+  <text x="3070" y="192" text-anchor="middle" fill="#2b2b29" font-size="23">certified</text>
+  <text x="2159" y="310" text-anchor="middle" fill="#2b2b29" font-size="23">fsync first</text>
+  <text x="2339" y="428" text-anchor="middle" fill="#2b2b29" font-size="23">one entry per round</text>
+  <text x="273" y="475" text-anchor="end" fill="#2b2b29" font-size="23">resume</text>
+  <path d="M 158 210 C 224 210, 224 210, 289 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 568 210 C 664 210, 664 92, 760 92" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 568 210 C 647 210, 647 210, 725 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 568 210 C 671 210, 671 328, 773 328" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1052 92 C 1154 92, 1154 210, 1256 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1086 210 C 1171 210, 1171 210, 1256 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1038 328 C 1147 328, 1147 210, 1256 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 1673 210 C 1772 210, 1772 210, 1871 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2288 210 C 2381 210, 2381 210, 2473 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2917 210 C 3070 210, 3070 210, 3222 210" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2288 210 C 2159 210, 2159 446, 2030 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2130 446 C 2339 446, 2339 446, 2549 446" fill="none" stroke="#a1a099" stroke-width="2" marker-end="url(#ha)"/>
+  <path d="M 2841 446 C 2938 446, 2938 493, 2890 493 C 192 493, 192 210, 289 210" fill="none" stroke="#a1a099" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#ha)"/>
+  <rect x="14" y="177" width="145" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="86" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">defect</text>
+  <rect x="289" y="177" width="279" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="429" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenClaw</text>
+  <text x="429" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen3-coder · fan</text>
+  <text x="429" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">3 read-only shells, one worktree each</text>
+  <rect x="760" y="59" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="906" y="83" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex</text>
+  <text x="906" y="115" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-27b · repro</text>
+  <rect x="725" y="177" width="361" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="906" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Hermes ACP</text>
+  <text x="906" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">deepseek-v4-flash · fix</text>
+  <rect x="773" y="295" width="265" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="906" y="319" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">OpenCode</text>
+  <text x="906" y="351" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · fix</text>
+  <rect x="1256" y="177" width="417" height="66" rx="0" fill="#f3f2f9" stroke="#a9a3c9" stroke-width="2"/>
+  <text x="1465" y="201" text-anchor="middle" fill="#5d579d" font-size="28" font-weight="600">reviewer</text>
+  <text x="1465" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">cross-vendor · never itself</text>
+  <text x="1465" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">a different lane than the fix</text>
+  <rect x="1871" y="177" width="417" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2080" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Claude Code</text>
+  <text x="2080" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-35b · the one writer</text>
+  <text x="2080" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">round_id-keyed, fsync first</text>
+  <rect x="2473" y="177" width="444" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2695" y="201" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">Codex exec</text>
+  <text x="2695" y="233" text-anchor="middle" fill="#2b2b29" font-size="23">qwen38-27b · test · is a fact</text>
+  <rect x="3222" y="177" width="229" height="66" rx="33" fill="#fbf0ed" stroke="#f0c5b6" stroke-width="2"/>
+  <text x="3337" y="220" text-anchor="middle" fill="#ad5130" font-size="28" font-weight="600">shipped fix</text>
+  <text x="3337" y="279" text-anchor="middle" fill="#2b2b29" font-size="21">tokens free · no rate limit · on your box</text>
+  <rect x="2022" y="405" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="2014" y="397" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="1.2" opacity="0.7"/>
+  <rect x="2030" y="413" width="100" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2080" y="456" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">WAL</text>
+  <text x="2080" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">round_id keys, one box</text>
+  <rect x="2549" y="413" width="292" height="66" rx="0" fill="#eff5ea" stroke="#b8d7a6" stroke-width="2"/>
+  <text x="2695" y="437" text-anchor="middle" fill="#5a912f" font-size="28" font-weight="600">NAS</text>
+  <text x="2695" y="469" text-anchor="middle" fill="#2b2b29" font-size="23">one copy per round</text>
+  <text x="2695" y="515" text-anchor="middle" fill="#2b2b29" font-size="21">off the box · outlives the box</text>
+
+</g>
+</svg>
