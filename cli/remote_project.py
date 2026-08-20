@@ -41,6 +41,19 @@ def cmd_remote_project(args: argparse.Namespace) -> int:
             "unarchive": project_archive.project_unarchive,
             "delete": project_archive.project_delete,
         }[args.subcommand](args)
+    if args.subcommand == "rename":
+        # ADR 0035 D-a (issue 55). Its handler lives in `cli/project_rename.py` for the reason the
+        # three above live in `cli/project_archive.py` — this file is past the 800-line ceiling.
+        from . import project_rename
+
+        return project_rename.project_rename(args)
+    if args.subcommand == "leave":
+        # ADR 0035 D-b (issue 56) — the member's counterpart to `member remove` below. Its handler
+        # lives in `cli/project_leave.py` for the reason the four above live elsewhere: this file is
+        # past the 800-line ceiling.
+        from . import project_leave
+
+        return project_leave.project_leave(args)
     if args.subcommand in ("share", "private"):
         # ADR 0034 D-k (issue 36). Their handlers live in `cli/project_visibility.py`, for the same
         # reason the three above live in `cli/project_archive.py` — imported at module scope with

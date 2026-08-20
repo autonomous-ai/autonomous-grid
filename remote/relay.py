@@ -1043,6 +1043,90 @@ def set_project_visibility(signaling_url: str, access_token: str, project_id: st
         missing_route_hint=_OLD_RELAY_NO_VISIBILITY)
 
 
+# A relay that predates ADR 0035 D-a (issue 55) has no rename route, and answers the same bare
+# framework 404 an unknown project id would produce on a relay that does.
+#
+# ⚠️ **Its own sentence**, for `_OLD_RELAY_NO_ARCHIVE`'s and `_OLD_RELAY_NO_VISIBILITY`'s reason:
+# `_OLD_RELAY` claims the relay has no projects at all, which is false here — this relay has the
+# whole project plane and is missing one route — and it would send somebody to check a feature that
+# is working perfectly.
+#
+# It says what the silence MEANS rather than only that the route is missing: nothing was renamed, and
+# the id still addresses the project. That matters because the obvious next move on a relay this old
+# is `grid project create --name <new>`, which is create-or-get BY NAME and would hand back a second,
+# empty project — the silent fork this whole command exists to prevent. So the sentence names the id
+# as the thing that still works.
+_OLD_RELAY_NO_RENAME = (
+    "This grid's relay cannot rename a project — it predates that route. Ask its operator to "
+    "update it. Nothing was changed, and the project's id still reaches it. Do NOT use "
+    "`grid project create` with the new name: that creates a second, empty project and leaves your "
+    "work in this one."
+)
+
+
+def rename_project(signaling_url: str, access_token: str, project_id: str,
+                   *, name: str) -> dict[str, Any]:
+    """Give a project a different name (``POST /relay/v1/projects/{id}/name``), ADR 0035 D-a.
+
+    Owner only. The **id does not change**, which is the whole point: a name was never an address
+    (ADR 0033 D-a), so no clone, script or stored reference is touched.
+
+    The reply is the project view plus ``previous_name`` — what it used to be called. The caller
+    typed only an id and a new name, so that key is the only way this CLI can tell whether it just
+    renamed somebody's ``default`` project away, which is the warning ADR 0035 D-g asks for.
+
+    ``name`` is sent verbatim and is the relay's to validate: it refuses a non-string rather than
+    coercing it, and a second validator here would be a second opinion about what a project may be
+    called.
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/name",
+        json={"name": name},
+        missing_route_hint=_OLD_RELAY_NO_RENAME)
+
+
+# A relay that predates ADR 0035 D-b (issue 56) has no leave route, and answers the same bare
+# framework 404 an unknown project id would produce on a relay that does.
+#
+# ⚠️ **Its own sentence**, for `_OLD_RELAY_NO_RENAME`'s reason: `_OLD_RELAY` claims the relay has no
+# projects at all, which is false here.
+#
+# It says what the silence MEANS and then names the way out, which matters more on this route than
+# on any of its neighbours: the whole point of a bare 404 being loud is that the person is not left
+# guessing whether they are still a member. They are — nothing was changed — and on a relay this old
+# the only way off a project is the one this command was written to replace, which is somebody else
+# running `grid project member remove`. Saying so is what stops a member assuming they are out.
+_OLD_RELAY_NO_LEAVE = (
+    "This grid's relay cannot take you off a project — it predates that route. Nothing was "
+    "changed and you are still a member. Ask its operator to update it, or ask the project's "
+    "owner to remove you with `grid project member remove`."
+)
+
+
+def leave_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
+    """Take yourself off a project (``POST /relay/v1/projects/{id}/leave``), ADR 0035 D-b.
+
+    **No request body, and no `member_key`** — that is the whole reason this is a route of its own
+    rather than a relaxed `DELETE …/members/{member_key}`. The caller is resolved from the token, so
+    nothing has to be looked up first; naming your own key would need `grid project member list`,
+    which is the three-step workaround this command exists to delete.
+
+    The reply says ``left: True`` and echoes the ``project_id`` and the ``member_key`` it removed.
+    ``left`` is what `cli/project_leave.py` checks before it reports a departure — the relay is the
+    only thing that knows whether one happened.
+
+    Refused for the project's **owner** (``422 owner_cannot_be_removed``) and on a **grid-visible**
+    project (``409 project_is_grid_visible``), and both sentences are displayed verbatim: neither is
+    a parsed code, because each already names the way forward and a fourth reader is a fourth thing
+    a reworded relay could break (ADR 0035 D-g).
+    """
+    return _task_oneshot(
+        signaling_url, access_token, "POST",
+        f"/relay/v1/projects/{quote(project_id, safe='')}/leave",
+        missing_route_hint=_OLD_RELAY_NO_LEAVE)
+
+
 def init_project(signaling_url: str, access_token: str, project_id: str) -> dict[str, Any]:
     """Give an empty project a trunk (``POST /relay/v1/projects/{id}/init``), ADR 0033 D-o.
 

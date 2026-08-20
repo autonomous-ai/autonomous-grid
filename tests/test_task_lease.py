@@ -1956,8 +1956,15 @@ def test_every_command_this_cli_tells_you_to_run_actually_parses():
     from cli import parser as cli_parser
     # `project_archive` (ADR 0033 D-p, issue 33) joins the scan because it prints advice of its own
     # — "Undo with: grid project unarchive <id>" is the one sentence a member reads after archiving
-    # something they did not mean to.
-    from cli import project_archive, remote_project, remote_task
+    # something they did not mean to. `project_rename` (ADR 0035 D-a, issue 55) for the same reason,
+    # and its hint is the harder one: it offers `grid project rename <id> --name <old>`, which has a
+    # REQUIRED flag — exactly the shape that produced three of the four defects this test was
+    # written for.
+    # `project_leave` (ADR 0035 D-b, issue 56) joins them, and it is the shape that produced three
+    # of the four defects this test was written for: the line it prints is the OWNER's
+    # `grid project member add <id> --email <address>`, which has a required flag AND a free-text
+    # value after it.
+    from cli import project_archive, project_leave, project_rename, remote_project, remote_task
 
     def printed_strings(module) -> list[str]:
         """Every literal a `print(...)` in this module emits, with each `{...}` as one token."""
@@ -1975,7 +1982,7 @@ def test_every_command_this_cli_tells_you_to_run_actually_parses():
         return out
 
     hints = []
-    for module in (project_archive, remote_project, remote_task):
+    for module in (project_archive, project_leave, project_rename, remote_project, remote_task):
         for text in printed_strings(module):
             found = re.search(r"grid (?:task|project) [a-z][^\n]*", text)
             if found:
@@ -2164,6 +2171,243 @@ def test_the_visibility_key_this_cli_reads_is_the_one_the_relay_writes():
     assert "visibility" in status, (
         "grid-src's `/projects/{id}/status` no longer carries `visibility`, so `grid project "
         "status` cannot tell a member their project is restricted")
+
+
+def test_the_rename_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0035 D-a (issue 55): `POST /relay/v1/projects/{project_id}/name`.
+
+    The path is most of the contract here, and a drift is silent in the worst direction — the same
+    one issues 45 and 47 record: this CLI would post to a path the relay does not serve, get
+    FastAPI's bare 404, and `missing_route_hint` would turn it into *"ask your operator to update
+    the relay"* about a relay that is perfectly up to date. Worse here than elsewhere, because that
+    sentence then steers somebody towards `grid project create --name <new>` — create-or-get BY
+    name, which hands them a second, empty project and leaves their work in the first. A typo in
+    this repository would deliver the exact failure the command exists to prevent.
+    """
+    from remote import relay
+
+    assert _client_paths(relay.rename_project) <= _served("project_rename.py", "{project_id}"), (
+        f"this CLI renames at {sorted(_client_paths(relay.rename_project))}, which grid-src's "
+        f"project_rename.py does not serve")
+
+
+def test_the_rename_reply_still_carries_what_the_project_used_to_be_called():
+    """`previous_name`, and it raises **nowhere** — which is exactly why it is pinned here.
+
+    It is the only way this CLI can know the old name: the caller typed an id and a new name, and
+    nothing else on this side has ever seen the project. Drop it on the relay and
+    `grid project rename` silently stops warning that it just renamed somebody's `default` project
+    away — after which their next `grid task create` with no `--project` refuses, and nothing
+    anywhere connects the two. Both suites stay green.
+
+    Read out of the route's own strings rather than restated, and paired with the KEY this CLI
+    reads, so the two spellings cannot drift apart.
+    """
+    from cli import project_rename  # noqa: F401  — the reader whose behaviour this protects
+
+    route = _relay_function_strings("_view", module="project_rename.py")
+    assert "previous_name" in route, (
+        "grid-src's rename route no longer answers with `previous_name`, so `grid project rename` "
+        "cannot warn that it renamed the caller's `default` project away — the ADR 0035 D-g "
+        "failure, arriving with nothing red in either repository")
+
+
+def test_the_relay_normalises_a_project_name_the_way_this_cli_expects():
+    """⚠️ The one hand-duplicated NORMALISATION on this seam, and it is invisible from both sides.
+
+    grid-src's `projects.requested_name` strips the name before storing and echoing it, so a caller
+    who typed `--name "acme "` gets back `acme`. `grid project rename` compares the echo against
+    what it asked for in order to decide whether the rename happened — so the two have to agree
+    about what "what it asked for" means, and `cli/project_rename._as_the_relay_will_store_it` is
+    this side's copy of that rule.
+
+    Both directions of drift are bad, and neither raises anywhere:
+
+      * the relay normalising **more** (case-folding, collapsing inner whitespace) makes every such
+        rename report a FAILURE for a rename that landed — and the refusal's remedy re-runs the same
+        request, so it never resolves. The person's next move is `grid project create --name <new>`,
+        create-or-get BY NAME, which is the second-empty-project fork this command exists to remove.
+      * the relay normalising **less** makes this CLI's `default` warning fire on a name the relay
+        did not store as `default`, and stay silent on one it did.
+
+    Read out of grid-src's validator rather than restated. The shape is asserted — `.strip()` and
+    nothing else touching the value — because what must be pinned is the TRANSFORMATION, and there
+    is no constant to compare.
+    """
+    import ast
+
+    from cli import project_rename
+
+    source = _relay_module("projects.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+
+    tree = ast.parse(source.read_text())
+    validator = next((n for n in ast.walk(tree)
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and n.name == "requested_name"), None)
+    assert validator is not None, (
+        "grid-src's `projects.requested_name` is gone — it was `_name` before ADR 0035 D-a made the "
+        "rename its second consumer. Whatever replaced it is what this CLI's postcondition has to "
+        "agree with")
+
+    body = ast.unparse(validator)
+    # The transformation applied to the value that is STORED. `.strip()` and nothing else: a second
+    # call here (`.lower()`, `.replace(...)`) is exactly the "normalises more" drift above.
+    assert "raw.strip()" in body, (
+        "grid-src no longer normalises a project name with `raw.strip()`, so "
+        "`cli/project_rename._as_the_relay_will_store_it` is now a different rule from the relay's "
+        "— every rename whose name needs normalising would be reported as a failure that landed")
+    for extra in (".lower()", ".upper()", ".casefold()", ".title()"):
+        assert extra not in body, (
+            f"grid-src's project-name validator now also applies `{extra}`, which this CLI does "
+            f"not — teach `_as_the_relay_will_store_it` the same rule, or the postcondition "
+            f"reports a landed rename as a failure")
+
+    # And this side really does apply it, rather than having quietly become the identity function.
+    assert project_rename._as_the_relay_will_store_it("  acme  ") == "acme"
+
+
+def test_the_rename_refusal_still_names_the_way_forward():
+    """`project_name_taken` is **displayed verbatim** — deliberately not a fourth parsed code
+    (ADR 0035 D-g), because exactly three are read across the two repositories and keeping the count
+    that low is itself the contract.
+
+    So a rename of the code is a display change and nothing breaks. What this catches instead is the
+    message losing its REMEDY: the sentence is the whole of what a person gets, and if it stopped
+    naming a command they can run they would be refused with no way to find out which of their own
+    projects is holding the name. Nothing on this side would notice, because the CLI is only passing
+    the words through — the `project_archived` / `project_not_empty` rule, applied to a third
+    refusal.
+    """
+    taken = _relay_function_strings("_taken", module="project_rename.py")
+    assert "project_name_taken" in taken, (
+        "grid-src's rename no longer sends `project_name_taken`")
+    assert any("grid project list" in value for value in taken), (
+        "grid-src's taken-name refusal no longer names a command, so somebody refused for a "
+        "collision has no way to find the project that is holding the name")
+
+
+def test_the_relay_still_refuses_a_rename_from_anybody_but_the_owner():
+    """Owner-only is a property of the NAME, not politeness, and the damage lands on THIS side.
+
+    `idx_projects_owner_name` is `(owner_id, name)`, so a name lives in the owner's namespace and
+    other people read it. Since ADR 0034 D-k every authenticated caller on the grid is auto-minted
+    as a member of a non-private project — so a relay that relaxed this gate to "any member" would
+    let anyone on the grid rename any team's project, and `grid project rename --help` in this
+    repository still promises otherwise.
+
+    Parsed out of the route rather than restated, so the promise here and the rule over there cannot
+    drift apart silently.
+    """
+    import ast
+
+    source = _relay_module("project_rename.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+
+    tree = ast.parse(source.read_text())
+    route = next((n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == "rename_project"), None)
+    assert route is not None, (
+        "grid-src's project_rename.py no longer has a `rename_project` route, so this check reads "
+        "nothing")
+
+    body = ast.unparse(route)
+    assert "require_owner" in body, (
+        "the rename route no longer goes through `require_owner`. Under ADR 0034 D-k every "
+        "authenticated caller on the grid reaches a non-private project, so without it any of them "
+        "can rename any team's project")
+    assert "refuse_if_archived" in body, (
+        "the rename route no longer refuses an archived project (ADR 0035 D-f), and "
+        "`grid project rename --help` in this repository still says it does")
+
+
+def test_the_leave_route_this_cli_posts_to_is_the_one_the_relay_serves():
+    """ADR 0035 D-b (issue 56): `POST /relay/v1/projects/{project_id}/leave`.
+
+    The path is the whole contract here — there is no body and no `member_key`, which is the point
+    of the route — and a drift is silent in the worst direction, the one issues 45 and 47 record:
+    this CLI would post to a path the relay does not serve, get FastAPI's bare 404, and
+    `missing_route_hint` would turn it into `_OLD_RELAY_NO_LEAVE` about a relay that is perfectly up
+    to date. That sentence tells the member *you are still a member* and sends them to the project's
+    owner — so a typo in this repository would deliver, in full sincerity, the exact dead end this
+    command was written to remove.
+    """
+    from remote import relay
+
+    assert _client_paths(relay.leave_project) <= _served("project_leave.py", "{project_id}"), (
+        f"this CLI leaves at {sorted(_client_paths(relay.leave_project))}, which grid-src's "
+        f"project_leave.py does not serve")
+
+
+def test_the_leave_reply_still_says_the_caller_left():
+    """`left`, and it raises **nowhere** — which is why it is pinned here.
+
+    `cli/project_leave.py` refuses to report a departure the relay did not confirm, keyed on
+    `answer.get("left") is not True`. Drop the key on the relay and every landed leave is reported
+    as a FAILURE — the member is told they may still be a member of a project they have just left,
+    and the remedy the refusal names (`grid project list`) agrees with the relay rather than with
+    the CLI, so nothing anywhere connects the two. Both suites stay green.
+
+    Read out of the route's own strings rather than restated, and paired with the reader whose
+    behaviour it protects, so the two spellings cannot drift apart.
+    """
+    from cli import project_leave  # noqa: F401  — the reader whose behaviour this protects
+
+    route = _relay_function_strings("leave_project", module="project_leave.py")
+    assert "left" in route, (
+        "grid-src's leave route no longer answers with `left`, so `grid project leave` refuses "
+        "every successful departure as an answer it cannot read")
+
+
+def test_the_two_removal_routes_still_share_one_implementation():
+    """⚠️ **Issue 56's first acceptance criterion, checked from this side**, because this is the
+    repository that pays for it being wrong.
+
+    `DELETE …/members/{member_key}` and `POST …/leave` mean the same thing to a project and differ
+    only in who may ask. Two spellings of "remove a member" is the two-authorization-models failure
+    this plane keeps warning about, and the grid-visible refusal is the one nobody would think to
+    copy: on a grid-visible project the membership row is not what grants access, so removing it
+    revokes nothing and the next request mints it straight back with an identical key.
+
+    A copy that lost that refusal answers **200** to `grid project leave`, and this CLI would print
+    "You have left project P1" over a departure that did not happen — a reply that says what the
+    caller asked for is not evidence the caller got it. Nothing here can see that, which is exactly
+    why the structure is pinned rather than the behaviour.
+    """
+    import ast
+
+    source = _relay_module("project_leave.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+
+    route = next((n for n in ast.walk(ast.parse(source.read_text()))
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == "leave_project"), None)
+    assert route is not None, (
+        "grid-src's project_leave.py no longer has a `leave_project` route, so this check reads "
+        "nothing")
+
+    body = ast.unparse(route)
+    assert "remove_membership" in body, (
+        "grid-src's leave route no longer calls the shared `projects.remove_membership`, so this "
+        "plane now has two opinions about what removing a member means — and the one this CLI "
+        "reaches is the copy, which is where the grid-visible refusal goes missing first")
+    assert "refuse_unless_reachable" in body, (
+        "grid-src's leave route no longer runs the project-shaped 404 first, so it can tell a "
+        "stranger whether a project id is real — on the one route in this plane that needs no "
+        "setup at all to call")
+    # ⚠️ The ABSENCE, and it is a decision rather than an oversight (ADR 0035 D-f). The rule that
+    # recruits a route into `project_writable` — *does it move a ref or write a row?* — would take
+    # `leave`, and it has already pulled in two routes nobody thought of. Refusing it would trap a
+    # member in a project nobody is working in and make them ask its owner to REOPEN the project
+    # purely so they could walk away from it. `grid project leave --help` here promises otherwise.
+    assert "refuse_if_archived" not in body, (
+        "grid-src's leave route now refuses an archived project, which ADR 0035 D-f decides "
+        "against — a member would have to ask the owner to unarchive a project in order to leave "
+        "it, and `grid project leave --help` in this repository says archiving does not stop them")
 
 
 def test_a_project_you_are_not_a_member_of_can_never_read_as_yours():

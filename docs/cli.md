@@ -887,6 +887,8 @@ grid project unarchive     <project-id> [--grid <grid>] [--json]
 grid project delete        <project-id> [--yes] [--grid <grid>] [--json]
 grid project share         <project-id> [--grid <grid>] [--json]
 grid project private       <project-id> [--grid <grid>] [--json]
+grid project rename        <project-id> --name <name> [--grid <grid>] [--json]
+grid project leave         <project-id> --yes [--grid <grid>] [--json]
 grid project member list   <project-id> [--grid <grid>] [--json]
 grid project member add    <project-id> --email <address> [--grid <grid>] [--json]
 grid project member remove <project-id> <member-key> [--grid <grid>] [--json]
@@ -1436,6 +1438,65 @@ in that case the recovery is a new project, not this command.
 
 Both are the project **owner's**. Another member is refused with a reason; someone who is not a
 member gets the same "no such project" a stranger always gets.
+
+### Renaming a project
+
+`grid project rename <id> --name <new>` changes what a project is called.
+
+**Its id does not change**, so nothing that points at the project has to be updated — clones keep
+working, scripts that name the id keep working, and anyone who has bookmarked it still gets there.
+The new name shows up in `grid project list` and nowhere else has to follow.
+
+This is what to reach for instead of creating a project under the new name. `grid project create`
+finds a project *by* name, so creating one with a new name hands you a second, empty project and
+leaves your work in the first — which is the mistake this command exists to remove.
+
+Two things to know:
+
+- **The old name becomes free.** A colleague whose script still says `grid project create --name
+  <old>` will now get a new, empty project rather than yours. Give them the **id**, which is what
+  the rename prints back, because the id is the part that did not change.
+- **If you rename to or from `default`, it says so.** A task created with no `--project` runs in
+  your own project called `default`, so renaming one *to* that name moves where your next such task
+  lands, and renaming *away from* it makes that shorthand stop working until you have another.
+
+It is the project **owner's**, like archiving and deleting, and it is refused while the project is
+archived — `grid project unarchive <id>` first. A name only has to be unique among your own
+projects: two people on one grid can each have an `acme`.
+
+### Leaving a project
+
+`grid project leave <id> --yes` takes you off a project. You do not need the owner to do it for you,
+and you do not need to know anything but the project's id — the grid already knows who is asking.
+
+**Nothing of yours is stopped or thrown away.** Any task you have already asked for is claimed, runs
+and finishes normally, exactly as when an owner removes somebody. What changes is that the project
+stops answering to you: from your next command onwards you cannot read it, send it work, or list its
+tasks, and it answers you with the same "no such project" that an id you have never seen would.
+
+Two things to know before you run it:
+
+- **Your own tasks in that project go with you.** They leave `grid task list`, because that listing
+  shows tasks in projects you can reach. The work is not deleted and the project keeps every bit of
+  it; you just cannot see it from here any more.
+- **Only the owner can put you back**, with `grid project member add <id> --email <your address>`.
+  There is no way to rejoin a project by yourself, so the id is worth keeping.
+
+That is why `--yes` is required. This command never asks — a prompt somebody declines would exit
+successfully, and anything driving the CLI would read a refused departure as a completed one.
+
+**The owner cannot leave**, on any project and whatever its visibility. A project whose owner is not
+a member is reachable by nobody, and there is no way to hand one over, so the refusal points at the
+two things that do exist:
+`grid project archive <id>` stops it accepting work and hides it from your listing, and
+`grid project delete <id>` removes one that holds nothing.
+
+**A project everyone on the grid can reach refuses it too**, because being a member is not what
+gives you access there — you would be added straight back by your next command, so leaving would
+change nothing at all. Its owner has to restrict it first with `grid project private <id>`.
+
+You can leave an **archived** project. Archiving stops a project's contents changing; it is not a
+reason to keep somebody in one nobody is working in.
 
 ### Who can reach a project
 
