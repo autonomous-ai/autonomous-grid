@@ -263,7 +263,7 @@ class Diagram:
 
         def lrange(box):
             """(x0, x1) the label really occupies, honouring its anchor."""
-            mx, base, bw, bh, anchor = box[0], box[1], box[2], box[3], box[4]
+            mx, bw, anchor = box[0], box[2], box[4]
             if anchor == "end":
                 return (mx - bw, mx)
             if anchor == "start":
@@ -323,7 +323,6 @@ class Diagram:
                     box[5] = fs
 
         # ---- relaxation: node clearance + label-label spread + canvas clamp.
-        import math
         GAP = 6.0          # clearance between any two labels
         NODE_CLR = 3.0     # extra so a label never touches a node's border
         for _ in range(120):
@@ -402,7 +401,7 @@ class Diagram:
         for box in boxes:
             if box is None:
                 continue
-            bw, bh = box[2], box[3]
+            bh = box[3]
             x0, x1 = lrange(box)
             if x0 < 0:
                 box[0] += -x0
@@ -413,7 +412,7 @@ class Diagram:
 
     def _elabel(self, p, e, box):
         lab = e["label"]
-        mx, baseline, bw, bh, anchor, fs = box[0], box[1], box[2], box[3], box[4], box[5]
+        mx, baseline, anchor, fs = box[0], box[1], box[4], box[5]
         p.append(f'  <text x="{mx:.0f}" y="{baseline:.0f}" text-anchor="{anchor}" '
                  f'fill="{INK}" font-size="{fs}">{esc(lab)}</text>')
 
