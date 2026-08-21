@@ -147,8 +147,21 @@ def _conversations(root: Path) -> list[tuple[tuple[str, str, str], Path]]:
     if not projects.is_dir():
         return found
     try:
-        project_dirs = sorted(projects.iterdir())
+        # ⚠️ **Filtered to DIRECTORIES here, not left for `_subdirectories` to trip over** (ND-18).
+        # A non-directory under `projects/` is not a project and can never hold a candidate, but
+        # handing one down produced `NotADirectoryError` — a real listing failure as far as that
+        # function can tell — and with it a warning that this provider's workspace bound "is not
+        # being fully enforced". On macOS the file is `.DS_Store`, Finder writes it the moment
+        # anybody opens the folder, and the sweep went on enforcing the cap perfectly over every
+        # genuine project while saying once per sweep that it had stopped. The impact was nil and
+        # the sentence was alarming, which is the pair that teaches an operator to ignore it.
+        #
+        # Same predicate as `_subdirectories`, symlinks included: a symlinked project directory
+        # would let the sweep walk — and delete — through a link out of the tree entirely.
+        project_dirs = sorted(entry for entry in projects.iterdir()
+                              if entry.is_dir() and not entry.is_symlink())
     except OSError as exc:
+        # A failure to list `projects/` ITSELF is still a real one, and still says so.
         _warn(f"could not list {projects} to bound the provider's workspaces ({exc})")
         return found
     for project in project_dirs:
