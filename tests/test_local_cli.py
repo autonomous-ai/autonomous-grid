@@ -23906,6 +23906,82 @@ def test_task_create_without_a_project_explains_an_old_relay_too(monkeypatch, tm
     assert "relay" in str(caught.value).lower()
 
 
+def test_task_create_with_a_project_does_not_leak_the_bare_framework_404(monkeypatch, tmp_path):
+    """ND-13. The one command in the C4 drill that handed the user FastAPI's two words.
+
+    The sibling test above passes for a reason that does not cover this: without `--project`, the
+    command resolves a project first, and that call carries `_OLD_RELAY`. Name the project and the
+    resolution is skipped, so `POST /relay/v1/tasks` is the first request — and it had no hint, so
+    the user's entire diagnosis was `Not Found`. Thirteen of the fourteen commands in that drill
+    translated the same 404 into a sentence.
+
+    ⚠️ **The reason it had no hint is sound, and the fix must not undo it.** `/relay/v1/tasks`
+    exists on relays predating the whole project plane, so a 404 HERE cannot mean "your relay is
+    old" — an old relay answers 201 and quietly puts the task in the caller's `default`, which is
+    what the echoed-`project_id` guard above catches. A 404 from a route every relay has means the
+    address being spoken to is not a relay at all: a proxy in front of it, or a wrong base URL.
+    So the sentence must say THAT, and pointing at "update your relay" would send somebody to
+    upgrade a server that is working.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    _mock_relay(monkeypatch, handler)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "x"])
+
+    message = str(caught.value)
+    # The positive control: the request under test is the one that failed. Without it a command
+    # that refused before ever calling the relay satisfies every assertion below.
+    assert seen and seen[-1] == "/relay/v1/tasks", (
+        f"the 404 under test did not come from the task route: {seen}")
+    assert message.strip() != "Not Found", (
+        "the bare framework 404 reached the user unexplained (ND-13)")
+    assert "relay" in message.lower(), f"the sentence does not name the relay: {message}"
+    # ⚠️ Not the old-relay sentence. This route is not missing on an old relay, and a message
+    # that said so would send a user to upgrade a server that is answering correctly.
+    assert "predates" not in message.lower() and "update it" not in message.lower(), (
+        f"a 404 here was diagnosed as an out-of-date relay, which it cannot be: {message}")
+
+
+def test_a_real_404_from_the_task_route_is_not_masked_by_the_new_hint(monkeypatch, tmp_path):
+    """The other half of ND-13, and the half a new guard is most likely to get wrong.
+
+    `_NOT_THE_RELAY` says something quite specific and quite alarming — *what is answering there
+    is probably not the relay* — so it must fire only for the bare framework 404 it was written
+    for. A relay that DOES have the route and is refusing something real (an unknown project, a
+    project the caller cannot reach) answers 404 with its own words, and swallowing those to
+    announce a misconfigured proxy would send the user to debug their network over a refusal that
+    was already explained.
+
+    Keyed on the DETAIL being exactly FastAPI's `"Not Found"` rather than on the status, which is
+    the same test `_task_oneshot` applies for the other thirteen hints.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": {
+        "code": "no_such_project",
+        "message": "There is no project P1 you can reach on this grid."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "x"])
+
+    message = str(caught.value)
+    assert "no project P1" in message, (
+        f"the relay's own refusal was replaced by the missing-route hint: {message}")
+    assert "not the relay" not in message, (
+        f"a real refusal was diagnosed as a misconfigured proxy (ND-13's guard overreaching): "
+        f"{message}")
+
+
 def test_a_real_404_from_the_projects_route_is_not_masked(monkeypatch, tmp_path):
     """The other half, and the reason the hint is keyed on the BARE detail: a relay that does know
     the route and answers 404 about the project itself must have its own words shown, not be
