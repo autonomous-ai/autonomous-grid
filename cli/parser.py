@@ -1200,8 +1200,9 @@ def _add_task(sub) -> None:
             "within about half a minute, on the provider's next lease renewal — and on a provider "
             "that has not been updated yet it runs to completion, harmlessly, with nothing waiting "
             "on it.\n\n"
-            "Nothing is rewound: whatever the agent had already done is kept, so "
-            "`grid task fetch` still works on it."),
+            "Nothing is undone. What the agent had reached is another matter: it is stopped "
+            "part-way and may never have published anything, so `grid task fetch` gives you "
+            "what the grid has recorded — which can be only what you sent in. It says which."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     cancel.add_argument(
         "task_id",

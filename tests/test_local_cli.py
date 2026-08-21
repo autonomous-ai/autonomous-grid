@@ -33062,6 +33062,62 @@ def test_task_cancel_posts_to_the_cancel_route_and_says_what_happened(monkeypatc
     assert "t-1" in out and "cancelled" in out.lower()
 
 
+def test_task_cancel_does_not_promise_the_agents_work_survived(monkeypatch, tmp_path, capsys):
+    """ND-02. `cancel` said the work was kept, and at the moment it says so nobody knows that.
+
+    Measured on a live grid 2026-08-20: cancel a running turn, then `grid task fetch` it, and the
+    tree that comes back is the task's **input** — the agent's edits are not in it. `fetch` was
+    already honest about this ("recorded no result … it may hold only the task's input"); this
+    line was the half that still over-promised, and the two were read one after the other by the
+    same person in the same minute.
+
+    The promise cannot be made conditional at this end either: `cancel` returns as soon as the
+    relay records it and the agent does not stop until the next lease beat, so what will finally
+    be recorded is unknown here. That leaves saying so — which is what the assertion pins.
+
+    The `fetch` pointer stays. It is the only way to find out which of the two you got, and
+    deleting it to fix the honesty would take away the answer along with the wrong promise.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "id": "t-1", "project_id": "P1", "state": "failed", "error": "cancelled",
+            "prompt": "fix the parser", "member_key": "def456"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "cancel", "t-1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # The positive control: the line under test is actually being read. Without it every
+    # assertion below passes just as well against a command that printed nothing at all.
+    assert "grid task fetch t-1" in out, (
+        f"cancel no longer points at fetch, so this test is checking an absent sentence:\n{out}")
+    assert "already done is kept" not in out, (
+        f"cancel is promising the agent's work survived again (ND-02) — it does not know that "
+        f"when it prints:\n{out}")
+    lowered = out.lower()
+    assert not ("is kept" in lowered or "left where the agent got to" in lowered), (
+        f"cancel found another way to promise the work survived:\n{out}")
+
+    # ⚠️ **The `--help` is the other copy of this promise, and the first report of ND-02 was
+    # against the help rather than the printed line.** They were written apart and fixed apart
+    # once already — issue 46 reworded the parser's one-line description and left the epilogue
+    # standing — so both are pinned here, in one test, where a future edit to either is measured
+    # against the same rule.
+    parser = cli.build_parser()
+    cancel = parser._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["cancel"]
+    help_text = cancel.format_help()
+    assert "grid task fetch" in help_text, (
+        f"the cancel help no longer mentions fetch, so the check below reads nothing:\n{help_text}")
+    assert "already done is kept" not in help_text and "is kept" not in help_text.lower(), (
+        f"the cancel --help promises the agent's work survived (ND-02); it does not know that "
+        f"when it is written, let alone when it is read:\n{help_text}")
+
+
 def test_task_cancel_refuses_a_reply_it_cannot_read(monkeypatch, tmp_path):
     """The rule every sibling in this plane follows since 19a's review: an answer this command
     cannot read is NOT a successful cancellation. Reporting one would tell somebody their colleague's
