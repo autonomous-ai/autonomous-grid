@@ -120,6 +120,16 @@ _HOSTILE_SEGMENTS = [
     # not the constant, because nothing from `remote/` is imported at this module's scope; the two
     # are pinned to each other by the test below.
     "store.git",
+    # The SAME directory on a case-insensitive filesystem (ND-11), which is what APFS and NTFS are
+    # by default — and what the provider fleet's macOS boxes run. Measured on this machine: create
+    # `store.git/marker`, then `cat STORE.GIT/marker`, and the store's own content comes back. The
+    # guard compared with `==`, so this spelling was accepted in all three positions and a
+    # workspace built from it would sit on the member's whole history — the exact disaster the
+    # row above exists to stop, reachable through a different capitalisation of it.
+    # ⚠️ `Path.resolve()` does not normalise case either, so comparing resolved paths misses it
+    # too; casefold is the tool.
+    "STORE.GIT",
+    "Store.Git",
 ]
 
 
@@ -133,6 +143,37 @@ def test_the_reserved_segment_is_the_object_stores_own_directory_name():
     from remote import task_worktree
 
     assert task_worktree.STORE_DIR_NAME in _HOSTILE_SEGMENTS
+
+
+def test_a_differently_cased_store_name_is_the_same_directory_where_the_provider_runs(tmp_path):
+    """Why the rows above are not paranoia: the collision is a property of the FILESYSTEM (ND-11).
+
+    The guard refuses one NAME, and a name only means a directory once a filesystem has resolved
+    it. APFS and NTFS are case-INsensitive by default, so `STORE.GIT` and `store.git` are one
+    directory there — and that is what the provider fleet's macOS boxes run.
+
+    Measured rather than assumed, and it reports which world it is in instead of skipping: on a
+    case-sensitive filesystem the two names really are two directories and there is nothing to
+    prove locally, but the guard still has to hold, because the machine that runs a provider is
+    not the machine that runs this suite. Either way the assertion below is the same.
+
+    ⚠️ `Path.resolve()` does NOT normalise case, so a resolved-path comparison misses this too.
+    """
+    from remote import task_worktree
+
+    store = tmp_path / task_worktree.STORE_DIR_NAME
+    store.mkdir()
+    (store / "marker").write_text("the member's whole history")
+    shouted = tmp_path / task_worktree.STORE_DIR_NAME.upper()
+
+    case_insensitive = (shouted / "marker").exists()
+    if case_insensitive:
+        assert (shouted / "marker").read_text() == "the member's whole history", (
+            "the filesystem resolved both spellings to one directory but handed back different "
+            "content, which is neither of the two worlds this test knows how to reason about")
+        assert store.resolve() != shouted.resolve(), (
+            "`resolve()` started normalising case, so the note above is stale — re-derive whether "
+            "casefold is still the right tool before trusting this test")
 
 
 @pytest.mark.parametrize("hostile", _HOSTILE_SEGMENTS)

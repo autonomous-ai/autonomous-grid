@@ -290,17 +290,47 @@ def _printed_strings(path: pathlib.Path):
 
     ⚠️ A string at MODULE level reaches nobody through these sinks and is therefore not walked; the
     constants that matter (`_MERGE_TURN_LABEL`, the refusal templates) are read inside a function
-    that prints or raises, so they are covered where they are used.
+    that prints or raises, so they are covered where they are used — and the tables that are NOT
+    are named in `_SENTENCE_TABLES`.
+
+    ⚠️ **A LOCAL variable holding a sentence is followed** (ND-06). Half a sentence assigned to a
+    plain local and interpolated into what the function returns is still prose a person reads, and
+    without this the walker yielded only the punctuation around it: `cli/remote_task.` \
+    `_no_trunk_message` shipped `main` to every new user past a green suite that way. The
+    resolution is deliberately shallow — one pass over the function's own `name = <literal>`
+    assignments, no flow analysis — because it only has to see the shape people actually write, and
+    a local that never reaches a sink is still invisible, which is what keeps a wire value like
+    `kind = "merge"` out of the report.
     """
     tree = ast.parse(path.read_text())
 
-    def parts(node):
+    def parts(node, names):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             yield node.lineno, node.value
         elif isinstance(node, ast.JoinedStr):
             for piece in node.values:
                 if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
                     yield node.lineno, piece.value
+                elif isinstance(piece, ast.FormattedValue) and isinstance(piece.value, ast.Name):
+                    # `f"{head} …"` — the ND-06 shape.
+                    yield from names.get(piece.value.id, ())
+        elif isinstance(node, ast.Name):
+            # `return head`, or `print(head)`.
+            yield from names.get(node.id, ())
+
+    def local_sentences(function):
+        """`name -> [(lineno, value)]` for this function's own string assignments."""
+        names: dict[str, list] = {}
+        for node in ast.walk(function):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)):
+                # Resolved against an EMPTY map, so one local built out of another is not chased.
+                # Depth is not what this scan is short of, and a fixpoint here would be a flow
+                # analysis nobody asked for.
+                collected = list(parts(node.value, {}))
+                if collected:
+                    names.setdefault(node.targets[0].id, []).extend(collected)
+        return names
 
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -311,18 +341,19 @@ def _printed_strings(path: pathlib.Path):
             # both planes, and a per-module rule exempted `_project_create` — the busiest command on
             # the application's surface — for years without anybody choosing to.
             continue
+        names = local_sentences(function)
         for node in ast.walk(function):
             if isinstance(node, ast.Call):
                 name = node.func.id if isinstance(node.func, ast.Name) else getattr(
                     node.func, "attr", "")
                 if name in _USER_FACING_CALLS:
                     for argument in node.args:
-                        yield from parts(argument)
+                        yield from parts(argument, names)
             elif isinstance(node, ast.Return) and node.value is not None:
                 # A helper that BUILDS a sentence for its caller to print —
                 # `task_diff._nothing_to_show` is the one this exists for, and it is the most
                 # user-facing prose in that module.
-                yield from parts(node.value)
+                yield from parts(node.value, names)
 
 
 def test_what_the_application_facing_handlers_print_speaks_no_git():
@@ -346,6 +377,74 @@ def test_what_the_application_facing_handlers_print_speaks_no_git():
     assert not found, (
         "git vocabulary in what an application-facing handler prints (ADR 0034 D-m):\n  "
         + "\n  ".join(sorted(found)))
+
+
+def test_the_printed_string_walker_follows_a_sentence_held_in_a_local_variable(tmp_path):
+    """The walker must see a literal that reaches a sink through a LOCAL name, not only directly.
+
+    ⚠️ **The third instance of one structural hole**, and the first that a module-level exemption
+    list could not have caught. `_DEFAULT_WARNINGS` and `_MERGE_TURN_LABEL` were both module-level
+    constants, and `_SENTENCE_TABLES` below was the answer to them — an explicit list somebody
+    maintains. That answer cannot reach this one: `cli/remote_task._no_trunk_message` assigned its
+    first sentence to a plain local `head` and returned `f"{head} …"`, so the literal was an
+    `ast.Name` inside a `FormattedValue` and the walker yielded only the punctuation around it.
+    `grid task create` printed `main` at the first wall a new user meets, and this file reported
+    18 passed.
+
+    So the walker resolves local string assignments inside the function it is already walking,
+    which needs no list and no maintenance. The three rows below are the whole contract:
+
+      * the DIRECT case, which already worked — the positive control. Without it a walker that
+        returned nothing at all would pass the row that matters by finding no offence;
+      * the LOCAL case, which is the hole;
+      * a WIRE value in a local that never reaches a sink, which must stay invisible. That is the
+        bound `_printed_strings`' docstring draws and the reason widening it to every module-level
+        string was rejected — a scan that reports `_MERGE_KIND = "merge"` can only be kept green by
+        exempting the two words that matter most.
+    """
+    module = tmp_path / "sample.py"
+    module.write_text(
+        "def direct():\n"
+        "    print('the trunk is a direct constant')\n"
+        "\n"
+        "def interpolated_from_a_local():\n"
+        "    head = 'this branch came through an f-string'\n"
+        "    return f'{head} and then some'\n"
+        "\n"
+        "def printed_from_a_local():\n"
+        "    note = 'this commit came through a bare name'\n"
+        "    print(note)\n"
+        "\n"
+        "def returned_from_a_local():\n"
+        "    line = 'this ref came back as a bare name'\n"
+        "    return line\n"
+        "\n"
+        "def wire_value_never_printed():\n"
+        "    kind = 'merge'\n"
+        "    return len(kind)\n")
+
+    seen = [value for _, value in _printed_strings(module)]
+
+    assert "the trunk is a direct constant" in seen, (
+        "the walker no longer sees a constant handed straight to `print`, so this test's other "
+        "rows prove nothing — fix the walker before reading them")
+    assert "this branch came through an f-string" in seen, (
+        "a sentence assigned to a local variable and interpolated into a returned f-string is "
+        "invisible to the walker again (ND-06). `grid task create` shipped `main` past this scan "
+        "that way")
+    # ⚠️ The two bare-`Name` shapes get their own rows because a mutation sweep found that the
+    # f-string row above does not reach them: disabling the bare-`Name` branch left this test
+    # green. They are also the shapes most likely to be written next — a sentence built over
+    # several lines and then printed is the ordinary way to write a long one.
+    assert "this commit came through a bare name" in seen, (
+        "`print(local)` is invisible to the walker — the same hole as ND-06 through a different "
+        "AST shape")
+    assert "this ref came back as a bare name" in seen, (
+        "`return local` is invisible to the walker — the same hole as ND-06 through a different "
+        "AST shape")
+    assert "merge" not in seen, (
+        "the walker now reports a wire value that reaches nobody — that is the failure mode which "
+        "makes this scan unusable, not a stricter version of it")
 
 
 # Module-level sentence TABLES on the application's surface, as `(module, attribute)`. `_printed_

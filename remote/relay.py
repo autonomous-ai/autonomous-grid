@@ -880,6 +880,28 @@ def _task_error_message(resp: httpx.Response) -> str:
     return f"Task request failed ({resp.status_code}): {resp.text[:400]}"
 
 
+# A bare framework 404 from `POST /relay/v1/tasks` (ND-13).
+#
+# ⚠️ **Its own sentence, and pointedly NOT `_OLD_RELAY`'s diagnosis.** Every other missing-route
+# hint in this module says "your relay predates this feature", because those routes really did
+# arrive with a release. This one did not: `/relay/v1/tasks` exists on every relay that has ever
+# had a task plane at all — an out-of-date relay answers **201** here and quietly files the task in
+# the caller's own `default`, which is the failure `create_task`'s echoed-`project_id` guard
+# catches. So a 404 from THIS route cannot mean an old relay, and saying so would send somebody to
+# upgrade a server that is answering correctly.
+#
+# What it does mean is that whatever is on the other end of this address is not the relay: a proxy
+# or gateway in front of it that does not forward the path, or a base URL pointing somewhere else
+# entirely. Left untranslated the user's whole diagnosis was the words "Not Found" — the one
+# command out of fourteen in the old-relay drill that leaked the framework's own string.
+_NOT_THE_RELAY = (
+    "This grid's relay address answered 'not found' for the route every relay has, so what is "
+    "answering there is probably not the relay — usually a proxy in front of it that does not "
+    "pass the path on, or a base address pointing somewhere else. No task was created. "
+    "`grid status` shows the address in use."
+)
+
+
 def create_task(
     signaling_url: str,
     access_token: str,
@@ -907,7 +929,8 @@ def create_task(
     body: dict[str, Any] = {"prompt": prompt, "project_id": project_id}
     if files:
         body["files"] = files
-    task = _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/tasks", json=body)
+    task = _task_oneshot(signaling_url, access_token, "POST", "/relay/v1/tasks", json=body,
+                         missing_route_hint=_NOT_THE_RELAY)
 
     # The ONE way this feature can fail silently, and it is the exact bug it exists to kill.
     # `/relay/v1/tasks` exists on a relay that predates project membership too, so it answers 201

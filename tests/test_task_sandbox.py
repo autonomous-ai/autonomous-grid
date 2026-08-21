@@ -208,23 +208,32 @@ def test_the_temp_directory_is_writable_and_not_merely_readable(monkeypatch, tmp
     assert expected in filesystem["allowWrite"]
 
 
-def test_the_workspace_stays_readable_even_when_it_sits_inside_the_denied_home(monkeypatch,
-                                                                               tmp_path):
-    """A dev box points `GRID_TASK_ROOT` at a directory under `$HOME`, which is denied wholesale.
+def test_a_workspace_under_the_denied_home_is_no_longer_a_supported_layout(monkeypatch, tmp_path):
+    """OVERTURNED 2026-08-20 (ND-01). Kept, rewritten, rather than deleted.
 
-    `allowRead` is documented to take precedence over `denyRead`, so the workspace is re-allowed by
-    name and the agent can still read the repository it was asked to work on. Without this the
-    confinement would be perfect and every task would fail.
+    This test used to assert that a workspace under a denied `$HOME` *"stays readable"*, on the
+    documented ground that `allowRead` takes precedence over `denyRead`. That ground is still true
+    **of the sandbox layer** — `test_build_caches_survive_the_denied_home` below is the live proof,
+    since every build cache it checks sits inside the same denied `$HOME` — and
+    `tests/e2e_agent_sandbox.py` measures it against the real binary.
+
+    What the old test did not cover is the SECOND layer. `permissions.deny` governs the in-process
+    tools and has no allow that beats it, so under that layout the `Write` tool is blocked while
+    Bash is not: measured on Claude Code 2.1.234, `Write` returns `is_error: true`, the agent works
+    around it with a shell redirect, and the task still reports `completed`. The old docstring's
+    *"without this the confinement would be perfect and every task would fail"* was therefore half
+    right — nothing failed, it just quietly cost more turns and depended on the agent being clever.
+
+    So the layout is refused now, and this test says so at the address the old assertion lived at,
+    so nobody re-derives the old rule from a gap in the file. The refusal's own reasoning is in
+    `test_a_workspace_inside_a_denied_tree_is_refused_rather_than_half_confined`.
     """
     from remote import task_sandbox
 
     workspace = Path.home() / ".grid-test-workspace" / "projects" / "p" / "workspace"
 
-    sandbox = task_sandbox.policy(workspace, tmp_path / "cfg")["sandbox"]
-
-    assert str(Path.home().resolve()) in sandbox["filesystem"]["denyRead"]
-    assert str(workspace.resolve()) in sandbox["filesystem"]["allowRead"]
-    assert str(workspace.resolve()) in sandbox["filesystem"]["allowWrite"]
+    with pytest.raises(ValueError):
+        task_sandbox.policy(workspace, tmp_path / "cfg")
 
 
 def test_build_caches_survive_the_denied_home(tmp_path, config_dir):
@@ -707,3 +716,79 @@ def test_temp_base_reads_what_the_child_will_actually_get(monkeypatch):
 
     monkeypatch.delenv("TMPDIR", raising=False)
     assert task_sandbox.temp_base() == Path("/tmp")
+
+
+def test_a_workspace_inside_a_denied_tree_is_refused_rather_than_half_confined(tmp_path,
+                                                                               config_dir,
+                                                                               monkeypatch):
+    """ND-01, measured live 2026-08-20 on Claude Code 2.1.234: the two layers disagree, silently.
+
+    `policy` builds TWO controls over the same paths. The sandbox's `filesystem` block has both
+    `denyRead` and `allowRead`, and there `allowRead` really does win — a workspace under a denied
+    `$HOME` stays readable, which is what the sibling test above measured. The `permissions` block
+    has **only** `deny`, because Claude Code's permission layer has no allow that beats a deny — so
+    the same workspace is covered by `Read(//$HOME/**)` with nothing to re-allow it.
+
+    The result is not a confinement failure, it is a CAPABILITY failure that reports success: the
+    `Write` tool comes back `is_error: true` (*"blocked by a Read deny rule in your permission
+    settings"*), the agent works around it with a shell redirect, the task still says `completed`,
+    and the only trace is extra turns. Measured: 5 turns / 24 s with the root inside `$HOME`,
+    3 turns / 15 s with it outside.
+
+    Refused here rather than repaired, because the repair is not available: dropping `$HOME` from
+    the deny list to make room for the workspace would hand the in-process `Read` tool the whole
+    home directory, which is the hole the second layer exists to close.
+    """
+    from remote import task_sandbox
+
+    inside = Path.home() / "gnd" / "projects" / "p" / "m" / "c" / "workspace"
+
+    with pytest.raises(ValueError) as refusal:
+        task_sandbox.policy(inside, config_dir)
+
+    message = str(refusal.value)
+    assert str(Path.home().resolve()) in message, message
+    assert task_agent_env_name() in message, message
+
+
+def test_a_workspace_outside_every_denied_tree_still_builds_a_policy(tmp_path, config_dir):
+    """The control for the refusal above: the ordinary layout must be untouched by it."""
+    from remote import task_sandbox
+
+    outside = tmp_path / "gnd" / "projects" / "p" / "m" / "c" / "workspace"
+
+    policy = task_sandbox.policy(outside, config_dir)
+
+    assert str(outside.resolve()) in policy["sandbox"]["filesystem"]["allowRead"]
+
+
+def test_preflight_refuses_a_task_root_inside_a_denied_tree_before_any_task_is_fetched(monkeypatch,
+                                                                                       tmp_path):
+    """The same refusal, moved to where an operator can act on it.
+
+    `policy` runs from `agent_argv`, which is built AFTER the checkout — so the `policy` guard alone
+    reports a configuration error on a task that has already fetched a repository. `preflight` is
+    called from the guarded pre-spawn block, once, before any of that.
+    """
+    from remote import task_sandbox
+
+    with pytest.raises(SystemExit) as refusal:
+        task_sandbox.preflight(task_root=Path.home() / "gnd")
+
+    assert str(Path.home().resolve()) in str(refusal.value)
+
+
+def test_preflight_still_passes_for_a_task_root_outside_the_home(monkeypatch, tmp_path):
+    """The control: preflight must not start refusing every provider."""
+    from remote import task_sandbox
+
+    monkeypatch.setattr(task_sandbox, "_prove_the_sandbox_can_bind_its_sockets", lambda: None)
+
+    task_sandbox.preflight(task_root=tmp_path / "gnd")
+
+
+def task_agent_env_name() -> str:
+    """The variable an operator would change, named without importing `task_agent` into the policy."""
+    from remote import task_sandbox
+
+    return task_sandbox.WORKSPACE_ROOT_HINT

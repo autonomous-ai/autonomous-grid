@@ -217,12 +217,12 @@ def _safe_segment(kind: str, value: str) -> str:
     minted — so "not a safe path segment" on its own would leave an operator with three things to
     check and no way to tell which.
 
-    ⚠️ **One NAME is refused as well as one shape** (ADR 0034 D-c, issue 50). The object store lives
-    at `<member_key>/store.git`, and `_SAFE_PROJECT_ID` admits a dot — so a conversation id spelled
-    exactly that is legal by every other rule here and would put a workspace on top of the member's
-    entire history. Refused in all three positions rather than only the one where the collision is
-    reachable: one rule is checkable, and "which levels does the store sit between" is the kind of
-    thing a later layout change moves.
+    ⚠️ **One NAME — in any casing — is refused as well as one shape** (ADR 0034 D-c, issue 50; the
+    casing is ND-11). The object store lives at `<member_key>/store.git`, and `_SAFE_PROJECT_ID`
+    admits a dot — so a conversation id spelled exactly that is legal by every other rule here and
+    would put a workspace on top of the member's entire history. Refused in all three positions
+    rather than only the one where the collision is reachable: one rule is checkable, and "which
+    levels does the store sit between" is the kind of thing a later layout change moves.
     """
     if not isinstance(value, str):
         raise ValueError(f"{kind} must be a string, got {type(value).__name__}")
@@ -230,7 +230,14 @@ def _safe_segment(kind: str, value: str) -> str:
         raise ValueError(f"{kind} must be 1-{_MAX_PROJECT_ID_CHARS} characters, got {len(value)}")
     if value in (".", "..") or not _SAFE_PROJECT_ID.match(value):
         raise ValueError(f"{kind} {value!r} is not a single safe path segment")
-    if value == task_worktree.STORE_DIR_NAME:
+    if value.casefold() == task_worktree.STORE_DIR_NAME.casefold():
+        # ⚠️ **`casefold`, never `==`** (ND-11). APFS and NTFS are case-INsensitive by default, so
+        # `STORE.GIT` and `store.git` are ONE directory on the machines a provider actually runs
+        # on — measured on macOS: writing `store.git/marker` and reading `STORE.GIT/marker` gives
+        # the store's own content back. An `==` here therefore admitted the exact collision this
+        # guard exists to refuse, spelled differently, in all three positions.
+        # `Path.resolve()` does not normalise case either, so comparing resolved paths would miss
+        # it too; the comparison has to be on the NAME.
         raise ValueError(
             f"{kind} {value!r} is the object store's own directory name, so a workspace built from "
             f"it would sit on top of this member's whole git history")
@@ -733,7 +740,9 @@ def preflight() -> None:
     permission_mode()
     _passthrough_env_names()
     if task_sandbox.enabled():
-        task_sandbox.preflight()
+        # The root is handed over rather than read there: `task_sandbox` cannot import this module
+        # (it would close a cycle), and this is the one caller that already knows the answer.
+        task_sandbox.preflight(task_root=workspace_root())
 
 
 def _require_version_for_the_sandbox(binary: str) -> None:

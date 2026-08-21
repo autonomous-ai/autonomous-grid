@@ -540,7 +540,13 @@ def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
     """
     import shlex
 
-    head = (f"Project {project_id} has no main yet, so there is nothing to cut a task from.")
+    # ⚠️ No git word (ADR 0034 D-m, issue 46). This said "has no main yet" and was the FIRST wall a
+    # new user meets — `project create` then `task create` — while `tests/test_application_surface`
+    # reported green, because the literal lives in this local and the scan's walker only followed
+    # constants handed straight to a sink (ND-06). The walker follows locals now; the wording is
+    # the other half. "Ready to work in" is `_project_ready`'s own phrase for the state this one is
+    # the absence of, so the two sides of that coin read as one thing.
+    head = (f"Project {project_id} has no files yet, so there is nothing to start a task from.")
     if getattr(args, "init_project", False):
         # The caller ALREADY asked for a trunk and the relay still says there is none, so offering
         # `--init-project` would hand back the command that just failed — the "advice that is
@@ -1333,9 +1339,9 @@ def _task_fetch(args: argparse.Namespace) -> int:
             f"Task {args.task_id} finished as {state} but recorded no result to fetch. "
             f"`grid task get {args.task_id}` shows what it did report.")
     # A missing `result_commit` used to be refused here too, and that made `grid task cancel` a
-    # liar: it prints "Its branch is left where the agent got to: grid task fetch <id>", and this
-    # command then answered "recorded no result to fetch" — while the branch was on the relay all
-    # along, holding at least the task's input.
+    # liar: cancel pointed the user straight at this command, and this command then answered
+    # "recorded no result to fetch" — while the branch was on the relay all along, holding at
+    # least the task's input. (Cancel's own wording was the other half, fixed under ND-02.)
     #
     # The promise cannot be made conditional at its own end: cancel returns immediately and the
     # agent does not die until the next lease beat, so at the moment the sentence is printed nobody
@@ -1630,10 +1636,25 @@ def _task_cancel(args: argparse.Namespace) -> int:
     reason = answer.get("error")
     print(f"task {args.task_id} cancelled — it is now {state}"
           + (f" ({reason})" if reason else ""))
-    # Nothing is rewound, so whatever the agent had done is still fetchable. Said out loud,
-    # because "cancelled" reads as "undone" and here it is not. No git word (ADR 0034 D-m,
-    # issue 46) — the parser's own description was reworded with it.
-    print(f"Whatever it had already done is kept: grid task fetch {args.task_id}")
+    # Nothing is REWOUND, and that is all this command can honestly claim. Said out loud, because
+    # "cancelled" reads as "undone" and here it is not. No git word (ADR 0034 D-m, issue 46) — the
+    # parser's own description was reworded with it.
+    #
+    # ⚠️ This used to say "Whatever it had already done is kept", and that was a promise this line
+    # is in no position to make (ND-02). `cancel` returns as soon as the relay records it while the
+    # agent runs on until the next lease beat, so at the moment these words are printed nobody
+    # knows whether a result will ever land — and measured on a live grid, the tree a subsequent
+    # `fetch` returned was the task's INPUT, with none of the agent's edits in it. `_task_fetch`
+    # already says which of the two it served ("recorded no result … it may hold only the task's
+    # input"); this end now stops contradicting it in advance.
+    #
+    # ⚠️ The command goes LAST on its own line, which is a house rule with a test behind it:
+    # `test_task_lease.test_every_command_this_cli_tells_you_to_run_actually_parses` reads a
+    # printed hint as `grid (task|project) …` to the end of the LINE and retypes it, so prose
+    # trailing the command becomes argv and the parser refuses what this CLI just recommended.
+    print(f"Nothing is undone. Whether the agent published anything before it stopped is another "
+          f"matter — this gives you what the grid has recorded, and says which it is:\n"
+          f"  grid task fetch {args.task_id}")
     return 0
 
 

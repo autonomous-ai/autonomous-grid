@@ -114,6 +114,48 @@ def test_a_provider_over_its_workspace_cap_evicts_the_least_recently_used_and_ke
         "project — the cost this layout exists to remove")
 
 
+def test_a_stray_file_beside_the_projects_does_not_warn_that_the_bound_has_stopped(
+        tmp_path, short_task_root, monkeypatch, capsys):
+    """ND-18. A `.DS_Store` under `projects/` made every sweep on every macOS provider say the
+    provider's workspace bound "is not being fully enforced".
+
+    The warning was TRUE of the entry it named and false of everything a reader takes it to mean.
+    `_conversations` handed each child of `projects/` to `_subdirectories`, which listed it, got
+    `NotADirectoryError` for a file, and reported the one thing it is right to report when a real
+    listing fails. But a file there is not a failure — it is Finder, on every Mac, without anybody
+    choosing it — and the sweep went on to enforce the cap correctly over every genuine project.
+    So the impact was nil and the sentence said otherwise, once per sweep, forever.
+
+    The fix is to stop asking: a non-directory is not a project and never was a candidate, so it
+    is filtered where the children are listed. The warning then keeps its meaning for the case it
+    was written for — which the sibling test below still holds it to.
+
+    Both halves are asserted, and the eviction half is the positive control: a test that only
+    checked stderr would pass just as well against a sweep that had silently stopped working.
+    """
+    from remote import task_evict
+
+    monkeypatch.setenv(task_agent_root_env(), str(short_task_root))
+    monkeypatch.setenv(task_evict.MAX_WORKSPACES_ENV, "1")
+    for conversation in _CONVERSATIONS[:2]:
+        _real_workspace(tmp_path, short_task_root, conversation)
+    # Exactly what Finder leaves behind the moment somebody opens the folder.
+    (short_task_root / "projects" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    capsys.readouterr()
+
+    task_evict.sweep(short_task_root, keep=None,
+                     reserve=_never_reserved, release=_released)
+
+    err = capsys.readouterr().err
+    assert _conversation_dirs(short_task_root) == [_CONVERSATIONS[1]], (
+        "the cap stopped being enforced, so the stderr assertion below proves nothing")
+    assert ".DS_Store" not in err, (
+        f"a stray file is still reported as a directory the sweep could not read:\n{err}")
+    assert "not being fully enforced" not in err, (
+        f"the sweep told the operator its workspace bound had stopped working, while enforcing "
+        f"it correctly in the same call (ND-18):\n{err}")
+
+
 def test_eviction_skips_a_workspace_a_worker_is_holding_rather_than_waiting_for_it(
         tmp_path, short_task_root, monkeypatch):
     """Criterion 3, and the mechanism matters as much as the outcome.

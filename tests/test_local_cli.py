@@ -23906,6 +23906,82 @@ def test_task_create_without_a_project_explains_an_old_relay_too(monkeypatch, tm
     assert "relay" in str(caught.value).lower()
 
 
+def test_task_create_with_a_project_does_not_leak_the_bare_framework_404(monkeypatch, tmp_path):
+    """ND-13. The one command in the C4 drill that handed the user FastAPI's two words.
+
+    The sibling test above passes for a reason that does not cover this: without `--project`, the
+    command resolves a project first, and that call carries `_OLD_RELAY`. Name the project and the
+    resolution is skipped, so `POST /relay/v1/tasks` is the first request — and it had no hint, so
+    the user's entire diagnosis was `Not Found`. Thirteen of the fourteen commands in that drill
+    translated the same 404 into a sentence.
+
+    ⚠️ **The reason it had no hint is sound, and the fix must not undo it.** `/relay/v1/tasks`
+    exists on relays predating the whole project plane, so a 404 HERE cannot mean "your relay is
+    old" — an old relay answers 201 and quietly puts the task in the caller's `default`, which is
+    what the echoed-`project_id` guard above catches. A 404 from a route every relay has means the
+    address being spoken to is not a relay at all: a proxy in front of it, or a wrong base URL.
+    So the sentence must say THAT, and pointing at "update your relay" would send somebody to
+    upgrade a server that is working.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    _mock_relay(monkeypatch, handler)
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "x"])
+
+    message = str(caught.value)
+    # The positive control: the request under test is the one that failed. Without it a command
+    # that refused before ever calling the relay satisfies every assertion below.
+    assert seen and seen[-1] == "/relay/v1/tasks", (
+        f"the 404 under test did not come from the task route: {seen}")
+    assert message.strip() != "Not Found", (
+        "the bare framework 404 reached the user unexplained (ND-13)")
+    assert "relay" in message.lower(), f"the sentence does not name the relay: {message}"
+    # ⚠️ Not the old-relay sentence. This route is not missing on an old relay, and a message
+    # that said so would send a user to upgrade a server that is answering correctly.
+    assert "predates" not in message.lower() and "update it" not in message.lower(), (
+        f"a 404 here was diagnosed as an out-of-date relay, which it cannot be: {message}")
+
+
+def test_a_real_404_from_the_task_route_is_not_masked_by_the_new_hint(monkeypatch, tmp_path):
+    """The other half of ND-13, and the half a new guard is most likely to get wrong.
+
+    `_NOT_THE_RELAY` says something quite specific and quite alarming — *what is answering there
+    is probably not the relay* — so it must fire only for the bare framework 404 it was written
+    for. A relay that DOES have the route and is refusing something real (an unknown project, a
+    project the caller cannot reach) answers 404 with its own words, and swallowing those to
+    announce a misconfigured proxy would send the user to debug their network over a refusal that
+    was already explained.
+
+    Keyed on the DETAIL being exactly FastAPI's `"Not Found"` rather than on the status, which is
+    the same test `_task_oneshot` applies for the other thirteen hints.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    _mock_relay(monkeypatch, lambda r: httpx.Response(404, json={"detail": {
+        "code": "no_such_project",
+        "message": "There is no project P1 you can reach on this grid."}}))
+
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["task", "create", "--project", "P1", "--prompt", "x"])
+
+    message = str(caught.value)
+    assert "no project P1" in message, (
+        f"the relay's own refusal was replaced by the missing-route hint: {message}")
+    assert "not the relay" not in message, (
+        f"a real refusal was diagnosed as a misconfigured proxy (ND-13's guard overreaching): "
+        f"{message}")
+
+
 def test_a_real_404_from_the_projects_route_is_not_masked(monkeypatch, tmp_path):
     """The other half, and the reason the hint is keyed on the BARE detail: a relay that does know
     the route and answers 404 about the project itself must have its own words shown, not be
@@ -33060,6 +33136,62 @@ def test_task_cancel_posts_to_the_cancel_route_and_says_what_happened(monkeypatc
     assert seen["body"] == b""
     out = capsys.readouterr().out
     assert "t-1" in out and "cancelled" in out.lower()
+
+
+def test_task_cancel_does_not_promise_the_agents_work_survived(monkeypatch, tmp_path, capsys):
+    """ND-02. `cancel` said the work was kept, and at the moment it says so nobody knows that.
+
+    Measured on a live grid 2026-08-20: cancel a running turn, then `grid task fetch` it, and the
+    tree that comes back is the task's **input** — the agent's edits are not in it. `fetch` was
+    already honest about this ("recorded no result … it may hold only the task's input"); this
+    line was the half that still over-promised, and the two were read one after the other by the
+    same person in the same minute.
+
+    The promise cannot be made conditional at this end either: `cancel` returns as soon as the
+    relay records it and the agent does not stop until the next lease beat, so what will finally
+    be recorded is unknown here. That leaves saying so — which is what the assertion pins.
+
+    The `fetch` pointer stays. It is the only way to find out which of the two you got, and
+    deleting it to fix the honesty would take away the answer along with the wrong promise.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "id": "t-1", "project_id": "P1", "state": "failed", "error": "cancelled",
+            "prompt": "fix the parser", "member_key": "def456"})
+
+    _mock_relay(monkeypatch, handler)
+    rc = cli.main(["task", "cancel", "t-1"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    # The positive control: the line under test is actually being read. Without it every
+    # assertion below passes just as well against a command that printed nothing at all.
+    assert "grid task fetch t-1" in out, (
+        f"cancel no longer points at fetch, so this test is checking an absent sentence:\n{out}")
+    assert "already done is kept" not in out, (
+        f"cancel is promising the agent's work survived again (ND-02) — it does not know that "
+        f"when it prints:\n{out}")
+    lowered = out.lower()
+    assert not ("is kept" in lowered or "left where the agent got to" in lowered), (
+        f"cancel found another way to promise the work survived:\n{out}")
+
+    # ⚠️ **The `--help` is the other copy of this promise, and the first report of ND-02 was
+    # against the help rather than the printed line.** They were written apart and fixed apart
+    # once already — issue 46 reworded the parser's one-line description and left the epilogue
+    # standing — so both are pinned here, in one test, where a future edit to either is measured
+    # against the same rule.
+    parser = cli.build_parser()
+    cancel = parser._subparsers._group_actions[0].choices["task"] \
+        ._subparsers._group_actions[0].choices["cancel"]
+    help_text = cancel.format_help()
+    assert "grid task fetch" in help_text, (
+        f"the cancel help no longer mentions fetch, so the check below reads nothing:\n{help_text}")
+    assert "already done is kept" not in help_text and "is kept" not in help_text.lower(), (
+        f"the cancel --help promises the agent's work survived (ND-02); it does not know that "
+        f"when it is written, let alone when it is read:\n{help_text}")
 
 
 def test_task_cancel_refuses_a_reply_it_cannot_read(monkeypatch, tmp_path):
