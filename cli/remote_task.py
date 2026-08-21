@@ -540,7 +540,13 @@ def _no_trunk_message(args: argparse.Namespace, project_id: str) -> str:
     """
     import shlex
 
-    head = (f"Project {project_id} has no main yet, so there is nothing to cut a task from.")
+    # ⚠️ No git word (ADR 0034 D-m, issue 46). This said "has no main yet" and was the FIRST wall a
+    # new user meets — `project create` then `task create` — while `tests/test_application_surface`
+    # reported green, because the literal lives in this local and the scan's walker only followed
+    # constants handed straight to a sink (ND-06). The walker follows locals now; the wording is
+    # the other half. "Ready to work in" is `_project_ready`'s own phrase for the state this one is
+    # the absence of, so the two sides of that coin read as one thing.
+    head = (f"Project {project_id} has no files yet, so there is nothing to start a task from.")
     if getattr(args, "init_project", False):
         # The caller ALREADY asked for a trunk and the relay still says there is none, so offering
         # `--init-project` would hand back the command that just failed — the "advice that is
