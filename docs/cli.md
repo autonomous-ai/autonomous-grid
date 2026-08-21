@@ -1201,6 +1201,17 @@ exactly the documents the relay sent:
 {"error": {"code": "project_has_no_trunk", "message": "…", "status": 409}}
 ```
 
+⚠️ **stderr is not only that document.** The envelope is written on its own line and the same
+message then follows as a plain sentence, because a person watching the terminal must still be
+told what happened — the envelope is an addition to stderr, not a replacement for it:
+
+```
+{"error": {"code": null, "message": "`grid task` is a remote-mode command. …", "status": null}}
+`grid task` is a remote-mode command. …
+```
+
+So read the **first line** of stderr, rather than parsing the whole stream as one document.
+
 `code` is the relay's own machine-readable slug, and is `null` for a refusal this CLI raised itself
 or one from a relay too old to send one — which is ordinary, not an error: branch on `code` when it
 is there and show `message` when it is not. `status` is the HTTP status when the relay answered and
