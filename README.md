@@ -31,6 +31,9 @@ answering as one.
 your own network, and it keeps working if we disappear. From outside your network:
 [Working from anywhere](#working-from-anywhere).
 
+<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one local AI grid spanning every machine you own. The grid is a single box holding two halves — inference, and training marked experimental — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
+
+
 ---
 
 ## Quickstart
@@ -49,8 +52,6 @@ These four steps are the local path; remote mode changes
 [three commands](#working-from-anywhere).
 
 ### 1 · Start a grid
-
-<img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one local AI grid spanning every machine you own. The grid is a single box holding two halves — inference, and training marked experimental — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
 
 ```bash
 grid up
