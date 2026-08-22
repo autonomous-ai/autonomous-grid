@@ -18,6 +18,12 @@ https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
 </div>
 
+> [!TIP]
+> **Prefer an app to a terminal?** Grid also ships as a desktop app for macOS (Apple Silicon) and
+> Linux — chat with any model on your grid, schedule recurring work, keep context in projects, works
+> offline. **[Download it at autonomous.ai/grid](https://www.autonomous.ai/grid)**. This README
+> covers the open-source CLI underneath it.
+
 An inference server serves whatever models fit on one machine. Grid puts every machine you have
 behind **one OpenAI-compatible endpoint**.
 
@@ -39,6 +45,9 @@ your own network, and it keeps working if we disappear. From outside your networ
 ---
 
 ## Quickstart
+
+Want the point-and-click version instead? [Get the desktop app](https://www.autonomous.ai/grid).
+Otherwise:
 
 **Install** — on each computer (macOS / Linux):
 
