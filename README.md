@@ -10,9 +10,6 @@ https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
 </div>
 
-> [!TIP]
-> **Prefer an app?** Download it here: **[autonomous.ai/grid](https://www.autonomous.ai/grid)**.
-
 An inference server serves whatever models fit on one machine. Grid puts every machine you have
 behind **one OpenAI-compatible endpoint**.
 
@@ -37,6 +34,9 @@ your own network, and it keeps working if we disappear. From outside your networ
 ---
 
 ## Quickstart
+
+> [!TIP]
+> **Prefer an app?** Download it here: **[autonomous.ai/grid](https://www.autonomous.ai/grid)**.
 
 **Install** — on each computer (macOS / Linux):
 
