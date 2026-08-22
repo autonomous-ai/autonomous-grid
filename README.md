@@ -1,3 +1,5 @@
+> [!TIP]
+> **Prefer an app?** Grid Desktop for macOS (Apple Silicon): **[autonomous.ai/grid](https://www.autonomous.ai/grid)**. Linux is CLI — keep reading.
 
 https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
@@ -17,12 +19,6 @@ https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 <img src="docs/home-grid.png" alt="Grid Desktop, OpenClaw, Hermes and your own app all draw from one local AI grid spanning every machine you own. The grid is a single box holding two halves — inference, and training marked experimental — beside a roll-up of what it adds up to: 5 nodes, 5 models, 424 GB of GPU memory. Underneath, the computers you already own join it, each keeping the engine it already runs: a MacBook Pro on MLX with 64 GB serving Qwen3-30B-A3B, a Mac Studio on MLX with 256 GB serving MiniMax-M2, a Mac mini on Ollama with 24 GB serving Gemma 3 12B, an RTX 6000 on vLLM with 48 GB serving Qwen3-32B, and an RTX 5090 on vLLM with 32 GB serving Gemma 3 27B." width="860">
 
 </div>
-
-> [!TIP]
-> **Prefer an app to a terminal?** Grid also ships as a desktop app for macOS (Apple Silicon) and
-> Linux — chat with any model on your grid, schedule recurring work, keep context in projects, works
-> offline. **[Download it at autonomous.ai/grid](https://www.autonomous.ai/grid)**. This README
-> covers the open-source CLI underneath it.
 
 An inference server serves whatever models fit on one machine. Grid puts every machine you have
 behind **one OpenAI-compatible endpoint**.
@@ -45,9 +41,6 @@ your own network, and it keeps working if we disappear. From outside your networ
 ---
 
 ## Quickstart
-
-Want the point-and-click version instead? [Get the desktop app](https://www.autonomous.ai/grid).
-Otherwise:
 
 **Install** — on each computer (macOS / Linux):
 
