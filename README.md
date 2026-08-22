@@ -1,22 +1,17 @@
-> [!TIP]
-> **Prefer an app?** Download it here: **[autonomous.ai/grid](https://www.autonomous.ai/grid)**.
-
 <div align="center">
 
-# ⚡ Grid
+# ⚡ AI Grid
 
 ### Your AI intranet: network the computers you already own for inference and training.
-
-[![CI](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml/badge.svg)](https://github.com/autonomous-ai/autonomous-grid/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
 [**Quickstart**](#quickstart) · [From anywhere](#working-from-anywhere) · [Inference](#inference) · [Training](#training-experimental) · [How it works](#how-it-works) · [CLI reference](docs/cli.md) · [Contributing](#contributing)
 
 https://github.com/user-attachments/assets/9573e961-423f-45ae-ada6-b7a8a361f188
 
 </div>
+
+> [!TIP]
+> **Prefer an app?** Download it here: **[autonomous.ai/grid](https://www.autonomous.ai/grid)**.
 
 An inference server serves whatever models fit on one machine. Grid puts every machine you have
 behind **one OpenAI-compatible endpoint**.
