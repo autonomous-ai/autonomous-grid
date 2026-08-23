@@ -427,6 +427,36 @@ allowlist with no domain constraint, so this rule is **wider** than the change r
 reaches every non-private project, including imported company repositories. That is not the supported
 topology, and `visibility` is the only instrument for it. Named here rather than discovered.
 
+⚠️ **CORRECTED — measured 2026-08-23 (ND-21). "Grid *is* domain, structurally" is true of the DOMAIN
+and false of the ROSTER, and it is false on the supported topology.** grid-apis
+`store.member_for_access` checks an allowlist row **before** anything else, on every network type,
+and grid-src `grid_auth._requires_allowlist` names three ways onto a `private-domain` grid — the
+right domain, an allowlist row, or owning the grid — carrying the sentence *"an invited account from
+another domain keeps working after the switch"*. An invited outsider is therefore **authenticated**,
+so D-k gives them every non-private project on the grid, imported company repositories included,
+plus a `project_members` row minted on their first read that needs a key.
+
+**The relay does not compare domains and cannot.** `grid_auth.GridAuthContext` carries `email`;
+`relay.AuthContext`, the object a route is handed, does not. The premise is enforced entirely at the
+control plane, and the rule there **admits** rather than restricts.
+
+**Decided 2026-08-23: correct the claim, do not narrow the gate.** D-k's premise reads *authenticated
+on this grid ⇒ a colleague **or somebody a colleague invited***, and the blast radius above is
+accepted with it. Three reasons, in order of weight: the alternative asks the control plane for a new
+value saying WHY a caller was admitted (domain vs allowlist vs owner), which is a lockstep value and
+a rollout order for a boundary that is already live; narrowing it would revoke access from invited
+accounts that work today, which grid-apis explicitly promises will keep working; and `visibility`
+already exists as the instrument for a project that must not be grid-wide. What is **not** accepted
+is the justification standing while being false — that is what this correction removes.
+
+⚖️ In fairness to the shape being accepted: the minted row is **visible** afterwards in
+`grid project member list`, so an owner can see who reached the project. Nobody is notified, and the
+access is granted before anyone looks.
+
+Pinned by grid-src `test_project_visibility.TestAnInvitedOutsiderIsAColleagueToThisRule` — a
+characterization test, so a future narrowing announces itself here rather than in a support ticket.
+Narrowing is tracked as follow-up work, not as a defect against this decision.
+
 ⚠️ **`TASK_SERVED_DOMAINS` is untouched.** It is 0033 issue 24's *a provider serves only its own
 company's domain* gate — a different axis with a different failure mode. This is the third thing in
 the codebase called "domain".
