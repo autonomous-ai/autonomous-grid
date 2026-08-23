@@ -32744,6 +32744,106 @@ def test_task_get_on_an_ordinary_failed_turn_says_no_such_thing(monkeypatch, tmp
     assert "combine" not in (captured.out + captured.err).lower()
 
 
+def test_task_get_says_when_the_project_no_longer_holds_what_the_turn_changed(
+        monkeypatch, tmp_path, capsys):
+    """ND-16/F-3. A turn whose work a later one overwrote still reads `completed` everywhere.
+
+    Measured live 2026-08-20 (scenario A2): a merge turn in SOMEBODY ELSE's conversation dropped B's
+    line on purpose and said so in its own result — which B cannot read, because
+    `grid task list --project` returns only the asker's own turns. `task get` said `completed`,
+    `task diff` showed B's own change, and only `grid project file` revealed the project did not
+    hold it. The PRD's person fires one task and walks away, so "your next turn will be told" is not
+    a way for them to find out.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed",
+        "result_text": "shared.txt now contains exactly one line: STATUS: bravo",
+        "changed_since_count": 1, "changed_since_paths": ["shared.txt"],
+    }))
+
+    rc = cli.main(["task", "get", "t-1"])
+
+    assert rc == 0, "a turn that completed did not stop completing because somebody edited it after"
+    out = capsys.readouterr().out
+    assert "shared.txt" in out
+    assert "changed again" in out, out
+    assert "grid project file p-1 shared.txt" in out, (
+        "the person is told their work may be gone with no way to look at what is there now")
+
+
+def test_task_get_quotes_a_path_it_tells_somebody_to_paste(monkeypatch, tmp_path, capsys):
+    """A repository that arrived through `import` holds whatever names its author gave it, and the
+    line below is a command a person copies. Unquoted, `my notes.txt` reaches `grid project file` as
+    two arguments and is refused — a warning about lost work whose one next step does not run."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed",
+        "changed_since_count": 1, "changed_since_paths": ["my notes.txt"]}))
+
+    cli.main(["task", "get", "t-1"])
+
+    out = capsys.readouterr().out
+    assert "grid project file p-1 'my notes.txt'" in out, out
+
+
+def test_task_get_says_nothing_when_the_turn_still_stands(monkeypatch, tmp_path, capsys):
+    """The control, and the one that decides whether the sentence means anything: `0` is the
+    ordinary answer for the ordinary turn, and a warning that appears on every task is furniture."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed", "result_text": "done",
+        "changed_since_count": 0, "changed_since_paths": [],
+    }))
+
+    cli.main(["task", "get", "t-1"])
+
+    assert "changed again" not in capsys.readouterr().out
+
+
+def test_task_get_on_a_relay_that_cannot_answer_that_question_says_nothing(
+        monkeypatch, tmp_path, capsys):
+    """The degrade direction, and it is the one this pair exists to pin. An older relay sends
+    NEITHER key, and absence must read as "nothing to show" — never as a warning invented client
+    side. The relay is deployed before this CLI (see the register in CLAUDE.md), so this is the
+    ordinary state of every grid for the length of a rollout."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "id": "t-1", "project_id": "p-1", "state": "completed", "result_text": "done"}))
+
+    rc = cli.main(["task", "get", "t-1"])
+
+    assert rc == 0
+    assert "changed again" not in capsys.readouterr().out
+
+
+def test_task_get_ignores_a_changed_since_pair_it_cannot_read(monkeypatch, tmp_path, capsys):
+    """A count without paths, a string where a number belongs, a `null` list. None of these can be
+    rendered into a true sentence, and the reading for all of them is the one absence already has.
+
+    Not defensive tidiness: this is the shape a proxy, a partial write or a future relay produces,
+    and the alternative is an `AttributeError` on a read whose exit code means *the task ended
+    badly* — a client-side parse fault delivered to a script as a verdict about somebody's work."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    for broken in ({"changed_since_count": 2},
+                   {"changed_since_count": "2", "changed_since_paths": ["a.txt"]},
+                   {"changed_since_count": 2, "changed_since_paths": None},
+                   {"changed_since_count": True, "changed_since_paths": ["a.txt"]},
+                   {"changed_since_paths": ["a.txt"]}):
+        _mock_relay(monkeypatch, lambda r, extra=broken: httpx.Response(200, json={
+            "id": "t-1", "project_id": "p-1", "state": "completed", **extra}))
+
+        rc = cli.main(["task", "get", "t-1"])
+
+        assert rc == 0, broken
+        assert "changed again" not in capsys.readouterr().out, broken
+
+
 def test_task_list_shows_a_merge_turn_as_a_step_rather_than_as_something_somebody_typed(
         monkeypatch, tmp_path, capsys):
     """ADR 0034 D-g (issue 42). A merge turn's `prompt` is the RELAY's — `merge_tiers._MERGE_PROMPT`,

@@ -1626,6 +1626,25 @@ can `get`, `list` and `follow` any task in it. That is deliberate — a member c
 project and read any task branch — and it is what makes reviewing a colleague's run possible without
 one.
 
+`get` also says when the project **no longer holds** what a task changed:
+
+```
+2 files this task changed have been changed again since it ran:
+  shared.txt
+  notes.md
+What the project holds now may not be what this result describes. Read what is there with:
+  grid project file 4f0e… shared.txt
+```
+
+The grid applies every finished task to the project by itself, so a colleague's later work can land
+over yours — and when two tasks collide, the step that combines them runs in **their** conversation,
+where you never see it. Without this line your task reads `completed` on every surface you have,
+including `grid task diff`, which shows what your task changed rather than what the project holds
+now. The line appears only when something really has changed, and it counts a later task of your own
+the same as anybody else's: what it means is *look before you rely on this*. `--json` carries the
+same fact as `changed_since_count` and `changed_since_paths`; a grid whose relay predates this sends
+neither key and the line simply does not appear.
+
 ### Acting on the outcome from a script
 
 Both `get` and `follow` exit with the task's own outcome, so a shell can branch on it without

@@ -985,6 +985,45 @@ def test_the_task_view_names_the_conversation_a_follow_up_is_addressed_to():
         "cancel or fetch")
 
 
+def test_the_single_turn_read_says_when_a_turns_work_no_longer_stands():
+    """ND-16/F-3: `changed_since_count` / `changed_since_paths` on `GET /tasks/{id}`.
+
+    ⚠️ **A rename on the relay side is SILENT here, in the direction that costs somebody their
+    work.** `cli/remote_task._changed_since_note` requires both keys, type-checked, and prints
+    NOTHING otherwise — the correct degrade for a relay predating this slice, and byte-identical to
+    a relay that renamed them. So a drift raises nothing, warns nobody and fails no request: the
+    warning simply stops appearing, and the person whose line a colleague's turn dropped goes back
+    to reading `completed` on every surface they have.
+
+    ⚠️ **Pinned on `get_task` and NOT on `task_view`, deliberately.** The pair is added by the route
+    rather than by the shared view because the answer costs two git reads, and `task_view` is also
+    what `GET /tasks` builds every row of — a listing of forty turns would pay eighty. A future
+    tidy-up that moved it into the view would make the listing quietly expensive, so this check
+    names the place the cost is bounded.
+
+    Rollout is **relay before CLI**, with the project routes: an old relay sends neither key and the
+    CLI says nothing, which is the pre-slice behaviour exactly.
+    """
+    import ast
+
+    source = _relay_module("tasks.py")
+    if not source.exists():
+        pytest.skip("grid-src worktree is not beside this one; the lockstep cannot be checked here")
+    found = [node for node in ast.walk(ast.parse(source.read_text()))
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "get_task"]
+    assert found, (
+        "get_task is no longer defined in grid-src's tasks.py — it was renamed, so teach this check "
+        "the new name rather than deleting it")
+    literals = {node.value for node in ast.walk(found[0])
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+    for key in ("changed_since_count", "changed_since_paths"):
+        assert key in literals, (
+            f"grid-src's `GET /tasks/{{id}}` no longer reports `{key}`, so `grid task get` silently "
+            f"stops saying that the project may no longer hold what a turn changed — the CLI reads "
+            f"a missing key as 'an old relay' and prints nothing at all")
+
+
 def test_the_status_view_reports_where_a_member_stands_against_their_running_cap():
     """ADR 0034 D-i (issue 49): `member_running_turns` / `member_running_cap` on the status view.
 
