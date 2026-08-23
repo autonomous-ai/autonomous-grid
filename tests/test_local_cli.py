@@ -6865,6 +6865,9 @@ def _mock_remote_spawn(monkeypatch, *, pid=4242):
         # `spawned["cmd"]` absent, and the assertions raise KeyError rather than passing.
         if run_records.REMOTE_ENGINE_MARKER in cmd:
             spawned["cmd"] = cmd
+            # The child's environment, kept beside its argv: task serving is opted into through the
+            # environment the parent hands over, so this is where issue 58's decision is observable.
+            spawned["env"] = kw.get("env") or {}
         return type("P", (), {"pid": pid})()
 
     monkeypatch.setattr(cli.remote_provider.subprocess, "Popen", fake_popen)
@@ -37981,3 +37984,116 @@ def test_leaving_under_json_prints_the_relays_document_and_nothing_else(monkeypa
     assert cli.main(["project", "leave", "P1", "--yes", "--json"]) == 0
 
     assert json.loads(capsys.readouterr().out) == _leave_reply()
+
+
+# --- issue 58: `grid join` says why it will not serve tasks ---------------------------------------
+
+
+def _child_env(spawned: dict) -> dict[str, str]:
+    """What the detached serve child was handed. `_mock_remote_spawn` keeps it beside the argv."""
+    assert "env" in spawned, "the join did not spawn a serve child"
+    return spawned["env"]
+
+
+def _the_child_would_claim_tasks(spawned: dict) -> bool:
+    """Ask the child's OWN predicate against the child's OWN environment.
+
+    Never `env["GRID_TASKS"] == "0"`: that is a second reading of the opt-in living in a test, and
+    it would keep passing after somebody widened or narrowed the spellings `serving_enabled` accepts.
+    """
+    from unittest import mock
+
+    from remote import task_opt_in
+
+    with mock.patch.dict(os.environ, _child_env(spawned), clear=True):
+        return task_opt_in.serving_enabled()
+
+
+def test_remote_join_without_the_task_opt_in_asks_the_provider_nothing(monkeypatch, tmp_path):
+    """Opt-in is off by default and costs nothing when it is off — no `claude --version`, no probe
+    of a workspace root nobody configured."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.delenv("GRID_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving",
+                        lambda: pytest.fail("the join checked task serving nobody asked for"))
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+
+@pytest.mark.parametrize("fault", [
+    # What each check actually raises, and one that nothing raises on purpose.
+    RuntimeError,   # `resolve_binary` — not installed, or below the floor with the sandbox on
+    SystemExit,     # ⚠️ `task_sandbox`'s clean-error idiom. An `except Exception` alone MISSES this
+                    # one, and missing it aborts the whole join — inference included
+    OSError,        # the workspace root, and `link_transcript`'s containment refusals
+    ValueError,     # a malformed `GRID_TASK_ENV_PASSTHROUGH` or config directory
+    KeyError,       # a BUG in one of the checks, which must still cost inference nothing
+])
+def test_remote_join_with_a_broken_task_config_still_serves_inference(
+        monkeypatch, tmp_path, capsys, fault):
+    """The whole point of the issue. Refusing the join would take a working inference provider down
+    over a task misconfiguration — including for the operator who keeps `GRID_TASKS=1` in a shell
+    profile — so the join lands, the child serves, and only task serving is withheld."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", _raise(
+        fault("Claude Code isn't installed on this provider; install it with: curl -fsSL …")))
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    record = cli.provider._read_records("n1")["remote"]
+    assert record["models"] == ["m"], "the inference join did not land"
+    assert spawned["cmd"][-3:-2] == ["__remote-engine"], "no serve child was spawned"
+    err = capsys.readouterr().err
+    assert "install it with" in err, f"the refusal does not say what to fix: {err!r}"
+    assert "respawn" in err, f"the refusal does not say how to retry it: {err!r}"
+    assert not _the_child_would_claim_tasks(spawned), (
+        "the child was spawned still claiming tasks it cannot finish")
+
+
+def test_remote_join_with_a_working_task_config_says_task_serving_is_on(monkeypatch, tmp_path, capsys):
+    """Today the banner says nothing about tasks in any case, so an operator who typed the variable
+    correctly gets exactly the same output as one who typed it wrong."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert "tasks=on" in capsys.readouterr().out
+    assert _the_child_would_claim_tasks(spawned), "the opt-in did not reach the child"
+
+
+def test_the_task_check_runs_before_the_join_stops_or_spawns_anything(monkeypatch, tmp_path):
+    """⚠️ The ordering IS the property. A provider that was serving inference a second ago must
+    still be serving it after a task check that failed — so the check may not run from inside the
+    lock, after the prior child has been terminated on the way to finding out."""
+    from remote import task_agent
+    from shared import run_records
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    order: list[str] = []
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: order.append("checked"))
+    real_terminate = run_records.terminate_recorded
+    monkeypatch.setattr(run_records, "terminate_recorded",
+                        lambda prior: (order.append("stopped"), real_terminate(prior))[1])
+    monkeypatch.setattr(cli.remote_provider, "_spawn_remote_engine", lambda *a, **k: (
+        order.append("spawned"), type("P", (), {"pid": 4242})())[1])
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert order and order[0] == "checked", (
+        f"the join acted before it asked whether this provider can run a task: {order}")
+    assert "spawned" in order, "the join never spawned, so this proves nothing about the order"
+    assert spawned is not None

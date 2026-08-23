@@ -5454,3 +5454,96 @@ def test_checkout_result_still_refuses_when_there_is_no_branch(tmp_path):
     with pytest.raises(task_repo.CheckoutError):
         task_repo.checkout_result(tmp_path / "d", url=remote.url, token="tok",
                                   branch="", commit=commit)
+
+
+# --- issue 58: the provider is asked before a member is waiting -----------------------------------
+
+
+def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_path):
+    """The delegation, pinned. `grid join` must not grow a second opinion about any of this."""
+    from remote import task_agent
+
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    asked: list[str] = []
+    monkeypatch.setattr(task_agent, "preflight", lambda: asked.append("preflight"))
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: asked.append("binary") or "claude")
+
+    task_agent.preflight_before_serving()
+
+    assert asked == ["preflight", "binary"]
+
+
+def test_preflight_before_serving_refuses_a_workspace_root_it_cannot_write(monkeypatch, tmp_path):
+    """The macOS shape: `/var` is root-owned, so a provider without sudo fails EVERY task with
+    "could not create /var/grid/…" — one member's task at a time, forever, every signal green."""
+    from remote import task_agent
+
+    denied = tmp_path / "denied"
+    denied.mkdir(mode=0o500)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(denied / "grid" / "tasks"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert "GRID_TASK_ROOT" in str(excinfo.value), (
+        f"the refusal does not say what to change: {excinfo.value}")
+    assert str(denied) in str(excinfo.value), (
+        f"the refusal does not say which directory refused it: {excinfo.value}")
+
+
+def test_preflight_before_serving_accepts_a_root_that_does_not_exist_yet(monkeypatch, tmp_path):
+    """The positive control, and the ordinary case: a root under a writable parent is fine, and
+    nothing is created here — which directory the root should be, and with what mode, is issue 62's
+    decision and this must not pre-empt it."""
+    from remote import task_agent
+
+    root = tmp_path / "grid" / "tasks"
+    monkeypatch.setenv("GRID_TASK_ROOT", str(root))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+    assert not root.exists(), "the probe created the root; that is issue 62's decision to make"
+
+
+def test_preflight_before_serving_refuses_a_root_that_is_a_file(monkeypatch, tmp_path):
+    """A root that exists and is not a directory is a different fault from an unwritable one, and
+    saying "not writable" about it would send an operator to `chmod`."""
+    from remote import task_agent
+
+    root = tmp_path / "root"
+    root.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(root))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert "not a directory" in str(excinfo.value).lower(), str(excinfo.value)
+
+
+def test_preflight_before_serving_does_not_move_the_version_floor(monkeypatch, tmp_path):
+    """⚠️ The floor is enforced only while the sandbox is ON, and that is the SHAPE of the rule
+    rather than a convenience — it protects a control that fails open, so an operator who turned the
+    control off deliberately gets the provider that existed before issue 23, older agent included.
+
+    Asking earlier may not quietly tighten it. This is the check that would be "fixed" back.
+
+    ⚠️ A REAL binary reporting a real old version, resolved the real way — not a patched
+    `_binary_version`. With the sandbox off that reader is never reached, so patching it would have
+    left this test green against a `preflight_before_serving` that grew a version check of its own
+    through some other door, which is exactly the regression it exists to catch.
+    """
+    from remote import task_agent, task_sandbox
+
+    binary, _ = _claude_reporting(tmp_path, "2.0.1 (Claude Code)")
+    _resolving_to(monkeypatch, binary)
+    monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "0")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+
+    task_agent.preflight_before_serving()  # an ancient binary, and the sandbox is off: allowed

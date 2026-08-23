@@ -139,6 +139,68 @@ def _reject_api_conflicts(args: argparse.Namespace) -> None:
         )
 
 
+class _TaskServing(NamedTuple):
+    """What this join decided about task serving, and what the operator must be told (issue 58)."""
+
+    #: The operator opted in. False means they did not, and nothing here applies.
+    requested: bool
+    #: Why this provider cannot run a task, in the words of whichever check found out.
+    problem: str | None
+
+    @property
+    def allowed(self) -> bool:
+        return self.requested and self.problem is None
+
+
+def _decide_task_serving() -> _TaskServing:
+    """Ask, in the parent, whether the child about to be spawned could actually run a task.
+
+    Every one of these answers exists already — and until this ran, `run_task` was the only place
+    that asked, which is *after a member is waiting*. So `grid join` printed "serving",
+    `grid project status` said online, and the provider looked healthy right up until somebody
+    else's task died on it. The fail-closed work of issues 22 and 23 made these failures loud; they
+    were loud at the wrong moment and to the wrong person.
+
+    ⚠️ **The refusal cannot be printed by the serve child.** Measured: `_spawn_remote_engine`
+    detaches it with BOTH stdout and stderr redirected into the engine log, and this process then
+    waits 3s only to tell "alive" from "died" — tailing that log only when it died. Task serving
+    must not kill the child, so anything it printed would land in a file nobody has a reason to
+    open. The parent is the only place the sentence reaches the person who typed the command.
+
+    Costs nothing when the opt-in is off, which is the default: no `claude --version`, no probe of a
+    root nobody configured.
+
+    `(Exception, SystemExit)` because these checks use both — `task_sandbox` raises `SystemExit` as
+    a clean-error idiom, and a *bug* in any of them must degrade to "task serving off, inference
+    fine" rather than taking down a provider that was only asked to serve inference.
+    """
+    from remote import task_opt_in
+
+    if not task_opt_in.serving_enabled():
+        return _TaskServing(requested=False, problem=None)
+    from remote import task_agent
+
+    try:
+        task_agent.preflight_before_serving()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — inference must survive any of them
+        return _TaskServing(requested=True, problem=str(exc) or exc.__class__.__name__)
+    return _TaskServing(requested=True, problem=None)
+
+
+def _task_serving_override(decision: _TaskServing) -> dict[str, str] | None:
+    """What to change in the serve child's environment, or `None` to hand it over untouched.
+
+    Only ever an OFF. Turning the opt-in *on* for somebody is the one thing this feature may not do
+    — a task loop spends the operator's own agent subscription — so a join that decided task serving
+    is fine passes the operator's own environment through rather than asserting it.
+    """
+    from remote import task_opt_in
+
+    if decision.requested and not decision.allowed:
+        return {task_opt_in.SERVING_ENV: "0"}
+    return None
+
+
 def cmd_remote_join(args: argparse.Namespace) -> int:
     from remote import credentials
 
@@ -202,6 +264,21 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         return 0
     engine_id = _REMOTE_IDENTITY
     meta_name = getattr(args, "name", None) or socket.gethostname()
+
+    # ⚠️ **Before the lock, and before anything is stopped.** A provider that was serving inference
+    # a second ago must still be serving it after a task check that failed — so this may not run
+    # from inside the block that has already terminated the prior child on its way to finding out.
+    # It is also the last point where nothing has been written: a pure read, then the mutation.
+    task_serving = _decide_task_serving()
+    if task_serving.problem:
+        print(
+            f"Task serving is off for this join: {task_serving.problem}\n"
+            f"Inference is unaffected. Fix that and re-run `grid join --respawn` to claim tasks.",
+            file=sys.stderr,
+        )
+    # Withheld from the CHILD, never from this process: the opt-in travels in the environment the
+    # parent hands over, and the child reads it once at startup.
+    engine_env = _task_serving_override(task_serving)
 
     # Remote has ONE identity per grid (the token pins the relay node_id), so `grid join` is additive:
     # merge this join's engines into whatever is already serving, then respawn the single detached engine.
@@ -302,7 +379,8 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
         else:
-            _respawn_identity(network_id, record, live)  # stops prior process(es) then respawns; aborts on failure
+            # stops prior process(es) then respawns; aborts on failure
+            _respawn_identity(network_id, record, live, env_overrides=engine_env)
 
     appended = bool(live)
     verb = "Appended to" if appended else "Joining"
@@ -315,6 +393,8 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         print(f"models={','.join(record['models'])}")
     if media:  # the comfyui:* models are resolved from bundle gating at serve time, not here
         print("media=on (serving comfyui:* workflows via the relay)")
+    if task_serving.allowed:  # said only when it is true — the refusal has already gone to stderr
+        print("tasks=on (claiming tasks for this grid)")
     print(f"log={paths.engines_dir(network_id) / f'{engine_id}.log'}")
     if reloaded:  # the live process re-advertised in place — nothing restarted, nothing dropped
         print(f"(hot-reloaded — no in-flight requests dropped; stop with `grid leave {label}`)")
@@ -997,7 +1077,8 @@ def _hot_reload_identity(
 
 
 def _respawn_identity(
-    network_id: str, record: dict[str, object], priors: list[dict[str, object]]
+    network_id: str, record: dict[str, object], priors: list[dict[str, object]],
+    *, env_overrides: dict[str, str] | None = None,
 ) -> None:
     """Stop the prior process(es), then write ``record`` and (re)spawn the one detached engine, setting
     ``record["pid"]``. Shared by join-append and leave-shrink (respawn is Slice 1's update mechanism).
@@ -1041,7 +1122,7 @@ def _respawn_identity(
     service_truth.clear_service_truth(record)
     record["started_at"] = runtime.utc_now()
     run_records.write_record(network_id, engine_id, record)
-    proc = _spawn_remote_engine(network_id, engine_id)
+    proc = _spawn_remote_engine(network_id, engine_id, env_overrides=env_overrides)
     # Stamp the identity, not just the pid: this is the ONLY stamp a `grid leave` racing this join
     # can see, because the child's own self-stamp has not run yet (POSIX `flock` gives the lock to
     # whoever asks, in no order). With it, that leave can verify the pid it is about to signal and —
@@ -1223,7 +1304,16 @@ def _build_record(
     }
 
 
-def _spawn_remote_engine(network_id: str, engine_id: str) -> subprocess.Popen:
+def _spawn_remote_engine(
+    network_id: str, engine_id: str, *, env_overrides: dict[str, str] | None = None
+) -> subprocess.Popen:
+    """Start the detached serve child. ``env_overrides`` wins over this process's own environment.
+
+    The child reads its opt-ins from the environment it inherits, so an override is how the parent
+    withholds one it has just decided this provider cannot honour (issue 58). A new dict rather than
+    a mutation of `os.environ`: this process may still have work to do, and a knob turned off for a
+    child must not be turned off for its parent.
+    """
     from local import runtime
 
     log_path = paths.engines_dir(network_id) / f"{engine_id}.log"
@@ -1237,7 +1327,7 @@ def _spawn_remote_engine(network_id: str, engine_id: str) -> subprocess.Popen:
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env={**os.environ, "PYTHONUNBUFFERED": "1", **(env_overrides or {})},
     )
 
 

@@ -2186,6 +2186,15 @@ a 24.04 host that a task can then read its workspace, install a dependency from 
 read a file outside the workspace. **Do not** task that sysctl off to "fix" a task that fails to run
 commands; check `bubblewrap` and `socat` first.
 
+**`grid join` checks all of this before it serves.** With `GRID_TASKS` on, the join asks the same
+questions a task would — is Claude Code installed and new enough, is the permission mode and
+passthrough list valid, can the sandbox start, and can this account create a workspace under
+`GRID_TASK_ROOT` — and it asks them *in the terminal you typed the command in*. A provider that
+fails any of them still **serves inference**: the join lands, the answer says what to change, and
+only task serving is withheld until you fix it and re-run `grid join --respawn`. Before this, every
+one of those was checked only after a task had been claimed, so the first person to find out was a
+member of your grid whose task died.
+
 The environment variables that tune a provider, all optional:
 
 | variable | default | what it does |
