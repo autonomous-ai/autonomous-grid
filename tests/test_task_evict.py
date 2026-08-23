@@ -221,6 +221,53 @@ def test_a_held_workspace_counts_against_the_cap_rather_than_costing_a_colder_on
         f"expected the held one and the newest to survive a cap of two, got {remaining}")
 
 
+def test_three_held_workspaces_against_a_cap_of_one_leaves_three(
+        tmp_path, short_task_root, monkeypatch):
+    """E4.3 — the all-held shape, which the case above states in prose and never runs.
+
+    ⚠️ **What is unique here is the RELEASE assertion, not the count.** Measured by mutation, and the
+    result was the opposite of what this case was written for:
+
+      * *three remain* is NOT a discriminator. Under a sweep that wrongly counted a skip as progress
+        the answer is still three — there is nothing colder to evict, so the fault is invisible in
+        this shape. The two cases above catch that one, because they have a cold workspace to lose.
+      * *stopping at the first held workspace* is caught here and by both of them.
+      * **releasing a reservation the sweep never took is caught by NOTHING ELSE.** That is the
+        expensive one: eviction takes the same reservation a worker takes
+        (`tasks._reserve_workspace`), so a spurious release hands away a workspace somebody is
+        running a turn inside — one registry, one owner, and this is what keeps it that way.
+
+    The `asked` count is the harness's own control: without it the answer *three remain* is also
+    what a sweep that never looked at anything produces, which is exactly how a bound that has
+    quietly stopped working reads.
+    """
+    from remote import task_evict
+
+    monkeypatch.setenv(task_agent_root_env(), str(short_task_root))
+    monkeypatch.setenv(task_evict.MAX_WORKSPACES_ENV, "1")
+    for conversation in _CONVERSATIONS[:3]:
+        _real_workspace(tmp_path, short_task_root, conversation)
+
+    asked, released = [], []
+
+    def _all_busy(triple):
+        asked.append(triple)
+        return False
+
+    task_evict.sweep(short_task_root, keep=None,
+                     reserve=_all_busy, release=lambda triple: released.append(triple))
+
+    assert _conversation_dirs(short_task_root) == sorted(_CONVERSATIONS[:3]), (
+        "a workspace somebody is holding was collected, or a colder one was evicted to pay for one "
+        "the sweep could not touch")
+    assert len(asked) >= 2, (
+        f"the sweep stopped after {len(asked)} candidate(s), so it treated a skip as progress "
+        f"towards the cap rather than moving on to the next one")
+    assert released == [], (
+        "a reservation that was never taken was released, which on a shared registry hands away a "
+        "workspace a worker is actually running in")
+
+
 def test_the_conversation_a_turn_is_about_to_run_in_is_never_evicted(
         tmp_path, short_task_root, monkeypatch):
     """`keep`, which covers what the reservation cannot.
