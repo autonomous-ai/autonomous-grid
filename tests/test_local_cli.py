@@ -13036,10 +13036,12 @@ def test_task_worker_that_fails_to_START_does_not_take_the_engine_down(monkeypat
     would propagate out of `_serve_loop` to the top-level handler, unregister the node and kill the
     process. A task-plane STARTUP fault must be as survivable as a task-plane runtime fault.
     """
-    from remote import serve
+    from remote import serve, task_opt_in
 
     monkeypatch.setenv("GRID_TASKS", "1")
-    monkeypatch.setattr(serve, "_task_serving_enabled", _raise(RuntimeError("cannot start thread")))
+    # Patched where the opt-in now LIVES (issue 57). `_start_task_worker` looks the name up on the
+    # module at call time, so this reaches the same guarded block the pre-move patch did.
+    monkeypatch.setattr(task_opt_in, "serving_enabled", _raise(RuntimeError("cannot start thread")))
     monkeypatch.setattr(serve, "_poll_loop", lambda state: state.stop.set())
     monkeypatch.setattr(serve, "_heartbeat_loop", lambda state: None)
     state = _serve_state(monkeypatch, tmp_path)

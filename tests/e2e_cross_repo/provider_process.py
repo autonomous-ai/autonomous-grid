@@ -70,7 +70,7 @@ def main() -> int:
     # process has exactly one worker. Every test that does not ask for concurrency must keep it.
     #
     # One `task_loop` per worker, on its own thread, sharing one `_State` — which is what
-    # `remote/serve.py` does for `GRID_MAX_TASKS`. Not a rebinding of that variable: this file
+    # `remote/serve.py` does for `task_opt_in.worker_count()`. Not a rebinding of that variable: this file
     # deliberately does not go through `serve`, so reading it here would name a knob nothing in this
     # process consults.
     workers = int(os.environ.get("GRID_E2E_TASK_WORKERS", "1"))

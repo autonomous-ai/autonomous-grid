@@ -13,7 +13,7 @@ the relay serves from a history it already has. So every failure in here warns a
 a bound that cannot be met is simply not met.
 
 Two knobs, both TUNABLES — a bad value warns on stderr and falls back, the convention
-`serve._task_worker_count` and `tasks.task_timeout` follow, rather than the refuse-outright one
+`task_opt_in.worker_count` and `tasks.task_timeout` follow, rather than the refuse-outright one
 `GRID_TASK_PERMISSION_MODE` follows. Refusing to start over a misconfigured *cap* would take task
 serving down for the life of the process, which is a far larger fault than the one it reports.
 """

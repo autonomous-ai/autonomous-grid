@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from remote import (
     api_keys, bringup, control_plane, credentials, engine_health, probe, relay, service_truth,
-    codex_auth, codex_oauth, task_capacity, throughput,
+    codex_auth, codex_oauth, task_capacity, task_opt_in, throughput,
 )
 from shared.handlers import HANDLERS
 from shared import run_records
@@ -2825,53 +2825,6 @@ def _supervise(loop: Callable[[_ServeState], None], state: _ServeState) -> None:
         state.stop.set()
 
 
-def _task_serving_enabled() -> bool:
-    """Whether this provider claims distributed tasks (ADR 0032). Opt-in, and off by default.
-
-    Read from the environment at serve time rather than baked into the run record: the detached
-    serve child inherits the parent's environment (`_spawn_remote_engine` passes ``{**os.environ}``),
-    so ``GRID_TASKS=1 grid join …`` reaches here. Opt-in is not a convenience — a task loop spends
-    the operator's own agent subscription, so it may never turn itself on.
-    """
-    return os.getenv("GRID_TASKS", "").strip().lower() in ("1", "true", "yes", "on")
-
-
-TASK_WORKERS_ENV = "GRID_MAX_TASKS"
-# The count that changes nothing. Turning task serving on may not also change how much of the
-# operator's subscription it spends, so the pool starts where it has always been and only the
-# operator moves it. Deliberately NOT a benchmarked ceiling — the ceiling that matters is the
-# subscription's own, read at runtime by `remote/task_capacity.py` (ADR 0032 issue 09).
-_DEFAULT_TASK_WORKERS = 1
-
-
-def _task_worker_count() -> int:
-    """How many tasks this provider runs at once (ADR 0032 issue 09).
-
-    Misconfiguration falls back rather than failing, the same rule `tasks.task_timeout()` states: a
-    provider that refused to serve tasks because an operator typed `three` would take task serving
-    down for the life of the process, which is a far worse answer than running with the default and
-    saying so.
-
-    There is **no upper clamp**, and that is deliberate. A number picked here would be exactly the
-    guessed constant this issue exists to remove, and it would be guessed about the wrong thing —
-    what binds is the operator's own subscription, not this process's opinion of their machine. The
-    machine's real limit is discovered instead: a thread that cannot start is reported, and the
-    workers that did start keep serving.
-    """
-    raw = (os.getenv(TASK_WORKERS_ENV) or "").strip()
-    if not raw:
-        return _DEFAULT_TASK_WORKERS
-    try:
-        count = int(raw)
-    except ValueError:
-        count = 0
-    if count < 1:
-        print(f"\n[tasks] {TASK_WORKERS_ENV}={raw!r} is not a positive whole number of tasks; "
-              f"using {_DEFAULT_TASK_WORKERS}", file=sys.stderr)
-        return _DEFAULT_TASK_WORKERS
-    return count
-
-
 def _start_task_worker(state: _ServeState) -> list[threading.Thread]:
     """Start the distributed-tasks claim loops, if enabled. Returns the threads that started.
 
@@ -2897,11 +2850,11 @@ def _start_task_worker(state: _ServeState) -> list[threading.Thread]:
     makes every worker throttle on ONE reading of the one subscription they all spend.
     """
     try:
-        if not _task_serving_enabled():
+        if not task_opt_in.serving_enabled():
             return []
         from . import tasks
 
-        count = _task_worker_count()
+        count = task_opt_in.worker_count()
     except (Exception, SystemExit) as exc:
         print(f"\nCould not start task serving ({exc!r}); inference is unaffected.", file=sys.stderr)
         state.tasks_stop.set()
