@@ -33389,6 +33389,56 @@ def test_project_status_says_a_provider_has_withdrawn_and_when_it_returns(
     assert "paused" in out.lower() or "withdraw" in out.lower()
 
 
+def test_project_status_does_not_tell_a_team_to_add_a_provider_for_a_paused_one(
+        monkeypatch, tmp_path, capsys):
+    """B7.2. The two states look identical from the outside — a queue that is not moving — and they
+    want OPPOSITE actions. Nobody is serving means find another machine; everybody is serving and
+    out of headroom means wait, and buying a second subscription for the same account would not have
+    helped. Sending a team to `grid join` for the second is the expensive kind of wrong.
+
+    The distinction lives in the code as two branches of `_print_providers`, and until this case
+    nothing held them apart: the `grid join` line could migrate into the withdrawn sentence and
+    every existing test would stay green, because they assert what IS said and not what is not.
+    """
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 2, "paused": 2, "resumes_at": "2026-08-09T11:30:00+00:00"}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out
+    assert "withdrawn" in out, "the reason the queue is not moving went missing entirely"
+    assert "headroom" in out, "a team is told work is stuck without being told why"
+    assert "grid join" not in out, (
+        f"a team whose providers are out of subscription headroom is being told to add another "
+        f"provider, which does not help and costs money:\n{out}")
+
+
+def test_project_status_DOES_say_to_add_one_when_nobody_is_serving(
+        monkeypatch, tmp_path, capsys):
+    """The positive control, and B7.2 means nothing without it: the advice has to appear in the one
+    state it is right for, or the case above would pass on a build that never gives advice at all."""
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    state.set_mode("remote")
+    _mock_relay(monkeypatch, lambda r: httpx.Response(200, json={
+        "project_id": "P1", "member_key": "def456", "trunk": "main",
+        "main_commit": "a" * 40, "active_turns": [], "members": [],
+        "queue": {"queued": 3, "running": 0, "oldest_queued_at": "2026-08-09T09:00:00+00:00"},
+        "providers": {"online": 0, "paused": 0, "resumes_at": None}}))
+
+    cli.main(["project", "status", "P1"])
+
+    out = capsys.readouterr().out
+    assert "grid join" in out, out
+    assert "withdrawn" not in out, (
+        "a fleet with nobody online is being described as withdrawn, which tells a team to wait for "
+        "a return that is not coming")
+
+
 def test_project_status_stays_quiet_about_a_fleet_that_is_all_serving(
         monkeypatch, tmp_path, capsys):
     """Nothing is wrong, so nothing is said. A line reading "0 paused" on every healthy poll is the
