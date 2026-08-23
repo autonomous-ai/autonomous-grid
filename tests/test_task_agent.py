@@ -1587,45 +1587,73 @@ def test_a_misconfigured_deadline_falls_back_instead_of_retiring_task_serving(mo
     assert "1h" in capsys.readouterr().err
 
 
-def test_tool_activity_is_published_while_the_agent_is_still_running(agent):
+def test_tool_activity_is_published_while_the_agent_is_still_running(agent, tmp_path):
     """Issue 03's first acceptance criterion — "while it is still running, not after".
 
-    Proven by ordering against the child's own clock: the tool call is emitted, then the child sleeps
-    before writing anything else. A publisher that buffered to the end would see the tool event only
-    after that sleep, so asserting the event arrived BEFORE the child exited is the whole test.
+    Proven by ORDERING against a gate this test holds shut, not by a wall clock. The child emits the
+    tool call and then blocks until the test creates `gate`, so it cannot reach its result line — let
+    alone exit — while the gate is shut. An event that arrives in that window therefore arrived while
+    the agent was still running, on any machine at any load.
 
-    The sleep and the bound are deliberately a factor of THREE apart. A threshold sitting exactly on
-    the child's own sleep has no margin in either direction: it fails on any scheduling hiccup, and
-    the temptation is then to widen it until it no longer distinguishes a live publisher from a
-    buffered one. Live is ~0.05s and buffered is ~3s, so 1.5s separates them with room on both sides.
+    ⚠️ The bound this replaces was `at < 1.5s` against a child that slept 3s, and it read as a
+    regression under the very load this feature creates: 2.90s with the machine at load 9.03 and 29
+    `claude` processes of its own test round (ND-19). The property it named still held — 2.90s was
+    still inside the child's sleep — so the threshold was wrong, not the publisher. Any absolute
+    bound here measures the machine as much as the code; a gate measures only the code.
+
+    Both controls are machine-checked rather than eyeballed:
+    · a publisher that BUFFERED to the end delivers nothing until the child exits, and the child
+      cannot exit while the gate is shut, so the wait below runs out and the test fails;
+    · `task.result` must be ABSENT from the same snapshot — that is what proves the child was still
+      running rather than already finished, which an arrival time alone can never establish.
     """
+    import threading
     import time
 
     from remote import tasks
 
+    gate = tmp_path / "release-the-child"
     seen = []
     agent(
         "printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\","
         "\"id\":\"t1\",\"name\":\"Edit\",\"input\":{\"file_path\":\"/w/app.py\"}}]}}\\n'\n"
-        "sleep 3\n"
+        f"while [ ! -f '{gate}' ]; do sleep 0.05; done\n"
         "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,"
         "\"result\":\"done\"}\\n'\n"
     )
 
-    started = time.monotonic()
-    outcome = tasks.run_task(
-        _job(), publish=lambda kind, **f: seen.append((kind, f, time.monotonic() - started)))
-    whole_run = time.monotonic() - started
+    finished = {}
+    worker = threading.Thread(
+        target=lambda: finished.update(outcome=tasks.run_task(
+            _job(), publish=lambda kind, **f: seen.append((kind, f)))),
+        daemon=True)
+    worker.start()
+    try:
+        # Generous, and bounded only so a broken publisher fails instead of hanging: the event
+        # arrives in ~0.2s idle and took 2.90s under the worst load measured. It is not a property
+        # of the code under test — every assertion below reads the snapshot, not the clock.
+        deadline = time.monotonic() + 15
+        while (time.monotonic() < deadline and worker.is_alive()
+               and not any(kind == "task.tool_use" for kind, _ in seen)):
+            time.sleep(0.02)
+        while_the_child_was_blocked = list(seen)
+    finally:
+        # In a finally so a failed assertion costs a second rather than the run's whole deadline.
+        gate.write_text("go", encoding="utf-8")
 
-    assert outcome.state == "completed"
-    tool_events = [e for e in seen if e[0] == "task.tool_use"]
-    assert tool_events, f"no tool activity was published at all: {seen}"
-    kind, fields, at = tool_events[0]
-    assert (fields["tool"], fields["path"]) == ("Edit", "/w/app.py")
-    assert at < 1.5, f"the tool call surfaced only after the child's 3s sleep ({at:.2f}s)"
-    # The child really did outlive the event — without this the bound above would also be satisfied
-    # by a child that exited immediately, which proves nothing about publishing DURING a run.
-    assert whole_run > 2.5, f"the child did not actually sleep ({whole_run:.2f}s)"
+    worker.join(timeout=30)
+    assert not worker.is_alive(), "the run never finished after the gate was opened"
+
+    tool_events = [e for e in while_the_child_was_blocked if e[0] == "task.tool_use"]
+    assert tool_events, (
+        "no tool activity was published while the child was blocked — a publisher that buffers to "
+        f"the end looks exactly like this: {while_the_child_was_blocked}")
+    assert tool_events[0][1]["tool"] == "Edit"
+    assert tool_events[0][1]["path"] == "/w/app.py"
+    assert not any(kind == "task.result" for kind, _ in while_the_child_was_blocked), (
+        "the child had already finished, so this proves nothing about publishing DURING a run: "
+        f"{while_the_child_was_blocked}")
+    assert finished["outcome"].state == "completed"
 
 
 def test_a_large_burst_neither_stalls_nor_drops_events(agent):
