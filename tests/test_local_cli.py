@@ -38348,3 +38348,153 @@ def test_the_preflight_checks_the_root_the_FLAG_names(
 
     assert _the_child_would_claim_tasks(spawned) is tasks_on, (
         f"the check consulted the environment's root, not the flag's: {capsys.readouterr().err!r}")
+
+
+# --- issue 60: turning task serving on must not be a silent no-op ---------------------------------
+
+
+_LIVE_ENGINE = [{"endpoint_url": "http://h:11434/v1", "models": ["llama3"], "engine_label": "ollama"}]
+
+
+def _rejoin_identically():
+    """The idempotent re-join: same engine, same model, same display name — the no-op gate's case."""
+    return ["join", "--at", "http://h:11434/v1", "-m", "llama3", "--name", "mybox"]
+
+
+def test_turning_task_serving_on_over_a_live_identity_says_it_will_not_take(
+        monkeypatch, tmp_path, capsys):
+    """The shape nothing reported. Adding the opt-in changes no engine, model, name, bundle or
+    media, so the join is declared idempotent — and the running child's environment was fixed when
+    it was spawned, so task serving never turns on. From outside that is indistinguishable from
+    "there is no work yet"."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=False)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    err = capsys.readouterr().err
+    assert "respawn" in err, f"the operator is not told how to make it take: {err!r}"
+    assert "cmd" not in spawned, "the join respawned implicitly"
+    # ⚠️ Signal **0** is `os.kill(pid, 0)`, the liveness probe the no-op gate makes — not a reload.
+    # Asserting on an empty signal list instead reads a healthy no-op as a hot reload.
+    assert [s for _, s in spawned["signals"] if s != 0] == [], "the join reloaded implicitly"
+
+
+def test_a_join_that_respawns_records_what_the_child_was_spawned_with(monkeypatch, tmp_path):
+    """The recorded value is the CHILD's, so the comparison above has something true to read."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["tasks"] is True
+    assert _the_child_would_claim_tasks(spawned)
+
+
+def test_the_record_says_what_the_child_got_not_what_was_asked_for(monkeypatch, tmp_path):
+    """⚠️ Issue 58 spawns the child with the opt-in WITHHELD when preflight fails. Recording the
+    request rather than the outcome would report task serving as on for a provider deliberately
+    told not to claim — and the next join would then read that lie as the truth."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving",
+                        _raise(RuntimeError("Claude Code isn't installed on this provider")))
+
+    assert cli.main(["join", "--serve", "m"]) == 0
+
+    assert cli.provider._read_records("n1")["remote"]["tasks"] is False
+    assert not _the_child_would_claim_tasks(spawned)
+
+
+@pytest.mark.parametrize("opt_in", ["1", None])
+def test_a_record_from_before_this_issue_makes_no_claim_either_way(
+        monkeypatch, tmp_path, capsys, opt_in):
+    """⚠️ Absent means UNKNOWN, never off. Every record written before this issue carries no such
+    key, and reading a missing key as `False` would tell every provider already serving tasks that
+    its task serving is not on — which for most of them is a lie. The same mistake five entries in
+    the lockstep register exist to record."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE)  # no `tasks` key at all
+    _mock_remote_spawn(monkeypatch)
+    if opt_in is None:
+        monkeypatch.delenv("GRID_TASKS", raising=False)
+    else:
+        monkeypatch.setenv("GRID_TASKS", opt_in)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    assert "respawn" not in capsys.readouterr().err, (
+        "a record that says nothing was read as saying the opt-in is off")
+
+
+def test_the_worker_count_drift_is_reported_too(monkeypatch, tmp_path, capsys):
+    """`GRID_MAX_TASKS=4` against a live identity is exactly as inert as the opt-in, and answering
+    only half of that would leave the obvious next report to somebody else."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=True, max_tasks=1)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setenv("GRID_MAX_TASKS", "4")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    err = capsys.readouterr().err
+    assert "respawn" in err and "4" in err, f"the worker count change is not reported: {err!r}"
+
+
+def test_a_live_identity_already_serving_tasks_is_not_nagged(monkeypatch, tmp_path, capsys):
+    """The positive control. A note that appeared on every idempotent re-join would be furniture
+    within a day, and the tests above would all still pass."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=True, max_tasks=1)
+    _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.delenv("GRID_MAX_TASKS", raising=False)
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    assert cli.main(_rejoin_identically()) == 0
+
+    assert "respawn" not in capsys.readouterr().err
+
+
+def test_the_hot_reload_path_says_it_too(monkeypatch, tmp_path, capsys):
+    """The second silent path, and the less obvious one. A join that DOES change the union may
+    SIGHUP the live child instead of respawning — zero dropped requests, which is the point — but a
+    reload re-reads the run RECORD. It cannot hand a running process a new environment, and the
+    opt-in is read from the environment once at startup."""
+    from remote import task_agent
+
+    _seed_running_remote_grid(monkeypatch, tmp_path)
+    _seed_live_identity_record(pid=4242, engines=_LIVE_ENGINE, tasks=False)
+    spawned = _mock_remote_spawn(monkeypatch)
+    monkeypatch.setenv("GRID_TASKS", "1")
+    monkeypatch.setattr(task_agent, "preflight_before_serving", lambda: None)
+
+    # A NEW model on the same engine: the union changed, so this is not the no-op gate — and it is
+    # hot-reloadable, so no child is spawned and no environment is handed over.
+    assert cli.main(["join", "--at", "http://h:11434/v1", "-m", "llama3", "-m", "mistral",
+                     "--name", "mybox"]) == 0
+
+    assert "cmd" not in spawned, "this went down the respawn path, so it proves nothing about reload"
+    assert [s for _, s in spawned["signals"] if s != 0], "no reload signal was sent"
+    assert "respawn" in capsys.readouterr().err, "a reload that cannot apply the opt-in said nothing"

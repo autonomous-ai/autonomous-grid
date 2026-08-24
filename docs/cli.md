@@ -2195,6 +2195,18 @@ only task serving is withheld until you fix it and re-run `grid join --respawn`.
 one of those was checked only after a task had been claimed, so the first person to find out was a
 member of your grid whose task died.
 
+**Or say it on the command line.** `grid join --tasks` turns task serving on for that join, with
+`--max-tasks N` and `--tasks-root PATH` beside it; each **wins over** the matching environment
+variable. Every variable below keeps working exactly as it does today, with or without the flags.
+A bad `--max-tasks` is refused rather than defaulted — you are at the terminal and can retype it,
+which is the one difference from `GRID_MAX_TASKS`'s rule.
+
+⚠️ **Turning it on over an engine that is already serving does not take effect by itself.** Task
+serving is read from the environment once, when the serve child starts, so a join that changes
+nothing else — or one that hot-reloads — cannot hand the running process a new setting. `grid join`
+now says so and points at `grid join --respawn`; it will not restart a serving provider on its own,
+because the in-flight requests that would drop are yours to decide about.
+
 The environment variables that tune a provider, all optional:
 
 | variable | default | what it does |

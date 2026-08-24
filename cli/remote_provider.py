@@ -201,6 +201,61 @@ def _as_the_child_will_see_it(overrides: dict[str, str]):
                 os.environ[name] = value
 
 
+def _task_state_of_the_child(overrides: dict[str, str] | None) -> dict[str, object]:
+    """What the child about to be spawned will decide about task serving, asked its own way.
+
+    Recorded on the run record so a LATER join can tell whether an opt-in it was handed will take
+    effect (issue 60). Read through `task_opt_in` rather than by inspecting `overrides`, so this
+    cannot drift from what the child itself concludes — the environment is the wire between the two
+    processes, and asking any other way is a second reading of it.
+    """
+    from remote import task_opt_in
+
+    with _as_the_child_will_see_it(overrides or {}):
+        return {"tasks": task_opt_in.serving_enabled(), "max_tasks": task_opt_in.worker_count()}
+
+
+def _task_serving_drift(live: list[dict[str, object]], desired: dict[str, object]) -> str | None:
+    """Why the task configuration this join was handed will not take effect, or `None` (issue 60).
+
+    Two paths turn `GRID_TASKS=1 grid join …` into nothing at all. The **no-op gate** declares a
+    join idempotent when no engine, model, display name, bundle or media changed — and the opt-in is
+    none of those, while the running child's environment was fixed when it was spawned. The
+    **hot reload** re-reads the run record, which cannot change a running process's environment
+    either. From outside, both are indistinguishable from "there is no work yet".
+
+    ⚠️ **Absent is UNKNOWN, never off.** Every record written before this issue carries no such key,
+    and reading a missing one as `False` would tell every provider already serving tasks that its
+    task serving is not on. Hence `isinstance(..., bool)` rather than `.get(...)` — and `bool` is
+    checked *before* `int` for the count, because `True` is an `int` and would otherwise read as one
+    worker.
+
+    Nothing respawns on the strength of this. A respawn stops the child, and the in-flight inference
+    requests that would drop are the operator's call, not this function's.
+    """
+    recorded = _identity_field(live, "tasks")
+    if not isinstance(recorded, bool):
+        return None
+    if recorded != desired["tasks"]:
+        return (
+            f"Task serving is {'on' if recorded else 'off'} for the engine already serving this "
+            f"grid, and it is read once at startup — so this join cannot turn it "
+            f"{'off' if recorded else 'on'}. Apply it with `grid join --respawn`."
+        )
+    if not desired["tasks"]:
+        return None  # both off: the worker count decides nothing at all
+    running = _identity_field(live, "max_tasks")
+    if isinstance(running, bool) or not isinstance(running, int):
+        return None
+    if running != desired["max_tasks"]:
+        return (
+            f"The engine already serving this grid runs {running} task(s) at once, not "
+            f"{desired['max_tasks']}; that count is read once at startup too. Apply it with "
+            f"`grid join --respawn`."
+        )
+    return None
+
+
 def _decide_task_serving() -> _TaskServing:
     """Ask, in the parent, whether the child about to be spawned could actually run a task.
 
@@ -334,6 +389,9 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
     # it outranks `--tasks` — a provider that cannot run a task may not be told to claim one by a
     # flag, however explicitly it was typed.
     engine_env = {**task_flags, **(_task_serving_override(task_serving) or {})} or None
+    # What a child spawned now WOULD conclude — recorded when one is spawned, and compared against
+    # the live record when one is not (issue 60).
+    task_state = _task_state_of_the_child(engine_env)
 
     # Remote has ONE identity per grid (the token pins the relay node_id), so `grid join` is additive:
     # merge this join's engines into whatever is already serving, then respawn the single detached engine.
@@ -395,6 +453,11 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
                     print(adrift.detail, file=sys.stderr)
                 return 0
             print(f"Already serving on {label}; nothing to append.")
+            # Said HERE rather than folded into the gate above: a task-configuration change is not a
+            # reason to restart a serving provider behind the operator's back (issue 60).
+            drift = _task_serving_drift(live, task_state)
+            if drift:
+                print(drift, file=sys.stderr)
             # The serve process records a hot-reload that failed AFTER the CLI reported success (the
             # SIGHUP is fire-and-forget) — surface it here, or the no-op compounds the false success.
             stale = _identity_field(live, "last_reload_error")
@@ -419,6 +482,10 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         # advertised, and the reload pins the advertised capacity to the actual live pool anyway).
         if getattr(args, "max_concurrency", None) is None and base:
             record["max_concurrency"] = _identity_field(base, "max_concurrency")
+        # What the child will actually conclude, not what was asked for — issue 58 withholds the
+        # opt-in from a provider that cannot run a task, and recording the request would make the
+        # next join read that as task serving being on.
+        record.update(task_state)
         # Zero-drop when we can: SIGHUP the live singleton to hot-reload the union in place — an appended
         # API engine reloads too now that its bearer is re-read from the key store (issue 05). Fall back to
         # stop-respawn for a first join, a legacy/pre-handler process, a launch, a media change, a
@@ -433,6 +500,12 @@ def cmd_remote_join(args: argparse.Namespace) -> int:
         reloaded = (not rotated_live) and (not respawn) and _hot_reloadable(live, merged_specs, record)
         if reloaded:
             reloaded = _hot_reload_identity(network_id, record, live)  # False if it fell back to a respawn
+            if reloaded:
+                # A reload re-reads the RECORD; it cannot hand a running process a new environment,
+                # so a task-configuration change goes the same way as on the no-op path (issue 60).
+                drift = _task_serving_drift(live, task_state)
+                if drift:
+                    print(drift, file=sys.stderr)
         else:
             # stops prior process(es) then respawns; aborts on failure
             _respawn_identity(network_id, record, live, env_overrides=engine_env)
