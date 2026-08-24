@@ -5461,6 +5461,19 @@ def test_checkout_result_still_refuses_when_there_is_no_branch(tmp_path):
 # --- issue 58: the provider is asked before a member is waiting -----------------------------------
 
 
+def _sandbox_packages_present(monkeypatch):
+    """Answer issue 59's probe as a box that HAS both packages.
+
+    ⚠️ Every test that drives `preflight_before_serving` for some other reason needs this, and the
+    need is invisible on macOS: the probe is Linux-only, so without it those tests pass on a
+    developer's Mac and fail on a Linux runner where the packages really are absent. That is exactly
+    the failure this suite has a memory about, and issue 59 introduced a fresh instance of it.
+    """
+    from remote import task_agent
+
+    monkeypatch.setattr(task_agent.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
 def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_path):
     """The delegation, pinned. `grid join` must not grow a second opinion about any of this."""
     from remote import task_agent
@@ -5469,6 +5482,7 @@ def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_p
     asked: list[str] = []
     monkeypatch.setattr(task_agent, "preflight", lambda: asked.append("preflight"))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: asked.append("binary") or "claude")
+    _sandbox_packages_present(monkeypatch)
 
     task_agent.preflight_before_serving()
 
@@ -5485,6 +5499,7 @@ def test_preflight_before_serving_refuses_a_workspace_root_it_cannot_write(monke
     monkeypatch.setenv("GRID_TASK_ROOT", str(denied / "grid" / "tasks"))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    _sandbox_packages_present(monkeypatch)
 
     with pytest.raises(OSError) as excinfo:
         task_agent.preflight_before_serving()
@@ -5505,6 +5520,7 @@ def test_preflight_before_serving_accepts_a_root_that_does_not_exist_yet(monkeyp
     monkeypatch.setenv("GRID_TASK_ROOT", str(root))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    _sandbox_packages_present(monkeypatch)
 
     task_agent.preflight_before_serving()
 
@@ -5521,6 +5537,7 @@ def test_preflight_before_serving_refuses_a_root_that_is_a_file(monkeypatch, tmp
     monkeypatch.setenv("GRID_TASK_ROOT", str(root))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    _sandbox_packages_present(monkeypatch)
 
     with pytest.raises(OSError) as excinfo:
         task_agent.preflight_before_serving()

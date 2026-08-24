@@ -38350,6 +38350,9 @@ def test_the_preflight_checks_the_root_the_FLAG_names(
     spawned = _mock_remote_spawn(monkeypatch)
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    # ⚠️ Issue 59's probe is Linux-only, so a test that skipped this passes on a Mac and fails on a
+    # Linux runner, where `bwrap` and `socat` really are absent.
+    monkeypatch.setattr(task_agent.shutil, "which", lambda name: f"/usr/bin/{name}")
     denied = tmp_path / "denied"
     denied.mkdir(mode=0o500)
     good, bad = tmp_path / "fine" / "root", denied / "root"
@@ -38533,6 +38536,9 @@ def test_a_root_the_operator_NAMED_is_not_judged_by_the_defaults_rules(
     monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(tmp_path / "never-made"))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    # ⚠️ Issue 59's probe is Linux-only, so a test that skipped this passes on a Mac and fails on a
+    # Linux runner, where `bwrap` and `socat` really are absent.
+    monkeypatch.setattr(task_agent.shutil, "which", lambda name: f"/usr/bin/{name}")
     argv = ["join", "--serve", "m", "--tasks"]
     if how == "flag":
         monkeypatch.delenv("GRID_TASK_ROOT", raising=False)
