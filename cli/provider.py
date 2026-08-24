@@ -40,6 +40,13 @@ _REMOTE_ONLY_JOIN_FLAGS = (
     ("pricing_output", "--pricing-output"),
     ("max_concurrency", "--max-concurrency"),
     ("respawn", "--respawn"),
+    # Task serving (ADR 0032, issue 61). A task is claimed from the relay, and local mode has no
+    # relay — the same structural reason `--max-concurrency` is here. ⚠️ All three default to
+    # `None`, `--tasks` included: the predicate below is `is not None`, so a `store_true` flag
+    # defaulting to False would refuse every LOCAL join.
+    ("tasks", "--tasks"),
+    ("max_tasks", "--max-tasks"),
+    ("tasks_root", "--tasks-root"),
 )
 
 

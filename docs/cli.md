@@ -2188,12 +2188,25 @@ commands; check `bubblewrap` and `socat` first.
 
 **`grid join` checks all of this before it serves.** With `GRID_TASKS` on, the join asks the same
 questions a task would — is Claude Code installed and new enough, is the permission mode and
-passthrough list valid, can the sandbox start, and can this account create a workspace under
-`GRID_TASK_ROOT` — and it asks them *in the terminal you typed the command in*. A provider that
+passthrough list valid, can the sandbox start, **are `bubblewrap` and `socat` both installed** (on
+Linux, with the sandbox on), and can this account create a workspace under `GRID_TASK_ROOT` — and it
+asks them *in the terminal you typed the command in*. A provider that
 fails any of them still **serves inference**: the join lands, the answer says what to change, and
 only task serving is withheld until you fix it and re-run `grid join --respawn`. Before this, every
 one of those was checked only after a task had been claimed, so the first person to find out was a
 member of your grid whose task died.
+
+**Or say it on the command line.** `grid join --tasks` turns task serving on for that join, with
+`--max-tasks N` and `--tasks-root PATH` beside it; each **wins over** the matching environment
+variable. Every variable below keeps working exactly as it does today, with or without the flags.
+A bad `--max-tasks` is refused rather than defaulted — you are at the terminal and can retype it,
+which is the one difference from `GRID_MAX_TASKS`'s rule.
+
+⚠️ **Turning it on over an engine that is already serving does not take effect by itself.** Task
+serving is read from the environment once, when the serve child starts, so a join that changes
+nothing else — or one that hot-reloads — cannot hand the running process a new setting. `grid join`
+now says so and points at `grid join --respawn`; it will not restart a serving provider on its own,
+because the in-flight requests that would drop are yours to decide about.
 
 The environment variables that tune a provider, all optional:
 
@@ -2201,7 +2214,7 @@ The environment variables that tune a provider, all optional:
 |---|---|---|
 | `GRID_TASKS` | off | `1` to claim tasks at all |
 | `GRID_MAX_TASKS` | `1` | how many tasks this provider runs at once. **Anything above 1 is unverified** — two Claude Code children sharing one config directory has never been measured (see [How much a provider takes on](#how-much-a-provider-takes-on)). No upper limit is imposed: the ceiling that actually binds is the provider's own Claude subscription, which is read at runtime rather than guessed at. A value that is not a positive whole number falls back to `1` and says so |
-| `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree (`<root>/projects/<project_id>/<member>/<conversation>/workspace`). **Keep it short** — the whole path becomes one directory name and grid adds ~126 characters below the root. **Every provider in a grid must agree** — Claude Code derives a session's transcript directory from the working directory, so a provider using a different root cannot resume a session another one started |
+| `GRID_TASK_ROOT` | `/var/grid` | root of the workspace tree (`<root>/projects/<project_id>/<member>/<conversation>/workspace`). **Keep it short** — the whole path becomes one directory name and grid adds ~126 characters below the root. Providers **do not** have to agree on it: the conversation travels inside the project's repository, and each provider points Claude Code at its own copy (ADR 0032, amended). The default is `/var/grid` on Linux and `/Users/Shared/grid` on macOS, where `/var` is root-owned |
 | `GRID_TASK_MAX_WORKSPACES` | `8` | how many conversations keep a working directory on this provider. Past this, the least recently used are deleted at the start of the next task — never by refusing work, and never one a worker is using. An evicted conversation rebuilds itself on its next task at the cost of one fetch. A value that is not a positive whole number falls back to `8` and says so |
 | `GRID_TASK_MIN_FREE_GB` | off | a floor under free space on the filesystem holding `GRID_TASK_ROOT`. Set it and the provider keeps evicting workspaces while free space is below it. Off by default because it is a promise about a disk the provider does not own alone: a machine already below the line for reasons of its own would evict everything on every task and re-fetch it |
 | `GRID_TASK_TIMEOUT_SECONDS` | `3600` | how long one agent run may take before the provider gives up on it |

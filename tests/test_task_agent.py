@@ -5,6 +5,8 @@ Split out of `test_local_cli.py` rather than appended to it: these cover the two
 claim/run/report loop's own tests stay beside the rest of the task-loop suite.
 """
 import json
+import stat
+import sys
 import subprocess
 from pathlib import Path
 
@@ -5459,6 +5461,19 @@ def test_checkout_result_still_refuses_when_there_is_no_branch(tmp_path):
 # --- issue 58: the provider is asked before a member is waiting -----------------------------------
 
 
+def _sandbox_packages_present(monkeypatch):
+    """Answer issue 59's probe as a box that HAS both packages.
+
+    ⚠️ Every test that drives `preflight_before_serving` for some other reason needs this, and the
+    need is invisible on macOS: the probe is Linux-only, so without it those tests pass on a
+    developer's Mac and fail on a Linux runner where the packages really are absent. That is exactly
+    the failure this suite has a memory about, and issue 59 introduced a fresh instance of it.
+    """
+    from remote import task_agent
+
+    monkeypatch.setattr(task_agent.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
 def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_path):
     """The delegation, pinned. `grid join` must not grow a second opinion about any of this."""
     from remote import task_agent
@@ -5467,6 +5482,7 @@ def test_preflight_before_serving_asks_what_a_claim_would_ask(monkeypatch, tmp_p
     asked: list[str] = []
     monkeypatch.setattr(task_agent, "preflight", lambda: asked.append("preflight"))
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: asked.append("binary") or "claude")
+    _sandbox_packages_present(monkeypatch)
 
     task_agent.preflight_before_serving()
 
@@ -5483,6 +5499,7 @@ def test_preflight_before_serving_refuses_a_workspace_root_it_cannot_write(monke
     monkeypatch.setenv("GRID_TASK_ROOT", str(denied / "grid" / "tasks"))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    _sandbox_packages_present(monkeypatch)
 
     with pytest.raises(OSError) as excinfo:
         task_agent.preflight_before_serving()
@@ -5503,6 +5520,7 @@ def test_preflight_before_serving_accepts_a_root_that_does_not_exist_yet(monkeyp
     monkeypatch.setenv("GRID_TASK_ROOT", str(root))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    _sandbox_packages_present(monkeypatch)
 
     task_agent.preflight_before_serving()
 
@@ -5519,6 +5537,7 @@ def test_preflight_before_serving_refuses_a_root_that_is_a_file(monkeypatch, tmp
     monkeypatch.setenv("GRID_TASK_ROOT", str(root))
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
     monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+    _sandbox_packages_present(monkeypatch)
 
     with pytest.raises(OSError) as excinfo:
         task_agent.preflight_before_serving()
@@ -5547,3 +5566,230 @@ def test_preflight_before_serving_does_not_move_the_version_floor(monkeypatch, t
     monkeypatch.setattr(task_agent, "preflight", lambda: None)
 
     task_agent.preflight_before_serving()  # an ancient binary, and the sandbox is off: allowed
+
+
+# --- issue 62: the default root the flag makes, and the rule that retired ------------------------
+
+
+@pytest.mark.parametrize("platform, expected", [("darwin", "/Users/Shared/grid"), ("linux", "/var/grid")])
+def test_the_default_root_is_per_platform(platform, expected):
+    """⚠️ Allowed only because ADR 0032's identical-absolute-path rule is RETIRED. Issue 06 moved
+    the transcript into the git worktree; issue 35's measurement 5 resumed a compacted one at a
+    DIFFERENT absolute path. `/var` is root-owned on macOS, so `/var/grid` fails every task there
+    for a provider without sudo."""
+    from remote import task_agent
+
+    assert task_agent.default_workspace_root(platform) == expected
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_both_platform_defaults_leave_transcript_headroom(platform):
+    """Measured for BOTH, not just the one this test happens to run on — a default that flattened
+    past the limit would lose every conversation with every other signal healthy."""
+    from remote import task_agent
+
+    stock = Path(task_agent.default_workspace_root(platform)) / "projects" / (
+        "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f") / ("9f2b" * 8) / (
+        "8d1a4c60-3b2e-4f7a-95d8-6e0f1a2b3c4d") / "workspace"
+
+    assert len(task_agent.transcript_dir_name(stock)) < task_agent.TRANSCRIPT_NAME_MAX_CHARS
+
+
+def _default_root_at(monkeypatch, path):
+    from remote import task_agent
+    monkeypatch.setattr(task_agent, "DEFAULT_WORKSPACE_ROOT", str(path))
+
+
+def test_the_created_default_root_is_private(monkeypatch, tmp_path):
+    """`/Users/Shared` is 1777 and a directory created there under the default umask lands 0755 —
+    every local account able to read every member's repository and every transcript."""
+    from remote import task_agent
+
+    root = tmp_path / "grid"
+    _default_root_at(monkeypatch, root)
+
+    assert task_agent.ensure_default_workspace_root() == root
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+
+def test_a_symlinked_default_root_is_refused(monkeypatch, tmp_path):
+    """`ensure_workspace` permits a symlink above the workspace, because relocating storage that way
+    is a legitimate thing an operator does. Nobody chose THIS path, so the same symlink is a second
+    account redirecting where this provider runs agents."""
+    from remote import task_agent
+
+    (tmp_path / "elsewhere").mkdir()
+    root = tmp_path / "grid"
+    root.symlink_to(tmp_path / "elsewhere")
+    _default_root_at(monkeypatch, root)
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.ensure_default_workspace_root()
+
+    assert "--tasks-root" in str(excinfo.value)
+
+
+def test_a_world_readable_default_root_is_refused_whoever_owns_it(monkeypatch, tmp_path):
+    """⚠️ The Linux case this rule is phrased for: `/var/grid` created once with `sudo` and then
+    handed to a non-root provider is legitimate and likely. What disqualifies it is being readable
+    by every account, not who made it — so the refusal names `chmod 700`, which is the one command
+    that fixes it."""
+    from remote import task_agent
+
+    root = tmp_path / "grid"
+    root.mkdir(mode=0o755)
+    _default_root_at(monkeypatch, root)
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.ensure_default_workspace_root()
+
+    assert "chmod 700" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_root_that_is_already_ours_and_private_is_adopted_silently(monkeypatch, tmp_path):
+    """The positive control, and the ordinary second run. A rule that refused this would make
+    `grid join --tasks` work once and fail every time after."""
+    from remote import task_agent
+
+    root = tmp_path / "grid"
+    root.mkdir(mode=0o700)
+    (root / "kept.txt").write_text("from the first join", encoding="utf-8")
+    _default_root_at(monkeypatch, root)
+
+    assert task_agent.ensure_default_workspace_root() == root
+    assert (root / "kept.txt").read_text(encoding="utf-8") == "from the first join"
+
+
+def test_a_default_root_that_is_a_file_says_so_rather_than_talking_about_permissions(
+        monkeypatch, tmp_path):
+    """Three refusals, three reasons. Calling this one "not writable" sends an operator to `chmod`
+    for a fault no mode can fix."""
+    from remote import task_agent
+
+    root = tmp_path / "grid"
+    root.write_text("not a directory", encoding="utf-8")
+    _default_root_at(monkeypatch, root)
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.ensure_default_workspace_root()
+
+    assert "not a directory" in str(excinfo.value)
+
+
+def test_ensure_workspace_still_permits_a_symlink_ABOVE_the_workspace(monkeypatch, tmp_path):
+    """⚠️ Issue 62's stricter rules are for the DEFAULT root only. `ensure_workspace`'s two
+    allowances are load-bearing for a path an operator named, and a sweep that "tightened" them
+    would refuse the legitimate relocation its own docstring describes."""
+    from remote import task_agent
+
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(linked))
+
+    path = task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION)
+    task_agent.ensure_workspace(path)  # must not raise: the symlink is ABOVE the workspace
+
+    assert path.is_dir()
+
+
+def test_ensure_workspace_still_leaves_an_existing_directorys_mode_alone(monkeypatch, tmp_path):
+    """The other allowance. A repair walk would happily `chmod` a system directory the first time
+    somebody points the root at one — `/tmp` is 1777 on purpose."""
+    from remote import task_agent
+
+    root = tmp_path / "root"
+    root.mkdir()
+    # ⚠️ `chmod` AFTER `mkdir`, not `mkdir(mode=…)`: the umask masks the mode argument, so the
+    # obvious spelling had this test asserting 0o777 against the 0o755 it actually produced.
+    root.chmod(0o777)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(root))
+
+    task_agent.ensure_workspace(task_agent.workspace_for("proj-1", _MEMBER, _CONVERSATION))
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o777, "ensure_workspace repaired a mode it found"
+
+
+# --- issue 59: a Linux provider knows it is missing bubblewrap or socat --------------------------
+
+
+def _packages(monkeypatch, present):
+    """Make `shutil.which` answer for exactly the sandbox packages in `present`."""
+    import shutil as shutil_module
+
+    from remote import task_agent
+    monkeypatch.setattr(task_agent.shutil, "which",
+                        lambda name: f"/usr/bin/{name}" if name in present else None)
+    return shutil_module
+
+
+@pytest.mark.parametrize("present, missing", [
+    (("bwrap",), "socat"),   # ⚠️ bwrap alone is NOT enough — measured on Ubuntu 24.04 / 2.1.223
+    (("socat",), "bwrap"),
+    ((), "bwrap"),
+])
+def test_a_linux_provider_missing_a_sandbox_package_is_told_at_join(
+        monkeypatch, tmp_path, present, missing):
+    """The only enforcement before this was Claude Code's own `failIfUnavailable`, which fires
+    inside the child — after the claim, after the repository was fetched, on a member's task."""
+    from remote import task_agent
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, present)
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    with pytest.raises(OSError) as excinfo:
+        task_agent.preflight_before_serving()
+
+    assert missing in str(excinfo.value), str(excinfo.value)
+    assert "apt install bubblewrap socat" in str(excinfo.value)
+
+
+def test_a_linux_provider_with_both_packages_is_allowed(monkeypatch, tmp_path):
+    """⚠️ The positive control. Every assertion above is "it refused", which is exactly what a probe
+    that refuses everything also reports — and that probe would take task serving off every Linux
+    provider in the fleet."""
+    from remote import task_agent
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ("bwrap", "socat"))
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+
+def test_the_sandbox_package_probe_does_not_run_off_linux(monkeypatch, tmp_path):
+    """macOS needs neither package. A probe that fired there is a refusal handed to a provider that
+    would have worked — the opposite of what this issue is for."""
+    from remote import task_agent
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delenv("GRID_TASK_SANDBOX", raising=False)
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ())  # neither present, and it must not matter
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
+
+
+def test_the_sandbox_package_probe_does_not_run_with_the_sandbox_off(monkeypatch, tmp_path):
+    """The packages are the SANDBOX's requirement. An operator who turned the sandbox off
+    deliberately gets the provider that existed before it — the same shape as the version floor."""
+    from remote import task_agent, task_sandbox
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv(task_sandbox.SANDBOX_ENV, "0")
+    monkeypatch.setenv("GRID_TASK_ROOT", str(tmp_path / "root"))
+    _packages(monkeypatch, ())
+    monkeypatch.setattr(task_agent, "preflight", lambda: None)
+    monkeypatch.setattr(task_agent, "resolve_binary", lambda: "claude")
+
+    task_agent.preflight_before_serving()
