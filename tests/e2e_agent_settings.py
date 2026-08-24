@@ -146,6 +146,12 @@ def _mcp_config(marker: Path) -> str:
         "command": "/bin/sh", "args": ["-c", f"/usr/bin/touch {marker}; sleep 30"]}}})
 
 
+# The same values `tests/test_task_agent.py` uses, so a claim built here and a claim built there
+# are the same shape. A `member_key` is a hex digest in the field; a conversation id is a uuid4.
+_MEMBER = "9f2b" * 8
+_CONVERSATION = "2f0b9b1e-7a4c-4d5e-9c31-0a1b2c3d4e5f"
+
+
 def _run(tmp_path: Path, files: dict[str, str], prompt: str, *, guarded: bool, project: str):
     """One task, through the real `run_task`, against a workspace carrying `files`."""
     from remote import task_agent, tasks
@@ -153,7 +159,15 @@ def _run(tmp_path: Path, files: dict[str, str], prompt: str, *, guarded: bool, p
     remote, commit = _remote_for(tmp_path, "task/T1", files)
     if not guarded:
         _strip_the_guard(task_agent)
-    job = {"task_id": "T1", "project_id": project, "prompt": prompt, "attempt": 1,
+    job = {"task_id": "T1", "project_id": project, "member_key": _MEMBER,
+           # ⚠️ Both of these are REFUSALS, not defaults, and both were added to the claim after
+           # this module was written — which is how it came to fail every check for a reason that
+           # had nothing to do with what it tests. `member_key` (ADR 0033 issue 11) is fail-closed
+           # by design: without it a provider cannot tell whose workspace a task belongs to and
+           # refuses rather than share one between members. `conversation_id` (ADR 0034 D-a) is the
+           # CONVERSATION, while `task_id` above is the TURN — two keys for two objects.
+           "conversation_id": _CONVERSATION,
+           "prompt": prompt, "attempt": 1,
            "input_commit": commit, "branch": "task/T1"}
     return tasks.run_task(job, remote=remote)
 
